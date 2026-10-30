@@ -45,14 +45,14 @@ def install() -> list[PlatformSpec]:
                 supports_local_scan=True,
                 gateway="admin.platform.trae.gateway",
                 platform_gateway="admin.platform.trae.platform_gateway:TraeGateway",
+                auth_callback="admin.platform.trae.auth",
                 icon="trae",
                 notes="Trae 国内版（trae-api-cn.mchost.guru）。独立凭证与模型目录；"
                       "支持 Chat Completions / Responses / Anthropic Messages 互转。",
                 storage_platform=PLATFORM_ID,
                 realm="cn",
                 extra={"kind": "proxied", "realm_key": "cn",
-                   # begin-auth：Trae 没有设备授权端点，这里的「授权登录」
-                   # 打开官方登录页，登录后回到本机点扫描导入 IDE 登录态。
+                   # begin-auth：浏览器 PKCE 授权，支持自动和手动回调。
                    # web-cookie 只服务「用量明细」，不是登录手段。
                    "actions": ["begin-auth", "scan", "import",
                                "refresh-quota", "usage", "web-cookie"]},
@@ -66,6 +66,7 @@ def install() -> list[PlatformSpec]:
                 supports_local_scan=True,
                 gateway="admin.platform.trae.gateway",
                 platform_gateway="admin.platform.trae.platform_gateway:TraeGateway",
+                auth_callback="admin.platform.trae.auth",
                 icon="trae",
                 notes="Trae 国际版（core-normal.trae.ai）。独立凭证与模型目录；"
                       "额度按请求次数限额。",

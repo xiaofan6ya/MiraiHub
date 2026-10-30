@@ -5215,186 +5215,207 @@ async function saveTraeWebCookie(realm) {
  * 结果必须区分「新领取」和「今日已领」，否则用户会以为没生效。
  */
 /**
- * 设备授权登录（Qoder 用）。
- *
- * 流程：start -> 展示链接 -> 每 3 秒 poll -> 拿到凭证即 claim 落账号。
- *
- * 为什么前端轮询而不是后端阻塞：后端阻塞一个请求 5 分钟会被
- * 网关/浏览器超时切断；前端每 3 秒拉一次，用户授权完下一次就能拿到。
+ * 通用授权：start -> 可选手动回调 -> poll -> 可选 claim。
+ * 手动回调能力由平台注册声明；协议参数解析留在各平台适配器中。
  */
-/** 官方登录页（Trae 没有设备授权端点时的「授权登录」入口）。 */
-const PLATFORM_LOGIN_URL = {
-  trae: "https://www.trae.ai/",
-  "trae-cn": "https://www.trae.cn/",
-  "trae-intl": "https://www.trae.ai/",
-};
-
 async function platformBeginAuth(spec, storage) {
-  const realm = (spec && spec.realm) || "cn";
-  const id = String((spec && spec.id) || storage || "").toLowerCase();
-
-  // Trae 没有 PKCE 设备端点：这里的「授权登录」= 打开官方登录页拿 IDE 登录态，
-  // 登录后本机 storage.json 会更新，回到这里点「扫描本机」即可导入。
-  // 之前 Trae 的登录入口是「贴网页 Cookie」—— 那只是用量查询用的，不是登录。
-  if (id.startsWith("trae")) {
-    // 走真正的 PKCE 授权链：后端生成 code_challenge 并起本地回调端口，
-    // 用户点链接登录 → 浏览器自动回调 → 后端用 code 换 token 写号池。
-    // 不再要求用户手动贴 Cookie，也不再依赖本机 storage.json。
-    const realm = (spec && spec.realm) || "cn";
-    let start;
+  const realm = (spec && (spec.realm || spec.default_realm)) || "";
+  const platformId = (spec && spec.id) || storage;
+  const label = (spec && spec.label) || storage;
+  const manualCallback = !!(spec && spec.auth && spec.auth.manual_callback);
+  const base = `/api/${encodeURIComponent(storage)}/device`;
+  const authRequest = async (path, options = {}, timeout = 10000) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      start = await api(`/api/trae/device/start?realm=${encodeURIComponent(realm)}`,
-                        { method: "POST" });
-    } catch (e) {
-      toast("开始授权失败：" + (e && e.message ? e.message : e), "err");
-      return;
-    }
-    const { ok, data } = await safeJson(start);
-    if (!ok || !data || !data.auth_url) {
-      toast("开始授权失败：" + ((data && data.detail) || "无授权地址"), "err");
-      return;
-    }
-    openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
-      <ol class="text-sm mb-3" style="color:var(--fg-muted);padding-left:18px">
-        <li>点下面的链接打开 Trae 授权页</li>
-        <li>选择账号并点「授权」</li>
-        <li>浏览器会自动跳回本机端口，本页随即提示成功，无需手动操作</li>
-      </ol>
-      <p class="text-xs mb-3" style="word-break:break-all">
-        <a href="${esc(data.auth_url)}" target="_blank" rel="noopener"
-           style="color:var(--brand);text-decoration:underline">${esc(data.auth_url)}</a>
-      </p>
-      <p id="traeAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待浏览器授权…</p>
-      <div class="flex justify-end gap-2 mt-4">
-        <button onclick="closeModal()" class="console-btn quiet">关闭</button>
-      </div>`);
-
-    const nonce = data.nonce;
-    for (let i = 0; i < 150; i += 1) {
-      await new Promise(r => setTimeout(r, 2000));
-      const el = document.getElementById("traeAuthStatus");
-      if (!el) return;                       // 弹窗被关掉了
-      let poll;
-      try {
-        poll = await api("/api/trae/device/poll?nonce=" + encodeURIComponent(nonce));
-      } catch (e) { continue; }
-      const { ok: pok, data: pd } = await safeJson(poll);
-      // **不要把错误当「继续等」**：换 token 失败会返回 502，
-      // 之前 `if (!pok) continue` 会一直等下去，表现就是
-      // 「回调页说授权完成，控制台却一直等待浏览器授权」。
-      if (!pok) {
-        el.textContent = "授权失败：" + ((pd && (pd.detail || pd.message)) || "请求出错");
-        el.style.color = "var(--danger)";
-        return;
-      }
-      if (pd && pd.pending) continue;
-      if (pd && pd.ok) {
-        el.textContent = "授权成功，账号已写入号池";
-        el.style.color = "var(--ok)";
-        toast("Trae 授权成功");
-        setTimeout(() => { closeModal(); loadAccounts(); loadPlatformOverview(); }, 900);
-        return;
-      }
-      el.textContent = "授权失败：" + ((pd && (pd.error || pd.detail)) || "未知原因");
-      el.style.color = "var(--danger)";
-      return;
-    }
+      return await safeJson(await api(path, { ...options, signal: controller.signal }));
+    } finally { clearTimeout(timer); }
+  };
+  const errorText = (payload, fallback) => {
+    if (payload && payload._parse_error) return fallback;
+    const detail = payload && (payload.detail || payload.error || payload.message);
+    const message = typeof detail === "string" ? detail : detail && (detail.error || detail.message);
+    return typeof message === "string" && !/^\s*</.test(message) ? message : fallback;
+  };
+  let start;
+  try {
+    start = await authRequest(`${base}/start?realm=${encodeURIComponent(realm)}`, { method: "POST" });
+  } catch (error) {
+    toast("发起授权超时或网络中断，请重试", "err");
     return;
   }
-
-  const start = await api(`/api/${storage}/device/start?realm=${encodeURIComponent(realm)}`,
-                          { method: "POST" });
-  const { ok, data } = await safeJson(start);
-  if (!ok) {
-    toast(`发起授权失败：${(data && data.detail) || start.status}`, "err");
+  const data = start.data || {};
+  if (!start.ok || !data.auth_url || !data.nonce) {
+    toast("发起授权失败：" + errorText(data, "授权链接生成异常"), "err");
     return;
   }
-  const authUrl = data.auth_url || "";
-  const nonce = data.nonce || "";
-  if (!authUrl || !nonce) {
-    toast("授权链接生成异常", "err");
-    return;
-  }
-
-  openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
+  openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc(label)}</h3>
     <ol class="text-sm mb-3" style="color:var(--fg-muted);padding-left:18px">
-      <li>点击下面的链接（或复制到浏览器）</li>
+      <li>点击下面的链接打开授权页</li>
       <li>选择要接入的账号并确认授权</li>
-      <li>本页会自动完成，无需再操作</li>
+      <li>本页会自动显示授权结果</li>
     </ol>
     <p class="text-xs mb-3" style="word-break:break-all">
-      <a href="${esc(authUrl)}" target="_blank" rel="noopener"
-         style="color:var(--brand);text-decoration:underline">${esc(authUrl)}</a>
+      <a href="${esc(data.auth_url)}" target="_blank" rel="noopener"
+         style="color:var(--brand);text-decoration:underline">${esc(data.auth_url)}</a>
     </p>
-    <p id="authStatus" class="text-sm" style="color:var(--fg-muted)">等待授权…</p>
+    ${manualCallback ? `<form id="authCallbackForm" class="mb-3">
+      <label for="authCallbackUrl" class="block text-sm mb-2">手动粘贴回调链接</label>
+      <p id="authCallbackHint" class="text-xs mb-2" style="color:var(--fg-muted)">
+        通过反向代理或远程访问时，如果授权后页面无法打开，请复制该页面地址栏中的完整链接，粘贴到这里。不要粘贴上方的授权页链接。
+      </p>
+      <textarea id="authCallbackUrl" rows="3" class="w-full border rounded-lg p-2 text-xs"
+        style="border-color:var(--border);resize:vertical" maxlength="32768" required
+        autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="authCallbackHint authCallbackError"
+        placeholder="粘贴授权后跳转的完整回调链接"></textarea>
+      <p id="authCallbackError" class="text-xs mt-2" style="color:var(--danger)" role="alert"></p>
+      <div class="flex justify-end mt-2">
+        <button id="authCallbackSubmit" type="submit" class="console-btn primary">提交回调链接</button>
+      </div>
+    </form>` : ""}
+    <p id="authStatus" class="text-sm" style="color:var(--fg-muted)" role="status" aria-live="polite">等待授权…</p>
     <div class="flex justify-end mt-4">
       <button onclick="closeModal()" class="console-btn quiet">关闭</button>
-    </div>`);
+    </div>`, "max-w-3xl");
 
-  // 轮询：每 3 秒一次，最多 100 次（5 分钟）
-  const statusEl = () => document.getElementById("authStatus");
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    if (!document.getElementById("authStatus")) return;   // 弹窗被关了
-    let poll;
-    try {
-      poll = await api(`/api/${storage}/device/poll?nonce=${encodeURIComponent(nonce)}`);
-    } catch (error) {
-      continue;
-    }
-    if (poll.status === 404) {
-      const el = statusEl();
-      if (el) el.textContent = "授权会话已过期，请重新发起";
+  const nonce = data.nonce;
+  const el = document.getElementById("authStatus");
+  const form = document.getElementById("authCallbackForm");
+  const input = document.getElementById("authCallbackUrl");
+  const button = document.getElementById("authCallbackSubmit");
+  const errorEl = document.getElementById("authCallbackError");
+  let submitting = false, accepted = false, finished = false;
+  const isActive = () => document.getElementById("authStatus") === el
+    && !document.getElementById("modal").classList.contains("hidden")
+    && !document.getElementById("modal").classList.contains("closing");
+  const disableForm = () => { if (input) input.disabled = button.disabled = true; };
+  const finish = (message, success = false) => {
+    finished = true;
+    disableForm();
+    if (errorEl) errorEl.textContent = "";
+    el.textContent = message;
+    el.style.color = success ? "var(--ok)" : "var(--danger)";
+  };
+  const succeed = () => {
+    finish("授权成功，账号已写入号池", true);
+    toast(`${label} 授权成功`);
+    setTimeout(async () => {
+      if (isActive() && window.WBPlatform && typeof window.WBPlatform.select === "function") {
+        try { await window.WBPlatform.select(platformId, realm); } catch (error) { /* 仍刷新账号 */ }
+      }
+      if (isActive()) closeModal();
+      loadAccounts(); loadPlatformOverview();
+    }, 900);
+  };
+  if (form) form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (submitting || accepted || finished || !isActive()) return;
+    const callbackUrl = input.value.trim();
+    if (!callbackUrl) {
+      errorEl.textContent = "请先粘贴授权后跳转页面的完整回调链接";
+      input.focus();
       return;
     }
-    const parsed = await safeJson(poll);
-    if (!parsed.ok) continue;
-    const payload = parsed.data || {};
-    if (payload.pending) {
-      const el = statusEl();
-      if (el) el.textContent = payload.summary || "等待授权…";
+    submitting = true;
+    button.disabled = true;
+    button.textContent = "正在提交…";
+    errorEl.textContent = "";
+    try {
+      const result = await authRequest(`/api/platforms/${encodeURIComponent(platformId)}/auth/callback`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nonce, realm, callback_url: callbackUrl }),
+      });
+      if (!isActive() || finished) return;
+      if (!result.ok) {
+        const message = errorText(result.data, `提交失败（HTTP ${result.status}），请稍后重试`);
+        if (result.status === 404) finish(message);
+        else errorEl.textContent = message;
+        return;
+      }
+      accepted = true;
+      input.value = "";
+      input.disabled = true;
+      el.textContent = "回调已接收，正在完成授权…";
+    } catch (error) {
+      if (isActive() && !finished) errorEl.textContent = "提交超时或网络中断，可以重新提交同一条回调链接";
+    } finally {
+      submitting = false;
+      button.disabled = accepted || finished;
+      button.textContent = accepted ? "回调已提交" : "提交回调链接";
+    }
+  });
+
+  const expires = Number(data.expires_in);
+  const deadline = Date.now() + (Number.isFinite(expires) && expires > 0 ? expires : 600) * 1000;
+  let pollFailures = 0;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (!isActive() || finished) return;
+    if (Date.now() >= deadline) break;
+    if (submitting) continue;
+    let poll;
+    try {
+      // 设备授权可能直接等待上游轮询（最长 30 秒），回调模式只查询后台进度。
+      poll = await authRequest(`${base}/poll?nonce=${encodeURIComponent(nonce)}`, {}, manualCallback ? 10000 : 40000);
+    } catch (error) {
+      if (!isActive() || finished) return;
+      if (++pollFailures >= 5) {
+        finish("无法获取授权结果，请检查网络并刷新账号列表确认是否已导入");
+        return;
+      }
+      el.textContent = "授权进度查询超时或网络中断，正在重试…";
       continue;
     }
-    // 拿到凭证 -> 落账号
-    const el = statusEl();
-    if (el) el.textContent = "授权成功，正在保存…";
-    const claim = await api(`/api/${storage}/device/claim`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credentials: payload.credentials }),
-    });
-    const claimed = await safeJson(claim);
-    if (claimed.ok) {
-      const info = claimed.data || {};
-      if (el) {
-        el.style.color = "var(--success, #33587F)";
-        el.textContent = `已添加账号：${info.name || info.uid || "成功"}`;
+    if (!isActive() || finished) return;
+    const payload = poll.data || {};
+    if (!poll.ok) {
+      if ((poll.status >= 500 || payload._parse_error) && ++pollFailures < 5) {
+        el.textContent = `授权进度查询暂时失败（HTTP ${poll.status}），正在重试…`;
+        continue;
       }
-      toast("授权完成，账号已添加");
-      // ⚠️ 不能只调 loadAccounts()：
-      // 它按 `window.WBPlatform.spec()` 分派，而授权期间当前平台
-      // 可能不是刚授权的那个 -> 会去渲染别的平台的账号池，
-      // 表现为「数据没进来，手动刷新才显示」。
-      //
-      // 正确做法：先显式切到该平台（select 内部会重新拉数据），
-      // 再等一拍补一次 loadAccounts()。
-      try {
-        if (window.WBPlatform && typeof window.WBPlatform.select === "function") {
-          await window.WBPlatform.select(spec && spec.id ? spec.id : storage, realm);
-        }
-      } catch (error) {
-        // 切平台失败也要刷，至少别让用户以为没成功
-      }
-      await new Promise(resolve => setTimeout(resolve, 600));
-      loadAccounts();
-      setTimeout(() => closeModal(), 900);
-    } else {
-      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || claim.status}`;
+      finish("授权失败：" + errorText(payload, `无法查询授权结果（HTTP ${poll.status}），请刷新账号列表确认是否已导入`));
+      return;
     }
+    pollFailures = 0;
+    if (payload.pending) {
+      if (payload.stage === "exchanging" && input) {
+        accepted = true;
+        input.value = "";
+        disableForm();
+        button.textContent = "回调已提交";
+      }
+      el.textContent = payload.summary || (accepted ? "回调已接收，正在完成授权…" : "等待授权…");
+      continue;
+    }
+    if (payload.ok === false || payload.error) {
+      finish("授权失败：" + errorText(payload, "未知原因"));
+      return;
+    }
+    if (payload.credentials) {
+      el.textContent = "授权成功，正在保存…";
+      let claimed;
+      try {
+        claimed = await authRequest(`${base}/claim`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ credentials: payload.credentials }),
+        }, 40000);
+      } catch (error) {
+        if (isActive()) finish("保存结果查询超时，请刷新账号列表确认是否已导入");
+        return;
+      }
+      if (!isActive() || finished) return;
+      if (!claimed.ok || (claimed.data && claimed.data.ok === false)) {
+        finish("保存失败：" + errorText(claimed.data, `HTTP ${claimed.status}`));
+        return;
+      }
+      succeed();
+      return;
+    }
+    if (payload.ok) { succeed(); return; }
+    finish("授权失败：服务未返回授权结果，请重新发起授权");
     return;
   }
-  const el = statusEl();
-  if (el) el.textContent = "授权超时（5 分钟），请重新发起";
+  if (isActive() && !finished) finish("授权会话已超时，请关闭弹窗后重新发起授权");
 }
 
 async function platformCheckin(spec, storage) {

@@ -80,6 +80,9 @@ class PlatformSpec:
     realm: str = ""
     #: 额外元数据，供前端自由使用（不参与后端逻辑）。
     extra: dict = field(default_factory=dict)
+    #: 手动授权回调适配器模块；空值表示该授权协议不使用手动回调。
+    #: 模块提供 get_session(nonce) 和 parse_callback(params)，按需加载。
+    auth_callback: str = ""
 
     def storage(self) -> str:
         """落库用的平台 id。"""

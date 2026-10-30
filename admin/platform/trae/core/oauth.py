@@ -40,9 +40,9 @@ import json
 import logging
 import secrets
 import socket
-import threading
 import time
 import urllib.parse
+from admin.platform.auth import CallbackSession, parse_callback_query
 
 logger = logging.getLogger("admin.platform.trae.oauth")
 
@@ -110,28 +110,62 @@ def free_port() -> int:
         sock.close()
 
 
-class DeviceLogin:
+def callback_payload(params: dict[str, str]) -> dict:
+    """解析自动回调和手动提交共用的参数，不访问回调 URL。"""
+    def object_param(name: str) -> dict:
+        raw = params.get(name, "")
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            raise ValueError("回调中的 %s 不是有效 JSON" % name) from None
+        if not isinstance(value, dict):
+            raise ValueError("回调中的 %s 必须是 JSON 对象" % name)
+        return value
+
+    error = params.get("error", "").strip()
+    if error:
+        return {"error": params.get("error_description", "").strip() or error}
+    code = params.get("code", "").strip()
+    if not code:
+        info = object_param("authCodeInfo")
+        code = info.get("AuthCode") or info.get("authCode") or ""
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("回调缺少授权码，请复制授权后跳转页面的完整地址，而不是授权页链接")
+
+    host = params.get("host", "").strip().rstrip("/")
+    if host:
+        parsed = urllib.parse.urlsplit(host)
+        hostname = (parsed.hostname or "").lower()
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443) or parsed.path
+                or parsed.query or parsed.fragment
+                or not any(hostname == domain or hostname.endswith("." + domain)
+                           for domain in ("trae.cn", "trae.com.cn", "trae.ai"))):
+            raise ValueError("回调中的 host 不是有效的 Trae 服务地址")
+    return {"code": code.strip(), "host": host,
+            "user_info": object_param("userInfo")}
+
+
+def parse_callback_url(value: str, nonce: str) -> dict:
+    """兼容调用方：公共 URL 校验 + 平台参数解析。"""
+    return callback_payload(parse_callback_query(
+        value, nonce, ("nonce", "login_trace_id", "loginTraceID", "state")))
+
+
+class DeviceLogin(CallbackSession):
     """一次 PKCE 授权会话。"""
 
     def __init__(self, realm: str = "cn", *, device_id: str = "",
                  machine_id: str = "", port: int = 0):
-        self.realm = "intl" if str(realm).lower() == "intl" else "cn"
+        super().__init__("trae", "intl" if str(realm).lower() == "intl" else "cn", ttl=_SESSION_TTL)
         # 客户端源码：randomBytes(48).toString('base64url')，48 字节而非 32
         self.verifier = _b64url(secrets.token_bytes(48))
         self.challenge = _b64url(hashlib.sha256(self.verifier.encode()).digest())
-        self.nonce = str(__import__("uuid").uuid4())
         self.device_id = str(device_id or DEFAULT_DEVICE_ID)
         self.machine_id = str(machine_id or DEFAULT_MACHINE_ID)
         self.port = int(port or free_port())
-        self.created_at = int(time.time())
-        self.code = ""
-        self.error = ""
-        #: 回调里带的 userInfo（换 token 后若接口不回 UserID 可作为兜底）
-        self.user_info: dict = {}
-        #: 回调里带的 host（换 token 用这个域名最稳）
-        self.host = ""
-        self._done = threading.Event()
-        self._server: threading.Thread | None = None
 
     # ---- URL ----
     @property
@@ -180,7 +214,7 @@ class DeviceLogin:
             "auth_url": self.auth_url,
             "callback_url": callback_url(),
             "expires_in": _SESSION_TTL,
-            "summary": "打开授权链接 → 选择账号登录 → 页面会自动回调并完成授权",
+            "summary": "打开授权链接 → 选择账号登录 → 自动回调；跳转失败时可手动粘贴回调链接",
         }
 
     # ---- 回调服务器 ----
@@ -195,24 +229,15 @@ class DeviceLogin:
         """
         return None
 
-    # ---- 换 token ----
-    def deliver(self, code: str = "", error: str = "", host: str = "") -> None:
-        """主服务的回调路由收到 code 时调它。"""
-        self.code = str(code or "")
-        self.error = str(error or "")
-        if host:
-            self.host = str(host)
-        self._done.set()
+    @property
+    def code(self) -> str:
+        return str((super().wait() or {}).get("code") or "")
 
     def wait(self, timeout: float = 0.0) -> dict | None:
-        """取回调结果；还没到就返回 None（**不要等待**，轮询接口自己控制节奏）。"""
-        if timeout > 0:
-            self._done.wait(timeout)
-        if not self._done.is_set():
-            return None
-        return {"code": self.code, "verifier": self.verifier,
-                "error": self.error, "realm": self.realm,
-                "host": self.host, "user_info": self.user_info}
+        result = super().wait(timeout)
+        if result is not None:
+            result.update(verifier=self.verifier, realm=self.realm)
+        return result
 
 
 def _device_keypair() -> tuple[str, str]:
@@ -264,7 +289,7 @@ def _device_info(device_id: str, machine_id: str, public_key_pem: str,
 
 def exchange_token(code: str, verifier: str, *, realm: str = "cn",
                    device_id: str = "", machine_id: str = "",
-                   host: str = "", timeout: float = 60.0) -> dict:
+                   host: str = "", timeout: float = 20.0) -> dict:
     """用授权码换 token。
 
     ## 端点（这是最关键的一处）
@@ -290,8 +315,7 @@ def exchange_token(code: str, verifier: str, *, realm: str = "cn",
     `DeviceInfo.DevicePublicKey` 必须是真实的 EC P-256 公钥（PEM），
     客户端用 `generateKeyPairSync("ec", {{namedCurve:"P-256"}})` 生成。
     """
-    import urllib.error
-    import urllib.request
+    import httpx
 
     base = str(host or "").strip().rstrip("/")
     if not base:
@@ -305,21 +329,32 @@ def exchange_token(code: str, verifier: str, *, realm: str = "cn",
         "DeviceInfo": _device_info(device_id, machine_id, pub_pem, APP_VERSION),
         "IDEVersion": APP_VERSION,
     }
-    req = urllib.request.Request(
-        base + EXCHANGE_PATH,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "Trae/%s" % APP_VERSION,
-        })
+    # 保留部署方的环境代理；只重试尚未发送授权码的建连失败。
+    # 读取超时、HTTP 错误不能自动重放一次性授权码。
+    for attempt in range(2):
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(10.0, timeout))) as connection:
+                response = connection.post(base + EXCHANGE_PATH, json=payload, headers={
+                    "Accept": "application/json", "User-Agent": "Trae/%s" % APP_VERSION,
+                })
+            break
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            if attempt == 0:
+                logger.warning("Trae 授权连接失败，重新建立连接一次（%s）", type(exc).__name__)
+                continue
+            raise RuntimeError("连接 Trae 授权服务失败或超时，请稍后重新发起授权") from None
+        except httpx.TimeoutException:
+            raise RuntimeError("Trae 授权服务响应超时，请重新发起授权") from None
+        except httpx.RequestError:
+            raise RuntimeError("与 Trae 授权服务的连接中断，请重新发起授权") from None
+    if response.is_error:
+        raise RuntimeError("Trae 授权服务返回 HTTP %s，请重新发起授权" % response.status_code)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read() or b"{}")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(1200).decode("utf-8", "replace")
-        raise RuntimeError("ExchangeToken HTTP %s: %s" % (exc.code, detail[:800]))
+        data = response.json()
+    except ValueError:
+        raise RuntimeError("Trae 授权服务返回了无效响应，请稍后重新发起授权") from None
+    if not isinstance(data, dict):
+        raise RuntimeError("Trae 授权服务返回了无效响应，请稍后重新发起授权")
 
     # 上游把错误放在 `ResponseMetadata.Error`，结果放在 `Result`
     error = ((data.get("ResponseMetadata") or {}).get("Error") or {})
@@ -367,4 +402,5 @@ def latest_pending() -> DeviceLogin | None:
 
 
 def get(nonce: str) -> DeviceLogin | None:
+    prune()
     return _SESSIONS.get(str(nonce or ""))

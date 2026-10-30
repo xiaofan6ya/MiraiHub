@@ -16,9 +16,10 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from admin.db import get_db
+from admin.db import get_db, SessionLocal
 from admin.models import Account, AccountModelCooldown
 from admin.platform.registry import get as get_platform
+from admin.platform.auth import ManualCallbackIn, submit_callback
 from admin.security import require_admin
 from admin.platform.trae.core import catalog, client
 from admin.platform.trae.services import accounts as trae_accounts
@@ -248,6 +249,8 @@ _ICON_FAIL = ('<svg viewBox="0 0 24 24"><path d="M18 6 6 18"/>'
 
 def _callback_page(ok: bool, title: str, message: str, detail: str = "") -> HTMLResponse:
     """渲染授权结果页（跟随系统深浅色）。"""
+    from html import escape
+
     if ok:
         colors = dict(bg="#f6f7f9", fg="#111827", surface="#ffffff",
                       border="#e5e7eb", muted="#6b7280", subtle="#9ca3af",
@@ -259,8 +262,8 @@ def _callback_page(ok: bool, title: str, message: str, detail: str = "") -> HTML
                       iconBg="#fee2e2", iconFg="#b91c1c", codeBg="#fef2f2")
         icon = _ICON_FAIL
     html = _CALLBACK_PAGE.format(
-        title=title, message=message, icon=icon,
-        detail=(f'<div class="detail">{detail}</div>' if detail else ""),
+        title=escape(title), message=escape(message), icon=icon,
+        detail=(f'<div class="detail">{escape(detail)}</div>' if detail else ""),
         bg=colors["bg"], fg=colors["fg"], surface=colors["surface"],
         border=colors["border"], muted=colors["muted"],
         subtle=colors["subtle"], iconBg=colors["iconBg"],
@@ -282,83 +285,60 @@ def device_callback(code: str = "", state: str = "", nonce: str = "",
     """
     from admin.platform.trae.core import oauth as trae_oauth
 
-    # ---- 1) 从真实回调里取授权码 ----
-    # Trae 的回调**不是** OAuth 标准形状，它的参数是：
-    #   authCodeInfo = {"AuthCode":"...","ExpireAt":...,"ExpireDuration":...}
-    #   userInfo     = {"UserID":"...","ScreenName":"...","TenantID":"..."}
-    #   loginTraceID / host / userRegion
-    # 只找 `code` 会永远拿不到码。
-    import json as _json
-
-    real_code = str(code or "").strip()
-    if not real_code and authCodeInfo:
-        try:
-            info = _json.loads(authCodeInfo)
-            real_code = str(info.get("AuthCode") or info.get("authCode") or "").strip()
-        except Exception:  # noqa: BLE001 - 解析失败按空处理
-            logger.debug("authCodeInfo 解析失败", exc_info=True)
-
-    # ---- 2) 从 userInfo 里预取账号信息（换 token 后仍以接口返回为准）----
-    user_info: dict = {}
-    if userInfo:
-        try:
-            user_info = _json.loads(userInfo) or {}
-        except Exception:  # noqa: BLE001
-            user_info = {}
-
-    # ---- 3) 找会话 ----
     key = (nonce or login_trace_id or loginTraceID or state or "").strip()
-    session = trae_oauth.get(key) if key else None
-    if session is None:
-        # 上游**不保证**回传 login_trace_id / state（实测常常只有 code）。
-        # 这时退到「最近的未完成会话」—— 用户同一时刻只会发起一次授权，
-        # 直接报「会话已失效」会让真实授权永远完不成。
-        session = trae_oauth.latest_pending()
+    # 仅在上游未回传会话标识时兼容旧回调，已失效的标识不能落到别的会话。
+    session = trae_oauth.get(key) if key else trae_oauth.latest_pending()
     if session is None:
         return _callback_page(
             False, "授权会话已失效",
             "这个链接对应的授权已经结束或超时了，请回到控制台重新发起授权。")
-    if error:
-        session.deliver(error=error_description or error)
+    try:
+        payload = trae_oauth.callback_payload({
+            "code": code, "authCodeInfo": authCodeInfo, "userInfo": userInfo,
+            "host": host, "error": error, "error_description": error_description,
+        })
+    except ValueError as exc:
+        return _callback_page(False, "授权参数不完整", str(exc))
+    if not session.deliver(**payload):
+        return _callback_page(False, "授权回调已接收", "请回到控制台查看本次授权结果。")
+    if payload.get("error"):
         return _callback_page(
             False, "授权未完成",
-            "上游返回了错误，请回到控制台重试。", error_description or error)
-    if not real_code:
-        session.deliver(error="回调缺少授权码")
-        return _callback_page(
-            False, "授权参数不完整",
-            "回调里没有拿到授权码，请回到控制台重新发起。")
-    # 把 userInfo 一起交给会话（换 token 后如果接口不回 UserID，用它兜底）
-    session.user_info = user_info
-    session.deliver(code=real_code, host=host)
+            "上游返回了错误，请回到控制台重试。", payload["error"])
     return _callback_page(
         True, "授权完成",
         "账号正在写入号池，请回到控制台查看结果。")
 
 
+@router.post("/device/callback")
+def device_callback_submit(body: ManualCallbackIn, _: bool = Depends(require_admin)):
+    """兼容旧控制台；交给公共入口完成校验和交付。"""
+    from admin.platform.trae.core import oauth as trae_oauth
+
+    session = trae_oauth.get(body.nonce.strip())
+    if session is None:
+        raise HTTPException(404, detail="授权会话不存在或已过期，请重新开始")
+    return submit_callback("trae-" + session.realm, body)
+
+
 @router.get("/device/poll")
-def device_poll(nonce: str, _: bool = Depends(require_admin),
-                db: Session = Depends(get_db)):
-    """查一次授权结果（外层包异常，任何错都把完整栈返回给前端）。"""
+def device_poll(nonce: str, _: bool = Depends(require_admin)):
+    """快速返回授权进度，兑换与入库在独立任务中执行。"""
     try:
-        return _device_poll_impl(nonce, db)
+        return _device_poll_impl(nonce)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        import traceback
-
-        logger.exception("Trae device_poll 崩溃（完整栈见上）")
-        raise HTTPException(500, detail={
-            "error": "%s: %s" % (type(exc).__name__, str(exc)[:300]),
-            "trace": traceback.format_exc()[-1500:],
-        }) from exc
+        logger.error("Trae 授权进度查询异常：%s", type(exc).__name__)
+        raise HTTPException(500, detail="授权进度查询失败，请稍后重试") from exc
 
 
-def _device_poll_impl(nonce: str, db: Session):
+def _device_poll_impl(nonce: str):
     """查一次授权结果。
 
     - 还没回调 -> `{pending: true}`
-    - 回调拿到 code -> 立刻换 token，写入账号，返回 `{ok: true, account_id}`
+    - 回调拿到 code -> 后台换 token、写入账号；轮询仍立即返回进度
+    - 兑换完成 -> 重复返回缓存的成功 / 失败结果，不重复兑换
     - 用户拒绝 / 超时 -> 明确错误
     """
     from admin.platform.trae.core import oauth as trae_oauth
@@ -367,7 +347,7 @@ def _device_poll_impl(nonce: str, db: Session):
     if session is None:
         raise HTTPException(404, detail="授权会话不存在或已过期，请重新开始")
 
-    result = session.wait(timeout=0.2)
+    result = session.wait()
     if result is None:
         return {"pending": True, "summary": "等待浏览器完成授权…"}
     if result.get("error"):
@@ -376,34 +356,32 @@ def _device_poll_impl(nonce: str, db: Session):
     if not code:
         return {"pending": True, "summary": "等待授权回调…"}
 
+    return session.exchange_once(lambda: _complete_device_login(session, result))
+
+
+def _complete_device_login(session, result: dict) -> dict:
+    """独立后台任务，自行管理数据库会话，避免复用已结束的请求事务。"""
+    from admin.platform.trae.core import oauth as trae_oauth
+
     try:
         token_data = trae_oauth.exchange_token(
-            code, result.get("verifier") or "", realm=result.get("realm") or "cn",
+            result["code"], result.get("verifier") or "", realm=result.get("realm") or "cn",
             device_id=session.device_id, machine_id=session.machine_id,
             # 回调里带的 host 最准（`https://api.trae.com.cn`），优先用它
             host=result.get("host") or "")
     except Exception as exc:  # noqa: BLE001
-        # 把「用哪个字段换、失败在哪」写进日志：
-        # 换 token 的字段名靠猜不可靠，留下记录才能对照上游要求修正。
-        # 换 token 的字段名/端点靠猜不可靠 —— 把**完整**的 code 和 verifier
-        # 都写进日志（10 分钟内有效），这样才能拿真实配对去逐个试端点定位。
-        # 用 exception() 而不是 warning()：它会把**完整栈**打进日志，
-        # 只写 str(exc) 的话 `unhashable type: 'dict'` 根本看不出是哪一行。
-        logger.exception("Trae 换 token 失败 | AuthCode=%s | verifier=%s | host=%s",
-                         code, result.get("verifier") or "",
-                         result.get("host") or "-")
-        raise HTTPException(502, detail="换 token 失败：%s" % str(exc)[:240]) from exc
+        logger.warning("Trae 换取令牌失败，realm=%s，错误类型=%s", session.realm, type(exc).__name__)
+        message = str(exc)[:240] if isinstance(exc, RuntimeError) else "换取 Trae 登录凭证失败，请重新发起授权"
+        return {"ok": False, "error": message}
 
-    # 从这里开始到写库结束，任何异常都要留下完整栈 ——
-    # 之前只报 `换 token 失败: xxx` 一句话，无法定位是哪一行。
     try:
-        return _finish_trae_account(db, session, token_data, result)
-    except HTTPException:
-        raise
+        with SessionLocal() as db:
+            return _finish_trae_account(db, session, token_data, result)
+    except HTTPException as exc:
+        return {"ok": False, "error": str(exc.detail)[:240]}
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Trae 授权收尾失败（完整栈见上）")
-        raise HTTPException(502, detail="授权收尾失败：%s: %s"
-                            % (type(exc).__name__, str(exc)[:200])) from exc
+        logger.error("Trae 授权账号保存失败：%s", type(exc).__name__)
+        return {"ok": False, "error": "授权账号保存失败，请重新发起授权"}
 
 
 def _finish_trae_account(db: Session, session, token_data: dict,
@@ -453,8 +431,7 @@ def _finish_trae_account(db: Session, session, token_data: dict,
                  info.get("ScreenName") or "")
     tenant = str(info.get("TenantID") or "")
     if not access:
-        raise HTTPException(502, detail="上游没有返回 access token：%s"
-                            % json.dumps(token_data, ensure_ascii=False)[:240])
+        raise HTTPException(502, detail="Trae 未返回登录凭证，请重新发起授权")
 
     auth_json = json.dumps({
         "token": access,

@@ -193,8 +193,56 @@ GET  /api/<platform>/device/poll?nonce=...
   -> {"ok": false, "error": "用户拒绝"}          # 失败
 ```
 
+### 通用手动回调：反向代理 / 远程访问
+
+授权弹窗支持粘贴回调链接。若授权后浏览器跳到本机 `/authorize`，但页面无法打开，
+复制该页面地址栏里的**完整地址**，回到弹窗点击「提交回调链接」。不要复制授权页链接。
+
+```python
+POST /api/platforms/<platform_id>/auth/callback      # 需要管理员身份
+  {"nonce": "<本次 start 返回的 nonce>", "realm": "<授权区域>",
+   "callback_url": "http://127.0.0.1:8790/authorize?..."}
+  -> {"ok": true, "summary": "回调已接收，正在完成授权…"}
+```
+
+公共模块 `admin/platform/auth.py` 校验链接、平台、区域和会话，
+通过平台适配器解析授权参数，将结果交给当前会话，
+由 poll 接口触发后台兑换、写入号池，不请求粘贴的 URL。
+兑换期间 poll 立即返回 `{"pending": true, "stage": "exchanging"}`，
+成功或失败结果在会话有效期内缓存；重复查询不会再次消费授权码。
+Trae 兑换建连超时最多重试一次，读取超时或上游 HTTP 错误不重放授权码。
+前端回调模式单次请求最多等待 10 秒，短暂网络错误 / 网关 5xx 最多连续重试 4 次，
+不会把反向代理的 HTML 错误页直接展示为授权错误。
+回调中的会话标识若与本次授权不符会被拒绝；无标识时按提交的 nonce 关联。
+错误链接可修正后重试；过期会话需要重新发起授权。自动回调仍然有效。
+
+平台通过 `PlatformSpec.auth_callback="admin.platform.<name>.auth"` 声明适配器模块。
+`GET /api/platforms` 仅公开 `auth.manual_callback` 能力标记，前端按能力渲染，
+不识别平台名称。适配器模块提供：
+
+```python
+session_keys = ("state", "nonce")  # 可声明平台实际回传的会话参数名
+
+def get_session(nonce: str) -> CallbackSession | None:
+    ...  # 查找本平台已有会话
+
+def parse_callback(params: dict[str, str]) -> dict:
+    ...  # 校验协议参数，返回会话 payload；无效参数抛 ValueError
+```
+
+回调会话继承公共 `CallbackSession(platform=<存储平台 id>, realm=<区域>)`，
+复用 `deliver`、`wait`、`exchange_once`。PKCE 和凭证兑换仍由平台自己实现；
+公开轮询结果不能包含 verifier 或授权码。不同平台、区域的会话不能互相提交。
+未配置适配器的平台不显示输入框，公共接口明确拒绝手动回调。
+
+当前生产适配器为 Trae 国内版 / 国际版（解析 `authCodeInfo`、`code`、`userInfo`），
+旧 `POST /api/trae/device/callback` 保留为公共逻辑的兼容入口。
+Qoder 使用设备轮询，无浏览器回调，继续走 `start -> poll -> claim`；
+其单次查询和保存最多等待 40 秒，以覆盖原有 30 秒上游请求。
+后续使用浏览器回调的平台只需注册适配器、提供上述会话接口，前端无需修改。
+
 **前端轮询，后端不阻塞**：后端阻塞 5 分钟会被网关/浏览器超时切断。
-实测 2~3 秒一次、最多 150 次（5 分钟）足够。
+每 2 秒查询一次，总时限使用 start 返回的 `expires_in`（默认 10 分钟）。
 
 ---
 

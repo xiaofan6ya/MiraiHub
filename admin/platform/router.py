@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from admin.db import get_db
 from admin.models import Account, SystemSetting
 from admin.platform import registry
+from admin.platform.auth import ManualCallbackIn, submit_callback
 from admin.platform.loader import load_platforms, status as loader_status
 from admin.security import require_admin
 
@@ -36,6 +37,7 @@ def _serialize(spec) -> dict:
         "label": spec.label,
         "enabled": spec.enabled,
         "supports_local_scan": spec.supports_local_scan,
+        "auth": {"manual_callback": bool(spec.auth_callback)},
         "default_realm": spec.default_realm(),
         "notes": spec.notes,
         # 图标 key：前端据此在 platform-icons.js 里取 logo。
@@ -64,6 +66,13 @@ def _serialize(spec) -> dict:
         #       checkin / begin-auth
         "actions": list((spec.extra or {}).get("actions") or []),
     }
+
+
+@router.post("/{platform_id}/auth/callback")
+def auth_callback(platform_id: str, body: ManualCallbackIn,
+                  _: bool = Depends(require_admin)):
+    """公共手动回调入口；平台、区域、会话校验由公共授权模块执行。"""
+    return submit_callback(platform_id, body)
 
 
 @router.get("/{platform_id}/overview")
