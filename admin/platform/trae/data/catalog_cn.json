@@ -1,0 +1,662 @@
+{
+ "schema": "trae-catalog/1",
+ "realm": "cn",
+ "generated_at": 1792345773,
+ "source": {
+  "kind": "client-state-vscdb",
+  "client": "Trae CN（国内版）",
+  "db": "%APPDATA%/Trae CN/User/globalStorage/state.vscdb",
+  "db_mtime": "2026-10-17T13:49:08",
+  "key": "<uid:16>_AI.agent.model.model_list_map",
+  "groups": {
+   "chat_v3": 20,
+   "builder_v3": 10,
+   "builder": 8,
+   "code_reviewer": 2,
+   "code_review_summary": 2,
+   "refactor": 4,
+   "solo_agent": 20
+  }
+ },
+ "models": [
+  {
+   "key": "Doubao-Seed-Code",
+   "name": "Doubao-Seed-Code",
+   "upstream_key": "Doubao-Seed-Code",
+   "display_name": "Seed-Code",
+   "model_type": "chat_model",
+   "context_window": 256000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Seed-Code",
+    "seed-code",
+    "seedcode",
+    "Doubao-Seed-Code",
+    "doubao-seed-code",
+    "doubaoseedcode"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "DeepSeek-V4-Flash-Official",
+   "name": "DeepSeek-V4-Flash-Official",
+   "upstream_key": "DeepSeek-V4-Flash-Official",
+   "display_name": "DeepSeek-V4-Flash",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "DeepSeek-V4-Flash",
+    "deepseek-v4-flash",
+    "deepseekv4flash",
+    "DeepSeek-V4-Flash-Official",
+    "deepseek-v4-flash-official",
+    "deepseekv4flashofficial"
+   ],
+   "fee_model_level": 2,
+   "multimodal": false,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "DeepSeek-V4-Pro-Official",
+   "name": "DeepSeek-V4-Pro-Official",
+   "upstream_key": "DeepSeek-V4-Pro-Official",
+   "display_name": "DeepSeek-V4-Pro",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "DeepSeek-V4-Pro",
+    "deepseek-v4-pro",
+    "deepseekv4pro",
+    "DeepSeek-V4-Pro-Official",
+    "deepseek-v4-pro-official",
+    "deepseekv4proofficial"
+   ],
+   "fee_model_level": 2,
+   "multimodal": false,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "deepseek-v4.1-flash",
+   "name": "deepseek-v4.1-flash",
+   "upstream_key": "deepseek-v4.1-flash",
+   "display_name": "DeepSeek-V4.1-Flash",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "DeepSeek-V4.1-Flash",
+    "deepseek-v4-1-flash",
+    "deepseekv41flash",
+    "deepseek-v4.1-flash"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "glm-5.2",
+   "name": "glm-5.2",
+   "upstream_key": "glm-5.2",
+   "display_name": "GLM-5.2",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "GLM-5.2",
+    "glm-5-2",
+    "glm52",
+    "glm-5.2"
+   ],
+   "fee_model_level": 2,
+   "multimodal": false,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "glm-5.3",
+   "name": "glm-5.3",
+   "upstream_key": "glm-5.3",
+   "display_name": "GLM-5.3",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "GLM-5.3",
+    "glm-5-3",
+    "glm53",
+    "glm-5.3"
+   ],
+   "fee_model_level": 2,
+   "multimodal": false,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "glm-5.3-flash",
+   "name": "glm-5.3-flash",
+   "upstream_key": "glm-5.3-flash",
+   "display_name": "GLM-5.3-Flash",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "GLM-5.3-Flash",
+    "glm-5-3-flash",
+    "glm53flash",
+    "glm-5.3-flash"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "glm-5.3-flashx",
+   "name": "glm-5.3-flashx",
+   "upstream_key": "glm-5.3-flashx",
+   "display_name": "GLM-5.3-FlashX",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "GLM-5.3-FlashX",
+    "glm-5-3-flashx",
+    "glm53flashx",
+    "glm-5.3-flashx"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "kimi-k2.8-preview",
+   "name": "kimi-k2.8-preview",
+   "upstream_key": "kimi-k2.8-preview",
+   "display_name": "Kimi-K2.8-Preview",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Kimi-K2.8-Preview",
+    "kimi-k2-8-preview",
+    "kimik28preview",
+    "kimi-k2.8-preview"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "extra_high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "kimi-k3",
+   "name": "kimi-k3",
+   "upstream_key": "kimi-k3",
+   "display_name": "Kimi-K3",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Kimi-K3",
+    "kimi-k3",
+    "kimik3"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "extra_high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "mimo-v2.6-flash",
+   "name": "mimo-v2.6-flash",
+   "upstream_key": "mimo-v2.6-flash",
+   "display_name": "MiMo-V2.6-Flash",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "MiMo-V2.6-Flash",
+    "mimo-v2-6-flash",
+    "mimov26flash",
+    "mimo-v2.6-flash"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": false,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "mimo-v2.6-pro",
+   "name": "mimo-v2.6-pro",
+   "upstream_key": "mimo-v2.6-pro",
+   "display_name": "MiMo-V2.6-Pro",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "MiMo-V2.6-Pro",
+    "mimo-v2-6-pro",
+    "mimov26pro",
+    "mimo-v2.6-pro"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": false,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "minimax-m3",
+   "name": "minimax-m3",
+   "upstream_key": "minimax-m3",
+   "display_name": "MiniMax-M3",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "MiniMax-M3",
+    "minimax-m3",
+    "minimaxm3"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "code_review_summary",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "qwen-3.7-plus",
+   "name": "qwen-3.7-plus",
+   "upstream_key": "qwen-3.7-plus",
+   "display_name": "Qwen3.7-Plus",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Qwen3.7-Plus",
+    "qwen3-7-plus",
+    "qwen37plus",
+    "qwen-3.7-plus",
+    "qwen-3-7-plus"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "qwen3.8-flash",
+   "name": "qwen3.8-flash",
+   "upstream_key": "qwen3.8-flash",
+   "display_name": "Qwen3.8-Flash",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Qwen3.8-Flash",
+    "qwen3-8-flash",
+    "qwen38flash",
+    "qwen3.8-flash"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "qwen3.8-max",
+   "name": "qwen3.8-max",
+   "upstream_key": "qwen3.8-max",
+   "display_name": "Qwen3.8-Max",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Qwen3.8-Max",
+    "qwen3-8-max",
+    "qwen38max",
+    "qwen3.8-max"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high",
+     "extra_high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "Doubao-Seed-2.1-Pro",
+   "name": "Doubao-Seed-2.1-Pro",
+   "upstream_key": "Doubao-Seed-2.1-Pro",
+   "display_name": "Seed-2.1-Pro-0915",
+   "model_type": "chat_model",
+   "context_window": 256000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Seed-2.1-Pro-0915",
+    "seed-2-1-pro-0915",
+    "seed21pro0915",
+    "Doubao-Seed-2.1-Pro",
+    "doubao-seed-2-1-pro",
+    "doubaoseed21pro"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "Doubao-Seed-2.1-Turbo",
+   "name": "Doubao-Seed-2.1-Turbo",
+   "upstream_key": "Doubao-Seed-2.1-Turbo",
+   "display_name": "Seed-2.1-Turbo",
+   "model_type": "chat_model",
+   "context_window": 256000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Seed-2.1-Turbo",
+    "seed-2-1-turbo",
+    "seed21turbo",
+    "Doubao-Seed-2.1-Turbo",
+    "doubao-seed-2-1-turbo",
+    "doubaoseed21turbo"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "Doubao-Seed-Evolving",
+   "name": "Doubao-Seed-Evolving",
+   "upstream_key": "Doubao-Seed-Evolving",
+   "display_name": "Seed-Evolving",
+   "model_type": "chat_model",
+   "context_window": 256000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Seed-Evolving",
+    "seed-evolving",
+    "seedevolving",
+    "Doubao-Seed-Evolving",
+    "doubao-seed-evolving",
+    "doubaoseedevolving"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": false,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "step-5-preview",
+   "name": "step-5-preview",
+   "upstream_key": "step-5-preview",
+   "display_name": "Step-5-Preview",
+   "model_type": "reasoning_model",
+   "context_window": 116000,
+   "max_tokens": 64000,
+   "aliases": [
+    "Step-5-Preview",
+    "step-5-preview",
+    "step5preview"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [
+     "light",
+     "high"
+    ],
+    "default_level": "high"
+   },
+   "groups": [
+    "chat_v3",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  }
+ ]
+}

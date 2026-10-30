@@ -1,0 +1,15 @@
+# Android-compatible wheels: Pydantic 1 avoids an unavailable Android Rust core.
+fastapi==0.115.12
+pydantic==1.10.22
+uvicorn==0.34.2
+httpx==0.28.1
+SQLAlchemy==2.0.40
+greenlet==3.0.1
+PyMySQL==1.1.1
+redis==5.2.1
+python-multipart==0.0.20
+PyJWT==2.10.1
+cryptography==42.0.8
+python-dotenv==1.1.0
+packaging==25.0
+tzdata==2026.5

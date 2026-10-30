@@ -1,0 +1,277 @@
+/* ==========================================================================
+   流量可视化样式（traffic.js 的配套）
+   -------------------------------------------------------------------------- */
+
+.wbt-root {
+  position: relative;
+  display: grid;
+  /* 三列按比例分配（而不是给右列固定 minmax(320px,1fr)）：
+     分栏卡片只有 ~660px 宽，固定最小值会让右列溢出卡片、压到旁边那栏上。 */
+  /* 左列用 min-content：它的文案是「客户端请求 / API Key」这种固定短词，
+     按内容取宽既不会截字，也不会白占宽度；剩下的全给平台列。 */
+  grid-template-columns: min-content minmax(112px, 128px) minmax(0, 1fr);
+  align-items: center;
+  gap: 0 26px;
+  /* 高度跟随内容：平台多时右侧列**分行**排，不再出现内部滚动条。
+     固定高度 + overflow 会把第 4 个平台之后的节点藏起来。 */
+  min-height: 260px;
+  height: auto;
+  padding: 22px 8px;
+  box-sizing: border-box;
+}
+/* 平台多时右侧列**多行分栏**：每行最多 2 个，logo 放大后也看得清。 */
+.wbt-col-right {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: center;
+  gap: 10px;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+@media (max-width: 1180px) {
+  .wbt-col-right { grid-template-columns: 1fr; }
+}
+
+/* SVG 连线层：铺满容器、不吃鼠标事件 */
+.wbt-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.wbt-link {
+  fill: none;
+  stroke: var(--border-strong, rgba(148, 163, 184, 0.45));
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+  animation: wbt-dash 1.6s linear infinite;
+  transition: stroke 0.25s, stroke-width 0.25s;
+}
+.wbt-link-main { stroke-width: 2; }
+.wbt-link-branch { opacity: 0.75; }
+.wbt-link.is-active {
+  stroke: var(--brand, var(--brand));
+  stroke-width: 2.6;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(var(--brand-rgb),0.5));
+}
+@keyframes wbt-dash {
+  to { stroke-dashoffset: -20; }
+}
+
+/* ---- 列 ---- */
+.wbt-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  z-index: 2;
+}
+.wbt-col-left { align-items: stretch; }
+.wbt-col-center { align-items: stretch; }
+.wbt-col-right { align-items: stretch; }
+
+/* ---- 节点 ---- */
+.wbt-node {
+  position: relative;
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.28));
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  padding: 10px 12px;
+  transition: transform 0.2s var(--ease-out, ease),
+    box-shadow 0.2s, border-color 0.2s;
+}
+.wbt-node-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--fg, #111);
+  /* 「Qoder 中国版」这类带区后缀的名字在 2 列网格里会被折成两行，
+     折行后副标题上下跳动、整列看不出对齐；单行 + 省略号更整齐。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wbt-node-sub {
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 3px;
+  color: var(--fg-subtle, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 中枢节点更醒目 */
+.wbt-col-center .wbt-node {
+  border-color: var(--brand, var(--brand));
+  background: linear-gradient(180deg,
+    rgba(var(--brand-rgb),0.08), rgba(var(--brand-rgb),0.02));
+  box-shadow: 0 0 0 1px rgba(var(--brand-rgb),0.12);
+}
+
+/* 当前生效的平台 */
+.wbt-node.is-active {
+  border-color: var(--brand, var(--brand));
+  box-shadow: 0 0 0 2px rgba(var(--brand-rgb),0.18);
+}
+
+/* 收到流量的脉冲反馈 */
+.wbt-node.is-hit {
+  animation: wbt-hit 0.42s ease-out;
+}
+@keyframes wbt-hit {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(var(--brand-rgb),0.55); }
+  40%  { transform: scale(1.03); box-shadow: 0 0 0 8px rgba(var(--brand-rgb),0.12); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(var(--brand-rgb),0); }
+}
+
+/* 风控信号用红色 */
+.wbt-node.is-hit[data-hit-tone="danger"] {
+  animation-name: wbt-hit-danger;
+}
+@keyframes wbt-hit-danger {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  40%  { transform: scale(1.03); box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.14); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* 链路按结果着色：成功绿 / 限流黄 / 失败红（比 7px 粒子更好认） */
+.wbt-link.wbt-link-tone-ok {
+  stroke: var(--brand) !important;
+  stroke-width: 2.8; opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(var(--brand-rgb),.65));
+}
+.wbt-link.wbt-link-tone-warn {
+  stroke: #f59e0b !important;
+  stroke-width: 2.6; opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(245, 158, 11, .55));
+}
+.wbt-link.wbt-link-tone-danger {
+  stroke: #ef4444 !important;
+  stroke-width: 2.8; opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(239, 68, 68, .6));
+}
+
+/* ---- 流量粒子 ---- */
+.wbt-packet {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--wbt-packet, var(--brand, var(--brand)));
+  box-shadow:
+    0 0 8px var(--wbt-packet, var(--brand, var(--brand))),
+    0 0 16px var(--wbt-packet, var(--brand, var(--brand)));
+  pointer-events: none;
+  z-index: 5;
+  offset-rotate: auto;
+  animation-name: wbt-travel;
+  animation-timing-function: ease-in-out;
+  animation-fill-mode: forwards;
+}
+/* 成功粒子：放大一号 + 更强辉光，一眼能看出"这条是通的" */
+.wbt-packet-ok {
+  width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
+  box-shadow:
+    0 0 10px var(--wbt-packet, var(--brand)),
+    0 0 22px var(--wbt-packet, var(--brand));
+}
+/* 失败粒子：略小，避免满屏红点抢走注意力 */
+.wbt-packet-danger { width: 6px; height: 6px; margin: -3px 0 0 -3px; }
+.wbt-packet-warn { width: 7px; height: 7px; }
+
+@keyframes wbt-travel {
+  from { offset-distance: 0%; opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  to   { offset-distance: 100%; opacity: 0; }
+}
+
+/* 深色主题微调 */
+[data-theme="dark"] .wbt-node {
+  background: var(--surface, #14161a);
+}
+[data-theme="dark"] .wbt-link {
+  stroke: rgba(148, 163, 184, 0.35);
+}
+
+/* 窄屏：竖排，连线隐藏（挤在一起看不出流向） */
+@media (max-width: 860px) {
+  .wbt-root {
+    grid-template-columns: 1fr;
+    gap: 12px 0;
+    min-height: 0;
+  }
+  .wbt-svg { display: none; }
+}
+
+
+/* 节点图标（平台 logo）—— 右侧平台节点放大，方便一眼分辨。 */
+.wbt-node {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+.wbt-node-icon {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border-radius: 6px;
+  background: var(--surface-2, rgba(148,163,184,.08));
+  color: inherit;
+}
+.wbt-node-icon svg,
+.wbt-node-icon img {
+  width: 22px;
+  height: 22px;
+  display: block;
+  shape-rendering: geometricPrecision;
+}
+/* 平台节点（右列）图标更大 */
+.wbt-col-right .wbt-node {
+  align-items: center;
+  padding: 10px;
+  gap: 8px;
+}
+.wbt-col-right .wbt-node-icon {
+  width: 32px; height: 32px;
+  border-radius: 9px;
+}
+.wbt-col-right .wbt-node-icon svg,
+.wbt-col-right .wbt-node-icon img {
+  width: 27px; height: 27px;
+}
+.wbt-col-right .wbt-node-label { font-size: 13px; }
+.wbt-col-right .wbt-node-sub {
+  font-size: 10px;
+  /* 「中国版 · 1 个账号」这类副标题在窄卡里会折成两行，副标题一折
+     卡片高度就不齐（2 列网格里最明显）；单行 + 省略号更整齐。 */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wbt-node-body { flex: 1 1 auto; min-width: 0; }
+
+/* 右列多行分栏：必须写在 `.wbt-col` 之后 ——
+   `.wbt-col { display:flex }` 与 `.wbt-col-right` 同权重，后定义的赢；
+   写在前面会被 flex 覆盖成单列（实测 6 个平台纵向排到屏幕外）。 */
+.wbt-root .wbt-col-right {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: center;
+  gap: 10px;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+@media (max-width: 1180px) {
+  .wbt-root .wbt-col-right { grid-template-columns: 1fr; }
+}

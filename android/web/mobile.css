@@ -1,0 +1,75 @@
+.mobile-mode .browser-password-settings{display:none!important}
+.mobile-mode body{background:var(--surface)}
+.mobile-mode .app-side{top:0}
+.mobile-mode .side-nav .side-foot{display:block;flex-shrink:0;margin-top:auto;padding:14px 12px 0}
+.mobile-mode .account-intake .intake-copy p{font-size:12px}
+.mobile-mode .desktop-topbar{padding:12px 16px;min-height:64px}
+.mobile-mode #modal{padding:12px;backdrop-filter:none}
+.mobile-mode #modalBox{padding:18px;max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px)}
+.mobile-mode input,.mobile-mode select,.mobile-mode textarea{font-size:16px;min-width:0;max-width:100%;box-sizing:border-box}
+.mobile-mode #plMobile,.mobile-mode #plCode{width:0}
+.mobile-mode #modalBox button{min-height:40px}
+.mobile-mode #modalBox .modal-close-button{min-height:30px}
+.mobile-mode .phone-login-footer{gap:8px;line-height:1.6}
+.mobile-mode .phone-login-footer a{font-size:14px;padding:4px 0}
+.mobile-mode .wb-update-dialog{width:calc(100vw - 24px);padding:18px}
+.mobile-mode .app-shell,.mobile-mode .app-main,.mobile-mode .app-body,.mobile-mode .app-body>section,.mobile-mode .card{min-width:0;max-width:100%;box-sizing:border-box}
+.mobile-mode .grid>*{min-width:0}
+.mobile-mode .api-share-grid{grid-template-columns:minmax(0,1fr)}
+.mobile-mode .api-share-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px}
+.mobile-mode .api-share-row>span{grid-column:1/-1;width:auto}
+.mobile-mode .api-share-row>code{overflow-wrap:anywhere;white-space:normal;word-break:break-word}
+.mobile-mode .api-share-grid>div{overflow-wrap:anywhere}
+.mobile-mode .mobile-api-help summary{font-size:12px;color:var(--brand-ink);padding:10px 0;cursor:pointer}
+.mobile-mode[data-active-tab]:not([data-active-tab="accounts"]):not([data-active-tab="credits"]) #overview{display:none}
+.mobile-mode pre{max-width:100%;min-width:0;overflow-x:auto}
+.mobile-mode .card.overflow-x-auto{width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.mobile-mode .panel-toolbar{align-items:flex-start}
+.mobile-mode .panel-toolbar .tools{min-width:0;max-width:100%;gap:8px}
+.mobile-mode .panel-toolbar .tools button{height:auto;min-height:40px;white-space:normal}
+.mobile-mode #modalBox .grid{grid-template-columns:minmax(0,1fr)}
+.mobile-mode #modalBox .modal-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:900px){
+  .mobile-mode .desktop-topbar{display:none}
+  .mobile-mode .app-side{gap:8px;padding:8px 12px;background:var(--surface)}
+  .mobile-mode .side-brand{flex:0 0 auto}
+  .mobile-mode .side-brand img{width:30px;height:30px}
+  .mobile-mode .side-current{flex:1;font-size:14px}
+  .mobile-mode .topbar-actions{gap:6px}
+  .mobile-mode .topbar-actions button{height:36px;width:36px;padding:0}
+  .mobile-mode .topbar-endpoint span{display:none}
+  .mobile-mode .app-body{padding:14px 12px 28px}
+  .mobile-mode #overview{margin-bottom:14px}
+  .mobile-mode #overview .stat{padding:12px;min-width:0}
+  .mobile-mode #overview .stat-value{font-size:22px;margin:5px 0 3px;line-height:1.2}
+  .mobile-mode #overview .stat-sub{font-size:10px;line-height:1.4}
+  .mobile-mode .account-intake{padding:14px;gap:12px;margin-bottom:16px}
+  .mobile-mode .intake-copy{flex-basis:100%}
+  .mobile-mode .intake-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;gap:8px}
+  .mobile-mode .intake-actions .console-btn{height:40px;padding:0 8px}
+  .mobile-mode .intake-divider{display:none}
+}
+.mobile-diagnostics-button { margin-top: 12px; }
+.mobile-diagnostic-record { border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; overflow-wrap: anywhere; }
+.mobile-diagnostic-record summary { cursor: pointer; display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.mobile-diagnostic-record small { color: var(--fg-muted); }
+.mobile-diagnostic-record p { font-size: 12px; margin: 8px 0; }
+.mobile-settings-card{padding:18px;margin-bottom:14px;overflow-wrap:anywhere}
+.mobile-settings-card h3{font-size:16px;font-weight:650;margin:0 0 12px}
+.mobile-settings-card p{font-size:13px;line-height:1.6;margin:8px 0}
+.mobile-settings-card .mobile-setting-hint{color:var(--fg-muted);font-size:12px}
+.mobile-setting-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.mobile-setting-actions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.mobile-setting-actions button{height:auto;min-height:42px;white-space:normal;padding:8px 12px}
+.mobile-setting-field{display:grid;gap:6px;font-size:13px;margin:14px 0}
+.mobile-setting-field select{width:100%;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--fg)}
+.mobile-service-address{font-family:monospace;user-select:text}
+.mobile-check-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px;border-bottom:1px solid var(--border);padding:12px 0;font-size:13px}
+.mobile-check-row small{display:block;color:var(--fg-muted);font-size:11px;margin-top:4px}
+.mobile-check-row>span{white-space:nowrap;font-variant-numeric:tabular-nums}
+.mobile-check-ok b{color:var(--brand-ink)}
+.mobile-check-failed b,.mobile-settings-card .mobile-check-failed{color:#dc4848}
+.mobile-speed-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0}
+.mobile-speed-metrics span{font-size:12px;color:var(--fg-muted);padding:12px;background:var(--bg);border-radius:10px}
+.mobile-speed-metrics b{display:block;color:var(--fg);font-size:16px;margin-top:6px;font-variant-numeric:tabular-nums}
+.mobile-speed-sample{font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word;user-select:text}

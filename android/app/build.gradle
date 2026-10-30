@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+def metadata = new groovy.json.JsonSlurper().parse(file('../../desktop/version.json'))
+def versionParts = metadata.version.tokenize('.').collect { it as int }
+android {
+    namespace 'io.github.xiaofan6ya.workbuddy2api'
+    compileSdk 35
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        applicationId 'io.github.xiaofan6ya.workbuddy2api'
+        minSdk 24
+        targetSdk 35
+        versionCode versionParts[0] * 1000000 + versionParts[1] * 1000 + versionParts[2]
+        versionName metadata.version
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    if (System.getenv('WB_ANDROID_KEYSTORE')) {
+        signingConfigs {
+            release {
+                storeFile file(System.getenv('WB_ANDROID_KEYSTORE'))
+                storePassword System.getenv('WB_ANDROID_STORE_PASSWORD')
+                keyAlias 'workbuddy2api'
+                keyPassword System.getenv('WB_ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        debug { applicationIdSuffix '.debug' }
+        release {
+            minifyEnabled false
+            if (System.getenv('WB_ANDROID_KEYSTORE')) signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version '3.10'
+        if (System.getenv('WB_ANDROID_BUILD_PYTHON')) buildPython System.getenv('WB_ANDROID_BUILD_PYTHON')
+        pip {
+            install '-r', rootProject.file('requirements.txt').absolutePath
+            options '--index-url', 'https://pypi.tuna.tsinghua.edu.cn/simple'
+            options '--extra-index-url', 'https://chaquo.com/pypi-13.1'
+        }
+    }
+    sourceSets {
+        main { srcDir layout.buildDirectory.dir('generated/python').get().asFile }
+    }
+}
+
+def preparePython = tasks.register('preparePython', Exec) {
+    workingDir rootProject.projectDir.parentFile
+    commandLine (System.getenv('WB_ANDROID_BUILD_PYTHON') ?: 'python'), 'scripts/build_android.py', '--prepare-only'
+}
+tasks.configureEach {
+    // Chaquopy snapshots sources during merge, before its generate tasks run.
+    // Staging only before generate can package the previous build's backend.
+    if ((name.startsWith('generate') && name.contains('Python')) ||
+            (name.startsWith('merge') && name.endsWith('PythonSources'))) dependsOn preparePython
+}

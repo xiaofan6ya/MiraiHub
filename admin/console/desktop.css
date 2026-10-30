@@ -1,0 +1,94 @@
+.version-button{display:block;margin:4px 0 0;padding:4px 0;border:0;background:transparent;color:var(--fg-muted);font-size:12px;cursor:pointer;text-align:left}
+.app-side{height:100dvh;overflow:hidden}
+.side-brand,.side-foot{flex-shrink:0}
+.side-nav{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.side-foot{margin-top:12px}
+.mobile-theme-controls{display:none!important}
+.window-controls{display:flex;gap:4px}
+.topbar-actions .window-controls button{width:32px;padding:0;font-size:20px;border:0;background:transparent}
+.topbar-actions .window-controls button:last-child:hover{background:#c42b1c;color:#fff}
+.native-window .desktop-topbar{min-height:64px;padding:8px 14px 8px 24px;gap:12px}
+.native-window .topbar-heading{flex:1;align-self:stretch;display:flex;flex-direction:column;justify-content:center;user-select:none}
+.native-window .topbar-breadcrumb{display:none}
+.native-window .topbar-heading h2{margin:0}
+.window-resize{position:fixed;z-index:1000}
+.resize-top,.resize-bottom{height:5px;left:8px;right:8px;cursor:ns-resize}
+.resize-top{top:0}.resize-bottom{bottom:0}
+.resize-left,.resize-right{width:5px;top:8px;bottom:8px;cursor:ew-resize}
+.resize-left{left:0}.resize-right{right:0}
+.resize-top-left,.resize-top-right,.resize-bottom-left,.resize-bottom-right{width:8px;height:8px}
+.resize-top-left{left:0;top:0;cursor:nwse-resize}.resize-top-right{right:0;top:0;cursor:nesw-resize}
+.resize-bottom-left{left:0;bottom:0;cursor:nesw-resize}.resize-bottom-right{right:0;bottom:0;cursor:nwse-resize}
+@media(max-width:900px){
+  .app-side{height:auto;overflow:visible}
+  .side-nav{flex:none}
+  .side-nav .side-foot{display:block;margin-top:auto;padding-top:16px}
+}
+#localBoot{display:none}.desktop-mode #login,.desktop-mode .browser-logout,.desktop-mode .side-item-quit,.desktop-mode .browser-password-settings{display:none!important}
+.desktop-mode #localBoot{display:flex;position:fixed;inset:0;align-items:center;justify-content:center;flex-direction:column;gap:16px;background:var(--bg);z-index:90;color:var(--fg-muted)}
+#localBoot img{width:56px;height:56px}#localBoot button{padding:8px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface);cursor:pointer}
+/* 顶栏**固定在顶部**，不随页面滚动消失。
+ *
+ * 结构：`<main class="app-main">` 是 `height:100vh; overflow-y:auto` 的滚动
+ * 容器，`<header class="desktop-topbar">` 是它的直接子元素。原来 header 没有
+ * 定位，于是跟着内容一起滚上去 —— 滚动到页面中段时，面包屑、连接状态、
+ * 「复制 API 地址」全都不见了，要滚回顶部才能操作。
+ *
+ * 改成 sticky 后：滚动的仍然是 app-main，但 header 吸附在它的顶部。
+ * 不用 fixed 是因为 fixed 会脱离文档流，得给 .app-body 补 padding-top
+ * 才能不遮内容；sticky 保持占位，零副作用。
+ *
+ * z-index 取 30：要盖住表头（.tbl thead 的 sticky 是 10）与图表浮层，
+ * 但低于模态框（#modal 的层级更高）。 */
+.desktop-topbar{position:sticky;top:0;z-index:30;min-height:90px;padding:18px 30px;display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--surface);border-bottom:1px solid var(--border-soft);backdrop-filter:saturate(180%) blur(8px)}
+.topbar-breadcrumb{font-size:11px;letter-spacing:.025em;color:var(--fg-muted);display:flex;gap:10px;align-items:center}.topbar-breadcrumb span{color:var(--fg-subtle)}
+.topbar-heading h2{margin:5px 0 0;font-size:19px;font-weight:600;letter-spacing:-.035em;line-height:1.4}
+.topbar-actions{display:flex;align-items:center;gap:12px}.topbar-status{display:flex;gap:7px;align-items:center;font-size:12px;color:var(--brand-ink);padding:7px 11px;background:var(--brand-soft);border-radius:20px}
+.topbar-status>span:first-child{width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.topbar-actions button{display:flex;gap:8px;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:10px;background:var(--surface);height:36px;padding:0 12px;font-size:12px;color:var(--fg-muted);cursor:pointer;transition:background .15s,border-color .15s}
+.topbar-actions button:hover{background:var(--surface-2);}.topbar-update{width:36px;padding:0!important}
+#modal{padding:24px;overflow:hidden}
+#modalBox{position:relative;container-type:inline-size;width:100%;max-width:min(var(--modal-width,1120px),calc(100vw - 48px));max-height:calc(100dvh - 48px);min-width:0;overscroll-behavior:contain;scrollbar-gutter:stable;padding:28px;overflow:auto}
+#modalBox>h3:first-of-type{padding-right:32px}
+.modal-close-button{position:sticky;top:0;float:right;margin:-12px -10px 4px 10px;width:30px;height:30px;z-index:3;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--fg-muted);font-size:22px;line-height:1;cursor:pointer}
+.modal-close-button:hover{background:var(--surface-2);color:var(--fg)}
+.modal-stat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.modal-stat-grid .stat{min-width:0;padding:18px;border:1px solid var(--border);border-radius:12px}
+.modal-stat-grid .stat-value{font-size:26px;white-space:nowrap;word-break:keep-all;line-height:1.35}
+.modal-stat-grid .stat-sub{overflow-wrap:anywhere;font-size:11px}
+@container(min-width:700px){.modal-stat-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:640px){#modal{padding:12px}#modalBox{max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);padding:18px;width:100%}.modal-stat-grid .stat{padding:12px}.modal-stat-grid .stat-value{font-size:23px}}
+.desktop-mode .page-head{display:none}
+@media(max-width:900px){.desktop-topbar{padding:14px 18px;min-height:74px}.topbar-breadcrumb{display:none}.topbar-actions{gap:8px}.topbar-status{display:none}}
+.version-button:hover{color:var(--brand-ink)}
+.phone-login-footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:18px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--fg-muted)}
+.phone-login-footer a{color:var(--brand-ink);font-size:12px;text-decoration:none;white-space:nowrap}
+.phone-login-footer a:hover{text-decoration:underline}
+.version-button.has-update{color:var(--brand-ink);font-weight:600}
+.wb-update-dialog{width:min(760px,92vw);max-height:85vh;border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--fg);padding:24px;box-shadow:var(--sh-pop)}
+.wb-update-dialog::backdrop{background:#0f172b66}
+.wb-update-header{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.wb-update-dialog h2{font-size:20px;font-weight:600;margin:0}
+.wb-update-dialog h3{font-size:15px;font-weight:600;margin:0}
+.wb-update-dialog button{padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);color:var(--fg);cursor:pointer}
+.wb-update-dialog button:disabled{cursor:wait;opacity:.6}
+.wb-update-dialog button.primary{background:var(--brand-grad);color:white;border:0}
+.wb-update-meta{color:var(--fg-muted);font-size:12px;margin:8px 0;line-height:1.8}
+.wb-update-history{max-height:45vh;overflow:auto;overscroll-behavior:contain;margin-top:18px}
+.wb-update-release{border-top:1px solid var(--border);padding:16px 0}
+.wb-release-markdown{font-size:13px;line-height:1.8;margin:12px 0;overflow-wrap:anywhere;min-width:0}
+.wb-release-markdown :is(h1,h2,h3,h4,h5,h6){font-size:15px;font-weight:600;margin:16px 0 8px;line-height:1.5}
+.wb-release-markdown p{margin:8px 0}
+.wb-release-markdown ul{list-style:disc;padding-left:22px;margin:8px 0}
+.wb-release-markdown ol{list-style:decimal;padding-left:22px;margin:8px 0}
+.wb-release-markdown blockquote{border-left:3px solid var(--border);padding-left:12px;color:var(--fg-muted);margin:12px 0}
+.wb-release-markdown code{font-family:var(--mono,Consolas,monospace);background:var(--surface-2);border-radius:4px;padding:2px 4px}
+.wb-release-markdown pre{white-space:pre;overflow:auto;max-width:100%;padding:12px;background:var(--surface-2);border-radius:8px;margin:12px 0}
+.wb-release-markdown pre code{padding:0;background:none}
+.wb-release-markdown table{display:block;max-width:100%;overflow:auto;border-collapse:collapse;margin:12px 0}
+.wb-release-markdown :is(th,td){border:1px solid var(--border);padding:6px 10px;min-width:90px}
+.wb-release-markdown input{margin-right:6px}
+.wb-release-markdown hr{border:0;border-top:1px solid var(--border);margin:16px 0}
+.wb-update-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+.wb-update-dialog a{color:var(--brand-ink);text-decoration:underline;font-size:13px}
+@media(max-width:767px){.side-foot .version-button{display:block}.wb-update-dialog{padding:18px}}

@@ -1,0 +1,16 @@
+.wb-region { position:relative; flex:0 0 82px; color:var(--fg, #18181b); font-size:13px; }
+.wb-region-native { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.wb-region-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-height:40px; padding:8px 10px; border:1px solid var(--border, #dfe3e8); border-radius:6px; background:var(--surface, #fff); color:inherit; font:inherit; cursor:pointer; }
+.wb-region-trigger::after { content:''; width:6px; height:6px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(45deg) translateY(-2px); }
+.wb-region-trigger[aria-expanded=true]::after { transform:rotate(225deg); }
+.wb-region-trigger:focus-visible, .wb-region-option:focus-visible { outline:2px solid #16a66b; outline-offset:2px; }
+.wb-region-menu { position:absolute; top:calc(100% + 6px); left:0; width:212px; max-width:calc(100vw - 48px); padding:5px; margin:0; border:1px solid var(--border, #dfe3e8); border-radius:8px; background:var(--surface, #fff); box-shadow:0 6px 20px #0002; z-index:20; }
+.wb-region-menu[hidden] { display:none; }
+.wb-region-floating { position:fixed; z-index:100; color:var(--fg, #18181b); font-size:13px; }
+.wb-region-option { width:100%; display:flex; align-items:center; gap:12px; min-height:40px; padding:9px 10px; border:0; border-radius:4px; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.wb-region-option:hover, .wb-region-option:focus { background:var(--surface-alt, #f3f5f7); }
+.wb-region-option[aria-selected=true] { background:#e8f7f0; color:#137449; }
+.wb-region-option strong { width:40px; font-weight:500; font-variant-numeric:tabular-nums; }
+.wb-region-option[aria-selected=true]::after { content:''; margin-left:auto; width:6px; height:10px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(45deg); }
+.field .wb-region { margin-left:-8px; margin-right:10px; padding-right:8px; border-right:1px solid var(--line, #dfe3e8); flex-basis:83px; }
+.field .wb-region-trigger { border:0; min-height:40px; padding:8px; background:transparent; }

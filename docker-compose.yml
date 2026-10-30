@@ -1,0 +1,52 @@
+services:
+  admin:
+    build: .
+    ports:
+      - "${ADMIN_PORT:-8790}:8790"
+    volumes:
+      - admin_data:/data
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: 8790
+      ADMIN_DATABASE_URL: sqlite:////data/workbuddy.db
+      ADMIN_REDIS_URL: ""
+      ADMIN_GATEWAY_LIMIT_BACKEND: memory
+      ADMIN_LOG_REQUEST_PAYLOAD: ${ADMIN_LOG_REQUEST_PAYLOAD:-0}
+      ADMIN_LOG_PAYLOAD_MAX_MB: ${ADMIN_LOG_PAYLOAD_MAX_MB:-8}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.docker}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?Set ADMIN_JWT_SECRET in .env.docker}
+      TZ: Asia/Shanghai
+    command: ["python3", "-m", "uvicorn", "admin.server:app", "--host", "0.0.0.0", "--port", "8790"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/app/version', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional standalone single-account converter. Admin already serves /v1/*.
+  converter:
+    profiles: ["standalone"]
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./credentials:/data/auth:ro
+    environment:
+      CODEBUDDY2OPENAI_KEY: ${CODEBUDDY2OPENAI_KEY:-}
+      CODEBUDDY_AUTH_DIR: /data/auth
+    command: ["python3", "converter.py", "--host", "0.0.0.0", "--port", "8787", "--skip-check", "--desensitize"]
+    restart: unless-stopped
+    init: true
+
+volumes:
+  admin_data:

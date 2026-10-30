@@ -1,0 +1,34 @@
+<section id="panel-sync" class="hidden">
+  <div class="panel-toolbar"><div><h2 class="font-semibold text-lg">设置</h2><p class="text-sm text-slate-500">本机服务、接口检查与模型测速</p></div></div>
+  <div class="card mobile-settings-card">
+    <h3>本地服务</h3>
+    <div id="mobileServiceState" aria-live="polite">正在读取系统状态…</div>
+    <div class="mobile-setting-actions">
+      <button id="mobileRestart" class="console-btn quiet" type="button">重启本地服务</button>
+      <button id="mobileNotifications" class="console-btn quiet" type="button">通知设置</button>
+      <button id="mobileBattery" class="console-btn quiet" type="button">允许后台高耗电</button>
+    </div>
+    <p class="mobile-setting-hint">重启保留账号和数据库。通知关闭时服务仍可能运行；请查看下方接口检查。需要后台提供 API 时，请在系统设置中允许后台运行。</p>
+  </div>
+  <div class="card mobile-settings-card">
+    <h3>客户端参数</h3>
+    <p class="mobile-setting-hint">导入电脑或服务端导出的参数文件，版本号、请求头和指纹同步到本机并立即启用。</p>
+    <div id="mobileProfileState" aria-live="polite">正在读取参数…</div>
+    <div class="mobile-setting-actions"><button class="console-btn primary" type="button" onclick="WBProfileTransfer.chooseImport()">导入并启用</button><button class="console-btn quiet" type="button" onclick="WBProfileTransfer.exportFile()">导出参数</button></div>
+  </div>
+  <div class="card mobile-settings-card">
+    <div class="mobile-setting-heading"><h3>接口自动检查</h3><button id="mobileCheck" class="console-btn quiet" type="button">重新检查</button></div>
+    <p class="mobile-setting-hint">启动及进入本页时检查，不发起模型对话。鉴权检查只验证入口；真实对话请使用下方测速。</p>
+    <label class="mobile-setting-field">测试 API Key<select id="mobileTestKey"><option value="">尚无可用 Key</option></select></label>
+    <div id="mobileCheckResults" aria-live="polite"></div>
+  </div>
+  <div class="card mobile-settings-card">
+    <h3>模型测速</h3>
+    <p class="mobile-setting-hint">通过这台手机的本地 API 发起一次真实流式对话，会消耗少量模型积分并记录调用日志。</p>
+    <label class="mobile-setting-field">模型<select id="mobileTestModel"><option value="">请先获取模型列表</option></select></label>
+    <label class="mobile-setting-field">接口<select id="mobileTestProtocol"><option value="chat">OpenAI · Chat Completions</option><option value="responses">OpenAI · Responses</option><option value="messages">Claude · Messages</option></select></label>
+    <div class="mobile-setting-actions"><button id="mobileSpeedTest" class="console-btn primary" type="button">开始测速</button><button id="mobileSpeedCancel" class="console-btn quiet" type="button" hidden>停止</button></div>
+    <div id="mobileSpeedResult" aria-live="polite">尚未测速</div>
+    <p class="mobile-setting-hint">显示有效文字首字延迟，心跳和空增量不计入。检测范围是手机本机 HTTP 链路；第三方应用的代理与后台限制需结合调用诊断判断。</p>
+  </div>
+</section>

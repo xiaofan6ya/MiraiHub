@@ -1,0 +1,410 @@
+/* ============================================================================
+   UI增强样式 - 全局交互和动画优化
+   参考官方客户端的设计系统
+   ========================================================================== */
+
+/* 全局平滑滚动 */
+* {
+  scroll-behavior:smooth;
+}
+
+/* 焦点状态优化 */
+:focus-visible {
+  outline:2px solid var(--brand);
+  outline-offset:2px;
+}
+
+/* 选择文本颜色 */
+::selection {
+  background:var(--brand-soft);
+  color:var(--brand-ink);
+}
+
+/* ============================================================================
+   通用按钮增强
+   ========================================================================== */
+button {
+  font-family:inherit;
+  cursor:pointer;
+}
+
+button:disabled {
+  cursor:not-allowed;
+  opacity:0.5;
+}
+
+/* ============================================================================
+   输入框通用增强
+   ========================================================================== */
+input,
+textarea,
+select {
+  font-family:var(--font-sans);
+  font-size:inherit;
+  transition:border-color .15s ease,box-shadow .15s ease,background .15s ease;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline:none;
+  border-color:var(--brand);
+  box-shadow:0 0 0 3px var(--brand-soft);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color:var(--fg-subtle);
+  opacity:1;
+}
+
+/* ============================================================================
+   卡片和容器通用样式
+   ========================================================================== */
+.card,
+.panel,
+.box {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:20px;
+}
+
+/* ============================================================================
+   链接样式优化
+   ========================================================================== */
+a {
+  color:var(--brand-ink);
+  text-decoration:none;
+  transition:color .12s ease,opacity .12s ease;
+}
+
+a:hover {
+  color:var(--brand-strong);
+  text-decoration:underline;
+}
+
+a:active {
+  opacity:0.7;
+}
+
+/* ============================================================================
+   加载动画
+   ========================================================================== */
+.spinner {
+  animation:spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform:rotate(0deg); }
+  to { transform:rotate(360deg); }
+}
+
+.pulse {
+  animation:pulse 2s cubic-bezier(0.4,0,0.6,1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity:1; }
+  50% { opacity:0.5; }
+}
+
+/* ============================================================================
+   淡入淡出动画
+   ========================================================================== */
+.fade-in {
+  animation:fadeIn .2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity:0; }
+  to { opacity:1; }
+}
+
+.slide-up {
+  animation:slideUp .2s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity:0;
+    transform:translateY(10px);
+  }
+  to {
+    opacity:1;
+    transform:translateY(0);
+  }
+}
+
+/* ============================================================================
+   表格通用增强
+   ========================================================================== */
+table {
+  border-collapse:collapse;
+  width:100%;
+}
+
+thead {
+  position:sticky;
+  top:0;
+  z-index:10;
+  background:var(--surface-2);
+}
+
+th {
+  font-weight:600;
+  text-align:left;
+  padding:12px;
+  border-bottom:1px solid var(--border);
+}
+
+td {
+  padding:12px;
+  border-bottom:1px solid var(--border);
+}
+
+tbody tr {
+  transition:background .12s ease;
+}
+
+tbody tr:last-child td {
+  border-bottom:none;
+}
+
+/* ============================================================================
+   代码块样式
+   ========================================================================== */
+code,
+pre {
+  font-family:var(--mono);
+  font-size:0.9em;
+  background:var(--surface-2);
+  border-radius:4px;
+}
+
+code {
+  padding:2px 6px;
+  color:var(--fg);
+}
+
+pre {
+  padding:12px;
+  overflow-x:auto;
+  line-height:1.6;
+}
+
+pre code {
+  padding:0;
+  background:transparent;
+}
+
+/* ============================================================================
+   滚动条美化
+   ========================================================================== */
+::-webkit-scrollbar {
+  width:8px;
+  height:8px;
+}
+
+::-webkit-scrollbar-track {
+  background:transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background:var(--border);
+  border-radius:4px;
+  transition:background .15s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background:var(--fg-subtle);
+}
+
+/* Firefox */
+* {
+  scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent;
+}
+
+/* ============================================================================
+   模态框和遮罩
+   ========================================================================== */
+.modal-overlay {
+  position:fixed;
+  inset:0;
+  z-index:50;
+}
+
+/* Paint the mask and blur at full strength on the first visible frame.
+   Keep them separate from the dialog content's entrance/exit animation. */
+.modal-overlay,
+#confirmMask {
+  background:transparent;
+  isolation:isolate;
+  opacity:1;
+  animation:none;
+  transition:none;
+}
+
+.modal-overlay::before,
+#confirmMask::before {
+  content:'';
+  position:absolute;
+  inset:0;
+  z-index:-1;
+  pointer-events:none;
+  background:var(--modal-mask,rgba(15,23,42,.52));
+  -webkit-backdrop-filter:blur(2px);
+  backdrop-filter:blur(2px);
+}
+
+.modal {
+  position:fixed;
+  top:50%;
+  left:50%;
+  transform:translate(-50%,-50%);
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:12px;
+  box-shadow:0 20px 50px rgba(15,23,42,.25);
+  z-index:51;
+  max-width:90vw;
+  max-height:90vh;
+  overflow:auto;
+  animation:slideUp .25s ease;
+}
+
+/* ============================================================================
+   通知和提示
+   ========================================================================== */
+.notification {
+  padding:12px 16px;
+  border-radius:8px;
+  font-size:13px;
+  line-height:1.6;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  animation:slideUp .2s ease;
+}
+
+.notification.success {
+  background:var(--ok-soft);
+  color:var(--ok);
+  border:1px solid color-mix(in srgb,var(--ok) 25%,transparent);
+}
+
+.notification.warning {
+  background:var(--warn-soft);
+  color:var(--warn);
+  border:1px solid color-mix(in srgb,var(--warn) 25%,transparent);
+}
+
+.notification.error {
+  background:var(--danger-soft);
+  color:var(--danger);
+  border:1px solid color-mix(in srgb,var(--danger) 25%,transparent);
+}
+
+.notification.info {
+  background:var(--brand-soft);
+  color:var(--brand-ink);
+  border:1px solid color-mix(in srgb,var(--brand) 25%,transparent);
+}
+
+/* ============================================================================
+   徽章和标签通用样式
+   ========================================================================== */
+.badge {
+  display:inline-flex;
+  align-items:center;
+  padding:3px 8px;
+  border-radius:6px;
+  font-size:11px;
+  font-weight:500;
+  line-height:1.4;
+  white-space:nowrap;
+}
+
+.badge.primary {
+  background:var(--brand-soft);
+  color:var(--brand-ink);
+}
+
+.badge.success {
+  background:var(--ok-soft);
+  color:var(--ok);
+}
+
+.badge.warning {
+  background:var(--warn-soft);
+  color:var(--warn);
+}
+
+.badge.danger {
+  background:var(--danger-soft);
+  color:var(--danger);
+}
+
+.badge.neutral {
+  background:var(--surface-2);
+  color:var(--fg-muted);
+}
+
+/* ============================================================================
+   分隔线
+   ========================================================================== */
+hr,
+.divider {
+  border:none;
+  border-top:1px solid var(--border);
+  margin:20px 0;
+}
+
+/* ============================================================================
+   工具提示通用
+   ========================================================================== */
+[data-tooltip] {
+  position:relative;
+  cursor:help;
+}
+
+/* ============================================================================
+   响应式优化 - 确保移动端体验流畅
+   ========================================================================== */
+@media (max-width:640px) {
+  .modal {
+    max-width:95vw;
+    max-height:95vh;
+  }
+
+  .card,
+  .panel,
+  .box {
+    border-radius:8px;
+    padding:16px;
+  }
+
+  h1 { font-size:24px!important; }
+  h2 { font-size:20px!important; }
+  h3 { font-size:16px!important; }
+}
+
+/* ============================================================================
+   深色模式特定优化
+   ========================================================================== */
+:root[data-theme="dark"] {
+  color-scheme:dark;
+}
+
+:root[data-theme="dark"] code {
+  background:var(--surface-3);
+}
+
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background:var(--surface-3);
+}
+
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background:var(--fg-subtle);
+}

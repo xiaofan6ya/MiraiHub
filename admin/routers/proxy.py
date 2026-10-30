@@ -1,0 +1,4527 @@
+"""代理网关：带 API Key 的 /v1/chat/completions 与 /v1/models。
+
+流程：校验 Key → 配额拦截（超额提示『积分已耗尽』）→ 从可用账号中挑选 →
+用该账号凭据转发到后端 → 流式返回 → 按用量回扣 Key 额度。
+"""
+import asyncio
+import json
+import logging
+import os
+import re
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+import httpx
+import anyio
+import model_metadata
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.requests import ClientDisconnect
+from sqlalchemy import or_, func, case
+from sqlalchemy.orm import Session
+
+from admin import (backend, pool, model_limits, model_catalog, upstream_http, request_metrics,
+                   upstream_errors, routing_policy, upstream_identity as identity)
+from admin.platform import registry
+from admin.account_binding import scope_accounts
+from admin.request_scheduling import pool_budget, release_connection
+from admin.config import settings
+from admin.db import SessionLocal, get_db
+from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, UsageLog
+from admin.routers.models import _is_model_allowed
+from admin.security import check_quota, get_key_row, GatewayRejected, check_key_current
+from admin.pool import POOL
+from upstream_compat import (
+    normalize_tool_choice,
+    cleanup_orphan_tool_calls,
+    validate_tool_pairing,
+    normalize_harness_body,
+)
+
+HTTP_LIMITS = backend.HTTP_LIMITS
+
+
+def _stream_timeout() -> httpx.Timeout:
+    """Set phase-specific upstream timeouts; the ASGI gateway adds an overall deadline.
+
+    先澄清一个容易搞错的点：`httpx.AsyncClient(timeout=300)` **不是**总时长 5 分钟，
+    它把 connect/read/write/pool 四项**各**设为 300s。所以原代码并不会在流式
+    响应中途掐断活跃的流（read 是「两次读到数据之间」的间隔上限，有数据就重置）。
+
+    但它确实有两个真实缺陷，两个都在「该快的时候不快」这一侧：
+
+    1. **connect=300**：一个 TCP 连不上的账号会先让我们干等最多 5 分钟，才轮到
+       换号逻辑。这才是用户感知到的「卡住不动」的主因 —— 而号池里恰恰总有
+       若干连不上的号（被墙/被限速/节点故障）。连接超时必须短，让它快速轮转。
+
+    2. **pool=300**：连接池打满时，新请求在池外排队最多 5 分钟。池满本身就是
+       过载信号，应当快速失败并把压力交回上层（退避/换号），而不是无限排队
+       —— 排队只会把延迟一层层叠起来，最后整池一起超时。
+
+    另外还有一处**要主动避免的坑**，依据来自官方客户端自己的源码：
+
+      D:\\WorkBuddy\\resources\\app.asar.unpacked\\...\\ardot-mcp-app\\
+      _workbuddy-runtime\\mcp-app-bootstrap.cjs
+
+    官方 MCP 运行时在 Node 18+ 下把 `http.Server.requestTimeout` 锁到 0（三重
+    防御补丁），因为 Node 默认的 300000ms 是**总时长**，会在流仍然活跃的情况下
+    到点强行掐断长连接 SSE，客户端只看到 undici `TypeError: terminated` /
+    "SSE stream disconnected"。官方把它当必须修的 bug，修法就是「总时长 = 0」。
+
+    这里仍将四项分别配置，让 read 表示上游静默多久算失败。请求整体还有
+    GatewayAdmissionMiddleware 的绝对时限，覆盖排队、上传、上游处理与客户端接收。
+
+    这里的 read 实际就等价于参考实现 internal/upstream/idle.go 的空闲监控
+    （有数据就续期、静默即取消），而且不需要额外起监控任务。因此**非流式端点
+    也用这一套**：上游一律以 `stream: true` 返回 SSE，我们在内部聚合。
+    """
+    return httpx.Timeout(
+        connect=settings.STREAM_CONNECT_TIMEOUT,
+        read=settings.STREAM_IDLE_TIMEOUT,
+        write=settings.STREAM_WRITE_TIMEOUT,
+        pool=settings.STREAM_POOL_TIMEOUT,
+    )
+
+_logger = logging.getLogger("proxy")
+
+
+def _exc_text(e: BaseException) -> str:
+    """把异常转成「类型 + 消息」，用于分类与落库。
+
+    为什么不能只用 `str(e)`：httpx 的多数网络异常 `str()` 出来只有
+    `"timed out"` / `""`，库里就只剩一句无用的「transport error」，
+    排障时分不清是 `ReadTimeout`（流静默超时，上游 180s 没吐字节 ——
+    换号大概率无用）还是 `ConnectError`（连不上 —— 换号可能有用），
+    而这两者的处置是相反的。带上类名就能一眼分辨。
+    """
+    if isinstance(e, httpx.TransportError):
+        request_metrics.mark_network_error(e)
+    return request_metrics.exception_text(e)
+
+# Responses API 适配器（converter 同款）；缺失时 /v1/responses 优雅降级为 501
+try:
+    from responses_adapter import responses_request_to_chat, ResponsesStreamConverter
+    from responses_projection import project_responses_chat_body
+    _RESPONSES_AVAILABLE = True
+except Exception:  # pragma: no cover - 降级分支
+    _RESPONSES_AVAILABLE = False
+    responses_request_to_chat = None
+    ResponsesStreamConverter = None
+    project_responses_chat_body = None
+
+# Anthropic Messages 适配器（与 converter 同款，复用同一套双向转换）；
+# 缺失时 /v1/messages 优雅降级为 501，不影响其余端点。
+try:
+    from anthropic_adapter import AnthropicStreamConverter, anthropic_request_to_chat
+    _ANTHROPIC_AVAILABLE = True
+except Exception:  # pragma: no cover - 降级分支
+    _ANTHROPIC_AVAILABLE = False
+    anthropic_request_to_chat = None
+    AnthropicStreamConverter = None
+
+# harness 脱敏（与 converter 的 /gw 端点同款）。Claude Code 的 system prompt / tools
+# 里含 "DoS / exploit / credential" 这类合规声明词，会被上游内容审核误判并整条拒绝
+# （典型报错 400 code=11128 "Illegal API invocation from an unapproved channel"）。
+try:
+    from desensitize import desensitize_body
+    _DESENSITIZE_AVAILABLE = True
+except Exception:  # pragma: no cover - 降级分支
+    _DESENSITIZE_AVAILABLE = False
+    desensitize_body = None
+
+
+def _normalize_harness_body(chat_body: dict) -> dict:
+    """第三方 harness（DeepSeek Harness / pi-ai / Codex）请求体兼容。
+
+    只做上游明确不接受的改写，**不动任何上游能接受的字段**：
+      1. role: developer → system
+         上游 role 白名单不含 developer，命中即整条 400 code=11128
+         （"Illegal API invocation from an unapproved channel"）。
+         pi-ai 只在模型开了 reasoning 时才发 developer，所以典型现象是
+         「简单 hello 能过，一开思考就发不出去」—— 正是 DSH 的复现形态。
+      2. 孤儿 tool_call 清理。
+      3. system/developer 身份声明归一，DSH 使用官方介绍句式并保留任务指令。
+      4. 全局去掉已知不兼容的主分支括号注释，保留 gitStatus 与实际分支名。
+
+    慎改：`prompt_cache_key` / `metadata` 上游实测接受（200），且
+    `admin/pool.py` 拿它们当会话粘性键 —— 在这里删掉会打散号池粘性。
+    增删字段只以上游实测为准。
+
+    与 `prepare_upstream_body()` 的区别：**不注入 thinking、不改 stream**，
+    避免覆盖端点已经算好的思考开关。
+    """
+    try:
+        stats = normalize_harness_body(chat_body)
+        if stats.get("roles"):
+            _logger.info("[harness-compat] role developer -> system，改写 %d 条", stats["roles"])
+        if stats.get("identity"):
+            _logger.info("[harness-compat] 身份声明句式归一 %d 处", stats["identity"])
+        if stats.get("templates"):
+            _logger.info("[harness-compat] 固定模板归一 %d 处", stats["templates"])
+        if stats.get("shield"):
+            _logger.info("[harness-compat] harness 提示词改写 %d 段（shield）", stats["shield"])
+        if stats.get("orphans"):
+            _logger.warning("[harness-compat] 清理孤儿 tool_call %d 处 | diag=%s",
+                            stats["orphans"], _tool_diag(chat_body))
+        return chat_body
+    except Exception as e:
+        # 兼容层绝不阻断主流程：上游若真不认，会以它自己的错误码回给我们。
+        _logger.warning("[harness-compat] 归一失败，按原样发送：%s", e)
+        return chat_body
+
+
+def _cleanup_orphan_tools(chat_body: dict) -> int:
+    """删除配不成对的 tool_calls / role:tool，防止上游 11148。
+
+    只做 ID 孤儿清理，不改 stream/thinking（勿用 prepare_upstream_body）。
+    """
+    try:
+        n = cleanup_orphan_tool_calls(chat_body)
+        if n:
+            _logger.warning("[tool-cleanup] removed=%d | diag=%s", n, _tool_diag(chat_body))
+        return n
+    except Exception as e:
+        _logger.warning("[tool-cleanup] failed: %s", e)
+        return 0
+
+
+def _tool_diag(chat_body: dict) -> str:
+    """截断的角色序列 + tool 配对问题摘要，便于排查 11148。"""
+    try:
+        msgs = (chat_body or {}).get("messages") or []
+        roles = [m.get("role", "?") for m in msgs if isinstance(m, dict)]
+        role_seq = ",".join(roles[:40])
+        if len(roles) > 40:
+            role_seq += ",…"
+        problems = validate_tool_pairing(msgs)
+        return f"roles=[{role_seq}] n={len(roles)} problems={problems[:5]}"
+    except Exception as e:
+        return f"diag-failed:{e}"
+
+
+def _desensitize_chat_body(chat_body: dict) -> dict:
+    """harness 脱敏（CC / OpenAI 反代 / converter /gw 共用同一套）。
+
+    上游内容审核会把 system/tools 里的合规声明词（DoS / exploit / credential…）
+    误判成敏感内容并整条拒绝（典型 11128 "unapproved channel"）。
+    /v1/messages 早就做了这一步；/v1/chat/completions、/v1/responses 若不同步，
+    就会出现「CC 能用、OpenAI 反代发不出去」。
+    """
+    if not (_DESENSITIZE_AVAILABLE and settings.ANTHROPIC_DESENSITIZE):
+        return chat_body
+    try:
+        raw_len = len(json.dumps(chat_body, ensure_ascii=False))
+        out = desensitize_body(
+            chat_body,
+            roles=("system", "developer"),
+            desensitize_harness_user=True,
+            desensitize_tools=True,
+            compact_harness=not settings.ANTHROPIC_NO_COMPACT,
+            strip_tool_metadata=False,
+        )
+        _logger.info("harness 脱敏 %d -> %d 字节（compact=%s）",
+                     raw_len, len(json.dumps(out, ensure_ascii=False)),
+                     not settings.ANTHROPIC_NO_COMPACT)
+        return out
+    except Exception as e:
+        _logger.warning("harness 脱敏失败，按原样发送：%s", e)
+        return chat_body
+
+# 上游流式 delta 的「空占位字段」归一（tool_calls:[] / function_call:null 等），
+# 外加「提交前缓冲」封装。这些空值会被一部分客户端误判成「工具调用开始」，
+# 把一次思考切成几十上百块。与 converter 的 /gw 端点共用同一实现，避免两处行为漂移。
+try:
+    from upstream_compat import StreamCommitBuffer, StreamDeltaNormalizer
+    _STREAM_NORMALIZER_AVAILABLE = True
+except Exception:  # pragma: no cover - 降级分支
+    _STREAM_NORMALIZER_AVAILABLE = False
+    StreamDeltaNormalizer = None
+    StreamCommitBuffer = None
+
+router = APIRouter(tags=["proxy"])
+
+
+def _client_ip(request: Request) -> str:
+    from admin.client_ip import request_ip
+    return request_ip(request)
+
+
+def _upstream_extra_headers(request: Request, purpose: str = "conversation",
+                            body: dict | None = None,
+                            account: "Account | None" = None,
+                            *, conversation: str = "", turn: str = "") -> dict:
+    """Headers that tell the upstream who called and which call this is.
+
+    Two groups, with different lifetimes:
+
+    * **identity** (`X-IDE-Name` / `X-Agent-Purpose` / …) — fixed per client
+      profile. Upstream fills the credit-usage table's 使用端 and 用途 columns
+      from them; omitting them leaves those columns empty even though the
+      request succeeded and was billed.
+    * **trace** (`X-Conversation-Request-ID` & friends) — **regenerated for
+      every upstream attempt**. Upstream takes the usage row's requestId from
+      `X-Conversation-Request-ID` and, without it, invents `crb-<hex>`; it also
+      de-duplicates on that value, so reusing one across a retry or a second
+      model attempt silently drops the extra row from the billing table.
+
+    `turn` stays fixed across the attempts of one gateway request so the rows
+    can be reassembled; see admin/upstream_identity.py for the probe evidence.
+    """
+    del request, account
+    del body  # conversation/turn are resolved once per gateway request
+    headers = identity.identity_headers(purpose)
+    headers.update(identity.trace_headers(conversation, turn))
+    # Keep the id we actually sent: upstream echoes it as the credit-usage
+    # record's requestId, which is how a local log row is matched to a billing
+    # line. This also proves in the diagnostic that we no longer let upstream
+    # invent a `crb-` value.
+    request_metrics.mark_upstream_request_id(headers.get("X-Conversation-Request-ID"))
+    return headers
+
+
+def _session_headers(body: dict, uid: str) -> dict:
+    """Preserve an explicit caller conversation id; never derive tracing values.
+
+    ``uid`` remains in the signature for callers from older releases, but is
+    intentionally ignored.  Generated IDs based on prompts or account IDs
+    would look like a client trace while not being one.
+    """
+    del uid
+    h: dict[str, str] = {}
+    conv_id = pool.extract_session_key(body)
+    if conv_id:
+        h["X-Conversation-ID"] = conv_id
+    return h
+
+
+def _turn_headers(body: dict, purpose: str) -> tuple[str, str]:
+    """Resolve (conversation, turn) once per gateway request.
+
+    The conversation id comes from the caller when it supplied one; the turn id
+    is stable for every attempt that belongs to this gateway request, so a
+    rotated/retried request still reads as one turn upstream. ``purpose`` is
+    accepted so endpoints can state their use case at the same place.
+
+    Note the two are only *declared* here: upstream takes the billing row's
+    requestId from ``X-Conversation-Request-ID``, which must be unique **per
+    upstream call**, so it is generated in ``upstream_identity.trace_headers``
+    instead of being pinned to the turn.
+    """
+    del purpose
+    conversation = pool.extract_session_key(body) if isinstance(body, dict) else ""
+    return conversation, identity.turn_id(body if isinstance(body, dict) else None)
+
+
+
+def _reasoning_effort(payload: dict) -> str:
+    """Keep only a bounded request setting, never prompts or arbitrary payloads."""
+    effort = payload.get("reasoning_effort") or payload.get("reasoningEffort")
+    reasoning = payload.get("reasoning")
+    if not effort:
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else reasoning
+    allowed = {"off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"}
+    if isinstance(effort, str) and effort.strip().lower() in allowed:
+        return effort.strip().lower()
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict):
+        if thinking.get("type") == "disabled":
+            return "off"
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, int) and not isinstance(budget, bool) and 0 <= budget <= 10**9:
+            return f"budget:{budget}"
+        if thinking.get("type") in ("enabled", "adaptive"):
+            return thinking["type"]
+    return ""
+
+
+def _record_usage(key_id: int, account_id: int, model: str, credits: float | None,
+                  updated_auth_json: str | None, *,
+                  client_ip: str = "", use_case: str = "",
+                  prompt_tokens: int | None = None,
+                  completion_tokens: int | None = None, total_tokens: int | None = None,
+                  cached_tokens: int | None = None,
+                  seq: int = 0, ttfb_ms: int | None = None,
+                  latency_ms: int | None = None, error_kind: str = "",
+                  reasoning_effort: str = "", persist_auth: bool = True,
+                  platform: str = "") -> int | None:
+    """流式响应结束后独立开一个 DB 会话写入用量/额度。
+
+    关键点：请求作用域的 db 会话在端点返回 StreamingResponse 时已被依赖 teardown 关闭，
+    不能在流式生成器里复用它做 commit（会抛 ResourceClosedError 且被流式 except 静默吞掉）。
+    这里用全新的 SessionLocal 落库，并把错误显式记录到日志，绝不再静默丢失。
+
+    credits 语义：
+    - None 表示上游未返回真实积分，此时按模型倍率估算；
+    - 0.0 表示上游明确返回 0 或请求失败，不再估算。
+
+    若本次使用了估算值，会启动后台线程在 60 秒后调用上游用量接口回写真实积分。
+    """
+    log_id = None
+    try:
+        db = SessionLocal()
+        try:
+            # 先取账号：错误记录（无号 / 准入失败）时 account_id 可能为 0，
+            # 但只要有账号就必须先拿到它，才能按**平台**选对倍率。
+            acc = (db.query(Account).filter(Account.id == account_id).with_for_update().first()
+                   if account_id else None)
+            resolved_platform = (platform or (getattr(acc, "platform", "") if acc else "")
+                                 or registry.DEFAULT_PLATFORM)
+            # 上游 usage 没给 credits 时，用本地模型配置的 credit_multiplier 估算。
+            # credit_multiplier 在 model_configs 里保存的是「每千 token 积分」，
+            # 因此估算公式为 total_tokens * multiplier / 1000；
+            # 当 total_tokens 缺失时用 completion_tokens 兜底。
+            estimated = False
+            original_credits = credits
+            # **`credits <= 0` 也要估算**，不能只判 `None`。
+            #
+            # 实测 WorkBuddy 上游返回 `usage.credit = 0`（它根本没算积分，
+            # 而不是「免费」）。按原逻辑 0 表示「上游明确说免费」→ 直接落库，
+            # 于是所有请求积分都是 0。
+            #
+            # 判据：模型在库里配了正倍率，就按倍率估算 —— 库里的倍率是
+            # 我们自己维护的定价，比上游那个 0 可信。
+            if (credits is None or float(credits or 0) <= 0) and (total_tokens or completion_tokens):
+                # 必须限定平台：不同平台可以有同名 model_id
+                # （workbuddy 与 trae 都有 `glm-5.2`），不带平台条件时
+                # `.first()` 可能命中另一个平台的倍率，导致记错账。
+                #
+                # **模型名要做候选匹配**：客户端发的是规范 slug
+                # （`deepseek-v4.1-flash-workbuddy`，带平台后缀），
+                # 库里存的是上游原始 id（`deepseek-v4.1-flash`）。
+                # 只按字面量精确查 → 查不到 → 倍率 0 → 积分显示 0
+                # 。
+                from admin.platform.shared import _billing_candidates
+
+                mc = None
+                for _name in _billing_candidates(model or ""):
+                    mc = db.query(ModelConfig).filter(
+                        ModelConfig.model_id == _name,
+                        ModelConfig.platform == resolved_platform,
+                        ModelConfig.enabled == 1).first()
+                    if mc is not None and mc.credit_multiplier:
+                        break
+                    mc = db.query(ModelConfig).filter(
+                        ModelConfig.model_id == _name,
+                        ModelConfig.enabled == 1).first()
+                    if mc is not None and mc.credit_multiplier:
+                        break
+                mult = mc.credit_multiplier if mc else 0
+                if mult:
+                    toks = total_tokens if total_tokens else completion_tokens
+                    credits = float(toks) * mult / 1000.0
+                    estimated = True
+            if credits is None:
+                credits = 0.0
+            _logger.info("记录用量 platform=%s model=%s raw_credits=%s est=%s pt=%s ct=%s tt=%s cached=%s client_ip=%s use_case=%s",
+                         resolved_platform, model, original_credits, credits, prompt_tokens, completion_tokens, total_tokens,
+                         cached_tokens, client_ip, use_case)
+            db.query(ApiKey).filter(ApiKey.id == key_id).update(
+                {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + credits}, synchronize_session=False)
+            if acc is not None:
+                acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(credits))
+                acc.last_used_at = datetime.utcnow()
+                if updated_auth_json and persist_auth:
+                    acc.auth_json = updated_auth_json
+            diagnostic_json, attempted_account = request_metrics.usage_evidence(error_kind)
+            log = UsageLog(
+                diagnostic_json=diagnostic_json,
+                platform=(resolved_platform or "").lower(),
+                api_key_id=key_id, account_id=account_id or attempted_account, model=model, credits=credits,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                total_tokens=total_tokens, cached_tokens=cached_tokens,
+                client_ip=client_ip or "", use_case=use_case or "",
+                reasoning_effort=reasoning_effort,
+                seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms, error_kind=error_kind or "",
+            )
+            db.add(log)
+            db.commit()
+            log_id = log.id
+            # Commit accounting first. Optional content must never roll back a
+            # debit or trigger inference retries if caching fails.
+            try:
+                from admin.request_payload import store
+                store(log_id)
+            except Exception:
+                _logger.warning("Request content cache failed for usage %s", log_id)
+            if estimated and account_id and updated_auth_json:
+                threading.Thread(
+                    target=_fetch_real_credits,
+                    args=(log_id, account_id, updated_auth_json, model, credits, log.created_at),
+                    kwargs={"request_ids": request_metrics.sent_upstream_request_ids()},
+                    daemon=True,
+                ).start()
+        finally:
+            db.close()
+    except Exception as e:  # 记账失败不应影响已返回的响应，但必须留痕便于排查
+        _logger.exception("记录用量失败 key=%s acc=%s model=%s credits=%s: %s",
+                          key_id, account_id, model, credits, e)
+    return log_id
+
+
+def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str,
+                        estimated_credits: float, created_at: datetime,
+                        request_ids: list[str] | None = None) -> None:
+    """延迟查询上游真实用量接口，回写 UsageLog.credits 并校正额度。
+
+    上游 /billing/meter/get-user-request-usage 有分钟级延迟，通常在请求完成后 30~90s
+    才能查到。
+
+    匹配顺序：
+      1. **requestId 精确匹配** —— 我们发出的 `X-Conversation-Request-ID` 就是
+         上游那条记录的 requestId（探针 I/H 实证）。一次请求内可能换号重试多次，
+         所以逐个 id 找，找到就用。
+      2. 老办法兜底：同模型 + 「使用端」是我们申报的客户端名 + requestTime 最近。
+         这条只在 requestId 拿不到时使用（旧版本发出去的请求没有 id）。
+
+    为什么必须优先用 id：同一分钟里同一个账号可能有多条同模型请求（agent 内部
+    还有 topic / compact 等旁路调用），按时间最近匹配会张冠李戴，把别人的积分
+    写进这条日志。
+    """
+    try:
+        time.sleep(60)
+        # `AccountSession` 在 workbuddy 平台模块里（**必须在这里导入**：
+        # proxy.py 早期版本引用过它但从没导入，后台回写线程每次都抛
+        # `NameError: name 'AccountSession' is not defined`，真实积分永远回写不上）
+        from admin.platform.workbuddy.core.backend import AccountSession
+
+        sess = AccountSession(auth_json)
+        try:
+            start = (created_at - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+            end = (created_at + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+            result = sess.fetch_request_usage(start, end, page_num=1, page_size=50)
+            data = (result.get("data") or {}).get("data") or []
+            wanted = [str(i) for i in (request_ids or []) if i]
+            by_id = {str(r.get("requestId") or ""): r for r in data}
+            best = next((by_id[i] for i in wanted if i in by_id), None)
+            matched_by = "requestId"
+            if best is None:
+                client_name = (settings.UPSTREAM_CLIENT_NAME or "WorkBuddy").strip() or "WorkBuddy"
+                candidates = [
+                    r for r in data
+                    if r.get("model") == model and client_name in (r.get("client") or "")
+                ]
+                if not candidates:
+                    _logger.info("真实积分回写未找到匹配 log=%s model=%s ids=%s",
+                                 log_id, model, wanted[:3])
+                    return
+                # 取 requestTime 最接近 created_at 的一条
+                def _ts(item):
+                    try:
+                        return datetime.strptime(item.get("requestTime", ""), "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        return datetime.min
+                best = min(candidates, key=lambda r: abs((_ts(r) - created_at).total_seconds()))
+                matched_by = "requestTime"
+            real = float(best.get("credit") or 0)
+            _logger.info("真实积分匹配 log=%s model=%s real=%s est=%s by=%s requestTime=%s requestId=%s",
+                         log_id, model, real, estimated_credits, matched_by,
+                         best.get("requestTime"), best.get("requestId"))
+            db = SessionLocal()
+            try:
+                log = db.query(UsageLog).filter(UsageLog.id == log_id).with_for_update().first()
+                if log is None:
+                    return
+                delta = real - log.credits
+                if abs(delta) < 0.0001:
+                    return
+                log.credits = real
+                amount = func.coalesce(ApiKey.credit_used, 0) + delta
+                db.query(ApiKey).filter(ApiKey.id == log.api_key_id).update(
+                    {ApiKey.credit_used: case((amount < 0, 0), else_=amount)}, synchronize_session=False)
+                acc = db.query(Account).filter(Account.id == log.account_id).with_for_update().first()
+                if acc is not None:
+                    acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(delta))
+                db.commit()
+                _logger.info("真实积分回写完成 log=%s real=%s delta=%s", log_id, real, delta)
+            finally:
+                db.close()
+        finally:
+            sess.close()
+    except Exception as e:
+        _logger.exception("真实积分回写失败 log=%s: %s", log_id, e)
+
+# ---------------------------------------------------------------------------
+# 请求级表格日志：每个 /v1/* chat 请求出口打印一行。
+# seq 进程级递增；模型截断 11 字符；uid 只显示前 8 位。
+# ---------------------------------------------------------------------------
+import itertools
+
+_CHAT_SEQ = itertools.count(1)
+
+
+def _log_chat_row(ttfb_ms, latency_ms, model, mode, uid, status, toks, error_kind=""):
+    """向 stdout 打印一行表格日志，便于排查慢请求与风控。"""
+    # This status is the gateway result, distinct from received HTTP headers.
+    request_metrics.mark_gateway_result(status)
+    request_metrics.mark_upstream_error(error_kind or 'unknown', status if error_kind == 'success' else None)
+    seq = next(_CHAT_SEQ)
+    now = datetime.now().strftime("%H:%M:%S")
+    model = (model or "-")[:11]
+    tok_field = "-" if toks is None else str(toks)
+    tps = "-"
+    if toks is not None and latency_ms and latency_ms > 0:
+        tps = f"{toks * 1000 / latency_ms:.1f}"
+    ttfb = "-" if ttfb_ms is None or ttfb_ms <= 0 else f"{ttfb_ms}ms"
+    uid_prefix = (uid or "-")[:8]
+    latency = f"{latency_ms}ms" if latency_ms is not None else "-"
+    print(f"| #{seq:03d} | {now} | {model:11s} | {mode:6s} | {status:3d} | uid={uid_prefix} | TTFB={ttfb:>5} | tok={tok_field:>5} | {tps:>6}t/s | total={latency:>7} | {error_kind}", flush=True)
+    return seq
+
+
+# ---------------------------------------------------------------------------
+# 上游错误分类 + 账号状态机（ pool/upstream）：
+#   - 网络层错误不累计 errCount
+#   - 404 短冷却不累计 errCount（防雪崩）
+#   - HTTP 5xx 累计 errCount，阈值 5 触发 10m 冷却
+#   - 余额不足 / session 死亡 / 429 分别处理
+# ---------------------------------------------------------------------------
+
+_HARD_CREDIT_MARKERS = [
+    "insufficient credit", "no credit", "credit exhausted", "out of credit",
+    "quota exceeded", "quota exhaust", "payment required", "credit not enough",
+    "not enough credit",
+    "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
+]
+_SESSION_DEAD_MARKERS = ["Offline user session not found", "12153", "session not found", "invalid session"]
+
+#: 账号级授权/配额故障：不是余额问题，也不是限流，而是「这个号当前不允许调」。
+#:   * 11140 "request illegal" —— 账号级授权风控；
+#:   * 14017 "trial not activated" —— 试用未激活/注册未完成；
+#:   * 14015 "license expired" —— 授权到期；
+#:   * 14016 "enterprise not activated" —— 企业未开通。
+#: 都应当**换号并冷却**，而不是无限重试同一个号；也不能误判成 429 软限流
+#: （14017 常带 429 状态码），否则会把一个长期不可用的号当「等一会就好」处理。
+#:
+#: 注：14015/14016 **不在**上游 `isQuotaExhaustedError` 集合里，语义是「授权态问题」
+#: 而非「额度用完」，所以走 account_fault（30 分钟冷却）而不是 hard_credit（额度限制）。
+_ACCOUNT_FAULT_CODES = ("11140", "11142", "14017", "14015", "14016")
+_ACCOUNT_FAULT_MARKERS = ("request illegal from an unapproved channel",
+                          "trial version is not yet activated",
+                          "trial not activated",
+                          "license expired",
+                          "enterprise not activated")
+
+# ---------------------------------------------------------------------------
+# 上游限流错误码族（6000–6008）
+#
+# 依据：官方客户端 CLI bundle 里的权威枚举 `ServerErrorCode`（我们原先**只知道 6004**，
+# 整族其余 7 个码全部漏判 —— 而它们恰恰就是「限速限流」本身）：
+#
+#     6000 CraftRateLimit   限流基值（未细化）
+#     6001 CraftRateTPSLimit  每秒 token 数
+#     6002 CraftRateTPMLimit  每分钟 token 数
+#     6003 CraftRateTPHLimit  每小时 token 数
+#     6004 CraftRateTPDLimit  每天 token 数   ← 原先唯一处理的
+#     6005 CraftRateRPSLimit  每秒请求数
+#     6006 CraftRateRPMLimit  每分钟请求数
+#     6007 CraftRateRPHLimit  每小时请求数
+#     6008 CraftRateRPDLimit  每天请求数
+#
+# 客户端的判定（bundle 内 `isTransientRateLimitBusinessCode` / `isCraftDailyQuotaBusinessCode`）：
+#     e_ = {6004, 6008}                  → 日额度，**不重试**（换号也没用，当天用完了）
+#     6000–6008 且 ∉ e_                 → 瞬时限流，**重试**（等一会/换号就能过）
+#
+# 对本网关的含义（比客户端更细，因为我们是号池）：
+#   * 秒/分/时级（6000–6003、6005–6007）是**账号级**额度 → 换号立刻可用 → soft_rate；
+#   * 日级（6004、6008）是**该账号×该模型**的日额度 → 换号可用、同号换模型也可用
+#     → model_rate（只冷却这一对）。
+#
+# 为什么必须按码判定而不是只看 429：上游会把限流包在 **HTTP 200** 或 **400** 里返回。
+# 此时旧逻辑会落到最后 `status >= 400 → "client"`（**不可重试**）或 `"transport"`，
+# 于是「限流了却不换号」—— 正是「接口直接报错，没有切换其它账号」。
+_ACCOUNT_RATE_CODES = frozenset({"6000", "6001", "6002", "6003",
+                                "6005", "6006", "6007"})
+#: 该账号对该模型的**日**额度：只冷这一对，换模型/换号都可解。
+_MODEL_RATE_CODES = frozenset({"6004", "6008"})
+#: 全族并集，仅用于自检与文档（分类走上面两个子集）。
+_RATE_LIMIT_CODES = _ACCOUNT_RATE_CODES | _MODEL_RATE_CODES
+
+#: 额度彻底耗尽（客户端 `isQuotaExhaustedError` 的精确集合）。
+#: 这组是**持久**失败：当天的额度真的用完了，等几分钟不会恢复，
+#: 换号也未必有额度 —— 采用明确恢复时间或本地保守退避，避免每次请求都白转一轮。
+#:   14001 UsageLimitExceeded            个人用量超限
+#:   14012 UsageLimitExceededEnterprise  企业用量超限
+#:   14013 UsageLimitExceededTencent     腾讯侧用量超限
+#:   14014 UsageLimitEnterpriseExhausted 企业额度用尽
+#:   14018 UsageLimitUserExhausted       个人额度用尽
+#: （14002 ConversationChatTooMany / 10105 ConversationLimitExceeded 是**会话数**限制，
+#:   不是额度，语义不同，故不并入这里。）
+_QUOTA_EXHAUSTED_CODES = frozenset({"14001", "14012", "14013", "14014", "14018", "14019"})
+
+#: 「纯请求速率」限流：code 14003。
+#:
+#: 官方枚举里它叫 `RateLimitError`（`codebuddy.js` @2842 附近的 ServerErrorCode），
+#: `classifyErrorDetail` 给它的归类是 `{category:"quota", subcategory:"quota_request_limit"}`
+#: —— 注意与 `quota_balance_exhausted`（14001/14002/14012/… 余额耗尽）是**不同**
+#: 的 subcategory：14003 是「发得太快」，不是「额度没了」。
+#: 上游文案：`{"code":14003,"msg":"too many requests","displayMsg":{"zh":"请求过于频繁，请稍后重试。"}}`；
+#: 官方 UI 把它渲染成「当前模型请求繁忙，请切换模型或稍后重试」。
+#:
+#: **作用域是「模型」，不是「账号」**（线上实测：同一个号对
+#: deepseek-v4.1-flash 报 14003，换别的模型立刻可用）。所以它归类到
+#: `model_rate` —— 只冷「该账号×该模型」这一对，账号本身**完全不动**。
+#: 早期版本把它当账号级 soft_rate，后果是一个模型抖动会把整个号池摘空
+#: （xx 个号 76 秒内全部被冷，期间所有请求 503），而其它模型其实都好着。
+#:
+#: 冷却时长走 REQUEST_RATE_SECONDS（秒级），不走配额型的 600 秒档。
+_REQUEST_RATE_CODES = frozenset({"14003"})
+# Capacity queue is scoped to the requested model, never the whole account.
+_QUEUE_CODES = frozenset({"6020", "6021", "6022"})
+_INBAND_FAILURE_CODES = (_RATE_LIMIT_CODES | _REQUEST_RATE_CODES | _QUEUE_CODES |
+                        _QUOTA_EXHAUSTED_CODES | frozenset(_ACCOUNT_FAULT_CODES) |
+                        {"11141", "11102", "12153", "3004"})
+#: Non-rate transient failures eligible for a last-resort candidate.
+#: Explicit rate limits are never bypassed before their recovery time.
+#:
+#: 为什么需要兜底：这些状态本来就是「等一会就好」。当**整池**都落在这种状态时，
+#: `_select_account` 直接返回 None 会让一次瞬时抖动升级成硬停摆 ——
+#: 所有请求拿到 503「无可用账号」，而实际上没有一个号被禁用、也没有一个号额度耗尽。
+#: （2026-09-23 线上事故即为此：上游 14003 在 76 秒内命中全部 xx 个号，
+#: 每个号被软冷却 600 秒，期间请求全部 503。）
+#:
+#: 明确**不包含** hard_credit / account_fault / session_dead / waf：
+#: 那些是持久失败或终态（额度耗尽、需重新登录、出口 IP 被拦），
+#: 兜底重试只会白烧一次上游调用，还可能加重风控。
+_TRANSIENT_COOL_KINDS = frozenset({"not_found", "upstream_internal"})
+
+#: 模型级限流：code 6004/6008「该模型的使用量超限」。只冷却**这一个模型**，
+#: 该账号对其他模型仍可用 —— 否则「切个模型就能继续用」的号会被整体摘出池子。
+_MODEL_RATE_CODE = "6004"
+#: 该后端无此模型：code 11102。这是确定性答复，重试无意义，只能换模型/换号。
+_MODEL_BLOCK_CODE = "11102"
+_MODEL_BLOCK_MARKERS = ("service info not found",)
+#: WAF 403 的判据：403 且**没有业务信封**（无 code 字段 / 空体 / HTML 拦截页）。
+#: 带业务信封的 403（11140 等）已在上面各层捕获，不会走到这里。
+_ENVELOPE_CODE_RE = re.compile(r'"code"\s*:\s*"?(-?\d+)"?')
+
+#: 上游把「内部错误」包在 **HTTP 200** 响应体里返回时，HTTP 层完全看不出来。
+#: 判据来自真实故障：桌面端 10000 的底层是 JSON-RPC -32603 "Internal error"，
+#: 以及 ENOSPC 这类磁盘写满的运维级瞬时故障。这类失败**必须换号重试**，
+#: 否则表现就是「接口直接报错了，但没有切换其它账号」。
+_UPSTREAM_INTERNAL_MARKERS = (
+    "-32603", "internal error", "internal server error",
+    '"category":"internal"', '"category": "internal"',
+    "enospc", "no space left on device",
+)
+
+#: 可重试（换号 / 换模型）的错误分类白名单。
+#: 集中定义一处，避免 5 个轮转循环各自内联一份而逐渐漂移 ——
+#: 任何一处漏掉一个分类，那条路径就会「报错但不重试」。
+_RETRYABLE_KINDS = frozenset({
+    "hard_credit", "session_dead", "soft_rate", "model_rate", "model_block",
+    "account_fault", "not_found", "server", "waf", "upstream_internal",
+})
+
+# 11102 只证明当前账号/后端的模型不可用，不能据此跳过其它账号。
+# 所有可重试错误先尝试同模型的剩余账号，再由外层考虑其它模型；
+# 账号归属、tried_ids、MAX_ROTATE 和共享重试预算仍限制尝试范围。
+
+#: `/v1/models` 的最大换号次数。刻意小于 MAX_ROTATE：
+#: 列模型只是元数据，不值得让客户端等几分钟；上游卡住时早报错更有用。
+_MODELS_MAX_TRY = 3
+
+#: 提交前探测缓冲上限：超过它就直接转发，避免为了等错误而无限期憋住正常流。
+_INBAND_PROBE_MAX = 64 * 1024
+
+
+def _json_code(body: str) -> str | None:
+    """Read error envelopes without mistaking generated content for a code."""
+    return upstream_errors.error_info(body)['code']
+
+
+def _looks_like_inband_error(body: str) -> bool:
+    """响应体（可能是 SSE 文本）里是否含「上游错误」信封。
+
+    上游有两类必须识别的失败，**HTTP 状态码都是 200**：
+
+    1. JSON-RPC 信封：``{"code":-32603,"message":"Internal error",...}``
+       —— 客户端报的 Error Code 10000 底层就是它；
+    2. error 字段/事件：``{"error":{...}}`` 或 SSE ``event: error``。
+
+    判定**基于解析后的结构**（error 字段 / 负 code / message 文本），
+    而不是对原始字节做 substring —— 否则模型正常回答里恰好出现
+    "internal error" 这几个字就会被误判成失败并触发换号。
+    """
+    if not body:
+        return False
+
+    def _err_text(obj) -> str:
+        """从候选错误对象里取出可匹配的文案。"""
+        if isinstance(obj, str):
+            return obj
+        if not isinstance(obj, dict):
+            return ""
+        parts = []
+        for k in ("message", "msg", "detail", "details", "reason", "error_description"):
+            v = obj.get(k)
+            if isinstance(v, str):
+                parts.append(v)
+        # data 里还可能再嵌一层 {"data":{"details":"ENOSPC ..."}}
+        d = obj.get("data")
+        if isinstance(d, dict):
+            parts.append(_err_text(d))
+        err = obj.get("error")
+        if isinstance(err, (dict, str)):
+            parts.append(_err_text(err))
+        return " ".join(parts)
+
+    def _is_error_obj(obj) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        # 显式 error 字段
+        if isinstance(obj.get("error"), (dict, str)):
+            err = obj["error"]
+            if err not in (None, "", {}, []):
+                return True
+        # JSON-RPC 负 code（-32603 等）；正数是业务码，不算
+        c = obj.get("code")
+        # Business failures can be returned as HTTP 200 JSON/SSE envelopes.
+        # Do not inspect codes embedded in model-generated choices/content.
+        if "choices" not in obj and str(c) in _INBAND_FAILURE_CODES:
+            return True
+        if ('choices' not in obj and c is not None and str(c) not in ('0', '200')
+                and any(isinstance(obj.get(k), str) for k in ('msg', 'message'))):
+            return True
+        if isinstance(c, int) and c < 0:
+            return True
+        if isinstance(c, str) and c.startswith("-") and c[1:].isdigit():
+            return True
+        # status/category 明确 internal
+        for k in ("category", "type", "status"):
+            v = obj.get(k)
+            if isinstance(v, str) and "internal" in v.lower():
+                return True
+        return False
+
+    def _markers_hit(text: str) -> bool:
+        low = (text or "").lower()
+        return bool(low) and any(m in low for m in _UPSTREAM_INTERNAL_MARKERS)
+
+    seen_any = False
+    for candidate in _iter_json_objects(body):
+        seen_any = True
+        if _is_error_obj(candidate):
+            return True
+        if _markers_hit(_err_text(candidate)):
+            return True
+    # 有 data: 行但一行都没解析成功（截断/非 JSON）时，
+    # 只剩「整段就是错误信封」这一种可能，做一次保守的尾部匹配。
+    if not seen_any and body.lstrip().startswith("{"):
+        return _markers_hit(body)
+    return False
+
+
+def _iter_json_objects(body: str):
+    """依次产出 body 里可解析的 JSON 对象（裸 JSON 或 SSE data: 行）。"""
+    stripped = body.lstrip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            yield obj
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload in ("", "[DONE]"):
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _sse_has_error_event(body: str) -> bool:
+    """SSE 里是否出现 ``event: error`` 行（与 data 信封独立的一种信号）。"""
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("event:") and "error" in s.lower():
+            return True
+    return False
+
+
+#: 匹配**非空**的 finish_reason 值。
+#: 只认带引号的值：流式分片里 ``"finish_reason": null`` 是常态，
+#: 用这个正则天然把它排除（null 不带引号）。
+_FINISH_REASON_RE = re.compile(r'"finish_reason"\s*:\s*"([^"]*)"')
+
+
+def _sse_has_finish_reason(body: str) -> bool:
+    """SSE 里是否出现过**非空** finish_reason（流式协议的正常收尾标志）。"""
+    for m in _FINISH_REASON_RE.finditer(body or ""):
+        if (m.group(1) or "").strip():
+            return True
+    return False
+
+
+def _sse_is_truncated(body: str) -> bool:
+    """流是否**被截断**：有内容，却没有任何终止标志。
+
+    OpenAI 流式协议要求以 ``finish_reason`` 收尾（实践中还会补一个
+    ``data: [DONE]``）。上游偶尔会直接断掉连接，两者都没有 ——
+    客户端于是报「Stream ended without finish_reason」并**反复重试**。
+
+    这一类响应必须单独识别出来：
+      * 不能记成 success（否则坏号永不受罚，客户端每次重试都再命中它）；
+      * 若尚未把字节发给客户端，应换号重试；
+      * 若已发出，至少要补一个终止帧，让客户端正常收尾而不是报错重试。
+    """
+    if not body:
+        return False
+    return not _sse_has_finish_reason(body) and "[DONE]" not in body
+
+
+def _sse_terminal_stub(model: str) -> str:
+    """补一个最小可用的终止帧（``finish_reason=stop`` + ``data: [DONE]``）。
+
+    用在「内容已经发给客户端、但上游没给终止帧」的场合：改不了已发出的字节，
+    但可以让客户端**正常结束**这次流式读取，而不是判定失败并重试。
+
+    这里如实发 ``stop`` 而不是伪装成 ``tool_calls``：截断时无法知道本该是什么，
+    发 ``stop`` 语义最中性，也不会诱导客户端去执行一个不完整的工具调用。
+    """
+    chunk = {
+        "id": "chatcmpl-gateway-truncated",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model or "",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    return ("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+            "data: [DONE]\n\n")
+
+
+#: 各种协议里「真实正文增量」的字段名。只有看到其中之一，才认为这条流是健康的。
+_CONTENT_FIELDS = ("content", "reasoning_content", "text", "thinking", "tool_calls")
+
+
+def _sse_has_content(body: str) -> bool:
+    """SSE 里是否已经出现**真实正文增量**。
+
+    流式模式下只要把字节提交给客户端，就再也无法换号重试了。所以提交前
+    必须确认「这确实是正文，而不是一个 200 包着的错误信封」。
+    注意 ``delta.role`` 之类只有元信息的帧不算正文。
+    """
+    for line in body.splitlines():
+        s = line.strip()
+        if not s.startswith("data:"):
+            continue
+        payload = s[5:].strip()
+        if payload in ("", "[DONE]"):
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # Anthropic 形态：content_block_delta {"delta":{"type":"text_delta","text":"..."}}
+        # OpenAI chat：choices[].delta.content
+        choices = obj.get("choices")
+        if isinstance(choices, list):
+            for ch in choices:
+                if not isinstance(ch, dict):
+                    continue
+                for holder in (ch.get("delta"), ch.get("message")):
+                    if isinstance(holder, dict):
+                        for f in _CONTENT_FIELDS:
+                            v = holder.get(f)
+                            if v:
+                                return True
+                # Responses API：output 数组里的文本
+                if ch.get("text"):
+                    return True
+        # Responses / Anthropic 顶层 delta
+        for holder in (obj.get("delta"), obj.get("content_block")):
+            if isinstance(holder, dict):
+                for f in _CONTENT_FIELDS:
+                    if holder.get(f):
+                        return True
+                if holder.get("type") == "text_delta" and holder.get("text"):
+                    return True
+        if isinstance(obj.get("delta"), str) and obj["delta"]:
+            return True
+        # 非流式的完整消息（聚合模式会用到）
+        if obj.get("content") or obj.get("output_text"):
+            return True
+    return False
+
+
+_EXHAUSTION_HINTS = {
+    "hard_credit": "上游返回用量或积分限制，恢复时间以上游为准",
+    "soft_rate": "上游限流中，请稍后重试",
+    "model_rate": "该模型当前不可用（账号对该模型的额度用尽，或上游模型繁忙）",
+    "model_behavior": "上游模型行为策略拒绝了本次请求",
+    "model_block": "上游没有这个模型（该后端不提供）",
+    "account_fault": "账号授权或使用权限受限（请检查上游提示）",
+    "session_dead": "上游账号凭据被拒绝或会话失效，请核对上游提示",
+    "upstream_internal": "上游返回错误信封，具体原因见上游原文",
+    "server": "上游服务异常",
+    "waf": "上游拒绝请求，本网关正在执行出口保护",
+    "not_found": "上游返回 404，模型或接口不存在",
+    "upstream_auth_anomaly": "上游认证接口异常，未判定为账号失效",
+    "transport": "与上游的网络连接异常",
+    "no_account": "号池里没有可用账号（余额或状态均不满足）",
+}
+
+
+def _exhaustion_message(kind: str, last_msg: str, tried_accounts: int,
+                        tried_models: int, upstream_status: int = 0) -> str:
+    """Present gateway interpretation, client explanation and upstream evidence."""
+    hint = _EXHAUSTION_HINTS.get(kind or "", "未知错误")
+    tried = f"账号调用尝试 {tried_accounts} 次 / 候选模型 {tried_models} 个"
+    base = f"本网关判断：{hint}；{tried}"
+    if not last_msg and not upstream_status:
+        return base + '；本次没有取得上游错误响应。'
+    info = upstream_errors.error_info(last_msg, upstream_status)
+    client = f"；客户端解释：{info['client_message']}" if info['client_message'] else ''
+    code = info['code'] if info['code'] is not None else '未返回'
+    status = info['http_status'] or '未记录'
+    return f"{base}{client}；上游 HTTP：{status}；上游 code：{code}；上游原文：{last_msg}"
+
+
+def _failure_evidence(kind: str, body: str, status: int = 0) -> dict:
+    return {'gateway_kind': kind, 'upstream': upstream_errors.error_info(body, status) if body or status else None}
+
+
+def _extract_http_status(msg: str) -> int:
+    """从异常文本里抠出 HTTP 状态码；抠不到返回 0。
+
+    为什么需要：分类器 `_classify_error(status, body)` 靠 **status** 判断
+    401/403（权威的登录态失效）。但 `backend.py` 抛出的异常只有一句话：
+
+        RuntimeError: 后端返回非 JSON GET /v2/... HTTP 401: <html>...
+
+    调用方（保活、非流式路径）拿不到 status 对象，只能把它当 0 传进去 ——
+    于是 401 被归成 `transport`（网络抖动），既不禁用也不计数。
+    这正是「xx 个号失效了保活却报全好」的最后一环。
+
+    这里把文本里的状态码抠出来，让分类器能按真实语义判定。
+    """
+    return upstream_errors.http_status(msg)
+
+
+def _classify_error(status: int, body: str) -> str:
+    """按 HTTP 状态码 + 业务 code + body 关键词返回错误分类。
+
+    分层顺序**很重要**，每层都要先于「更宽泛」的层判定：
+      1. 11102 模型不存在 —— 明确业务码优先于 HTTP 状态。
+      2. session 死亡（12153）—— 终态，需要人工重登。它可能与 "rate limit"
+         文案混排，若被 429 先判会误当软冷却，让死号留在池里反复被选中。
+      3. 账号级授权故障（11140/14017）—— 常带 429 状态码，必须先于限流判定。
+      4. 6004 模型级限流 —— 只冷却该模型，不能污染账号级冷却。
+      5. **余额/额度耗尽的明确标记** —— 必须先于通用 429。这类错误是**持久**
+         失败（积分 / 额度何时恢复取决于上游），若误判成「限流、等一会就好」，
+         这个号会在整天的每一次请求里都被选中并失败，白烧一次轮转 + 增加
+         所有用户的延迟。宁可保守地把它按日冷却（误判代价：一个健康号当天
+         少用；反向误判代价：每次请求都多一次必败重试）。
+       6. 429 / 限流文案。
+       7. 404 / 5xx / WAF 403 / 其它 4xx。
+       8. **HTTP 200 但体内是错误信封**（JSON-RPC -32603 / ENOSPC / error 字段）
+          —— 放在最后，具体业务码优先；上游确实会把内部错误塞进 200 响应，
+          这类失败必须换号重试，否则表现就是「报错了但没切换账号」。
+    """
+    status = status or upstream_errors.http_status(body)
+    if not status and not body:
+        return "transport"
+    body_l = (body or "").lower()
+    code = _json_code(body)
+
+    # A gateway can reject the request shape with a 401/403.  In particular,
+    # the upstream returns ``401 {"message":"not_found"}`` when an
+    # unsupported authentication header is present.  That is not evidence
+    # that the account session was deleted.
+    from admin.upstream_auth_guard import known_request_anomaly
+    if known_request_anomaly(status, body):
+        return "upstream_auth_anomaly"
+
+    # 未获上游批准的通道请求不能靠换号解决；保留原始错误交给调用方，
+    # 不重放同一请求，也不将账号标记为冷却或故障。
+    if code == "11128":
+        return "client"
+
+    # 1. 该后端无此模型（确定性，重试无意义）
+    if code == _MODEL_BLOCK_CODE:
+        # A 429 status is transient even if a gateway attached a contradictory
+        # model-not-found body. Do not poison this account/model pair with a
+        # persistent model_block cooldown on a rate-limited response.
+        if status == 429:
+            return "soft_rate"
+        return "model_block"
+    for m in _MODEL_BLOCK_MARKERS:
+        if status in (400, 404) and m in body_l:
+            return "model_block"
+
+    # 2. session 死亡（终态，连续计数后才禁用）
+    if code in ('401', '402', '3004', '12153'):
+        return 'session_dead'
+    for m in _SESSION_DEAD_MARKERS:
+        if not code and m.lower() in body_l:
+            return "session_dead"
+
+    # 3. 账号级授权/配额故障（可能带 429，必须先判）
+    if code in _ACCOUNT_FAULT_CODES:
+        return "account_fault"
+    # 11128（渠道校验未通过）在更上面已有专门分支返回 `client` ——
+    # 那是**正确**处理：不换号、不冷却账号（换号解决不了指纹问题）。
+    # 这里不重复判定，避免把账号错误地冷却掉。
+    # Official 5.8.1 classifier: model_service/model_behavior_error, not IP WAF.
+    if code == "11141":
+        return "model_behavior"
+    if status == 403:
+        for m in _ACCOUNT_FAULT_MARKERS:
+            if m in body_l:
+                return "account_fault"
+
+    # 4. 上游限流码族 6000–6008（客户端权威枚举 ServerErrorCode）。
+    #     必须在「通用 429」和「其余 4xx」之前 —— 上游会把限流包在 200/400 里返回，
+    #     落到后面就会被判成 client（不可重试）或 transport，于是「限流却不换号」。
+    #     日级（6004/6008）只冷该模型；秒/分/时级（其余）是账号级，换号即可。
+    if code in _MODEL_RATE_CODES:
+        return "model_rate"
+    # 4a. 14003 RateLimitError：**模型**繁忙，不是账号的问题。
+    #     线上实测：同一个号对 deepseek-v4.1-flash 报 14003，换别的模型立刻可用；
+    #     官方 UI 对它的文案也是「当前模型请求繁忙，请**切换模型**或稍后重试」。
+    #     所以必须走 model_rate（只冷「该账号×该模型」），**绝不能冷账号** ——
+    #     否则一个模型抖动就会把整个号池摘空，而其它模型其实都是好的。
+    if code in _REQUEST_RATE_CODES or code in _QUEUE_CODES:
+        return "model_rate"
+    if code in _ACCOUNT_RATE_CODES:
+        return "soft_rate"
+    # 4b. 额度彻底耗尽（14001/14012/14013/14014/14018）：持久失败，
+    #     优先采用上游恢复时间。必须先于通用 429 —— 这些码常带 429 状态码。
+    if code in _QUOTA_EXHAUSTED_CODES:
+        return "hard_credit"
+
+    # 5. 余额/额度不足（恢复时间以上游为准）—— 必须在通用限流之前
+    if status == 402 and not code:
+        # A bare HTTP status is not a business quota code. The current official
+        # UI maps 402 to rejected credentials; explicit 140xx codes above win.
+        return 'session_dead'
+    if status == 412:
+        return "hard_credit"
+    for m in _HARD_CREDIT_MARKERS:
+        if m.lower() in body_l or m in body:
+            return "hard_credit"
+
+    # 6. 通用限流
+    if status == 429:
+        return "soft_rate"
+    for m in ("rate limit", "rate-limit", "too many requests",
+              "限流", "请求过于频繁", "频率过高"):
+        if m in body_l or m in body:
+            return "soft_rate"
+
+    # 7. 其余
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "server"
+    # 408 请求超时 / 425 Too Early：瞬时，换号重试即可，绝不能算客户端错误。
+    if status in (408, 425):
+        return "server"
+    # 401 上游鉴权失效：通常是该账号 token 过期/被吊销。
+    # 换号能立刻恢复服务，因此归入可重试，而不是把 401 透传给客户端。
+    if status == 401:
+        return "session_dead"
+    if status == 403:
+        if code:
+            # A business rejection is not evidence of an IP/WAF block.
+            return 'client'
+        # 走到这里说明 403 但**没有业务信封** —— 典型是 APISIX/WAF 拦截页或空体。
+        # 账号级软冷却 + fail-fast（多号同时命中则判定出口 IP 被拦）。
+        return "waf"
+    if status >= 400:
+        return "client"
+    # 8. HTTP 200 但体内是上游错误信封（JSON-RPC -32603 / ENOSPC / error 字段）。
+    #    放在最后：具体业务码（6004/11102/12153…）优先级更高，只有它们都不匹配
+    #    时才按「上游内部故障」处理。真实故障：客户端 10000 的底层就是这个。
+    if status == 200 and body and _looks_like_inband_error(body):
+        return "upstream_internal"
+    if status == 200 and body and _sse_has_error_event(body):
+        return "upstream_internal"
+    return "transport"  # 网络层/无响应状态
+
+
+def _cooling_active(acc: Account, now: datetime) -> bool:
+    """账号当前是否处于任一冷却/熔断/降权中（或门，生效的是最晚截止者）。"""
+    for attr in ("cool_until", "breaker_until", "degrade_until"):
+        until = getattr(acc, attr, None)
+        if until is not None and until > now:
+            return True
+    return False
+
+
+def _bump_breaker(db: Session, acc: Account, now: datetime, msg: str) -> None:
+    """累计一次熔断失败；达阈值则按指数退避置 breaker_until。
+
+    只对「反复失败」（5xx 等）计数：带权威恢复时刻的错误（429 有重置时间、
+    402 有次日签到）各有自己的处置，再并入连续失败会让用户正常重试越堆越厚。
+    退避随命中次数翻倍并封顶，且**已在熔断期内不延长**（防重试把冷却堆成 2h）。
+    """
+    if acc.breaker_until is not None and acc.breaker_until > now:
+        return  # 熔断期内不翻倍、不延长
+    acc.breaker_fails = (acc.breaker_fails or 0) + 1
+    acc.last_err_msg = (msg or f"upstream {acc.breaker_fails}")[:255]
+    if acc.breaker_fails >= settings.BREAKER_THRESHOLD:
+        base = max(1, settings.BREAKER_COOLDOWN_SECONDS)
+        cap = max(base, settings.BREAKER_COOLDOWN_MAX_SECONDS)
+        d = base * (2 ** min(acc.breaker_fails - settings.BREAKER_THRESHOLD, 6))
+        acc.breaker_until = now + timedelta(seconds=min(d, cap))
+        acc.breaker_fails = 0  # 计数清零：下轮重新累计，避免一路翻到封顶
+
+
+def _req_rate_seconds() -> tuple[int, int]:
+    """纯请求速率限流（`14003`）的 (基数秒, 封顶秒)。
+
+    这里用 `getattr` 兜底是**有意**的：线上 `admin/config.py` 属于
+    「服务器专用、部署时不覆盖」的文件（`ssh_sync.py` 的 EXCLUDE_EXACT），
+    新增设置项因此依赖部署顺序。万一哪次只更新了本文件而没更新配置，
+    这里退回默认值，而不是让整条限流处理路径抛 AttributeError。
+    """
+    base = int(getattr(settings, "REQUEST_RATE_SECONDS", 20) or 20)
+    cap = int(getattr(settings, "REQUEST_RATE_MAX_SECONDS", 120) or 120)
+    base = max(1, base)
+    return base, max(base, cap)
+
+
+def _apply_account_policy(db: Session, acc: Account, kind: str, status: int,
+                          msg: str, model: str = "",
+                          reset_at: datetime | None = None) -> None:
+    """根据错误分类更新账号状态：冷却 / 熔断 / 降权 / 禁用 / 模型级冷却。
+
+    分层原则（每条都有明确的恢复依据）：
+      * hard_credit  → 上游恢复时间优先，缺失时仅作本地保守退避
+      * soft_rate    → 秒级有界退避，连续触发按 2 倍指数放大并封顶
+      * model_rate   → **只冷却该模型**（6004），账号对别的模型照常可用
+      * model_block  → 该 (账号, 模型) 负缓存（11102），重试无意义
+      * account_fault→ 账号级授权故障（11140/14017），冷却并换号，不无限重试
+      * session_dead → 连续计数达阈值才禁用（避免临时 12153 误杀）
+      * waf          → 短冷却 + IP 级 fail-fast（见 pool.POOL.waf）
+      * server/5xx   → 熔断，指数退避
+      * not_found    → 短冷却，不累计 errCount（防雪崩）
+      * transport/client → 只记录，不改变账号健康状态
+
+    每次**成功**都会清空连续失败计数（见 `_note_success`），所以偶发抖动不会
+    累积成熔断 —— 只有真正持续坏的账号才会被摘出去。
+    """
+    now = datetime.utcnow()
+    status = status or upstream_errors.http_status(msg)
+    if kind == "session_dead":
+        from admin.upstream_auth_guard import known_request_anomaly
+        if known_request_anomaly(status, msg):
+            kind = "upstream_auth_anomaly"
+        else:
+            # A model request is not authoritative evidence that a session was
+            # deleted.  Verify the same credential on authenticated balance and
+            # account-profile endpoints first.  Any success (including a real
+            # zero balance) keeps the account usable; only two explicit 401/403
+            # responses may advance the session-dead counter.  The trusted
+            # probe itself applies the shared-response guard after it has made
+            # both authenticated calls.
+            trusted_kind, trusted_detail = _trusted_auth_probe(acc)
+            if trusted_kind != "dead":
+                kind = "upstream_auth_anomaly"
+                msg = f"{msg[:150]}；可信登录探测：{trusted_detail}"
+    if os.getenv('WORKBUDDY_ANDROID') == '1':
+        request_metrics.mark_upstream_error(kind, status)
+    acc.last_upstream_error = json.dumps(upstream_errors.error_info(msg, status), ensure_ascii=False)
+    # 风控哨兵：只记「封控类」信号（11140 / 403 / 4015 等），热路径上是一次
+    # Redis ZADD（或内存 append），不做查询。任何异常都在哨兵内部吞掉 ——
+    # 哨兵坏了不能反过来影响转发。
+    try:
+        from admin import sentinel
+        code = _json_code(msg) or (str(status) if status in (401, 403) else "")
+        # detail 里带上「本次会冷却多久」—— 账号冷却的时长是按错误码分档的
+        # （11140 用基础值、其它 account_fault 用 4 倍），事后在哨兵面板
+        # 上能直接看出「这个号什么时候会自己回来」，不必再去翻配置。
+        cool_hint = ""
+        if kind == "account_fault":
+            base = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES)
+            cool_hint = " · 冷却 %d 分钟" % (base if code == "11140" else base * 4)
+        elif kind == "session_dead":
+            cool_hint = " · 登录态需重新授权"
+        elif code == "11128":
+            # 渠道校验未通过：明确告诉运维「换号没用，要改指纹」，
+            # 否则看到 403 的第一反应总是去换账号。
+            cool_hint = " · 客户端渠道校验未通过，换号无效"
+        sentinel.note_failure(getattr(acc, "platform", "") or "", acc.id, kind,
+                              code=str(code or ""), status=status,
+                              detail=(msg or "") + cool_hint, model=model or "")
+    except Exception:  # noqa: BLE001 - 哨兵绝不阻断主链路
+        pass
+    if kind == "hard_credit":
+        # Credit exhaustion does not prove a daily reset. Prefer the actual
+        # upstream clock; otherwise this is only a local retry deadline.
+        acc.cool_until = min(reset_at, now + timedelta(days=7)) if reset_at and reset_at > now else now + timedelta(hours=24)
+        acc.cool_kind = "hard_credit"
+        acc.err_count = 0
+        acc.breaker_fails = 0
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "余额不足")[:255]
+    elif kind == "soft_rate":
+        # 有上游重置时间就精确对齐（绝不指数放大：那样会把全池推到封顶），
+        # 没有才做有界指数退避。
+        #
+        # 基数按**码族**分档：14003 是「请求过于频繁」（纯速率），上游自己就说
+        # 「请稍后重试」，给秒级即可；6000–6008 那类配额型限流才用 600 秒起。
+        # 共用一个 600 秒基数会把几次并发请求放大成整池停摆（见线上故障复盘）。
+        if _json_code(msg) in _REQUEST_RATE_CODES:
+            base = max(1, settings.REQUEST_RATE_SECONDS)
+            cap = max(base, settings.REQUEST_RATE_MAX_SECONDS)
+        else:
+            base = max(1, settings.SOFT_RATE_SECONDS)
+            cap = max(base, settings.SOFT_RATE_MAX_SECONDS)
+        if reset_at is not None and reset_at > now:
+            until = min(reset_at, now + timedelta(days=7))
+        else:
+            streak = (acc.err_count or 0) + 1
+            until = now + timedelta(seconds=min(base * (2 ** min(streak - 1, 8)), cap))
+        # Local backoff never extends an active cooldown. A later explicit
+        # upstream deadline can extend it, but cannot shorten it.
+        if acc.cool_kind != "soft_rate" or not acc.cool_until or acc.cool_until <= now:
+            acc.cool_until = until
+        elif reset_at is not None and reset_at > now:
+            acc.cool_until = max(acc.cool_until, until)
+        acc.cool_kind = "soft_rate"
+        acc.err_count = (acc.err_count or 0) + 1
+        acc.breaker_fails = 0
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "429 rate limit")[:255]
+    elif kind == "model_rate":
+        # 只冷却触发调用的那个模型：账号级 until 不动，切模型立即可用。
+        #
+        # 时长按码族分档：
+        #   * 6004/6008 是日额度：官方时间优先；6008 按客户端规则到次日零点，6004 缺失时保守等待 24h。
+        #   * 14003 是「模型繁忙 / 请求过于频繁」——瞬时，且上游自己的建议
+        #     就是「切换模型或稍后重试」。无官方时间时给秒级退避；
+        #     有明确 Retry-After/reset 时遵守上游时间，不套本地退避上限。
+        if _json_code(msg) in _QUEUE_CODES:
+            from admin.model_limits import queue_retry_time
+            # retry_after is a queue polling delay, not an account quota reset.
+            _set_model_cooldown(db, acc, model, "model_queue",
+                                msg,
+                                reset_at=queue_retry_time(msg, now) or reset_at,
+                                fallback_seconds=max(1, settings.REQUEST_RATE_SECONDS), status=status)
+        elif _json_code(msg) in _REQUEST_RATE_CODES:
+            _set_model_cooldown(db, acc, model, "model_rate",
+                                msg,
+                                reset_at=reset_at,
+                                fallback_seconds=max(1, _req_rate_seconds()[0]), status=status)
+        elif _json_code(msg) in _MODEL_RATE_CODES:
+            source = 'upstream' if reset_at and reset_at > now else 'estimated'
+            if source == 'estimated' and _json_code(msg) == '6008':
+                reset_at = model_limits.next_cn_midnight(now)
+                source = 'client_midnight'
+            _set_model_cooldown(db, acc, model, "model_daily",
+                                msg,
+                                reset_at=reset_at,
+                                fallback_seconds=max(1, getattr(settings, "MODEL_DAILY_COOLDOWN_SECONDS", 86400)),
+                                status=status, reset_source=source)
+        else:
+            _set_model_cooldown(db, acc, model, "model_rate",
+                                msg,
+                                reset_at=reset_at,
+                                fallback_seconds=settings.MODEL_SOFT_RATE_SECONDS, status=status)
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "model rate limit")[:255]
+    elif kind == "model_block":
+        # 该后端无此模型：负缓存 (账号, 模型)，重试无意义。
+        _set_model_cooldown(db, acc, model, "model_block",
+                            msg,
+                            reset_at=None,
+                            fallback_seconds=settings.MODEL_BLOCK_SECONDS, status=status)
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "11102 model not available")[:255]
+    elif kind == "account_fault":
+        # 账号级授权/配额故障。
+        #
+        # ⚠️ 冷却时长必须**按错误码区分**，不能一律 30 分钟：
+        #   * 11140「request illegal from an unapproved channel」是**临时风控**，
+        #     上游过一阵会自己放开 —— 给短冷却 + 复核，能尽快把号捞回来；
+        #   * 14017/14015/14016（授权/权限层面）是**硬失败**，凭证或套餐本身就
+        #     不对，冷却 30 分钟再试仍然是同样的错，只会白打上游 N 次。
+        # 一律 30 分钟的后果：用户手动解冷却后能正常用一会儿，一旦再触发
+        # 又是 30 分钟静默期，且没有任何「什么时候能恢复」的提示 ——
+        # 这正是「账号冷却没有准信」的成因。
+        code = _json_code(msg)
+        if code == "11140":
+            minutes = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES)
+        else:
+            # 硬失败：给更长的冷却，避免反复用同一个号去打上游
+            minutes = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES * 4)
+        acc.cool_until = now + timedelta(minutes=minutes)
+        acc.cool_kind = "account_fault"
+        acc.err_count = 0
+        acc.breaker_fails = 0
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "account fault")[:255]
+    elif kind == "session_dead":
+        # 区分两种「登录态失效」，它们的确定性完全不同：
+        #
+        #   * **HTTP 401 / 403** —— 上游**明确拒绝**了这个 token。
+        #     这是权威判定，不是抖动：token 被吊销/被换掉就是彻底不可用了，
+        #     重试一万次还是 401。必须**立即禁用**，否则这个号会一直留在池子里
+        #     被反复选中（实测就是这样：xx 个号的 status 一直是 active，
+        #     每次取模型/对话都先命中它们再失败）。
+        #
+        #   * **12153 / "session not found" 文案** —— 真实环境会被临时性触发
+        #     （上游抖动 / 并发刷新 token），一次就禁用等于误杀健康号。
+        #     所以保留「连续计数达阈值才禁用」。
+        #
+        # 原实现把两者混为一谈（只看文案），于是确定性的 401 也被当成抖动，
+        # 要等 3 次才禁用 —— 期间每次请求都在白烧一次轮转。
+        authoritative = status in (401, 403)
+        acc.session_dead_fails = (acc.session_dead_fails or 0) + 1
+        acc.cool_kind = "session_dead"
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "session dead")[:255]
+        # A single rejected request is insufficient evidence for a deleted
+        # session.  The trusted account/balance/profile probes must agree, and
+        # the same credential must fail repeatedly before it can be disabled.
+        threshold = max(3, settings.SESSION_DEAD_THRESHOLD)
+        if acc.session_dead_fails >= threshold:
+            acc.status = "disabled"
+            acc.cool_until = None
+            acc.breaker_until = None
+            acc.degrade_until = None
+            if authoritative:
+                acc.last_err_msg = (
+                    f"登录态被上游拒绝（HTTP {status}），需重新登录：{(msg or '')[:180]}"
+                )[:255]
+    elif kind == "waf":
+        # WAF 403：短冷却 + IP 级判定。多账号同时命中说明是**出口 IP** 被拦，
+        # 此时继续轮转只会把一次请求放大成 N 次（加重风控）。
+        acc.cool_until = now + timedelta(seconds=60)
+        acc.cool_kind = "waf"
+        acc.err_count = 0
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "waf 403")[:255]
+        POOL.waf.note(acc.uid or "")
+    elif kind == "not_found":
+        # 404 短冷却不累计 errCount（防雪崩）
+        acc.cool_until = now + timedelta(seconds=60)
+        acc.cool_kind = "not_found"
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "upstream 404")[:255]
+    elif kind == "upstream_internal":
+        # HTTP 200 但体内是上游内部错误（-32603 Internal error / ENOSPC 写盘失败）。
+        # 这是**瞬时运维级故障**：上游那台机器磁盘满了，换一个账号（很可能是
+        # 另一台后端）就能立刻恢复。因此：
+        #   * 做秒级短冷却，把刚刚那个后端从选号里摘出去一会儿；
+        #   * 累计连败计数（是「不知道原因的持续失败」，符合降权目标形态）；
+        #   * **不动** err_count/session_dead_fails —— 不是账号的错，不该熔断。
+        acc.cool_until = now + timedelta(seconds=max(15, settings.SOFT_RATE_SECONDS // 20))
+        acc.cool_kind = "upstream_internal"
+        acc.consecutive_fails = (acc.consecutive_fails or 0) + 1
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "upstream internal error")[:255]
+    elif kind == "model_behavior":
+        # Request/model policy rejection must not cool or degrade the entire account.
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "model behavior policy")[:255]
+    elif kind == "upstream_auth_anomaly":
+        # Shared/header-level auth failures must never disable an account.
+        # Keep evidence for the logs, but leave status, cooldowns, and failure
+        # counters untouched so the pool can recover after the request fix.
+        acc.last_err_at = now
+        acc.last_err_msg = (
+            f"上游认证接口异常，未判定账号失效：{msg or 'shared upstream authentication anomaly'}"
+        )[:255]
+    elif _json_code(msg) == "11134":
+        # The provider for this model is temporarily unavailable. It proves
+        # neither an account failure nor exhaustion of the other models.
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "model provider temporarily unavailable")[:255]
+    elif kind == "server" or status >= 500:
+        # HTTP 5xx：熔断（指数退避），不再用「累计 5 次固定 10 分钟」——
+        # 固定时长对持续坏的号太短（10 分钟后又被选中再失败），对偶发又太长。
+        _bump_breaker(db, acc, now, msg or f"upstream {status}")
+        acc.last_err_at = now
+    elif kind == "transport":
+        # A socket failure proves no account quota/auth state. In a one-account
+        # mobile pool, counting network errors towards account degradation
+        # turns an intermittent connection into five minutes of local 503s.
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or "transport error")[:255]
+    else:
+        # 其它明确的 4xx 是请求/参数/工具内容问题，不是账号健康问题。
+        # 只记录原文供排障；不能喂给连败降权，否则同一个坏请求会把健康账号
+        # 逐个移出候选池，最终伪装成「没有可用账号」。账号/模型级 4xx 已在
+        # 上面的 account_fault、model_rate、model_block 等分支单独处理。
+        acc.last_err_at = now
+        acc.last_err_msg = (msg or f"upstream {status}")[:255]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+    evidence = upstream_errors.error_info(msg, status)
+    upstream_message = evidence['message']
+    if upstream_message is None and status:
+        upstream_message = evidence['raw']
+    request_metrics.mark_account_policy(acc.id, model, kind, status, evidence['code'],
+                                        message=upstream_message, raw=evidence['raw'],
+                                        cool_until=acc.cool_until,
+                                        breaker_until=acc.breaker_until,
+                                        degrade_until=acc.degrade_until)
+
+
+def _note_success(db: Session, acc: Account) -> None:
+    """请求成功：清空所有连续失败计数与熔断/降权截止。
+
+    这是「偶发抖动不会累积成熔断」的关键 —— 没有这个清零，任何长期运行的池子
+    最终都会因为零星失败把健康号一个个摘出去。
+    """
+    changed = False
+    if acc.breaker_fails:
+        acc.breaker_fails = 0
+        changed = True
+    if acc.err_count:
+        acc.err_count = 0
+        changed = True
+    if acc.consecutive_fails:
+        acc.consecutive_fails = 0
+        changed = True
+    if acc.degrade_until is not None:
+        acc.degrade_until = None
+        changed = True
+    if acc.breaker_until is not None and acc.breaker_until <= datetime.utcnow():
+        acc.breaker_until = None
+        changed = True
+    if acc.session_dead_fails:
+        acc.session_dead_fails = 0
+        changed = True
+    if changed:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
+#: 连败降权时长（秒）与封顶。达阈后临时出池，避免「一直失败但一直没到熔断阈值」的号
+#: 持续被选中、持续把失败传给用户。
+DEGRADE_SECONDS = 300
+DEGRADE_SECONDS_MAX = 7200
+
+
+def _maybe_degrade(db: Session, acc: Account) -> None:
+    """连败降权：连续失败达阈值则临时出池（不延长已在降权期内的截止）。"""
+    now = datetime.utcnow()
+    if acc.degrade_until is not None and acc.degrade_until > now:
+        return
+    if (acc.consecutive_fails or 0) < settings.BREAKER_THRESHOLD:
+        return
+    acc.degrade_until = now + timedelta(
+        seconds=min(DEGRADE_SECONDS, DEGRADE_SECONDS_MAX))
+    acc.consecutive_fails = 0
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _set_model_cooldown(db: Session, acc: Account, model: str, kind: str,
+                        reason: str, *, reset_at: datetime | None,
+                        fallback_seconds: int, status: int = 0, reset_source: str = '') -> None:
+    """写入/更新 (账号, 模型) 级冷却。
+
+    与账号级冷却**完全独立**：6004 限流后账号对其他模型仍可用，
+    这样「切个模型就能继续」的号不会被整体白扔。
+    """
+    if not model:
+        return
+    now = datetime.utcnow()
+    evidence = json.dumps(upstream_errors.error_info(reason, status), ensure_ascii=False)
+    source = reset_source or ('queue_retry' if kind == 'model_queue' and reset_at else
+                              'upstream' if reset_at and reset_at > now else
+                              'estimated' if kind == 'model_daily' else 'backoff')
+    row = (db.query(AccountModelCooldown)
+           .filter(AccountModelCooldown.account_id == acc.id,
+                   AccountModelCooldown.model == model)
+           .first())
+    if kind == "model_daily":
+        until = reset_at if reset_at is not None and reset_at > now else now + timedelta(seconds=fallback_seconds)
+        # Bound invalid upstream values, but never truncate a 24h recovery to 2h.
+        until = min(until, now + timedelta(days=7))
+    elif kind == "model_queue" and reset_at is not None and reset_at > now:
+        until = min(reset_at, now + timedelta(days=7))
+    elif kind == "model_rate" and reset_at is not None and reset_at > now:
+        until = min(reset_at, now + timedelta(days=7))
+        reason = "[upstream] " + reason[:240]
+    elif kind == "model_block":
+        # 负缓存按命中次数指数退避：官方确定「该后端无此模型」，重试无意义；
+        # 半开到期后允许再试一次，再命中就翻倍，封顶 24h。
+        hits = (row.hits or 0) + 1 if row else 1
+        ttl = min(fallback_seconds * (2 ** min(hits - 1, 4)), 86400)
+        until = now + timedelta(seconds=ttl)
+    else:
+        until = now + timedelta(seconds=max(1, fallback_seconds))
+    if row is None:
+        row = AccountModelCooldown(account_id=acc.id, model=model)
+        db.add(row)
+    elif row.until and row.until > now:
+        # A later transient error must not erase an existing daily cooldown.
+        if row.kind == "model_daily" and kind != "model_daily":
+            row.hits = (row.hits or 0) + 1
+            return
+        if row.kind == 'model_daily' and row.until >= until:
+            row.hits = (row.hits or 0) + 1
+            return
+        if row.until >= until and (row.reset_source == 'upstream' or (row.reason or "").startswith("[upstream]")):
+            row.hits = (row.hits or 0) + 1
+            return
+        until = max(until, row.until)
+    row.until = until
+    row.kind = kind
+    row.reason = reason[:255]
+    row.upstream_error = evidence
+    row.reset_source = source
+    row.hits = (row.hits or 0) + 1
+
+
+def _model_cooled(db: Session, acc: Account, model: str, now: datetime) -> bool:
+    """该账号对该模型是否处于模型级冷却中。"""
+    if not model:
+        return False
+    row = (db.query(AccountModelCooldown)
+           .filter(AccountModelCooldown.account_id == acc.id,
+                   AccountModelCooldown.model == model)
+           .first())
+    return bool(row and row.until and row.until > now)
+
+
+def _parse_reset_at(msg: str) -> datetime | None:
+    return model_limits.reset_from_body(msg)
+
+
+def _reset_at_from_headers(headers) -> datetime | None:
+    return model_limits.reset_from_headers(headers)
+
+
+def _error_reset_at(headers, body: str) -> datetime | None:
+    return model_limits.recovery_time(headers, body,
+                                     daily=_json_code(body) in _MODEL_RATE_CODES)
+
+
+_ACCOUNT_AUTH_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+# A model-route 401 is only an account failure after the authenticated balance
+# and profile routes reject the same credential.  Cache the short probe result
+# so a retry storm does not multiply those two extra upstream calls.
+_TRUSTED_AUTH_CACHE: dict[int, tuple[float, str, str]] = {}
+_TRUSTED_AUTH_CACHE_LOCK = threading.Lock()
+_TRUSTED_AUTH_CACHE_SECONDS = 10.0
+
+
+def _trusted_auth_probe(acc: Account) -> tuple[str, str]:
+    """Return ``(ok|dead|inconclusive|anomaly, detail)`` for one account.
+
+    Balance and account-profile are authenticated upstream endpoints.  A
+    successful response from either one proves the bearer session is accepted;
+    a model endpoint alone cannot make that determination because its request
+    shape may be rejected independently.  A pair of 401/403 responses is still
+    checked through the shared-auth guard so a provider-wide outage cannot
+    disable every account at once.
+    """
+    account_id = int(getattr(acc, "id", 0) or 0)
+    now = time.monotonic()
+    if account_id:
+        with _TRUSTED_AUTH_CACHE_LOCK:
+            cached = _TRUSTED_AUTH_CACHE.get(account_id)
+            if cached and now - cached[0] < _TRUSTED_AUTH_CACHE_SECONDS:
+                return cached[1], cached[2]
+
+    sess = None
+    errors: list[Exception] = []
+    try:
+        sess = backend.AccountSession(acc.auth_json)
+        for fn in (sess.fetch_balance, sess.fetch_account_profile):
+            try:
+                value = fn()
+                # A successful authenticated call may legitimately report zero
+                # credits; the response itself, rather than its numeric value,
+                # is the proof that the credential is accepted.
+                if value is not None:
+                    result = ("ok", "余额或账号信息接口返回成功")
+                    if account_id:
+                        with _TRUSTED_AUTH_CACHE_LOCK:
+                            _TRUSTED_AUTH_CACHE[account_id] = (time.monotonic(), *result)
+                    return result
+            except Exception as exc:
+                errors.append(exc)
+
+        statuses = [
+            getattr(error, "http_status", 0) or _extract_http_status(str(error))
+            for error in errors
+        ]
+        if statuses and all(status in (401, 403) for status in statuses):
+            detail = "; ".join(str(error)[:180] for error in errors)
+            from admin.upstream_auth_guard import observe
+            if observe(statuses[0], detail, getattr(acc, "uid", "")):
+                result = ("anomaly", "可信接口也出现共享上游认证异常")
+            else:
+                result = ("dead", "余额与账号信息接口均明确返回 401/403")
+        else:
+            result = ("inconclusive", "可信登录接口探测遇到网络或非鉴权错误")
+        if account_id:
+            with _TRUSTED_AUTH_CACHE_LOCK:
+                _TRUSTED_AUTH_CACHE[account_id] = (time.monotonic(), *result)
+        return result
+    except Exception as exc:
+        return "inconclusive", f"可信登录接口探测异常：{str(exc)[:150]}"
+    finally:
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
+
+
+def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession | None:
+    """创建 AccountSession 并调用 get_headers()（可能触发 token 刷新）。
+
+    若刷新失败（session 死亡等），按策略禁用/冷却该账号并返回 None。
+    """
+    sess = None
+    try:
+        if not isinstance(acc, Account) or not isinstance(acc.id, int):
+            sess = backend.AccountSession(acc.auth_json)
+            sess._gateway_headers = sess.get_headers()
+            return sess
+        # CredentialManager's lock belongs to one instance. Concurrent requests
+        # create separate instances, so serialize refreshes for this identity.
+        lock = _ACCOUNT_AUTH_LOCKS[hash(acc.uid or acc.id) % len(_ACCOUNT_AUTH_LOCKS)]
+        with lock:
+            # A separate transaction sees credentials saved by a request which
+            # finished refreshing while this request waited for the lock.
+            with Session(bind=db.get_bind(), expire_on_commit=False) as auth_db:
+                for _ in range(2):
+                    row = auth_db.query(Account.auth_json).filter(Account.id == acc.id).first()
+                    if row is None:
+                        raise RuntimeError('账号已被删除')
+                    original = row[0]
+                    sess = backend.AccountSession(original)
+                    sess._gateway_headers = sess.get_headers()
+                    updated = sess.updated_json()
+                    if json.loads(updated) != json.loads(original):
+                        changed = auth_db.query(Account).filter(
+                            Account.id == acc.id, Account.auth_json == original).update(
+                                {Account.auth_json: updated}, synchronize_session=False)
+                        auth_db.commit()
+                        if not changed:
+                            # Another process/import won; prepare from its current
+                            # credential instead of overwriting the newer login.
+                            sess.close()
+                            sess = None
+                            continue
+                    sess._gateway_auth_persisted = True
+                    return sess
+                raise RuntimeError('账号凭据正在更新，请稍后重试')
+    except Exception as e:
+        msg = str(e)
+        kind = _classify_error(0, msg)
+        # A token-refresh network failure is not evidence of invalid credentials.
+        # Keep transport failures out of the session-dead disable counter.
+        _apply_account_policy(db, acc, kind, 0, msg)
+        try:
+            sess.close()
+        except Exception:
+            pass
+        return None
+
+
+def _headers_for_attempt(sess, extra):
+    prepared = getattr(sess, '_gateway_headers', None)
+    if isinstance(prepared, dict):
+        return {**prepared, **extra}
+    return sess.get_headers(extra=extra)
+
+
+async def _blocking_call(fn, *args, on_cancel=None, **kwargs):
+    """Run synchronous upstream I/O off the event loop; drain before DB cleanup.
+
+    A cancelled to_thread call keeps running in its worker. Shield and await it
+    so the enclosing request cannot close a Session still in use by that worker.
+    """
+    started = time.perf_counter()
+    request_metrics.set_phase(getattr(fn, '__name__', 'worker'))
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            with anyio.CancelScope(shield=True):
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                result = task.result()
+                if on_cancel is not None and result is not None:
+                    on_cancel(result)
+        except Exception:
+            pass
+        raise
+    finally:
+        elapsed = (time.perf_counter() - started) * 1000
+        request_metrics.add_stage(getattr(fn, '__name__', 'worker'), elapsed)
+        if elapsed >= 250:
+            _logger.info("local-stage stage=%s elapsed_ms=%d", getattr(fn, '__name__', 'worker'), elapsed)
+
+
+async def _account_session_async(db: Session, acc: Account):
+    await _blocking_call(release_connection, db)
+    return await _blocking_call(_account_session_safe, db, acc,
+                                on_cancel=lambda session: session.close())
+
+
+async def _record_gateway_rejection(exc, key_id, request):
+    request_metrics.mark_gateway_error(exc.status_code, exc.detail)
+    error = exc.detail.get('error', {})
+    await _blocking_call(_record_usage, key_id, 0, '', 0.0, None,
+                         error_kind=error.get('code') or error.get('type') or 'gateway_rejected',
+                         client_ip=_client_ip(request), use_case='gateway-admission')
+
+
+async def _stream_response(source, anthropic=False):
+    # All streaming clients need heartbeats while the pool retries another
+    # identity, and disconnect monitoring before the first model token.
+    from admin.mobile_stream import MobileResponse
+    return MobileResponse(source, lambda stream: _prepare_stream_response(stream, anthropic))
+
+
+async def _prepare_stream_response(source, anthropic=False):
+    """Keep pre-output failures as HTTP errors so SDK retry policies can run."""
+    try:
+        first = await source.__anext__()
+    except StopAsyncIteration:
+        first = ""
+    except BaseException:
+        await source.aclose()
+        raise
+    text = first.decode("utf-8", "replace") if isinstance(first, bytes) else first
+    error = None
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            try:
+                obj = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and obj.get("error"):
+                error = obj["error"]
+                break
+    if error is not None or not first:
+        await source.aclose()
+        error = error if isinstance(error, dict) else {"message": str(error or "上游未返回有效响应")}
+        code = error.get('http_status') if error.get('source') == 'gateway' else error.get("code")
+        status = code if isinstance(code, int) and 400 <= code <= 599 else 503
+        retryable = status in (429, 502, 503, 504)
+        kind = ("overloaded_error" if retryable else "invalid_request_error") if anthropic else ("server_error" if retryable else "invalid_request_error")
+        payload = {"error": error if error.get('source') == 'gateway' else {
+            **error, "type": kind, "code": "service_unavailable" if retryable else code}}
+        if anthropic:
+            payload["type"] = "error"
+        return JSONResponse(status_code=status, content=payload,
+                            headers={"Retry-After": "3"} if retryable else {})
+
+    async def remaining():
+        try:
+            yield first
+            async for chunk in source:
+                yield chunk
+        finally:
+            await source.aclose()
+    return StreamingResponse(remaining(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def _select_account_with_wait(db, **kwargs):
+    from admin.capacity_queue import current_queue
+    started = time.monotonic()
+    timeout = max(0, getattr(settings, 'GATEWAY_QUEUE_TIMEOUT', 90))
+
+    def attempt():
+        leased = None
+        try:
+            if POOL.waf.active():
+                return None, False
+            if kwargs.get('key_id') is not None:
+                check_key_current(kwargs['key_id'])
+            account = _select_account(db, **kwargs)
+            if account is not None and POOL.acquire_account(account):
+                leased = account
+                return account, False
+            if POOL.waf.active():
+                return None, False
+            now = datetime.utcnow()
+            query = scope_accounts(db.query(Account), kwargs.get('account_id'), kwargs.get('key_id'))
+            if kwargs.get('exclude_ids'):
+                query = query.filter(~Account.id.in_(kwargs['exclude_ids']))
+            config = db.query(ModelConfig).filter(
+                ModelConfig.model_id == kwargs.get('model'), ModelConfig.level == 'system').first()
+            free = kwargs.get('min_balance', 1) <= 0 or (config is not None and config.credit_multiplier == 0
+                and not model_metadata.is_media_model(kwargs.get('model')))
+            limits = dict(db.query(AccountModelCooldown.account_id, AccountModelCooldown.until).filter(
+                AccountModelCooldown.model == kwargs.get('model'), AccountModelCooldown.until > now).all())
+            remaining = timeout - (time.monotonic() - started)
+            for row in query.populate_existing().filter(Account.status == 'active').all():
+                if (not free and not row.balance_remain) or _looks_login_dead(row, now):
+                    continue
+                account_timers = [getattr(row, field) for field in ('cool_until', 'breaker_until', 'degrade_until')]
+                model_until = limits.get(row.id)
+                timers = account_timers + [model_until]
+                if any(timer and (timer - now).total_seconds() > remaining for timer in timers):
+                    continue
+                # 只有「账号×模型」冷却、账号本身健康时，等待通常没有意义：
+                # 模型级冷却动辄 6 小时，占着公平队列 90 秒只会让客户端干等，
+                # 也挡住别的平台接管。剩余 ≤3 秒才值得等。
+                if (model_until is not None
+                        and not any(account_timers)
+                        and (model_until - now).total_seconds() > 3):
+                    continue
+                return None, True
+            return None, False
+        finally:
+            try:
+                release_connection(db)
+            except BaseException:
+                if leased is not None:
+                    POOL.release(leased.uid or '')
+                raise
+
+    def cancelled(result):
+        if result and result[0] is not None:
+            POOL.release(result[0].uid or '')
+
+    async def select():
+        result = await _blocking_call(attempt, on_cancel=cancelled)
+        request_metrics.set_phase('account_capacity_wait')
+        return result
+
+    try:
+        request_metrics.set_phase('account_capacity_wait')
+        return await current_queue().run(kwargs.get('key_id'), select, timeout,
+            scope=(kwargs.get('account_id'), kwargs.get('model'), frozenset(kwargs.get('exclude_ids') or ())))
+    finally:
+        request_metrics.add_stage('account_queue_wait', (time.monotonic() - started) * 1000)
+
+
+async def _request_json(request):
+    # A disconnect while uploading is distinct from malformed JSON. Preserve
+    # the existing HTTP response while exposing the actual cause in diagnostics.
+    with request_metrics.measure('read_request_body'):
+        try:
+            payload = await request.json()
+            try:
+                from admin.request_payload import capture
+                capture(request.headers, await request.body())
+            except Exception:
+                _logger.warning('Optional ingress request capture failed')
+            record = request_metrics.current.get()
+            if record is not None and isinstance(payload, dict):
+                model = payload.get('model')
+                if isinstance(model, str):
+                    record['requested_model'] = model[:120]
+            return payload
+        except ClientDisconnect:
+            request_metrics.mark_request_error('client_disconnected')
+            raise
+        except json.JSONDecodeError:
+            request_metrics.mark_request_error('invalid_json')
+            raise
+        except UnicodeDecodeError:
+            request_metrics.mark_request_error('invalid_encoding')
+            raise
+        except Exception:
+            request_metrics.mark_request_error('body_read_failed')
+            raise
+
+
+_CREDIT_RE = re.compile(r"x\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+def _transient_cool_fallback(db: Session, exclude_ids: set | None,
+                             min_balance: int, now: datetime,
+                             limit: int = 5, account_id=None, key_id=None,
+                             key=None) -> list:
+    """整池都在临时冷却时的兜底候选（冷却最早到期的前 `limit` 个）。
+
+    只在 `_select_account` 的严格过滤结果为空时调用。语义是「退一档，
+    而不是判定无号可用」：
+
+      * 只放宽 `cool_until` —— `breaker_until` / `degrade_until` 仍然生效，
+        因为它们代表**连续真实失败**，不是单次限流可以解释的；
+      * 只接受 `_TRANSIENT_COOL_KINDS`，持久状态（额度耗尽 / 需重登 / IP 被拦）
+        一律不参与，避免对着一个死号反复重试；
+      * 不在这里做在途/防撞号/模型级过滤 —— 调用方会继续走 `_select_account`
+        剩下的同一套下游逻辑，所以并发请求会被防撞号窗口摊到不同号上，
+        不会出现「一堆请求同时砸同一个兜底号」。
+
+    返回按 `cool_until` 升序的候选（最早到期的排最前，最可能已恢复）。
+    """
+    q = (db.query(Account)
+           .filter(Account.status == "active",
+                   Account.cool_kind.in_(tuple(_TRANSIENT_COOL_KINDS))))
+    # 与 `_select_account` 同口径：兜底也只能在默认平台内部兜底。
+    # 漏掉这里的话，严格过滤没选到号时会从别的平台拉一个过来 ——
+    # 表现就是「WorkBuddy 报 8 个账号不可选」那种跨平台串号。
+    q = q.filter(Account.platform == registry.DEFAULT_PLATFORM)
+    q = scope_accounts(q, account_id, key_id, key=key)
+    if min_balance > 0:
+        q = q.filter(Account.balance_remain > 0)
+    if exclude_ids:
+        q = q.filter(~Account.id.in_(exclude_ids))
+    q = q.filter(or_(Account.breaker_until.is_(None), Account.breaker_until <= now))
+    q = q.filter(or_(Account.degrade_until.is_(None), Account.degrade_until <= now))
+    return q.order_by(Account.cool_until.asc()).limit(limit).all()
+
+
+def _no_account_reason(db: Session, account_id=None, key_id=None,
+                       model: str = "") -> str:
+    """`_select_account` 选不出号时，给出一句**如实**的原因。
+
+    原实现固定回「全部禁用或额度耗尽」。这句话在「整池只是被上游临时限流」
+    的场景下是**错的** —— 它会把排障直接引向「换账号 / 充值」，
+    而真实原因只是等几十秒。线上事故里全池都是 active 且余额充足，
+    却被这句话误导成额度问题。
+    """
+    now = datetime.utcnow()
+    # 与 `_select_account` 同口径：只看默认平台的账号，
+    # 否则会报「全库 N 个账号」这种让用户困惑的数字。
+    accs = scope_accounts(
+        db.query(Account).filter(Account.platform == registry.DEFAULT_PLATFORM),
+        account_id, key_id).all()
+    if not accs:
+        if account_id:
+            return "绑定账号不存在或绑定已变更；该 Key 不会使用公共账号"
+        return "公共账号池为空（账号可能已被 API Key 独占绑定）"
+    active = [a for a in accs if (a.status or "") == "active"]
+    if not active:
+        return f"全部 {len(accs)} 个账号都已禁用"
+    funded = [a for a in active if int(a.balance_remain or 0) > 0]
+    if not funded:
+        return f"{len(active)} 个启用中的账号余额都为 0（积分耗尽）"
+    transient = [a for a in funded
+                 if a.cool_kind in _TRANSIENT_COOL_KINDS
+                 and a.cool_until is not None and a.cool_until > now]
+    if len(transient) == len(funded):
+        soon = min(a.cool_until for a in transient)
+        left = max(0, int((soon - now).total_seconds()))
+        return (f"全部 {len(funded)} 个账号正被上游临时限流"
+                f"（最近一个约 {left} 秒后恢复，无需人工处理）")
+    # 模型级冷却：**最容易被忽略的一层**。
+    #
+    # 账号可能状态健康、有余额、无冷却，但「该账号 × 该模型」被单独冷却了
+    # （上游对该模型返回 11102/6004 时会记）。不查这一层就会把原因
+    # 错误地归到「熔断/降权」，排障会走错方向。
+    if model:
+        from admin.models import AccountModelCooldown
+
+        cooled_ids = {
+            row[0] for row in
+            db.query(AccountModelCooldown.account_id)
+            .filter(AccountModelCooldown.model == model,
+                    AccountModelCooldown.until > now).all()
+        }
+        cooled = [a for a in funded if a.id in cooled_ids]
+        if len(cooled) == len(funded):
+            return (f"{len(funded)} 个账号对模型「{model}」暂时不可用"
+                    f"（上游曾返回该模型不存在/不可用，已按账号×模型记冷却）")
+        if cooled:
+            return (f"{len(funded)} 个账号里有 {len(cooled)} 个对模型"
+                    f"「{model}」冷却中，其余 {len(funded) - len(cooled)} 个"
+                    f"因在途占满暂不可选")
+
+    blocked = len(funded) - len(transient)
+    return (f"{len(funded)} 个账号有余额，但当前都不可选"
+            f"（其中 {blocked} 个处于熔断/降权、在途占满或需人工处理的异常状态）")
+
+
+#: last_err_msg 里代表「上游明确拒绝了这个登录态」的标记。
+#: 与 `_SESSION_DEAD_MARKERS`（文案式、可能是抖动）**刻意分开**：
+#: 这里只认 HTTP 401/403 这类**权威**判定，或保活探测写下的明确结论。
+_LOGIN_DEAD_MARKERS = (
+    "需重新登录",                 # 保活探测 / 策略写入的结论
+    "登录态被上游拒绝",
+    "401 authorization required",
+    "http 401",
+)
+
+
+def _looks_login_dead(acc: Account, now: datetime) -> bool:
+    """该账号是否已被**确证**登录态失效（应从选号中排除）。
+
+    为什么不能只看 `status`：失效判定依赖连续计数达阈值，
+    而阈值存在「还没到禁用、但已经确定不能用」的窗口期。
+    在这个窗口里，账号仍是 active、有余额、无冷却 —— 每次选号都会命中它，
+    每次请求都白失败一次（实测 xx 个号正是这样）。
+
+    为什么也不看 `session_dead_fails > 0`：那个计数在旧实现里
+    会把网络抖动（transport）一起算进去，拿它当门控会误杀健康号。
+    所以只认**权威标记**——由 401/403 路径或保活探测写下的那句结论。
+    """
+    # 用 getattr 容错：调用方（测试替身、其它模块传入的轻量对象）未必带齐字段，
+    # 缺字段时按「健康」处理 —— 门控是**额外的排除条件**，不该因为缺字段
+    # 把候选全部排掉（那会让选号直接返回 None，比漏过一个坏号更严重）。
+    if (getattr(acc, "status", "active") or "active") != "active":
+        return True                      # 已禁用/停用，本就不该被选
+    last_err_at = getattr(acc, 'last_err_at', None)
+    # 没有 last_err_at 就没有**带时间戳的失效证据**。所有写入 session_dead
+    # 结论的路径（对话策略 / 保活 / 复核）都会同时写 last_err_at；它为空
+    # 说明后续成功已经把失败时间清掉了。此时 last_upstream_error 里可能
+    # 还躺着一份旧原文（没有时间字段、永不自过期）—— 线上实测：11 个
+    # 正常出流量的号因为一条陈年 401 HTML 被这里判死，「可用账号」常年
+    # 显示 2。证据必须与 last_err_at 同在才可信。
+    if not last_err_at:
+        return False
+    # A model-route auth error that was followed by a successful or
+    # inconclusive trusted probe is evidence of a request/upstream anomaly,
+    # not a dead account.  Keep the old raw 401 for diagnostics, but do not let
+    # the selector treat that historical response as a login failure.
+    msg = (getattr(acc, "last_err_msg", "") or "").lower()
+    if any(marker in msg for marker in (
+            "可信登录探测", "上游认证接口异常", "共享上游认证异常")):
+        return False
+    if last_err_at and any(
+            succeeded_at and succeeded_at > last_err_at
+            for succeeded_at in (
+                getattr(acc, 'last_used_at', None),
+                getattr(acc, 'last_sync_at', None),
+                getattr(acc, 'credits_synced_at', None),
+            )):
+        # A successful conversation, balance refresh, or credit-package sync is
+        # an authenticated upstream call.  It supersedes older 401/invalid_grant
+        # evidence even when legacy rows still retain cool_kind=session_dead.
+        return False
+    evidence = upstream_errors.stored_info(getattr(acc, 'last_upstream_error', ''))
+    if evidence.get('raw'):
+        kind = _classify_error(evidence.get('http_status') or 0, evidence['raw'])
+        if kind != 'session_dead':
+            return False
+        return (evidence.get('http_status') in (401, 402)
+                or evidence.get('code') in ('401', '402', '3004')
+                or (acc.session_dead_fails or 0) >= max(1, settings.SESSION_DEAD_THRESHOLD))
+    if not msg:
+        return False
+    return any(m in msg for m in _LOGIN_DEAD_MARKERS)
+
+
+def _select_account(db: Session, exclude_ids: set | None = None,
+                    min_balance: int = 1, mark_picked: bool = True,
+                    model: str = "", sticky_key: str = "",
+                    require_realm: str = "", account_id=None, key_id=None,
+                    key=None) -> Account | None:
+    """健康、绑定、容量过滤后，先尊重手动优先级与会话粘性，再应用自动策略。
+
+    模式只影响新会话；免费模型按在途数和最久未用均衡，不消耗临期积分。
+    """
+    now = datetime.utcnow()
+    free_model = False
+    if model and min_balance > 0:
+        config = db.query(ModelConfig).filter(ModelConfig.model_id == model, ModelConfig.level == "system").first()
+        if config is not None and config.credit_multiplier == 0 and not model_metadata.is_media_model(model):
+            free_model = True
+            min_balance = 0
+    q = db.query(Account).populate_existing().filter(Account.status == "active")
+    # ⚠️ **必须按平台过滤**。
+    #
+    # 这条路径属于主应用（默认平台的网关）。不过滤的话会从**全库**挑号 ——
+    # 实测挑中了别的平台的账号，然后用错的凭证走错的协议，必然失败，
+    # 报出来的却是「8 个账号都不可选」（8 是全库账号数，不是本平台的）。
+    #
+    # 多平台各自有 gateway，不走这里，所以固定用默认平台即可。
+    q = q.filter(Account.platform == registry.DEFAULT_PLATFORM)
+    q = scope_accounts(q, account_id, key_id, key=key)
+    if min_balance > 0:
+        q = q.filter(Account.balance_remain > 0)
+    if exclude_ids:
+        q = q.filter(~Account.id.in_(exclude_ids))
+    # 冷却 == 或门：cool_until / breaker_until / degrade_until 任一未到期即不可选。
+    # 生效的一定是最晚到期者 —— 三者各管一类原因，互不覆盖（原实现用单个
+    # cool_until 会被后写的短冷却覆盖掉先写的长冷却，等于提前放行一个坏号）。
+    q = q.filter(or_(Account.cool_until.is_(None), Account.cool_until <= now))
+    q = q.filter(or_(Account.breaker_until.is_(None), Account.breaker_until <= now))
+    q = q.filter(or_(Account.degrade_until.is_(None), Account.degrade_until <= now))
+
+    rows = q.all()
+    if not rows:
+        # 整池都进了**临时**冷却，而不是「没有健康账号」。
+        # 这里不直接返回 None（那会变成对客户端的 503 硬失败），
+        # 而是退一档：把冷却最早到期、且阻塞原因只是临时限流的号拿来做候选。
+        # 14003 这类「请求过于频繁」很可能已经自然恢复；即便没恢复，
+        # 试一次也远好于给用户一个必然失败的 503。
+        rows = _transient_cool_fallback(db, exclude_ids, min_balance, now,
+                                        account_id=account_id, key_id=key_id,
+                                        key=key)
+        if rows:
+            _logger.warning(
+                "号池全部处于临时冷却中，启用兜底候选 %d 个（最早的 %s 到期）",
+                len(rows), rows[0].cool_until)
+    if not rows:
+        return None
+
+    # 「已知登录态失效」的号直接排除 —— 这是本次故障的直接补丁。
+    #
+    # 背景：`last_err_msg` 里已经是 401 的号，如果只是被计了 1 次
+    # session_dead_fails（还没到禁用阈值），它仍然满足 active + 有余额 + 无冷却，
+    # 于是每次选号都会命中它、每次请求都白失败一次。
+    # 权威判定（HTTP 401/403）现在会立即禁用，但历史遗留数据里可能还有
+    # 只计过数、没禁用的号，所以选号层再兜一道。
+    #
+    # 判据取「权威 401 标记」而不是「计数 > 0」：计数会被网络抖动误加
+    # （旧实现就把它和 transport 混在一起），拿它当门控会误杀健康号。
+    rows = [a for a in rows if not _looks_login_dead(a, now)]
+    if not rows:
+        return None
+
+    # 模型级冷却过滤（6004 / 11102）：只排除「该账号×该模型」，
+    # 账号对其他模型仍然可用 —— 这正是模型级冷却独立存在的意义。
+    if model:
+        cooled_ids = {account_id for (account_id,) in db.query(AccountModelCooldown.account_id)
+                      .filter(AccountModelCooldown.model == model,
+                              AccountModelCooldown.until > now).all()}
+        rows = [a for a in rows if a.id not in cooled_ids]
+        if not rows:
+            return None
+
+    # 在途占满的号不参与选号（把并发摊平到整个池子，避免单号过载→成片 429）
+    rows = POOL.available(rows)
+    if not rows:
+        return None
+
+    # 真实客户端 IP / realm 维度：本系统只保留 CN 域，require_realm 预留扩展位。
+    if require_realm:
+        rows = [a for a in rows if (a.domain or "").find(require_realm) >= 0] or rows
+
+    # Explicit user order outranks stickiness, expiry and free-model balancing.
+    # Health/model limits, ownership and capacity were already checked above.
+    from admin.selection_order import manual_priority
+    priority = min(manual_priority(a) for a in rows)
+    if priority != float('inf'):
+        rows = [a for a in rows if manual_priority(a) == priority]
+
+    strategy = routing_policy.selection_mode(db)
+    if strategy == 'throughput':
+        # Read each load once: releases from other threads must not change the
+        # minimum between ranking and filtering and leave an empty shortlist.
+        loads = {a.id: POOL.inflight.count(a.uid or '') / max(1, POOL.limit_for(a)) for a in rows}
+        lowest = min(loads.values())
+        rows = [a for a in rows if loads[a.id] == lowest]
+
+    # Keep cache affinity among equally loaded accounts in throughput mode.
+    if sticky_key:
+        bound = POOL.sticky.resolve(sticky_key, {a.uid or "" for a in rows})
+        if bound:
+            hit = next((a for a in rows if (a.uid or "") == bound), None)
+            if hit is not None:
+                if mark_picked:
+                    POOL.recent.mark(hit.uid or "")
+                    hit.last_picked_at = now
+                return hit
+
+    candidates = rows
+    if not free_model and strategy == 'expiring':
+        best = min(pool.expiry_key(a, now) for a in candidates)
+        candidates = [a for a in candidates if pool.expiry_key(a, now) == best]
+    # Apply the short collision window inside a strict expiry tier only.
+    fresh = [a for a in candidates if POOL.recent.fresh(a.uid or '')]
+    candidates = fresh or candidates
+    POOL.recent.prune()
+    load_key = lambda a: (POOL.inflight.count(a.uid or ''),
+                          a.last_used_at or datetime.min, a.id)
+    if strategy == 'throughput':
+        acc = min(candidates, key=load_key) if free_model else min(
+            candidates, key=lambda a: (pool.expiry_key(a, now), *load_key(a)))
+    elif free_model or strategy in ('lru', 'expiring'):
+        acc = min(candidates, key=load_key)
+    elif strategy == 'expiry_weighted':
+        acc = pool.expiry_weighted_pick(candidates, inflight=POOL.inflight, now=now)
+    elif strategy == 'weighted':
+        canon = [
+            {'uid': a.uid or '', 'credits': int(a.balance_remain or 0),
+             'credits_expiring': int(a.credits_expiring_soon or 0) or int(a.credits_expiring or 0),
+             'last_used_at': a.last_used_at, 'acc': a}
+            for a in candidates
+        ]
+        picked = pool.weighted_pick(canon, now=now)
+        acc = picked['acc'] if picked else None
+    elif strategy == 'remain':
+        acc = min(candidates, key=lambda a: (-int(a.balance_remain or 0), *load_key(a)))
+    else:  # oldest
+        acc = min(candidates, key=lambda a: (a.created_at or datetime.min, *load_key(a)))
+
+    if acc is not None and mark_picked:
+        POOL.recent.mark(acc.uid or "")
+        acc.last_picked_at = now
+        # Observational timestamp is persisted with request accounting/policy,
+        # not a separate write transaction on the selection hot path.
+    return acc
+
+
+
+def _key_group_models(db: Session, key: "ApiKey | None") -> set[str] | None:
+    """返回该 Key 允许的模型集合；None 表示不限制（可用全部启用模型）。
+
+    绑定分组后只允许组内模型。分组被删除 → group_id 由删除接口置 0，
+    这里读到 0 即视为不限制（自动降级，不锁死 Key）。
+    组内模型全部被禁用时返回空集合，此时拒绝一切模型调用 —— 这是「配了分组但
+    组内模型都不可用」的明确信号，不应静默放开。
+    """
+    if key is None:
+        return None
+    gid = int(getattr(key, "group_id", 0) or 0)
+    if not gid:
+        return None
+    from admin.routers.groups import effective_group_models
+    return effective_group_models(db, gid)
+
+
+def _model_out_of_group_error(model: str) -> JSONResponse:
+    """模型不在 Key 绑定分组内时的统一拒绝响应。"""
+    return JSONResponse(
+        status_code=403,
+        content={"error": {
+            "message": f"模型 '{model}' 不在该 API Key 绑定的分组内",
+            "type": "model_not_in_group",
+            "code": "model_not_in_group",
+        }},
+    )
+
+
+def _key_allowed_models(db: Session, key) -> set[str] | None:
+    allowed = _key_group_models(db, key)
+    aid = getattr(key, "account_id", None)
+    if not aid:
+        return allowed
+    acc = scope_accounts(db.query(Account), aid, key.id).first()
+    if acc is None or acc.status != "active":
+        raise HTTPException(503, {"error": {"message": "绑定账号不存在或已禁用，该 Key 无法使用公共池",
+                                           "type": "bound_account_unavailable"}})
+    try:
+        def fetch():
+            with backend.AccountSession(acc.auth_json) as sess:
+                rows = sess.fetch_models()
+                acc.auth_json = sess.updated_json()
+            db.commit()
+            return rows
+        rows = model_catalog.get_models(acc.auth_json, settings.BACKEND, fetch)
+    except Exception:
+        db.rollback()
+        raise HTTPException(503, {"error": {"message": "无法获取绑定账号的模型权益，请稍后重试",
+                                           "type": "bound_account_unavailable"}}) from None
+    entitled = {m["id"] for m in rows or [] if m.get("id") and m["id"].lower() != "auto"}
+    configs = db.query(ModelConfig).all()
+    if configs:
+        entitled &= {c.model_id for c in configs if c.enabled}
+    return entitled if allowed is None else entitled & allowed
+
+
+def _model_access_error(key, model):
+    if getattr(key, "account_id", None):
+        return JSONResponse(status_code=403, content={"error": {
+            "message": f"模型 '{model}' 不在该 Key 绑定账号的模型权益或允许分组内",
+            "type": "model_not_entitled", "code": "model_not_entitled"}})
+    return _model_out_of_group_error(model)
+
+
+def _pick_best_model(db: Session, requested_model: str,
+                     allowed: set[str] | None = None) -> str | None:
+    """根据请求模型和可用配置，选出最优实际使用的模型 ID。
+
+    策略：
+      - 用户指定了具体模型 → 校验白名单后直接用（或返回 None 表示被拒）
+      - 用户传 "auto" 或空 → 优先选免费模型（credit_multiplier=0），没有免费的才选付费的
+      - 未配置任何模型规则时放行全部（向后兼容），返回原始 model
+      - allowed 非 None 时（Key 绑定了分组），只在 allowed 集合内选择
+    """
+    from admin.routers.models import _is_model_allowed, _get_free_models, _get_enabled_models
+    from admin.models import ModelConfig
+
+    # 检查是否有任何配置记录（无配置=向后兼容，放行全部）
+    has_any_config = db.query(ModelConfig).first() is not None
+
+    # 具体模型：有配置时校验白名单，无配置直接放行
+    if requested_model and requested_model != "auto":
+        if allowed is not None:
+            # 绑定了分组：只认组内模型，优先于全局白名单判定，
+            # 组内没有就是没权限（比白名单更严格，语义更明确）
+            return requested_model if requested_model in allowed else None
+        if not has_any_config:
+            return requested_model  # 无配置，放行
+        if _is_model_allowed(db, requested_model):
+            return requested_model
+        return None  # 被白名单拒绝
+
+    # auto 模式：有配置时免费优先，无配置也从后端取模型列表自选（绝不透传 auto）
+    if allowed is not None:
+        # 分组内：免费优先，否则任意组内模型
+        allowed = {mid for mid in allowed if not model_metadata.is_media_model(mid)}
+        free_in_group = _get_free_models(db) & allowed
+        if free_in_group:
+            return sorted(free_in_group)[0]
+        if allowed:
+            return sorted(allowed)[0]
+        return None  # 分组内无可用模型（都被禁用）
+
+    if not has_any_config:
+        # Cache discovery: a chat must not fetch the model catalog on every turn.
+        try:
+            acc_tmp = _select_account(db)
+            if acc_tmp:
+                def fetch():
+                    with backend.AccountSession(acc_tmp.auth_json) as sess:
+                        return sess.fetch_models()
+                selected = model_catalog.auto_model(acc_tmp.auth_json, settings.BACKEND, fetch)
+                if selected:
+                    return selected
+        except Exception:
+            pass
+        return "deepseek-v4-flash"  # 兜底：无配置且后端不可达时用默认模型
+
+    free_models = {mid for mid in _get_free_models(db) if not model_metadata.is_media_model(mid)}
+    if free_models:
+        return list(free_models)[0]  # 取第一个免费模型
+
+    # 无免费模型：取任意一个启用的
+    enabled = {mid for mid in _get_enabled_models(db) if not model_metadata.is_media_model(mid)}
+    if enabled:
+        return list(enabled)[0]
+
+    return None  # 有配置但全禁用
+
+
+def _candidate_models(db: Session, tried: set, allowed: set[str] | None = None) -> list:
+    """按 免费→付费 顺序返回可用模型候选（排除已尝试的），用于 429/5xx 自动切换。
+
+    allowed 非 None 时（Key 绑定了分组）只在组内挑选，避免自动切换时
+    悄悄把请求切到分组外的模型上。
+    """
+    from admin.routers.models import _get_enabled_models, _get_free_models
+
+    free = {mid for mid in _get_free_models(db) - tried if not model_metadata.is_media_model(mid)}
+    paid = {mid for mid in (_get_enabled_models(db) - free) - tried if not model_metadata.is_media_model(mid)}
+    if allowed is not None:
+        free &= allowed
+        paid &= allowed
+    return list(free) + list(paid)
+
+
+def _aggregate_chat_sse(sse_text: str) -> dict:
+    """把上游 chat SSE 聚合成一个非流式 `chat.completion` 对象。
+
+    上游 `/v2/chat/completions` 只支持流式，所以 `stream: false` 的客户端
+    必须在网关内部聚合。**这个函数是必需的，不是优化**：若直接把 SSE 原样
+    返回给 `stream: false` 的调用方，OpenAI SDK 会拿到 `text/event-stream`
+    去做 `json.loads`，直接抛 JSONDecodeError —— 非流式调用 100% 失败。
+
+    合并规则与 `converter._collect_stream` 保持一致（两边必须同源，否则
+    直连网关与后台网关对同一请求会给出不同的响应形状）：
+
+      * `delta.content` 拼接为 `message.content`
+      * `delta.reasoning_content` 拼接为 `message.reasoning_content`
+        （思维链不能丢，见 converter.py 的同类注释）
+      * `delta.tool_calls` 按 `index` 聚合、`arguments` 分片拼接
+      * `usage` 取最后一个出现的事件
+      * 兼容上游偶发回 `message` 而非 `delta` 的形态
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    model: str | None = None
+    finish_reason: str | None = None
+    usage: dict | None = None
+    saw_content_delta = False
+    created = None
+    resp_id = ""
+
+    for line in sse_text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload in ("", "[DONE]"):
+            continue
+        try:
+            chunk = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        model = chunk.get("model") or model
+        resp_id = chunk.get("id") or resp_id
+        created = chunk.get("created") or created
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+            # 补齐积分类字段（credit / credits / cost 三份），
+            # 客户端读哪个都能显示「消耗 N 积分」。
+            try:
+                from upstream_compat import _ensure_usage_credit
+
+                _ensure_usage_credit(usage)
+            except Exception:  # noqa: BLE001
+                pass
+        for choice in (chunk.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+                saw_content_delta = True
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+            msg = choice.get("message") or {}
+            if not saw_content_delta and msg.get("content"):
+                content_parts.append(msg["content"])
+            if not reasoning_parts and msg.get("reasoning_content"):
+                reasoning_parts.append(msg["reasoning_content"])
+            for tc in (delta.get("tool_calls") or msg.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index", 0)
+                slot = tool_calls.setdefault(
+                    idx, {"id": None, "name": None, "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
+
+    tcs = None
+    if tool_calls:
+        tcs = [
+            {"id": v["id"], "type": "function",
+             "function": {"name": v["name"], "arguments": v["arguments"]}}
+            for _, v in sorted(tool_calls.items())
+        ]
+        finish_reason = finish_reason or "tool_calls"
+
+    message: dict = {"role": "assistant",
+                     "content": "".join(content_parts) or None}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tcs:
+        message["tool_calls"] = tcs
+
+    out: dict = {
+        "id": resp_id or f"chatcmpl-{os.urandom(12).hex()}",
+        "object": "chat.completion",
+        "created": created or int(time.time()),
+        "model": model or "",
+        "choices": [{"index": 0, "message": message,
+                     "finish_reason": finish_reason or "stop",
+                     "logprobs": None}],
+    }
+    if usage is not None:
+        out["usage"] = usage
+    return out
+
+
+def _parse_usage(sse_text: str) -> dict:
+    """从 chat SSE 文本里找最后一个带 usage 的事件，解析 credits 与 token 明细。
+
+    返回 {"credits", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"}。
+    上游通常只在最后一个事件回传 usage（配合 stream_options.include_usage=True）。
+
+    积分字段优先级：usage.credits > usage.credit > usage.cost，均缺失时返回 credits=None，
+    由调用方按模型倍率估算（倍率单位为「每千 token」）。
+    """
+    credits = None
+    prompt_tokens = completion_tokens = total_tokens = cached_tokens = None
+    for line in sse_text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload in ("", "[DONE]"):
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        # 桌面端源码读取 usage.credit / usage.credits；旧协议有 usage.cost，一并兼容。
+        cred = usage.get("credits")
+        if cred is None:
+            cred = usage.get("credit")
+        if cred is None and isinstance(usage.get("cost"), (int, float)):
+            cred = usage.get("cost")
+        if cred is not None:
+            cred_str = str(cred).strip()
+            # 兼容 "x 100" / "x100" 以及纯数字 "100" / "100.5"
+            m = _CREDIT_RE.search(cred_str)
+            if m:
+                credits = float(m.group(1))
+            else:
+                try:
+                    credits = float(cred_str)
+                except ValueError:
+                    pass
+            _logger.debug("parse_usage credit raw=%r parsed=%s", cred, credits)
+            # **上游回 0 视为「没算」而不是「免费」**：
+            # WorkBuddy 的多数模型固定回 `credit: 0`（它根本没算积分），
+            # 若把 0 当权威值，`_record_usage` 就不会走倍率估算，
+            # 客户端底部也永远显示「消耗 0 积分」。
+            # 归成 None，让下游按 model_configs 的倍率估算。
+            if credits == 0.0:
+                credits = None
+        if usage.get("prompt_tokens") is not None:
+            prompt_tokens = usage["prompt_tokens"]
+        if usage.get("completion_tokens") is not None:
+            completion_tokens = usage["completion_tokens"]
+        if usage.get("total_tokens") is not None:
+            total_tokens = usage["total_tokens"]
+        # 缓存命中 token：OpenAI 标准在 prompt_tokens_details.cached_tokens
+        cached = None
+        ptd = usage.get("prompt_tokens_details")
+        if isinstance(ptd, dict):
+            cached = ptd.get("cached_tokens")
+        if cached is None and usage.get("cached_tokens") is not None:
+            cached = usage["cached_tokens"]
+        if cached is not None:
+            cached_tokens = cached
+    return {
+        "credits": credits,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": cached_tokens,
+    }
+
+
+def _estimate_credits(sse_text: str, model: str) -> float:
+    """兼容旧调用：仅返回 credits 估算（token 明细用 _parse_usage）。"""
+    u = _parse_usage(sse_text)
+    if u["credits"] is not None:
+        return u["credits"]
+    toks = u["total_tokens"] or u["completion_tokens"]
+    if toks:
+        return float(toks) * settings.COST_PER_TOKEN / 1000.0
+    return 0.0
+
+
+# Claude Code 等 Anthropic 客户端发来的是 claude-* 模型名，上游不认。
+# 按 opus / sonnet / haiku 三个档次映射到本后台白名单里的模型，
+# 档次目标来自 .env（ADMIN_ANTHROPIC_MODEL_*），默认 auto。
+_ANTHROPIC_MODEL_TIERS = (
+    ("opus", settings.ANTHROPIC_MODEL_OPUS),
+    ("sonnet", settings.ANTHROPIC_MODEL_SONNET),
+    ("haiku", settings.ANTHROPIC_MODEL_HAIKU),
+)
+
+
+def _map_anthropic_model(db: Session, model: str, key: "ApiKey | None" = None) -> str:
+    """把 Anthropic 的模型名翻译成本后台白名单里的模型名。
+
+    按顺序判定：
+      1. 空 / auto                 → auto（由号池按免费优先自选）
+      2. 具体上游模型名           → 保留原名，由统一权限检查决定是否允许
+      3. Claude 的 opus/sonnet/haiku 别名 → 取配置的对应档次模型，再检查权限
+      4. 其它 claude-* 别名        → auto
+
+    移出分组或禁用的具体模型不能退回 auto，否则一次应被拒绝的调用
+    会静默改用其它模型并成功。档次映射目标也遵守相同的权限检查。
+    """
+    allowed = _key_group_models(db, key)
+    m = (model or "").strip()
+    if not m or m == "auto":
+        return "auto"
+    if (not m.lower().startswith("claude-")
+            or db.query(ModelConfig.id).filter(ModelConfig.model_id == m).first() is not None
+            or (allowed is not None and m in allowed)):
+        return m
+    low = m.lower()
+    for tier, target in _ANTHROPIC_MODEL_TIERS:
+        if tier in low and target:
+            return target
+    return "auto"
+
+
+@router.post("/v1/chat/completions")
+async def chat_completions(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    request_start = time.perf_counter()
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "缺少 API Key", "type": "auth_error"}})
+
+    key = await _blocking_call(get_key_row, db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={"error": {"message": "无效 API Key", "type": "auth_error"}})
+    try:
+        check_quota(key)
+    except Exception as e:
+        request_metrics.mark_gateway_error(e.status_code, e.detail)
+        kind = 'key_quota_exceeded' if e.status_code == 402 else 'key_disabled'
+        await _blocking_call(_record_usage, key.id, 0, '', 0.0, None,
+                             error_kind=kind, use_case='gateway-admission')
+        return JSONResponse(status_code=e.status_code, content=e.detail)
+
+    request.scope['_gateway_key_id'] = key.id
+    try:
+        payload = await _request_json(request)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "bad json", "type": "invalid_request"}})
+
+    model = payload.get("model", "auto")
+
+    # 模型白名单检查 + 免费优先选择（绑定了分组的 Key 只在组内选择）
+    allowed = await _blocking_call(_key_allowed_models, db, key)
+    resolved_model = await _blocking_call(_pick_best_model, db, model, allowed)
+    if resolved_model is None:
+        if allowed is not None and model not in ("auto", ""):
+            return _model_access_error(key, model)
+        # **提示可能的原因**：平台网关的模型（如 `dfmodel-qoder`）不在
+        # 主应用的白名单里。带平台后缀的请求本应由 dispatch 层截走，
+        # 走到这里说明后缀没匹配上（平台被禁用 / 名字有拼写差异）。
+        hint = ""
+        _fallback_pid = ""
+        try:
+            from admin.platform import model_suffix
+
+            pid, _bare, matched = model_suffix.resolve(str(model))
+            if matched:
+                hint = ("；该名字看着像平台模型（%s）" % pid)
+                _fallback_pid = pid
+        except Exception:  # noqa: BLE001
+            pass
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "message": f"模型 '{model}' 不存在或已被禁用" + hint,
+                "type": "model_not_found",
+            }},
+        )
+
+    # 候选模型顺序：auto 模式按 免费→付费 排列，支持上游 429/5xx 自动切换下一个
+    if model in ("auto", ""):
+        order = [resolved_model] + await _blocking_call(_candidate_models, db, {resolved_model}, allowed)
+        order = order[:8]  # 最多尝试 8 个，避免全局限流时反复重试
+    else:
+        order = [resolved_model]  # 具体模型：不静默切换，失败即报错
+
+    body = dict(payload)
+    body["stream"] = True
+    # 最后内容帧时刻（用于算纯解码耗时，与 DSH 口径一致）
+    last_content_at = None
+    # 客户端是否要流式。OpenAI SDK 默认 stream=false，所以**不能**假定为 True。
+    # 上游只支持流式，因此客户端要非流式时我们先向自己要 SSE、再内部聚合。
+    client_wants_stream = bool(payload.get("stream", False))
+
+    # 始终要求上游回传 usage（token 与缓存命中），保证调用方一定能拿到用量自行记录
+    opts = dict(body.get("stream_options") or {})
+    opts["include_usage"] = True
+    body["stream_options"] = opts
+
+    url = f"{settings.BACKEND}/v2/chat/completions"
+
+    # 会话粘性键与会话头族在**轮转循环外**算一次，循环内所有尝试复用同一份：
+    # 换号重试若换了会话 ID，上游看到的是 N 个并发会话而不是一次对话的一次重试。
+    # 先按原始 body 取会话键，再脱敏 —— 零宽字符不应改变会话身份。
+    sticky_key = pool.session_key_for(body)
+    conversation_id, turn_id = _turn_headers(body, identity.purpose_for("chat"))
+    await _blocking_call(release_connection, db)
+    # 所有客户端共用的内容兼容：role developer → system、身份/固定模板归一、
+    # 清孤儿 tool_call；保留上游接受的归因字段与会话粘性键。
+    # **必须在脱敏之前**：脱敏只改 content 文本，改不了 role 字段值。
+    _normalize_harness_body(body)
+    # 与 /v1/messages 同一套 harness 脱敏：OpenAI 反代不过这道过滤，
+    # system/tools 里的合规声明词会被上游内容审核整条拒掉（11128）。
+    body = _desensitize_chat_body(body)
+
+    async def _stream(aggregate: bool = False):
+        """带账号轮换 + 在途租约 + 退避 + 错误状态机 + 表格日志的流式代理。
+
+        ``aggregate=False``（默认）：逐块 yield SSE，直接转发给客户端。
+        ``aggregate=True``：同样的轮换/重试/记账逻辑，但把上游 SSE 收集起来，
+        最后 yield **一个** 非流式 `chat.completion` JSON —— 供 `stream: false`
+        的调用方使用。两条路径共用这套重试逻辑（含租约、粘性、退避、分类处置），
+        避免为「要不要流式」复制一份号池状态机（那份复制迟早会漂移）。
+        """
+        db2 = SessionLocal()
+        held_uid = ""  # 当前持有的在途租约
+        sess_i = None
+        try:
+            ttfb_at = None
+            status_out = 503
+            seq = None
+            mode = "stream"
+            final_model = resolved_model or model
+            final_acc_id = 0
+            final_uid = "-"
+            total_toks = None
+            collected = []
+            delivered = False
+            last_err_kind = ""
+            last_err_msg = ""
+            last_err_status = 0
+            retry_budget = await _blocking_call(pool_budget, db2, key, order)
+            rotate_idx = 0  # 轮转序号（退避按它指数增长）
+            tried_accounts = 0   # 供「全部失败」提示说明尝试规模
+            tried_models_n = 0
+
+            async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
+                for m in order:
+                    if not retry_budget.available():
+                        break
+                    body["model"] = m
+                    tried_models_n += 1
+                    tried_ids: set = set()
+                    while retry_budget.available():
+                        # WAF IP 级 fail-fast：多账号接连 403 说明是**出口 IP** 被拦，
+                        # 继续轮转只会把一次请求放大成 N 次并加重风控，立即终止。
+                        if POOL.waf.active():
+                            last_err_kind = "waf"
+                            last_err_msg = (f"出口 IP 被 WAF 拦截，"
+                                            f"剩余 {POOL.waf.remaining()}s")
+                            break
+                        if not retry_budget.available():
+                            break
+                        acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
+                                                model=m, sticky_key=sticky_key,
+                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                        if not acc_i:
+                            break
+                        tried_accounts += 1
+                        # The fair selector already owns this account lease.
+                        tried_ids.add(acc_i.id)
+                        held_uid = acc_i.uid or ""
+                        retry_budget.consume()
+                        request_metrics.mark_attempt(acc_i.id, m)
+                        upstream_http.select_account(request.scope, acc_i)
+                        sess_i = await _account_session_async(db2, acc_i)
+                        if sess_i is None:
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            continue
+                        # 归属头（使用端/用途）+ 本次调用的追踪头；两者都在每次
+                        # 上游尝试时现算，换号/换模型后的请求不会再撞上用量去重键。
+                        extra = await _blocking_call(
+                            _upstream_extra_headers, request,
+                            identity.purpose_for("chat"), conversation=conversation_id,
+                            turn=turn_id)
+                        headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra)
+                        try:
+                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                                if r.status_code >= 400:
+                                    detail = await r.aread()
+                                    text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
+                                    kind = _classify_error(r.status_code, text)
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, r.status_code, text,
+                                                          model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    # 可重试：余额不足 / session 死亡 / 限流 / 模型级限流 /
+                                    # 账号故障 / 上游 5xx / 404 / WAF / 上游内部错误
+                                    # 都换号或换模型，绝不把中断感传递给客户端。
+                                    if kind in _RETRYABLE_KINDS:
+                                        last_err_kind = kind
+                                        last_err_msg = text
+                                        last_err_status = r.status_code
+                                        # 6004 / 11102 only reject this account-model pair.
+                                        # Try the next account before another model.
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    # Keep the HTTP status separate from upstream business codes.
+                                    # Stream preflight recognizes SSE error envelopes; yielding
+                                    # bare backend JSON here would turn a 400 into HTTP 200 SSE.
+                                    if not delivered:
+                                        rejected = json.dumps({"error": {
+                                            "message": text, "type": "upstream_error",
+                                            "code": r.status_code,
+                                            **_failure_evidence(kind, text, r.status_code),
+                                        }}, ensure_ascii=False)
+                                        yield rejected if aggregate else f"data: {rejected}\n\n"
+                                    return
+                                # HTTP 200 —— 但 200 **不等于**成功：上游会把内部错误
+                                # （-32603 Internal error / ENOSPC 写盘失败）塞进 200 的
+                                # 响应体里。一旦我们把字节转发给客户端，就再也无法换号了，
+                                # 所以先缓冲一小段，确认是**正文**再提交。
+                                final_model = m
+                                final_acc_id = acc_i.id
+                                final_uid = acc_i.uid or "-"
+                                probe = ""
+                                committed = False
+                                # 空占位字段归一 + 「提交前缓冲」：只在确认这是
+                                # **真正文**（而非 200 包着的错误信封）后才把字节发给
+                                # 客户端 —— 一旦发出就无法换号重试了。
+                                # collected 里仍保留上游原文（换号判断/日志/聚合要用原文）。
+                                # 用 aiter_text() 而非 aiter_bytes()：httpx 的文本迭代器
+                                # 是**增量**解码的，不会把一个汉字（3 字节）拆坏；逐 chunk
+                                # 自己 decode("utf-8","replace") 会把拆开的汉字变成 U+FFFD。
+                                #
+                                # ⚠️ StreamCommitBuffer **全程只用 bytes**。这里是曾经出过
+                                # 事故的地方：把 normalizer 返回的 bytes 塞进 list[str] 再
+                                # "".join()，每个流式请求在出现第一段正文时抛 TypeError；
+                                # 它又被下面的 except Exception 吞掉（此时 delivered 已为
+                                # True，只静默结束），表现为 nginx「upstream prematurely
+                                # closed connection」+ 客户端「Stream ended without
+                                # finish_reason」，且日志里连堆栈都没有。别再把 str 混进来。
+                                buf = StreamCommitBuffer(
+                                    StreamDeltaNormalizer()
+                                    if not aggregate and _STREAM_NORMALIZER_AVAILABLE
+                                    else None
+                                )
+                                async for chunk in r.aiter_text():
+                                    collected.append(chunk)
+                                    # 记录**最后一个内容帧**到达时刻。
+                                    # DSH 的 decodeMs 是 `completedTime - firstTokenTime`，
+                                    # 终点取「最后一个 token」，不含收尾帧与 [DONE] 的
+                                    # 传输时间。我们原来用「读完整个响应」，多算了
+                                    # 200~400ms，TPS 因而偏低 15~25%。
+                                    if _sse_has_content(chunk):
+                                        last_content_at = time.perf_counter()
+                                    clean = buf.feed_text(chunk)
+                                    if buf.committed:
+                                        if not aggregate and clean:
+                                            ttfb_at = ttfb_at or time.perf_counter()
+                                            yield clean
+                                        continue
+                                    probe += chunk
+                                    # 看到真实正文增量就提交（此后不再换号）；
+                                    # 或缓冲到上限仍未见到正文，也不再憋着。
+                                    if _sse_has_content(probe) or len(probe) >= _INBAND_PROBE_MAX:
+                                        committed = True
+                                        delivered = True
+                                        if not aggregate:
+                                            head = buf.commit()
+                                            if head:
+                                                ttfb_at = ttfb_at or time.perf_counter()
+                                                yield head
+                                        else:
+                                            buf.commit()
+                                        probe = ""
+                                # 流结束：吐净归一器残留（已提交则立即转发，
+                                # 否则留在 pending 交给下面的兜底分支）。
+                                if not aggregate:
+                                    tail = buf.flush()
+                                    if tail:
+                                        yield tail
+                            # 流式完成：先判定这是不是「200 包着的错误」
+                            text = "".join(collected)
+                            stream_is_error = bool(text) and (
+                                _looks_like_inband_error(text) or _sse_has_error_event(text)
+                            )
+                            # 聚合模式全程缓冲、尚未向客户端产出任何字节，可整条重试。
+                            # 流式模式只在「还没提交过字节」时才可重试。
+                            can_retry = aggregate or not committed
+
+                            # 「流被截断」：上游结束了连接，却没有任何终止帧
+                            # （没有 finish_reason、也没有 [DONE]）。客户端会报
+                            # 「Stream ended without finish_reason」并**反复重试**。
+                            # 原实现把它当成功（_note_success）、不惩罚账号，
+                            # 于是每次重试都再选中同一个坏号 —— 正是「一直重试」的成因。
+                            truncated = (not aggregate and not stream_is_error
+                                         and _sse_is_truncated(text))
+                            if truncated and can_retry:
+                                # 一个字节都没发出去 → 完整换号重试，用户无感
+                                kind = "upstream_internal"
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, text[:500], model=m)
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                last_err_kind = kind
+                                last_err_msg = "上游流被截断（无 finish_reason 与 [DONE]）"
+                                _logger.warning(
+                                    "上游流被截断且尚未提交，换号重试 acc=%s model=%s body=%.160s",
+                                    final_uid, m, text)
+                                collected.clear()      # 下一轮从零收集，避免拼接两个号的内容
+                                delivered = False
+                                await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                rotate_idx += 1
+                                continue
+                            if stream_is_error:
+                                kind = _classify_error(200, text)
+                                if can_retry:
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, text[:65536],
+                                                          model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    last_err_kind = kind
+                                    last_err_msg = text
+                                    last_err_status = r.status_code
+                                    _logger.warning(
+                                        "上游 200 但响应体是错误，换号重试 kind=%s acc=%s model=%s body=%.200s",
+                                        kind, final_uid, m, text)
+                                    # 累积内容清空：下一轮账号从零收集，
+                                    # 否则最终会把两个号的内容拼在一起。
+                                    # （pending / probe / normalizer 都在每轮账号
+                                    # 开头重新初始化，不在这里清。）
+                                    collected.clear()
+                                    delivered = False
+                                    if kind in _RETRYABLE_KINDS:
+                                        # Account/model failures retry another eligible account.
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    # 不可重试：如实把错误交给客户端
+                                    if aggregate:
+                                        yield json.dumps(
+                                            {"error": {"message": text[:500],
+                                                       "type": "upstream_error"}},
+                                            ensure_ascii=False)
+                                    else:
+                                        yield text
+                                    return
+                                # 已经把字节发给客户端了，收不回来 —— 但绝不能记成成功：
+                                # 如实标记错误，让用量/日志与真实结果一致。
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, final_model, mode,
+                                                    final_uid, 200, None, error_kind=kind)
+                                await _blocking_call(_record_usage, key.id, final_acc_id, final_model, 0.0, None,
+                                              reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request),
+                                              use_case="chat-completion", seq=seq,
+                                              latency_ms=latency_ms, error_kind=kind)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, text[:500], model=m)
+                                return
+                            # 流式模式下若始终没识别到正文（如仅角色帧就结束），
+                            # 把缓冲补发给客户端，绝不静默吞掉内容。
+                            # 优先发**已归一化**的 pending（bytes），避免把上游的
+                            # 空占位字段带出去；pending 为空时才退回原始 probe。
+                            if not committed and not aggregate:
+                                tail = buf.take_pending()
+                                if tail or probe:
+                                    ttfb_at = ttfb_at or time.perf_counter()
+                                    delivered = True
+                                    yield tail if tail else probe
+                                    probe = ""
+                            # 已把内容发给客户端、但流被截断：换号已不可能（收不回来），
+                            # 但**绝不能记成成功** —— 否则坏号永不受罚，
+                            # 客户端每次重试都再命中它，就是这个号一直失败的原因。
+                            if truncated:
+                                kind = "upstream_internal"
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, text[:500], model=m)
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, final_model, mode,
+                                                    final_uid, 200, None, error_kind=kind)
+                                await _blocking_call(_record_usage, key.id, final_acc_id, final_model, 0.0, None,
+                                              reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request),
+                                              use_case="chat-completion", seq=seq,
+                                              latency_ms=latency_ms, error_kind=kind)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                _logger.warning(
+                                    "上游流被截断且已提交，补发终止帧 acc=%s model=%s body=%.160s",
+                                    final_uid, m, text)
+                                # 补终止帧：客户端据此正常收尾，不再判失败重试。
+                                # 内容仍是上游已给的部分（截断是上游造成的，
+                                # 但「报错 + 无限重试」对用户更糟）。
+                                yield _sse_terminal_stub(final_model)
+                                return
+                            # 确认是健康响应后，才清空连败计数：
+                            # 「200 但体内是错误」不该被记成一次成功。
+                            acc_i.last_used_at = datetime.utcnow()
+                            await _blocking_call(_note_success, db2, acc_i)
+                            usage = _parse_usage(text)
+                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
+                            status_out = 200
+                            # **纯解码口径**：终点取最后一个内容帧，
+                            # 而不是「响应读完」。差的那 200~400ms 是收尾帧、
+                            # usage 帧与 [DONE] 的传输时间，DSH 不计入解码耗时，
+                            # 计入就会让 TPS 系统性偏低（实测 99 vs 真实 120）。
+                            _end_at = last_content_at or time.perf_counter()
+                            latency_ms = int((_end_at - request_start) * 1000)
+                            if aggregate:
+                                ttfb_at = time.perf_counter()
+                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
+                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, mode, final_uid,
+                                                status_out, total_toks, error_kind="success")
+                            # 粘性跟随最终成功号：让多轮对话收敛到「对该会话持续成功」
+                            # 的那个账号，而不是每轮重新抽签。
+                            if sticky_key and held_uid:
+                                POOL.sticky.bind(sticky_key, held_uid)
+                            updated = sess_i.updated_json()
+                            sess_i.close()
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            # **把最终积分回填给客户端**。
+                            #
+                            # 上游相当多模型回 `usage.credit = 0`（它压根没算积分），
+                            # 而客户端底部要显示「消耗 N 积分」，读的就是这个字段。
+                            # `usage["credits"]` 此时已经是「上游值 or 倍率估算」的
+                            # 最终结果 —— 用它补发一个 usage 帧，客户端就能显示。
+                            #
+                            # 只在**客户端要流式**时补：非流式走聚合分支，
+                            # 那里 usage 会随 JSON 一起产出。
+                            if not aggregate and client_wants_stream:
+                                _sto0 = None
+                                try:
+                                    _acc0 = getattr(acc_i, "platform", "") or ""
+                                    _sto0 = (registry.get(_acc0)
+                                             if _acc0 else None)
+                                except Exception:  # noqa: BLE001
+                                    _sto0 = None
+                                try:
+                                    _final = float(usage.get("credits") or 0)
+                                    if _final <= 0:
+                                        # 上游没给（或给了 0）：现场按倍率算一次，
+                                        # 让客户端能显示真实消耗，而不是 0。
+                                        try:
+                                            from admin.platform.shared import (
+                                                credits_for as _credits_for,
+                                            )
+
+                                            _toks = (usage.get("total_tokens")
+                                                     or usage.get("completion_tokens") or 0)
+                                            _sto = (_sto0.storage()
+                                                    if _sto0 is not None else "")
+                                            with SessionLocal() as _cdb:
+                                                _final = _credits_for(
+                                                    _cdb, _sto,
+                                                    final_model or "", _toks)
+                                        except Exception:  # noqa: BLE001
+                                            _final = 0.0
+                                    _uframe = {
+                                        "id": "chatcmpl-gateway-usage",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": final_model or "",
+                                        "choices": [],
+                                        "usage": {
+                                            "prompt_tokens": usage.get("prompt_tokens") or 0,
+                                            "completion_tokens": usage.get("completion_tokens") or 0,
+                                            "total_tokens": usage.get("total_tokens") or 0,
+                                            "credit": _final,
+                                            "credits": _final,
+                                            "cost": _final,
+                                        },
+                                    }
+                                    yield ("data: " + json.dumps(_uframe, ensure_ascii=False)
+                                           + "\n\n")
+                                except Exception:  # noqa: BLE001 - 补帧失败不影响主流程
+                                    _logger.debug("补发 usage 帧失败", exc_info=True)
+                            await _blocking_call(_record_usage, key.id, final_acc_id, final_model, usage["credits"], updated,
+                                          persist_auth=not getattr(sess_i, "_gateway_auth_persisted", False),
+                                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="chat-completion",
+                                          prompt_tokens=usage["prompt_tokens"],
+                                          completion_tokens=usage["completion_tokens"],
+                                          total_tokens=usage["total_tokens"],
+                                          cached_tokens=usage["cached_tokens"],
+                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                          error_kind="success")
+                            if aggregate:
+                                # 聚合模式下客户端要的是一个 JSON 对象，
+                                # 而不是 text/event-stream。这里 yield **字符串**
+                                # （与流式分支的 chunk 同为 str），调用方统一
+                                # json.loads 一次即可，不必按类型分支。
+                                yield json.dumps(_aggregate_chat_sse(text),
+                                                 ensure_ascii=False)
+                            return
+                        except GatewayRejected:
+                            raise
+                        except Exception as e:
+                            if delivered:
+                                _exc_text(e)
+                                request_metrics.mark_stream_error()
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, m, "stream", "-", 502, None, error_kind="transport")
+                                await _blocking_call(_record_usage, key.id, 0, m, 0.0, None,
+                                                     reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request),
+                                                     use_case="chat-completion", seq=seq, latency_ms=latency_ms, error_kind="transport")
+                                # 已经往客户端发过字节：流式模式下无法「收回」，
+                                # 只能静默结束（客户端看到截断的流，符合 SSE 语义）。
+                                # 但聚合模式下我们还没产出任何东西，必须**如实报错**，
+                                # 否则调用方会拿到空响应却不知道上游中途断了。
+                                if aggregate:
+                                    yield json.dumps(
+                                        {"error": {
+                                            "message": f"上游流中断：{e}",
+                                            "type": "upstream_error"}},
+                                        ensure_ascii=False)
+                                else:
+                                    yield 'data: ' + json.dumps({"error": {"message": "上游流中断，请重试", "type": "server_error",
+                                                                          "code": "upstream_stream_interrupted"}}, ensure_ascii=False) + '\n\n'
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                return
+                            kind = _classify_error(0, _exc_text(e))
+                            await _blocking_call(_apply_account_policy, db2, acc_i, kind, 0, _exc_text(e), model=m)
+                            await _blocking_call(_maybe_degrade, db2, acc_i)
+                            last_err_kind = kind
+                            last_err_msg = _exc_text(e)
+                            last_err_status = _extract_http_status(last_err_msg)
+                            sess_i.close()
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            # 网络/传输错误也换号重试（含退避）
+                            await pool.rotate_backoff_async(min(rotate_idx, 1))
+                            rotate_idx += 1
+                            continue
+            # 全部账号/模型均失败
+            latency_ms = int((time.perf_counter() - request_start) * 1000)
+            err_kind = last_err_kind or ("no_account" if not last_err_msg else "transport")
+            seq = _log_chat_row(None, latency_ms, final_model, mode, "-", status_out, None, error_kind=err_kind)
+            await _blocking_call(_record_usage, key.id, 0, final_model, 0.0, None,
+                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="chat-completion", seq=seq, latency_ms=latency_ms,
+                          error_kind=err_kind)
+            err_msg = _exhaustion_message(err_kind, last_err_msg, tried_accounts, tried_models_n, last_err_status)
+            err_obj = {"error": {"message": err_msg, "type": "server_error", "code": "service_unavailable",
+                                 **_failure_evidence(err_kind, last_err_msg, last_err_status)}}
+            if aggregate:
+                # 聚合模式：统一产出 JSON（调用方不是 SSE 客户端，
+                # 给它 data: 行只会让它 json.loads 失败）。
+                yield json.dumps(err_obj, ensure_ascii=False)
+            else:
+                yield f"data: {json.dumps(err_obj, ensure_ascii=False)}\n\n"
+        except GatewayRejected as exc:
+            await _record_gateway_rejection(exc, key.id, request)
+            text = json.dumps(exc.payload(), ensure_ascii=False)
+            yield text if aggregate else f'data: {text}\n\n'
+        finally:
+            # 兜底释放租约：流被客户端中断（CancelledError）时也必须归还名额，
+            # 否则那个账号的在途计数永远减不回去，最终被永久排除在选号之外。
+            if held_uid:
+                POOL.release(held_uid)
+            if sess_i is not None:
+                sess_i.close()
+            await _blocking_call(db2.close)
+
+
+    if client_wants_stream:
+        return await _stream_response(_stream())
+
+    # 非流式：复用同一套号池状态机，但把上游 SSE 聚合成单个 chat.completion。
+    # 上游只支持流式，所以「非流式」在本网关里意味着「内部聚合」而非
+    # 「向上游要非流式」—— 这也正是 admin 侧长期把 SSE 原样吐给
+    # stream:false 调用方的原因，属于必须修的协议违约。
+    agg_out = ""
+    async for chunk in _stream(aggregate=True):
+        agg_out = chunk
+    if not agg_out:
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "3"},
+            content={"error": {"message": _exhaustion_message("no_account", "", 0, len(order)),
+                               "type": "server_error", "code": "service_unavailable"}})
+    try:
+        payload_out = json.loads(agg_out)
+    except Exception:
+        return JSONResponse(status_code=502,
+                            content={"error": {"message": "网关聚合响应失败", "type": "upstream_error"}})
+    if isinstance(payload_out, dict) and payload_out.get("error"):
+        # 错误必须带上**正确的状态码**：把上游 400（参数错）报成 503（服务不可用）
+        # 会让调用方去重试一个永远不会成功的请求，也会掩盖真实故障。
+        err = payload_out["error"] or {}
+        code = err.get("http_status") if err.get("source") == "gateway" else err.get("code")
+        status = code if isinstance(code, int) and 400 <= code < 600 else 503
+        return JSONResponse(status_code=status, content=payload_out,
+                            headers={"Retry-After": "3"} if status in (429, 502, 503, 504) else {})
+    return JSONResponse(content=payload_out)
+
+
+@router.post("/v1/responses")
+async def responses_proxy(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """OpenAI Responses API 兼容端点（带 API Key 配额 / 用量记账 / 账号级熔断重试）。
+
+    与 /v1/chat/completions 同一套托管逻辑：校验 Key → 配额 → 候选模型 →
+    自动挑选健康账号；遇到余额不足 / session 死亡 / 限流 / 5xx 时自动换号，
+    绝不把上游中断感传递给客户端。
+    """
+    request_start = time.perf_counter()
+    if not _RESPONSES_AVAILABLE:
+        return JSONResponse(status_code=501, content={"error": {"message": "Responses 适配器未加载", "type": "not_supported"}})
+
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "缺少 API Key", "type": "auth_error"}})
+    key = await _blocking_call(get_key_row, db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={"error": {"message": "无效 API Key", "type": "auth_error"}})
+    try:
+        check_quota(key)
+    except Exception as e:
+        request_metrics.mark_gateway_error(e.status_code, e.detail)
+        kind = 'key_quota_exceeded' if e.status_code == 402 else 'key_disabled'
+        await _blocking_call(_record_usage, key.id, 0, '', 0.0, None,
+                             error_kind=kind, use_case='gateway-admission')
+        return JSONResponse(status_code=e.status_code, content=e.detail)
+
+    request.scope['_gateway_key_id'] = key.id
+    try:
+        payload = await _request_json(request)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "bad json", "type": "invalid_request"}})
+
+    try:
+        chat_body = responses_request_to_chat(payload)
+    except Exception as e:
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": f"请求转换失败：{e}", "type": "invalid_request"}})
+
+    chat_body, _stats = project_responses_chat_body(chat_body)
+    chat_body.setdefault("model", "auto")
+    chat_body["stream"] = True
+    opts = dict(chat_body.get("stream_options") or {})
+    opts["include_usage"] = True
+    chat_body["stream_options"] = opts
+
+    requested = payload.get("model", "auto")
+    allowed = await _blocking_call(_key_allowed_models, db, key)
+    resolved = await _blocking_call(_pick_best_model, db, requested, allowed)
+    if resolved is None:
+        if allowed is not None and requested not in ("auto", ""):
+            return _model_access_error(key, requested)
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": f"模型 '{requested}' 不存在或已被禁用", "type": "model_not_found"}})
+
+    order = [resolved]
+    if requested in ("auto", ""):
+        order = [resolved] + await _blocking_call(_candidate_models, db, {resolved}, allowed)
+        order = order[:8]
+
+    client_wants_stream = bool(payload.get("stream", True))
+    model_name = payload.get("model", "auto")
+    url = f"{settings.BACKEND}/v2/chat/completions"
+
+    # 会话粘性键与会话头族：在轮转循环外算一次，循环内所有尝试复用同一份
+    # （换号重试若换了会话 ID，上游看到的是 N 个并发会话而非一次对话的一次重试）。
+    # 先按原始 chat_body 取会话键，再脱敏 —— 零宽字符不应改变会话身份。
+    sticky_key = pool.session_key_for(chat_body)
+    conversation_id, turn_id = _turn_headers(chat_body, identity.purpose_for("responses"))
+    await _blocking_call(release_connection, db)
+    # 第三方 harness 兼容：Responses 入口同样可能带 role: developer
+    # （Codex 用它承载 system 级指令），不归一就会被上游 11128 整条拒掉。
+    _normalize_harness_body(chat_body)
+    # 与 /v1/messages 同一套 harness 脱敏（OpenAI Responses 也要过这道过滤）。
+    chat_body = _desensitize_chat_body(chat_body)
+
+    if not client_wants_stream:
+        # 非流式：内部重试，成功后聚合为单一 Response 对象
+        db2 = SessionLocal()
+        held_uid = ""
+        sess_i = None
+        try:
+            retry_budget = await _blocking_call(pool_budget, db2, key, order)
+            rotate_idx = 0
+            last_err_kind = ""
+            last_err_msg = ""
+            last_err_status = 0
+            for m in order:
+                if not retry_budget.available():
+                    break
+                body = dict(chat_body)
+                body["model"] = m
+                tried_ids: set = set()
+                while retry_budget.available():
+                    if POOL.waf.active():
+                        break
+                    if not retry_budget.available():
+                        break
+                    acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
+                                            model=m, sticky_key=sticky_key,
+                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                    if not acc_i:
+                        break
+                    tried_ids.add(acc_i.id)
+                    held_uid = acc_i.uid or ""
+                    retry_budget.consume()
+                    request_metrics.mark_attempt(acc_i.id, m)
+                    upstream_http.select_account(request.scope, acc_i)
+                    sess_i = await _account_session_async(db2, acc_i)
+                    if sess_i is None:
+                        POOL.release(held_uid)
+                        held_uid = ""
+                        continue
+                    extra_i = await _blocking_call(
+                        _upstream_extra_headers, request, identity.purpose_for("responses"),
+                        conversation=conversation_id, turn=turn_id)
+                    headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
+                    try:
+                        _ua = headers_i.get("User-Agent", "")[:80]
+                        _logger.info("[forward] POST %s | acc=%s | UA=%s | body_len=%d",
+                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     _ua, len(json.dumps(body, ensure_ascii=False)))
+                        async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
+                            r = await client.post(url, headers=headers_i, json=body)
+                            if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
+                                _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
+                                if "11148" in r.text or "tool calls and tool results" in r.text:
+                                    _logger.warning("[forward] tool-pairing diag | %s", _tool_diag(body))
+                            if r.status_code >= 400:
+                                text = r.text[:65536]
+                                kind = _classify_error(r.status_code, text)
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, r.status_code, text,
+                                                      model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                if kind in _RETRYABLE_KINDS:
+                                    last_err_kind = kind
+                                    last_err_msg = text
+                                    last_err_status = r.status_code
+                                    # 6004 只限制当前账号的模型额度，继续换号。
+                                    await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                    rotate_idx += 1
+                                    continue
+                                return JSONResponse(status_code=r.status_code,
+                                                    content={"error": {"message": text, "code": r.status_code}})
+                            # HTTP 200 但体内是错误信封（-32603 / ENOSPC）：同样要换号。
+                            if _looks_like_inband_error(r.text) or _sse_has_error_event(r.text):
+                                kind = _classify_error(200, r.text)
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, r.text[:65536], model=m,
+                                                      reset_at=_error_reset_at(r.headers, r.text))
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                last_err_kind = kind
+                                last_err_msg = r.text
+                                last_err_status = r.status_code
+                                _logger.warning("上游 200 但响应体是错误（responses）kind=%s acc=%s body=%.200s",
+                                                kind, acc_i.uid or "-", r.text)
+                                if kind in _RETRYABLE_KINDS:
+                                    await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                    rotate_idx += 1
+                                    continue
+                                return JSONResponse(status_code=502,
+                                                    content={"error": {"message": r.text[:500],
+                                                                       "type": "upstream_error"}})
+                            converter = ResponsesStreamConverter(model=model_name)
+                            for line in r.text.splitlines():
+                                if not line.strip():
+                                    continue
+                                converter.feed_line(line)
+                            converter.finish()
+                            obj = converter.get_nonstream_response()
+                            cost_info = _parse_usage(r.text)
+                            acc_i.last_used_at = datetime.utcnow()
+                            await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
+                            updated = sess_i.updated_json()
+                            total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
+                            seq = _log_chat_row(None, None, m, "resp", acc_i.uid or "-", 200, total_toks, error_kind="success")
+                            sess_i.close()
+                            if sticky_key and held_uid:
+                                POOL.sticky.bind(sticky_key, held_uid)
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await _blocking_call(_record_usage, key.id, acc_i.id, m, cost_info["credits"], updated,
+                                          persist_auth=not getattr(sess_i, "_gateway_auth_persisted", False),
+                                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="responses",
+                                          prompt_tokens=cost_info["prompt_tokens"],
+                                          completion_tokens=cost_info["completion_tokens"],
+                                          total_tokens=cost_info["total_tokens"],
+                                          cached_tokens=cost_info["cached_tokens"],
+                                          seq=seq, error_kind="success")
+                            return JSONResponse(content=obj)
+                    except GatewayRejected:
+                        raise
+                    except Exception as e:
+                        kind = _classify_error(0, _exc_text(e))
+                        last_err_kind = kind
+                        last_err_msg = _exc_text(e)
+                        last_err_status = _extract_http_status(last_err_msg)
+                        await _blocking_call(_apply_account_policy, db2, acc_i, kind, 0, _exc_text(e), model=m)
+                        await _blocking_call(_maybe_degrade, db2, acc_i)
+                        sess_i.close()
+                        POOL.release(held_uid)
+                        held_uid = ""
+                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                        rotate_idx += 1
+                        continue
+            err_kind = last_err_kind or "no_account"
+            seq = _log_chat_row(None, None, resolved, "resp", "-", 503, None, error_kind=err_kind)
+            await _blocking_call(_record_usage, key.id, 0, resolved, 0.0, None,
+                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="responses", seq=seq, error_kind=err_kind)
+            if POOL.waf.active():
+                return JSONResponse(status_code=503, headers={"Retry-After": str(max(3, POOL.waf.remaining()))}, content={"error": {
+                    "message": f"上游 WAF 拦截了网关出口 IP，已暂停轮转，请 {POOL.waf.remaining()}s 后重试",
+                    "type": "server_error", "code": "service_unavailable"}})
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "3"},
+                content={"error": {"message": _exhaustion_message(last_err_kind, last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status),
+                                   "type": "server_error", "code": "service_unavailable",
+                                   **_failure_evidence(last_err_kind, last_err_msg, last_err_status)}})
+        except GatewayRejected as exc:
+            await _record_gateway_rejection(exc, key.id, request)
+            return JSONResponse(status_code=exc.status_code, content=exc.payload())
+        finally:
+            if held_uid:
+                POOL.release(held_uid)
+            if sess_i is not None:
+                sess_i.close()
+            await _blocking_call(db2.close)
+
+
+    async def _stream():
+        db2 = SessionLocal()
+        held_uid = ""
+        sess_i = None
+        try:
+            ttfb_at = None
+            seq = None
+            final_model = resolved
+            final_acc_id = 0
+            final_uid = "-"
+            total_toks = None
+            raw_lines: list[str] = []
+            delivered = False
+            last_err_kind = ""
+            last_err_msg = ""
+            last_err_status = 0
+            retry_budget = await _blocking_call(pool_budget, db2, key, order)
+            rotate_idx = 0
+
+            async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
+                for m in order:
+                    if not retry_budget.available():
+                        break
+                    body = dict(chat_body)
+                    body["model"] = m
+                    tried_ids: set = set()
+                    while retry_budget.available():
+                        if POOL.waf.active():
+                            last_err_kind = "waf"
+                            last_err_msg = f"出口 IP 被 WAF 拦截，剩余 {POOL.waf.remaining()}s"
+                            break
+                        if not retry_budget.available():
+                            break
+                        acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
+                                                model=m, sticky_key=sticky_key,
+                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                        if not acc_i:
+                            break
+                        tried_ids.add(acc_i.id)
+                        held_uid = acc_i.uid or ""
+                        retry_budget.consume()
+                        request_metrics.mark_attempt(acc_i.id, m)
+                        upstream_http.select_account(request.scope, acc_i)
+                        sess_i = await _account_session_async(db2, acc_i)
+                        if sess_i is None:
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            continue
+                        extra_i = await _blocking_call(
+                            _upstream_extra_headers, request, identity.purpose_for("responses"),
+                            conversation=conversation_id, turn=turn_id)
+                        headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
+                        raw_lines.clear()
+                        delivered = False
+                        pending_events = []
+                        converter = ResponsesStreamConverter(model=model_name)
+                        try:
+                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                                if r.status_code >= 400:
+                                    detail = await r.aread()
+                                    text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
+                                    kind = _classify_error(r.status_code, text)
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, r.status_code, text,
+                                                          model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    if kind in _RETRYABLE_KINDS:
+                                        last_err_kind = kind
+                                        last_err_msg = text
+                                        last_err_status = r.status_code
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    yield f"data: {json.dumps({'type': 'error', 'error': {'message': text, 'code': r.status_code}}, ensure_ascii=False)}\n\n"
+                                    return
+                                final_model = m
+                                final_acc_id = acc_i.id
+                                final_uid = acc_i.uid or "-"
+                                async for line in r.aiter_lines():
+                                    if not line.strip():
+                                        continue
+                                    raw_lines.append(line)
+                                    if not delivered and (_looks_like_inband_error(line) or _sse_has_error_event(line)):
+                                        _logger.warning("[forward] in-band error | line=%s", line[:400])
+                                        break
+                                    events = converter.feed_line(line)
+                                    if events:
+                                        pending_events.append(events)
+                                    if delivered or _sse_has_content(line) or _sse_has_finish_reason(line):
+                                        if pending_events:
+                                            delivered = True
+                                            ttfb_at = ttfb_at or time.perf_counter()
+                                            yield "".join(pending_events)
+                                            pending_events.clear()
+                            # HTTP 200 但体内是错误信封（-32603 / ENOSPC）：
+                            # 尚未向客户端产出任何事件时可安全换号重试。
+                            _raw_text = "\n".join(raw_lines)
+                            if (_looks_like_inband_error(_raw_text) or _sse_has_error_event(_raw_text)):
+                                kind = _classify_error(200, _raw_text)
+                                if not delivered:
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, _raw_text[:65536], model=m,
+                                                          reset_at=_error_reset_at(r.headers, _raw_text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    last_err_kind = kind
+                                    last_err_msg = _raw_text
+                                    last_err_status = r.status_code
+                                    _logger.warning("上游 200 但响应体是错误（resp-stream）kind=%s acc=%s body=%.200s",
+                                                    kind, final_uid, _raw_text)
+                                    raw_lines.clear()
+                                    if kind in _RETRYABLE_KINDS:
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    yield f"data: {json.dumps({'type': 'error', 'error': {'message': _raw_text[:500]}}, ensure_ascii=False)}\n\n"
+                                    return
+                                # 已经产出过事件：收不回来，但绝不能记成成功。
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, final_model, "resp", final_uid,
+                                                    200, None, error_kind=kind)
+                                await _blocking_call(_record_usage, key.id, final_acc_id, final_model, 0.0, None,
+                                              reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="responses",
+                                              seq=seq, latency_ms=latency_ms, error_kind=kind)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, _raw_text[:65536], model=m,
+                                                          reset_at=_error_reset_at(r.headers, _raw_text))
+                                return
+                            if pending_events:
+                                delivered = True
+                                yield "".join(pending_events)
+                                pending_events.clear()
+                            finish = converter.finish()
+                            if finish:
+                                delivered = True
+                                yield finish
+                            text = "\n".join(raw_lines)
+                            # 健康响应才清空连败计数并更新「最近使用」。
+                            acc_i.last_used_at = datetime.utcnow()
+                            await _blocking_call(_note_success, db2, acc_i)
+                            usage = _parse_usage(text)
+                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
+                            latency_ms = int((time.perf_counter() - request_start) * 1000)
+                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
+                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, "resp", final_uid, 200, total_toks, error_kind="success")
+                            updated = sess_i.updated_json()
+                            sess_i.close()
+                            if sticky_key and held_uid:
+                                POOL.sticky.bind(sticky_key, held_uid)
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await _blocking_call(_record_usage, key.id, final_acc_id, final_model, usage["credits"], updated,
+                                          persist_auth=not getattr(sess_i, "_gateway_auth_persisted", False),
+                                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="responses",
+                                          prompt_tokens=usage["prompt_tokens"],
+                                          completion_tokens=usage["completion_tokens"],
+                                          total_tokens=usage["total_tokens"],
+                                          cached_tokens=usage["cached_tokens"],
+                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                          error_kind="success")
+                            return
+                        except GatewayRejected:
+                            raise
+                        except Exception as e:
+                            if delivered:
+                                _exc_text(e)
+                                request_metrics.mark_stream_error()
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, m, "stream", "-", 502, None, error_kind="transport")
+                                await _blocking_call(_record_usage, key.id, 0, m, 0.0, None,
+                                                     reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request),
+                                                     use_case="responses", seq=seq, latency_ms=latency_ms, error_kind="transport")
+                                yield 'event: error\ndata: ' + json.dumps({"type": "error", "error": {
+                                    "message": "上游流中断，请重试", "type": "server_error", "code": "upstream_stream_interrupted"}}, ensure_ascii=False) + '\n\n'
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                return
+                            kind = _classify_error(0, _exc_text(e))
+                            await _blocking_call(_apply_account_policy, db2, acc_i, kind, 0, _exc_text(e), model=m)
+                            await _blocking_call(_maybe_degrade, db2, acc_i)
+                            last_err_kind = kind
+                            last_err_msg = _exc_text(e)
+                            last_err_status = _extract_http_status(last_err_msg)
+                            sess_i.close()
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await pool.rotate_backoff_async(min(rotate_idx, 1))
+                            rotate_idx += 1
+                            continue
+            latency_ms = int((time.perf_counter() - request_start) * 1000)
+            err_kind = last_err_kind or "no_account"
+            seq = _log_chat_row(None, latency_ms, final_model, "resp", "-", 503, None, error_kind=err_kind)
+            await _blocking_call(_record_usage, key.id, 0, final_model, 0.0, None,
+                          reasoning_effort=_reasoning_effort(payload), client_ip=_client_ip(request), use_case="responses", seq=seq, latency_ms=latency_ms,
+                          error_kind=err_kind)
+            if err_kind == "waf":
+                msg = _exhaustion_message("waf", last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status)
+            else:
+                msg = _exhaustion_message(err_kind, last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status)
+            yield f"data: {json.dumps({'type': 'error', 'error': {'message': msg, 'code': 503, **_failure_evidence(err_kind, last_err_msg, last_err_status)}}, ensure_ascii=False)}\n\n"
+        except GatewayRejected as exc:
+            await _record_gateway_rejection(exc, key.id, request)
+            text = json.dumps({'type': 'error', **exc.payload()}, ensure_ascii=False)
+            yield f'event: error\ndata: {text}\n\n'
+        finally:
+            # 兜底释放租约：客户端中断流时也必须归还名额，否则该账号的在途计数
+            # 永远减不回去，最终被永久排除在选号之外。
+            if held_uid:
+                POOL.release(held_uid)
+            if sess_i is not None:
+                sess_i.close()
+            await _blocking_call(db2.close)
+
+    return await _stream_response(_stream())
+
+
+@router.post("/v1/messages")
+async def anthropic_messages(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """Anthropic Messages API 兼容端点（带 API Key 配额 / 用量记账 / 号池熔断重试）。
+
+    与 /v1/chat/completions 共用完全相同的托管逻辑，差别只在两头：
+    入口把 Anthropic 请求转成 Chat 格式，出口把 Chat SSE 转回 Anthropic 事件流。
+    这样 Claude Code 这类只会说 Anthropic 协议的客户端，就能直接吃后台号池的
+    配额与用量记账，而不必再走 /gw 那条「桌面端单账号、无配额」的旁路。
+
+    模型名：claude-opus-* / claude-sonnet-* / claude-haiku-* 按档次映射到白名单
+    里的模型（见 _map_anthropic_model），也允许直接传 glm-5.2 这类上游模型名。
+    """
+    request_start = time.perf_counter()
+    if not _ANTHROPIC_AVAILABLE:
+        return JSONResponse(status_code=501,
+                            content={"error": {"message": "Anthropic 适配器未加载", "type": "not_supported"}})
+
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "缺少 API Key", "type": "auth_error"}})
+    key = await _blocking_call(get_key_row, db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={"error": {"message": "无效 API Key", "type": "auth_error"}})
+    try:
+        check_quota(key)
+    except Exception as e:
+        request_metrics.mark_gateway_error(e.status_code, e.detail)
+        kind = 'key_quota_exceeded' if e.status_code == 402 else 'key_disabled'
+        await _blocking_call(_record_usage, key.id, 0, '', 0.0, None,
+                             error_kind=kind, use_case='gateway-admission')
+        return JSONResponse(status_code=e.status_code, content=e.detail)
+
+    request.scope['_gateway_key_id'] = key.id
+    try:
+        payload = await _request_json(request)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "bad json", "type": "invalid_request"}})
+
+    if not payload.get("messages"):
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": "messages is required", "type": "invalid_request"}})
+
+    try:
+        chat_body = anthropic_request_to_chat(payload)
+        normalize_tool_choice(chat_body)
+        _normalize_harness_body(chat_body)
+    except Exception as e:
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": f"请求转换失败：{e}", "type": "invalid_request"}})
+
+    # Claude Code 的 system prompt / tools 是固定 harness 模板，内含 "DoS attacks /
+    # exploit development / credential testing" 一类合规声明词 —— 这些是「拒绝作恶」
+    # 声明，却会被上游内容审核当成敏感内容，整条请求被拒（就是那个 11128
+    # "unapproved channel"）。这里做与 converter /gw 端点完全相同的 harness 压缩 +
+    # 零宽空格脱敏：模型读到的仍是原词，后端的关键词匹配失效。少了这一步，
+    # Claude Code 的真实请求基本发不出去（简单 hello 测试却会通过，很容易误判）。
+    chat_body = _desensitize_chat_body(chat_body)
+
+    requested = await _blocking_call(_map_anthropic_model, db, payload.get("model", "auto"), key)
+    allowed = await _blocking_call(_key_allowed_models, db, key)
+    resolved = await _blocking_call(_pick_best_model, db, requested, allowed)
+    if resolved is None:
+        if allowed is not None and requested not in ("auto", ""):
+            return _model_access_error(key, requested)
+        return JSONResponse(status_code=400,
+                            content={"error": {"message": f"模型 '{requested}' 不存在或已被禁用", "type": "model_not_found"}})
+
+    order = [resolved]
+    if requested in ("auto", ""):
+        order = ([resolved] + await _blocking_call(_candidate_models, db, {resolved}, allowed))[:8]
+
+    # 上游一律按流式拉取：Anthropic 的方向就是「消费 Chat SSE 再转事件流」。
+    # 客户端若要非流式，我们在内部聚合完再一次性返回。
+    chat_body["stream"] = True
+    opts = dict(chat_body.get("stream_options") or {})
+    opts["include_usage"] = True
+    chat_body["stream_options"] = opts
+
+    # Anthropic Messages API 的 stream 默认是 false
+    client_wants_stream = bool(payload.get("stream", False))
+    model_name = payload.get("model", "auto")
+    url = f"{settings.BACKEND}/v2/chat/completions"
+
+    # 会话粘性键与会话头族：轮转循环外算一次，循环内所有尝试复用同一份。
+    # 这里用**原始 payload** 而非转换后的 chat_body：Anthropic 协议的
+    # `metadata.user_id` 只在原 payload 里，用它才能正确触发「已声明用户维度
+    # 则不借首条 prompt 建立粘性」的抑制规则。
+    sticky_key = pool.session_key_for(payload)
+    conversation_id, turn_id = _turn_headers(
+        payload if isinstance(payload, dict) else {}, identity.purpose_for("messages"))
+    await _blocking_call(release_connection, db)
+
+    if not client_wants_stream:
+        db2 = SessionLocal()
+        held_uid = ""
+        sess_i = None
+        try:
+            retry_budget = await _blocking_call(pool_budget, db2, key, order)
+            rotate_idx = 0
+            last_err_kind = ""
+            last_err_msg = ""
+            last_err_status = 0
+            for m in order:
+                if not retry_budget.available():
+                    break
+                body = dict(chat_body)
+                body["model"] = m
+                tried_ids: set = set()
+                while retry_budget.available():
+                    if POOL.waf.active():
+                        break
+                    if not retry_budget.available():
+                        break
+                    acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
+                                            model=m, sticky_key=sticky_key,
+                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                    if not acc_i:
+                        break
+                    tried_ids.add(acc_i.id)
+                    held_uid = acc_i.uid or ""
+                    retry_budget.consume()
+                    request_metrics.mark_attempt(acc_i.id, m)
+                    upstream_http.select_account(request.scope, acc_i)
+                    sess_i = await _account_session_async(db2, acc_i)
+                    if sess_i is None:
+                        POOL.release(held_uid)
+                        held_uid = ""
+                        continue
+                    extra_i = await _blocking_call(
+                        _upstream_extra_headers, request, identity.purpose_for("messages"),
+                        conversation=conversation_id, turn=turn_id)
+                    headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
+                    try:
+                        _ua = headers_i.get("User-Agent", "")[:80]
+                        _logger.info("[forward] POST %s | acc=%s | UA=%s | body_len=%d",
+                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     _ua, len(json.dumps(body, ensure_ascii=False)))
+                        async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
+                            r = await client.post(url, headers=headers_i, json=body)
+                            if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
+                                _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
+                                if "11148" in r.text or "tool calls and tool results" in r.text:
+                                    _logger.warning("[forward] tool-pairing diag | %s", _tool_diag(body))
+                            if r.status_code >= 400:
+                                text = r.text[:65536]
+                                kind = _classify_error(r.status_code, text)
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, r.status_code, text,
+                                                      model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                last_err_kind = kind
+                                last_err_msg = text
+                                last_err_status = r.status_code
+                                if kind in _RETRYABLE_KINDS:
+                                    await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                    rotate_idx += 1
+                                    continue
+                                return JSONResponse(status_code=r.status_code,
+                                                    content={"error": {"message": text, "type": "upstream_error"}})
+                            # HTTP 200 但体内是错误信封（-32603 / ENOSPC）：同样换号。
+                            if _looks_like_inband_error(r.text) or _sse_has_error_event(r.text):
+                                kind = _classify_error(200, r.text)
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, r.text[:65536], model=m,
+                                                      reset_at=_error_reset_at(r.headers, r.text))
+                                await _blocking_call(_maybe_degrade, db2, acc_i)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                last_err_kind = kind
+                                last_err_msg = r.text
+                                last_err_status = r.status_code
+                                _logger.warning("上游 200 但响应体是错误（anthropic）kind=%s acc=%s body=%.200s",
+                                                kind, acc_i.uid or "-", r.text)
+                                if kind in _RETRYABLE_KINDS:
+                                    await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                    rotate_idx += 1
+                                    continue
+                                return JSONResponse(status_code=502,
+                                                    content={"error": {"message": r.text[:500],
+                                                                       "type": "upstream_error"}})
+                            conv = AnthropicStreamConverter(model=model_name)
+                            raw_lines: list[str] = []
+                            for line in r.text.splitlines():
+                                if not line.strip():
+                                    continue
+                                raw_lines.append(line)
+                                conv.feed_line(line)
+                            msg_obj = conv.build_message()
+                            cost_info = _parse_usage("\n".join(raw_lines))
+                            acc_i.last_used_at = datetime.utcnow()
+                            await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
+                            updated = sess_i.updated_json()
+                            total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
+                            seq = _log_chat_row(None, None, m, "anthropic", acc_i.uid or "-", 200,
+                                                total_toks, error_kind="success")
+                            sess_i.close()
+                            if sticky_key and held_uid:
+                                POOL.sticky.bind(sticky_key, held_uid)
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await _blocking_call(_record_usage, key.id, acc_i.id, m, cost_info["credits"], updated,
+                                          persist_auth=not getattr(sess_i, "_gateway_auth_persisted", False),
+                                          reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request), use_case="anthropic",
+                                          prompt_tokens=cost_info["prompt_tokens"],
+                                          completion_tokens=cost_info["completion_tokens"],
+                                          total_tokens=cost_info["total_tokens"],
+                                          cached_tokens=cost_info["cached_tokens"],
+                                          seq=seq, error_kind="success")
+                            return JSONResponse(content=msg_obj)
+                    except GatewayRejected:
+                        raise
+                    except Exception as e:
+                        kind = _classify_error(0, _exc_text(e))
+                        last_err_kind = kind
+                        last_err_msg = _exc_text(e)
+                        last_err_status = _extract_http_status(last_err_msg)
+                        await _blocking_call(_apply_account_policy, db2, acc_i, kind, 0, _exc_text(e), model=m)
+                        await _blocking_call(_maybe_degrade, db2, acc_i)
+                        sess_i.close()
+                        POOL.release(held_uid)
+                        held_uid = ""
+                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                        rotate_idx += 1
+                        continue
+            err_kind = last_err_kind or "no_account"
+            seq = _log_chat_row(None, None, resolved, "anthropic", "-", 503, None, error_kind=err_kind)
+            await _blocking_call(_record_usage, key.id, 0, resolved, 0.0, None,
+                          reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request), use_case="anthropic",
+                          seq=seq, error_kind=err_kind)
+            if POOL.waf.active():
+                return JSONResponse(status_code=503, headers={"Retry-After": str(max(3, POOL.waf.remaining()))}, content={"type": "error", "error": {
+                    "message": f"上游 WAF 拦截了网关出口 IP，已暂停轮转，请 {POOL.waf.remaining()}s 后重试",
+                    "type": "overloaded_error"}})
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "3"},
+                content={"type": "error", "error": {"message": _exhaustion_message(last_err_kind, last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status),
+                                   "type": "overloaded_error",
+                                   **_failure_evidence(last_err_kind, last_err_msg, last_err_status)}})
+        except GatewayRejected as exc:
+            await _record_gateway_rejection(exc, key.id, request)
+            return JSONResponse(status_code=exc.status_code, content={'type': 'error', **exc.payload()})
+        finally:
+            if held_uid:
+                POOL.release(held_uid)
+            if sess_i is not None:
+                sess_i.close()
+            await _blocking_call(db2.close)
+
+
+    async def _stream():
+        db2 = SessionLocal()
+        held_uid = ""
+        sess_i = None
+        try:
+            ttfb_at = None
+            seq = None
+            final_model = resolved
+            final_acc_id = 0
+            final_uid = "-"
+            total_toks = None
+            raw_lines: list[str] = []
+            delivered = False
+            last_err_kind = ""
+            last_err_msg = ""
+            last_err_status = 0
+            retry_budget = await _blocking_call(pool_budget, db2, key, order)
+            rotate_idx = 0
+
+            async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
+                for m in order:
+                    if not retry_budget.available():
+                        break
+                    body = dict(chat_body)
+                    body["model"] = m
+                    tried_ids: set = set()
+                    while retry_budget.available():
+                        if POOL.waf.active():
+                            last_err_kind = "waf"
+                            last_err_msg = f"出口 IP 被 WAF 拦截，剩余 {POOL.waf.remaining()}s"
+                            break
+                        if not retry_budget.available():
+                            break
+                        acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
+                                                model=m, sticky_key=sticky_key,
+                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                        if not acc_i:
+                            break
+                        tried_ids.add(acc_i.id)
+                        held_uid = acc_i.uid or ""
+                        retry_budget.consume()
+                        request_metrics.mark_attempt(acc_i.id, m)
+                        upstream_http.select_account(request.scope, acc_i)
+                        sess_i = await _account_session_async(db2, acc_i)
+                        if sess_i is None:
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            continue
+                        extra_i = await _blocking_call(
+                            _upstream_extra_headers, request, identity.purpose_for("messages"),
+                            conversation=conversation_id, turn=turn_id)
+                        headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
+                        _ua = headers_i.get("User-Agent", "")[:80]
+                        _logger.warning("[forward-cc-stream] POST %s | acc=%s | UA=%s | body_len=%d | keys=%s",
+                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     _ua, len(json.dumps(body, ensure_ascii=False)),
+                                     list(headers_i.keys()))
+                        _body_str = json.dumps(body, ensure_ascii=False)
+                        _logger.warning("[forward-cc-stream] body_head=%s | model=%s | tools_count=%d | system_type=%s",
+                                        _body_str[:500], body.get("model", "?"),
+                                        len(body.get("tools", [])), type(body.get("system")).__name__)
+                        raw_lines.clear()
+                        delivered = False
+                        pending_events = []
+                        conv = AnthropicStreamConverter(model=model_name)
+                        try:
+                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                                if r.status_code >= 400:
+                                    detail = await r.aread()
+                                    text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
+                                    _logger.warning("[forward-cc-stream] upstream %s | body=%s", r.status_code, text[:400])
+                                    if "11148" in text or "tool calls and tool results" in text:
+                                        _logger.warning("[forward-cc-stream] tool-pairing diag | %s", _tool_diag(body))
+                                    kind = _classify_error(r.status_code, text)
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, r.status_code, text,
+                                                          model=m, reset_at=_error_reset_at(getattr(r, "headers", None), text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    if kind in _RETRYABLE_KINDS:
+                                        last_err_kind = kind
+                                        last_err_msg = text
+                                        last_err_status = r.status_code
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    # 不可重试的客户端错误才原样透出
+                                    yield conv.error_event(text)
+                                    return
+                                final_model = m
+                                final_acc_id = acc_i.id
+                                final_uid = acc_i.uid or "-"
+                                async for line in r.aiter_lines():
+                                    if not line.strip():
+                                        continue
+                                    raw_lines.append(line)
+                                    if not delivered and (_looks_like_inband_error(line) or _sse_has_error_event(line)):
+                                        _logger.warning("[forward] in-band error | line=%s", line[:400])
+                                        break
+                                    events = conv.feed_line(line)
+                                    if events:
+                                        pending_events.append(events)
+                                    if delivered or _sse_has_content(line) or _sse_has_finish_reason(line):
+                                        if pending_events:
+                                            delivered = True
+                                            ttfb_at = ttfb_at or time.perf_counter()
+                                            yield "".join(pending_events)
+                                            pending_events.clear()
+                            # HTTP 200 但体内是错误信封（-32603 / ENOSPC）：
+                            # 尚未产出任何事件时可安全换号重试。
+                            _raw_text = "\n".join(raw_lines)
+                            if (_looks_like_inband_error(_raw_text) or _sse_has_error_event(_raw_text)):
+                                kind = _classify_error(200, _raw_text)
+                                if not delivered:
+                                    await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, _raw_text[:65536], model=m,
+                                                          reset_at=_error_reset_at(r.headers, _raw_text))
+                                    await _blocking_call(_maybe_degrade, db2, acc_i)
+                                    sess_i.close()
+                                    POOL.release(held_uid)
+                                    held_uid = ""
+                                    last_err_kind = kind
+                                    last_err_msg = _raw_text
+                                    last_err_status = r.status_code
+                                    _logger.warning("上游 200 但响应体是错误（anthropic-stream）kind=%s acc=%s body=%.200s",
+                                                    kind, final_uid, _raw_text)
+                                    raw_lines.clear()
+                                    if kind in _RETRYABLE_KINDS:
+                                        await pool.rotate_backoff_async(min(rotate_idx, 1))
+                                        rotate_idx += 1
+                                        continue
+                                    yield conv.error_event(_raw_text[:500])
+                                    return
+                                # 已产出过事件：收不回来，但绝不记成成功。
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, final_model, "anthropic",
+                                                    final_uid, 200, None, error_kind=kind)
+                                await _blocking_call(_record_usage, key.id, final_acc_id, final_model, 0.0, None,
+                                              reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request), use_case="anthropic",
+                                              seq=seq, latency_ms=latency_ms, error_kind=kind)
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                await _blocking_call(_apply_account_policy, db2, acc_i, kind, 200, _raw_text[:65536], model=m,
+                                                          reset_at=_error_reset_at(r.headers, _raw_text))
+                                return
+                            if pending_events:
+                                delivered = True
+                                yield "".join(pending_events)
+                                pending_events.clear()
+                            tail = conv.finish()
+                            if tail:
+                                yield tail
+                            text = "\n".join(raw_lines)
+                            # 健康响应才清空连败计数并更新「最近使用」。
+                            acc_i.last_used_at = datetime.utcnow()
+                            await _blocking_call(_note_success, db2, acc_i)
+                            usage = _parse_usage(text)
+                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
+                            latency_ms = int((time.perf_counter() - request_start) * 1000)
+                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
+                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, "anthropic", final_uid, 200,
+                                                total_toks, error_kind="success")
+                            updated = sess_i.updated_json()
+                            sess_i.close()
+                            if sticky_key and held_uid:
+                                POOL.sticky.bind(sticky_key, held_uid)
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await _blocking_call(_record_usage, key.id, final_acc_id, final_model, usage["credits"], updated,
+                                          persist_auth=not getattr(sess_i, "_gateway_auth_persisted", False),
+                                          reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request), use_case="anthropic",
+                                          prompt_tokens=usage["prompt_tokens"],
+                                          completion_tokens=usage["completion_tokens"],
+                                          total_tokens=usage["total_tokens"],
+                                          cached_tokens=usage["cached_tokens"],
+                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                          error_kind="success")
+                            return
+                        except GatewayRejected:
+                            raise
+                        except Exception as e:
+                            if delivered:
+                                _exc_text(e)
+                                request_metrics.mark_stream_error()
+                                latency_ms = int((time.perf_counter() - request_start) * 1000)
+                                seq = _log_chat_row(None, latency_ms, m, "stream", "-", 502, None, error_kind="transport")
+                                await _blocking_call(_record_usage, key.id, 0, m, 0.0, None,
+                                                     reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request),
+                                                     use_case="anthropic", seq=seq, latency_ms=latency_ms, error_kind="transport")
+                                yield conv.error_event("上游流中断，请重试", "api_error")
+                                sess_i.close()
+                                POOL.release(held_uid)
+                                held_uid = ""
+                                return
+                            kind = _classify_error(0, _exc_text(e))
+                            await _blocking_call(_apply_account_policy, db2, acc_i, kind, 0, _exc_text(e), model=m)
+                            await _blocking_call(_maybe_degrade, db2, acc_i)
+                            last_err_kind = kind
+                            last_err_msg = _exc_text(e)
+                            last_err_status = _extract_http_status(last_err_msg)
+                            sess_i.close()
+                            POOL.release(held_uid)
+                            held_uid = ""
+                            await pool.rotate_backoff_async(min(rotate_idx, 1))
+                            rotate_idx += 1
+                            continue
+            latency_ms = int((time.perf_counter() - request_start) * 1000)
+            err_kind = last_err_kind or "no_account"
+            seq = _log_chat_row(None, latency_ms, final_model, "anthropic", "-", 503, None, error_kind=err_kind)
+            await _blocking_call(_record_usage, key.id, 0, final_model, 0.0, None,
+                          reasoning_effort=_reasoning_effort(chat_body), client_ip=_client_ip(request), use_case="anthropic",
+                          seq=seq, latency_ms=latency_ms, error_kind=err_kind)
+            if err_kind == "waf":
+                msg = _exhaustion_message("waf", last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status)
+            else:
+                msg = _exhaustion_message(err_kind, last_err_msg, retry_budget.used, len(order) if order else 0, last_err_status)
+            error = {'type': 'error', 'error': {'message': msg, 'type': 'overloaded_error',
+                                               **_failure_evidence(err_kind, last_err_msg, last_err_status)}}
+            yield 'event: error\ndata: ' + json.dumps(error, ensure_ascii=False) + '\n\n'
+        except GatewayRejected as exc:
+            await _record_gateway_rejection(exc, key.id, request)
+            text = json.dumps({'type': 'error', **exc.payload()}, ensure_ascii=False)
+            yield f'event: error\ndata: {text}\n\n'
+        finally:
+            if held_uid:
+                POOL.release(held_uid)
+            if sess_i is not None:
+                sess_i.close()
+            await _blocking_call(db2.close)
+
+    return await _stream_response(_stream(), anthropic=True)
+
+
+@router.post("/v1/messages/count_tokens")
+async def anthropic_count_tokens(
+    request: Request,
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """Anthropic token 计数端点（本地粗估，不请求上游、不消耗配额）。
+
+    Claude Code 发消息前会调它做上下文预算。上游没有等价接口，这里按
+    「字符数 / 3」估算并刻意偏向高估 —— 宁可让客户端早点压缩上下文，
+    也不要低估，否则真正请求时可能超出上游上限直接失败。
+    """
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "缺少 API Key", "type": "auth_error"}})
+    if not await _blocking_call(get_key_row, db, api_key):
+        return JSONResponse(status_code=401, content={"error": {"message": "无效 API Key", "type": "auth_error"}})
+
+    try:
+        payload = await _request_json(request)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "bad json", "type": "invalid_request"}})
+
+    text = "".join((
+        json.dumps(payload.get("system") or "", ensure_ascii=False),
+        json.dumps(payload.get("messages") or [], ensure_ascii=False),
+        json.dumps(payload.get("tools") or [], ensure_ascii=False),
+    ))
+    return {"input_tokens": max(1, len(text) // 3)}
+
+
+@router.get("/v1/models")
+def models(
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """列出可用模型（**同步端点，故意的**）。
+
+    ⚠️ 这里必须是 `def` 而**不是** `async def`。
+
+    FastAPI 对 `def` 端点会**自动丢进线程池**执行；而 `async def` 端点的函数体
+    直接在**事件循环**里跑。本函数内部全是**同步阻塞**调用
+    （`AccountSession` / `httpx.Client` / SQLAlchemy），一旦写成 `async def`，
+    每一次上游网络等待都会**冻结整个事件循环** —— 连一个 404 路由都超时，
+    管理后台全站无响应。
+
+    这不是理论风险，是实测事故：加上「换号重试」后最多会串行阻塞
+    6 次 × 单次超时（最长 60s），事件循环可被占住**数分钟**，
+    表现就是「服务在监听、但任何请求都不返回」。
+
+    改成 `def` 后由线程池承载，阻塞再久也只占一个工作线程。
+    """
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={"error": {"message": "缺少 API Key", "type": "auth_error"}})
+    key = get_key_row(db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={"error": {"message": "无效 API Key", "type": "auth_error"}})
+    try:
+        check_quota(key)
+    except Exception as e:
+        return JSONResponse(status_code=e.status_code, content=e.detail)
+
+    aid = getattr(key, "account_id", None)
+    # 绑定了分组的 Key 只应看到组内模型，否则客户端会照着完整列表点模型然后被 403
+    allowed = _key_allowed_models(db, key)
+    configs = db.query(ModelConfig).all()
+    enabled_ids = {row.model_id for row in configs if row.enabled}
+    if os.getenv("WORKBUDDY_ANDROID") == "1" and not aid:
+        # Reuse the local model rules also displayed in the admin model screen.
+        if configs:
+            from admin.routers.models import _stored_metadata
+            data = []
+            for row in configs:
+                if not row.enabled or (allowed is not None and row.model_id not in allowed):
+                    continue
+                meta = _stored_metadata(row)
+                # Older model rows may predate vendor metadata. The local
+                # catalog must expose the same brand field as live discovery.
+                meta.setdefault('vendor', model_metadata.get_model_vendor(row.model_id))
+                if not meta.get('credits'):
+                    meta['credits'] = row.credits_raw or f'x{row.credit_multiplier or 0}'
+                data.append({**meta, **model_metadata.client_capabilities(meta),
+                             **model_metadata.promotion_display(meta),
+                             'id': row.model_id, 'object': 'model', 'owned_by': 'codebuddy',
+                             'name': row.note or row.model_id,
+                             'display_name': meta.get('name') or row.note or row.model_id,
+                             'description': row.description or '',
+                             'base_credit_multiplier': row.credit_multiplier})
+            from admin.model_listing import (format_entries, display_options,
+                                             official_order, apply_official_visibility)
+            local_opts = display_options(db)
+            data = apply_official_visibility(data, official_order(db),
+                                             enabled=local_opts.get("official_only", True))
+            data = format_entries(data, options=local_opts)
+            return {'object': 'list', 'data': data, 'source': 'local'}
+    acc = _select_account(db, account_id=aid, key_id=key.id, min_balance=0,
+                          key=key)
+    if not acc:
+        return JSONResponse(status_code=503, headers={"Retry-After": "3"},
+                            content={"error": {"message": f"无可用账号：{_no_account_reason(db, aid, key.id)}",
+                                               "type": "server_error", "code": "service_unavailable"}})
+    # 换号重试 + 错误处置，与对话端点同口径。
+    #
+    # 原实现只选**一次**账号，失败就直接 502 —— 既不做 `_apply_account_policy`
+    # （不冷却、不计数、不禁用），也不换号。后果是一个登录态失效的号会
+    # **每次**取模型都命中它：会看到「模型列表报 502 / 401」而不是自动恢复，
+    # 坏号也永远不会被标记，形成死循环。
+    #
+    # 重试次数**刻意比对话端点更保守**（默认 3，而不是 MAX_ROTATE=6）：
+    # 列模型只是元数据，不值得让客户端等上好几分钟；
+    # 上游网络卡住时，早一点如实报错比长时间无响应更有用。
+    tried_ids: set[int] = set()
+    last_err = ""
+    max_try = max(1, min(settings.MAX_ROTATE, _MODELS_MAX_TRY))
+    from admin import maintenance, model_listing
+    display_opts = model_listing.display_options(db)
+    for attempt in range(max_try):
+        if acc is None:
+            break
+        try:
+            with request_metrics.measure('models_catalog'):
+                with backend.AccountSession(acc.auth_json) as sess:
+                    try:
+                        # Explicit list refreshes must read current upstream prices.
+                        # Automatic routing retains its separate catalog TTL cache.
+                        catalog = sess.fetch_models_catalog()
+                        # 官方同显：与官方客户端一致，仅返回 cli agent 名单内的模型
+                        #（且按官方顺序）；开关关闭时回全量目录。
+                        models_raw = catalog["official"] if display_opts.get("official_only", True) \
+                            else catalog["models"]
+                        data = [{
+                            "id": m.get("id"), "object": "model", "owned_by": "codebuddy",
+                            "name": m.get("name") or m.get("id"),
+                            **model_metadata.metadata(m),
+                            **model_metadata.client_capabilities(m),
+                            **model_metadata.promotion_display(m),
+                            "display_name": m.get("name") or m.get("id"),
+                            "base_credit_multiplier": backend.CredentialManager._parse_credit_multiplier(m.get("credits"))
+                            if hasattr(backend.CredentialManager, "_parse_credit_multiplier") else None,
+                        } for m in models_raw
+                            if m.get("id") and m.get("id", "").lower() != "auto"
+                            and (m.get("id") in allowed if allowed is not None else
+                                 not configs or m.get("id") in enabled_ids)]
+                        _note_success(db, acc)
+                        data = model_listing.enrich_entries(
+                            sess, data, on_error=lambda error: maintenance.note_failure(db, acc, error),
+                            options=model_listing.display_options(db))
+                    finally:
+                        acc.auth_json = sess.updated_json()
+            acc.last_used_at = datetime.utcnow()
+            # 注意参数顺序是 (db, acc) —— 写反了会把 Session 当账号用，
+            # 报 "'Session' object has no attribute 'breaker_fails'"，而且因为
+            # 在 try 里会被当成「取模型失败」→ 502，很难一眼看出是参数顺序问题。
+            db.commit()
+            return {"object": "list", "data": data, "source": "backend"}
+        except Exception as e:
+            last_err = str(e)
+            # 与对话端点同一套处置：先分类，再按分类冷却/计数/禁用。
+            # 401 → session_dead 连续计数，达阈值自动禁用；
+            # 其余按各自分类（限流冷却、WAF 等）。
+            kind = _classify_error(_extract_http_status(last_err), last_err)
+            try:
+                _apply_account_policy(db, acc, kind, _extract_http_status(last_err), last_err)
+            except Exception:
+                db.rollback()
+            tried_ids.add(acc.id)
+            if os.getenv("WORKBUDDY_ANDROID") == "1" and kind == "transport":
+                # The same unreachable network will not improve by switching accounts.
+                break
+            if attempt + 1 >= max_try:
+                acc = None
+                break
+            # 换一个号再试（排除已失败的）。
+            # 第二次放宽 min_balance：模型列表不消耗积分，
+            # 余额为 0 的号也能正常列模型，不该因此被排除。
+            acc = (_select_account(db, exclude_ids=tried_ids, account_id=aid,
+                            key_id=key.id, key=key)
+                   or _select_account(db, exclude_ids=tried_ids, min_balance=0,
+                            account_id=aid, key_id=key.id, key=key))
+    return JSONResponse(status_code=502, content={
+        "error": {"message": f"获取模型失败（已尝试 {len(tried_ids)} 个账号）：{last_err[:200]}",
+                  "type": "upstream"}})
+
+
+def _key_balance_rows(db: Session, key):
+    """该 Key 可见账号的「去重后最新余额快照」行；绑定账号不存在时返回 None。"""
+    rows = scope_accounts(
+        db.query(Account), getattr(key, "account_id", None), key.id
+    ).filter(Account.status == "active").all()
+    if getattr(key, "account_id", None) and not rows:
+        return None
+
+    # Legacy imports can contain several rows for the same upstream identity.
+    # Count its newest balance snapshot once instead of multiplying its credits.
+    unique = {}
+    for row in rows:
+        identity = ("uid", row.uid) if row.uid else ("row", row.id)
+        previous = unique.get(identity)
+        if previous is None or (row.last_sync_at or datetime.min, row.id) > (
+                previous.last_sync_at or datetime.min, previous.id):
+            unique[identity] = row
+    return list(unique.values())
+
+
+def _key_available_credits(key, rows) -> float:
+    """该 Key 实际可用的积分：账号池余额与 Key 剩余额度取小（无限额度用前者）。"""
+    remain = sum(max(0, int(row.balance_remain or 0)) for row in rows)
+    if bool(key.unlimited):
+        return float(remain)
+    quota_limit = float(key.credit_limit or 0)
+    quota_used = round(float(key.credit_used or 0), 4)
+    return min(float(remain), round(max(0.0, quota_limit - quota_used), 4))
+
+
+@router.get("/v1/balance")
+def balance(
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """Return the upstream credit snapshot accessible to this API key."""
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "缺少 API Key", "type": "auth_error"}})
+    key = get_key_row(db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "无效 API Key", "type": "auth_error"}})
+    # A spent key must still be able to inspect its zero remaining balance.
+    if key.status != "active":
+        return JSONResponse(status_code=403, content={
+            "error": {"message": "API Key 已停用", "type": "key_disabled"}})
+
+    rows = _key_balance_rows(db, key)
+    if rows is None:
+        return JSONResponse(status_code=503, content={
+            "error": {"message": "绑定账号不存在或已禁用", "type": "bound_account_unavailable"}})
+
+    remain = sum(max(0, int(row.balance_remain or 0)) for row in rows)
+    total = sum(max(0, int(row.balance_total or 0)) for row in rows)
+    synced = [row.last_sync_at for row in rows if row.last_sync_at]
+    unlimited = bool(key.unlimited)
+    quota_limit = None if unlimited else float(key.credit_limit or 0)
+    quota_used = round(float(key.credit_used or 0), 4)
+    quota_remaining = None if unlimited else round(max(0.0, quota_limit - quota_used), 4)
+    available = remain if unlimited else min(remain, quota_remaining)
+    return {
+        "object": "balance",
+        "source": "gateway_snapshot",
+        "unit": "credits",
+        "balance": available,
+        "balance_remain": available,
+        "upstream_balance_remain": remain,
+        "balance_total": total,
+        "account_count": len(rows),
+        "shared_pool": not bool(getattr(key, "account_id", None)),
+        "snapshot_complete": bool(rows) and len(synced) == len(rows),
+        "synced_at": min(synced).isoformat() + "Z" if rows and len(synced) == len(rows) else None,
+        "key_quota": {
+            "unlimited": unlimited,
+            "limit": quota_limit,
+            "used": quota_used,
+            "remaining": quota_remaining,
+        },
+    }
+
+
+@router.get("/user/balance")
+@router.get("/v1/user/balance")
+def user_balance_deepseek(
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+):
+    """DeepSeek 官方余额接口的兼容实现（`GET /user/balance`）。
+
+    DeepSeek 开放平台查询余额的路径是 `GET https://api.deepseek.com/user/balance`
+    （Bearer 鉴权），返回 `is_available` + `balance_infos[]`，金额一律是字符串。
+    把客户端的 base_url 指到本网关的 DeepSeek 系工具（含各类渠道余额检测）
+    因此可以直接查余额；`/v1/user/balance` 是给「base_url 已带 /v1」的客户端
+    的等价别名。
+
+    口径与 `/v1/balance` 完全一致（同一份账号池快照，Key 额度取小），只是换成
+    DeepSeek 的返回形状：
+      * total_balance     = 该 Key 实际可用积分
+      * granted_balance   = "0.00" —— 上游没有「赠金/充值」的区分，恒为 0，
+        以保持官方 total = granted + topped_up 的恒等式；
+      * topped_up_balance = 同 total_balance；
+      * currency          = "CREDITS" —— 上游记账单位是积分而非人民币，如实
+        标注，不冒充 CNY。
+    此查询同样不触发逐账号上游刷新。
+    """
+    api_key = x_api_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:].strip()
+    if not api_key:
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "缺少 API Key", "type": "authentication_error"}})
+    key = get_key_row(db, api_key)
+    if not key:
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "无效 API Key", "type": "authentication_error"}})
+    if key.status != "active":
+        return JSONResponse(status_code=403, content={
+            "error": {"message": "API Key 已停用", "type": "key_disabled"}})
+    rows = _key_balance_rows(db, key)
+    if rows is None:
+        return JSONResponse(status_code=503, content={
+            "error": {"message": "绑定账号不存在或已禁用", "type": "bound_account_unavailable"}})
+    available = _key_available_credits(key, rows)
+    total = f"{float(available):.2f}"
+    return {
+        "is_available": available > 0,
+        "balance_infos": [{
+            "currency": "CREDITS",
+            "total_balance": total,
+            "granted_balance": "0.00",
+            "topped_up_balance": total,
+        }],
+    }

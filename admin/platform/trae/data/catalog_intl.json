@@ -1,0 +1,332 @@
+{
+ "schema": "trae-catalog/1",
+ "realm": "intl",
+ "generated_at": 1792345773,
+ "source": {
+  "kind": "client-state-vscdb",
+  "client": "Trae（国际版）",
+  "db": "%APPDATA%/Trae/User/globalStorage/state.vscdb",
+  "db_mtime": "2026-10-17T14:10:03",
+  "key": "<uid:19>_AI.agent.model.model_list_map",
+  "groups": {
+   "chat_v3": 10,
+   "builder_v3": 10,
+   "builder": 10,
+   "code_reviewer": 3,
+   "code_review_summary": 2,
+   "refactor": 4,
+   "solo_agent": 9
+  }
+ },
+ "models": [
+  {
+   "key": "gemini-2.5-pro-latest",
+   "name": "gemini-2.5-pro-latest",
+   "upstream_key": "gemini-2.5-pro-latest",
+   "display_name": "Gemini-2.5-Pro",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Gemini-2.5-Pro",
+    "gemini-2-5-pro",
+    "gemini25pro",
+    "gemini-2.5-pro-latest",
+    "gemini-2-5-pro-latest",
+    "gemini25prolatest"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "aws_claude_4.7_opus",
+   "name": "aws_claude_4.7_opus",
+   "upstream_key": "aws_claude_4.7_opus",
+   "display_name": "Claude-Opus-4.7",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Claude-Opus-4.7",
+    "claude-opus-4-7",
+    "claudeopus47",
+    "aws_claude_4.7_opus",
+    "aws-claude-4-7-opus",
+    "awsclaude47opus"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "aws_claude_4.6_sonnet",
+   "name": "aws_claude_4.6_sonnet",
+   "upstream_key": "aws_claude_4.6_sonnet",
+   "display_name": "Claude-Sonnet-4.6",
+   "model_type": "reasoning_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Claude-Sonnet-4.6",
+    "claude-sonnet-4-6",
+    "claudesonnet46",
+    "aws_claude_4.6_sonnet",
+    "aws-claude-4-6-sonnet",
+    "awsclaude46sonnet"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "gemini_2.5_flash_premium",
+   "name": "gemini_2.5_flash_premium",
+   "upstream_key": "gemini_2.5_flash_premium",
+   "display_name": "Gemini-2.5-Flash",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Gemini-2.5-Flash",
+    "gemini-2-5-flash",
+    "gemini25flash",
+    "gemini_2.5_flash_premium",
+    "gemini-2-5-flash-premium",
+    "gemini25flashpremium"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "gemini_3_flash",
+   "name": "gemini_3_flash",
+   "upstream_key": "gemini_3_flash",
+   "display_name": "Gemini-3-Flash-Preview",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Gemini-3-Flash-Preview",
+    "gemini-3-flash-preview",
+    "gemini3flashpreview",
+    "gemini_3_flash",
+    "gemini-3-flash",
+    "gemini3flash"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "gemini_3.1_pro",
+   "name": "gemini_3.1_pro",
+   "upstream_key": "gemini_3.1_pro",
+   "display_name": "Gemini-3.1-Pro-Preview",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 32000,
+   "aliases": [
+    "Gemini-3.1-Pro-Preview",
+    "gemini-3-1-pro-preview",
+    "gemini31propreview",
+    "gemini_3.1_pro",
+    "gemini-3-1-pro",
+    "gemini31pro"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "gpt-5.5",
+   "name": "gpt-5.5",
+   "upstream_key": "gpt-5.5",
+   "display_name": "GPT-5.5",
+   "model_type": "reasoning_model",
+   "context_window": 272000,
+   "max_tokens": 32000,
+   "aliases": [
+    "GPT-5.5",
+    "gpt-5-5",
+    "gpt55",
+    "gpt-5.5"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "gpt-6-astra",
+   "name": "gpt-6-astra",
+   "upstream_key": "gpt-6-astra",
+   "display_name": "GPT-6-Astra",
+   "model_type": "reasoning_model",
+   "context_window": 272000,
+   "max_tokens": 64000,
+   "aliases": [
+    "GPT-6-Astra",
+    "gpt-6-astra",
+    "gpt6astra"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "solo_agent"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "grok-4",
+   "name": "grok-4",
+   "upstream_key": "grok-4",
+   "display_name": "Grok-4",
+   "model_type": "chat_model",
+   "context_window": 128000,
+   "max_tokens": 16000,
+   "aliases": [
+    "Grok-4",
+    "grok-4",
+    "grok4"
+   ],
+   "fee_model_level": 2,
+   "multimodal": true,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder"
+   ],
+   "chat": true,
+   "config_source": 1
+  },
+  {
+   "key": "kimi-k2",
+   "name": "kimi-k2",
+   "upstream_key": "kimi-k2",
+   "display_name": "Kimi-K2-0905",
+   "model_type": "chat_model",
+   "context_window": 200000,
+   "max_tokens": 16000,
+   "aliases": [
+    "Kimi-K2-0905",
+    "kimi-k2-0905",
+    "kimik20905",
+    "kimi-k2",
+    "kimik2"
+   ],
+   "fee_model_level": 2,
+   "multimodal": false,
+   "thinking": {
+    "supported": true,
+    "options": [],
+    "default_level": null
+   },
+   "groups": [
+    "chat_v3",
+    "builder_v3",
+    "builder",
+    "code_reviewer",
+    "code_review_summary"
+   ],
+   "chat": true,
+   "config_source": 1
+  }
+ ]
+}
