@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from admin.db import get_db
+from admin.platform.auth import SessionStore
 from admin.platform.qoder.core import oauth
 from admin.platform.qoder.core.client import UpstreamError
 from admin.security import require_admin
@@ -24,7 +25,8 @@ router = APIRouter(prefix="/api/qoder", tags=["qoder"])
 
 #: 进行中的授权会话（nonce -> DeviceLogin）。单进程内存即可：
 #: 授权是一次性交互，重启丢失可接受。
-_SESSIONS: dict = {}
+_SESSION_STORE = SessionStore()
+_SESSIONS: dict = _SESSION_STORE.items
 
 #: 会话过期时间（秒）
 SESSION_TTL = 600
@@ -53,8 +55,7 @@ def device_start(realm: str = "cn", _: bool = Depends(require_admin)):
         logger.exception("生成设备授权链接失败")
         raise HTTPException(502,
                             detail="生成授权链接失败：%s" % str(exc)[:120]) from exc
-    _prune()
-    _SESSIONS[session.nonce] = session
+    _SESSION_STORE.add(session)
     payload = session.as_dict()
     payload["summary"] = "打开链接 → 选择账号 → 授权，然后本页会自动完成"
     return payload
@@ -64,7 +65,7 @@ def device_start(realm: str = "cn", _: bool = Depends(require_admin)):
 def device_poll(nonce: str, _: bool = Depends(require_admin)):
     """轮询一次（前端每 3 秒一次）。"""
     session = _SESSIONS.get(nonce)
-    if session is None:
+    if session is None or session.expired:
         raise HTTPException(404,
                             detail="授权会话不存在或已过期，请重新开始")
     try:

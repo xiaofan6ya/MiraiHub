@@ -27,11 +27,12 @@ class ManualCallbackIn(BaseModel):
 
 
 def parse_callback_query(value: str, nonce: str,
-                         session_keys: tuple[str, ...] = ("state", "nonce")) -> dict[str, str]:
+                         session_keys: tuple[str, ...] = ("state", "nonce"),
+                         *, schemes: tuple[str, ...] = ("http", "https")) -> dict[str, str]:
     """只解析链接，不访问链接；绑定显式会话，拒绝重复或冲突参数。"""
     try:
         parsed = urlsplit(value.strip())
-        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+        if (parsed.scheme not in schemes or not parsed.hostname
                 or parsed.username or parsed.password or parsed.fragment):
             raise ValueError
         # 触发非法端口检查，不对回调目标发起请求。
@@ -140,9 +141,12 @@ def submit_callback(platform_id: str, body: ManualCallbackIn) -> dict:
                 or session.nonce != body.nonce.strip()
                 or session.platform != spec.storage() or session.realm != realm):
             raise HTTPException(404, detail="授权会话不存在或已过期，请重新开始")
-        params = parse_callback_query(body.callback_url, session.nonce,
-                                      getattr(adapter, "session_keys", ("state", "nonce")))
-        payload = adapter.parse_callback(params)
+        if hasattr(adapter, "parse_callback_url"):
+            payload = adapter.parse_callback_url(body.callback_url, session)
+        else:
+            params = parse_callback_query(body.callback_url, session.nonce,
+                                          getattr(adapter, "session_keys", ("state", "nonce")))
+            payload = adapter.parse_callback(params)
         if not session.deliver(**payload):
             raise HTTPException(409, detail="本次授权已接收其他回调，请查看授权结果或重新开始")
     except HTTPException:
@@ -153,3 +157,98 @@ def submit_callback(platform_id: str, body: ManualCallbackIn) -> dict:
         logger.error("授权回调处理失败，platform=%s，错误类型=%s", spec.id, type(exc).__name__)
         raise HTTPException(500, detail="授权回调处理失败，请稍后重试") from None
     return {"ok": True, "summary": "回调已接收，正在完成授权…"}
+
+
+def adapter_for(platform_id: str, realm: str = ""):
+    """Resolve lifecycle operations with the same platform/realm isolation."""
+    from admin.platform import registry
+    from admin.platform.loader import load_platforms
+    load_platforms()
+    spec = registry.get(platform_id)
+    if spec is None or not spec.enabled:
+        raise HTTPException(404, "平台不存在或未启用")
+    if not spec.auth_callback:
+        raise HTTPException(400, "该平台未接入授权回调")
+    target = realm.strip() or spec.default_realm()
+    if ((spec.realm and target != spec.realm)
+            or (spec.realms and target not in spec.realm_keys())
+            or (not spec.realm and not spec.realms and target)):
+        raise HTTPException(400, "授权区域与平台不匹配")
+    return spec, target, importlib.import_module(spec.auth_callback)
+
+
+def checked_session(spec, realm, adapter, nonce):
+    session = adapter.get_session(nonce)
+    if (not isinstance(session, CallbackSession) or session.expired
+            or session.platform != spec.storage() or session.realm != realm
+            or session.nonce != nonce):
+        raise HTTPException(404, "授权会话不存在或已过期，请重新开始")
+    return session
+
+
+class SessionStore:
+    """Bounded, expiring adapter sessions; eviction never leaks client handles."""
+    def __init__(self):
+        self.items = {}
+        self.lock = threading.RLock()
+
+    def add(self, session):
+        with self.lock:
+            for key, old in list(self.items.items()):
+                if old.expired:
+                    self.items.pop(key)
+                    close = getattr(old, "close", None)
+                    if close:
+                        close()
+            if len(self.items) >= 100:
+                raise HTTPException(429, "进行中的授权会话过多，请稍后重试")
+            self.items[session.nonce] = session
+        return session
+
+    def get(self, nonce):
+        with self.lock:
+            return self.items.get(nonce)
+
+
+class PollingSession(CallbackSession):
+    """Poll upstream in one background worker; cache terminal results once."""
+    def poll_background(self, complete):
+        with self._exchange_lock:
+            if self.expired:
+                return {"ok": False, "error": "授权会话已过期，请重新开始"}
+            if self._exchange_result is not None:
+                return deepcopy(self._exchange_result)
+            if not self._exchange_started:
+                self._exchange_started = True
+                def run():
+                    try:
+                        result = complete()
+                        if not isinstance(result, dict):
+                            raise TypeError("Invalid authorization result")
+                    except Exception:
+                        logger.warning("授权处理失败，platform=%s", self.platform)
+                        result = {"ok": False, "error": "授权处理失败，请重新发起授权"}
+                    with self._exchange_lock:
+                        if not result.get("pending"):
+                            self._exchange_result = deepcopy(result)
+                        self._exchange_started = False
+                try:
+                    threading.Thread(target=run, daemon=True, name="platform-auth").start()
+                except RuntimeError:
+                    self._exchange_started = False
+                    raise
+        return {"pending": True, "summary": "正在查询授权结果…"}
+
+
+def completion_link(value, session, *, schemes, hosts, reject_paths=()):
+    """Accept only a platform completion URL bound to this authorization."""
+    parsed = urlsplit(value.strip())
+    if (parsed.scheme in ("http", "https") and parsed.hostname not in hosts
+            or parsed.path.rstrip("/") in reject_paths):
+        raise ValueError("请粘贴本平台授权完成后的链接，不要粘贴授权页地址")
+    params = parse_callback_query(value, session.nonce, schemes=schemes)
+    if not any(params.get(k) == session.nonce for k in ("state", "nonce")):
+        raise ValueError("回调链接缺少当前授权会话的 state/nonce")
+    if params.get("error") or params.get("errmsg"):
+        raise ValueError("上游未完成授权，请重新授权")
+    return {"authorized": True}

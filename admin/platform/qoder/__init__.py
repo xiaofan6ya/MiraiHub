@@ -80,6 +80,7 @@ def install() -> None:
             # 管理契约
             platform_gateway="admin.platform.qoder.platform_gateway:QoderGateway",
             storage_platform=PLATFORM,
+            auth_callback="admin.platform.qoder.auth",
             realm=realm,
             icon="qoder",
             notes="Qoder %s（%s）。COSY 自签名鉴权；模型格式为 OpenAI，"

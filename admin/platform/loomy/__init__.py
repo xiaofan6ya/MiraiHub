@@ -68,6 +68,7 @@ def install() -> None:
             # 管理契约（账号池 / 任务 / 探测 / 卡片）
             platform_gateway="admin.platform.loomy.platform_gateway:LoomyGateway",
             storage_platform=PLATFORM,
+            auth_callback="admin.platform.loomy.auth",
             realm=realm,
             icon="loomy",
             notes="Loomy",
@@ -75,7 +76,7 @@ def install() -> None:
             "task_runners": list(_task_runners().keys()),
             # Loomy 凭证是明文 JSON —— 扫描即导入，用户零操作。
             # checkin：每日签到领 5000 积分（POST /points/first-login，幂等）。
-            "actions": ["scan", "import", "refresh-quota", "checkin"],
+            "actions": ["begin-auth", "scan", "import", "refresh-quota", "checkin"],
         },
         ))
         logger.debug("Loomy 平台已登记：%s", platform_id)

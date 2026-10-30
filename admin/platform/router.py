@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from admin.db import get_db
@@ -37,7 +37,8 @@ def _serialize(spec) -> dict:
         "label": spec.label,
         "enabled": spec.enabled,
         "supports_local_scan": spec.supports_local_scan,
-        "auth": {"manual_callback": bool(spec.auth_callback)},
+        "auth": {"manual_callback": bool(spec.auth_callback),
+                 "lifecycle": bool(spec.auth_callback)},
         "default_realm": spec.default_realm(),
         "notes": spec.notes,
         # 图标 key：前端据此在 platform-icons.js 里取 logo。
@@ -66,6 +67,38 @@ def _serialize(spec) -> dict:
         #       checkin / begin-auth
         "actions": list((spec.extra or {}).get("actions") or []),
     }
+
+
+@router.post("/{platform_id}/auth/start")
+def auth_start(platform_id: str, realm: str = "", _: bool = Depends(require_admin)):
+    from admin.platform.auth import adapter_for
+    spec, realm, adapter = adapter_for(platform_id, realm)
+    return adapter.start(realm)
+
+
+@router.get("/{platform_id}/auth/poll")
+def auth_poll(platform_id: str, nonce: str, realm: str = "", _: bool = Depends(require_admin)):
+    from admin.platform.auth import adapter_for, checked_session
+    spec, realm, adapter = adapter_for(platform_id, realm)
+    session = checked_session(spec, realm, adapter, nonce)
+    return adapter.poll(session)
+
+
+class AuthBindIn(BaseModel):
+    nonce: str = Field(min_length=1, max_length=128)
+    realm: str = Field(default="", max_length=64)
+    phone: str = Field(default="", max_length=20)
+    code: str = Field(default="", max_length=8)
+
+
+@router.post("/{platform_id}/auth/bind/{action}")
+def auth_bind(platform_id: str, action: str, body: AuthBindIn, _: bool = Depends(require_admin)):
+    from admin.platform.auth import adapter_for, checked_session
+    spec, realm, adapter = adapter_for(platform_id, body.realm)
+    session = checked_session(spec, realm, adapter, body.nonce)
+    if action not in ("send", "verify") or not hasattr(adapter, "bind"):
+        raise HTTPException(400, "该平台不支持此授权操作")
+    return adapter.bind(session, action, body)
 
 
 @router.post("/{platform_id}/auth/callback")

@@ -33,17 +33,20 @@ Qoder 的登录态加密在 `auth.v1.dat`（原生层），本地读不出来。
 """
 from __future__ import annotations
 
+import getpass
 import base64
 import hashlib
 import json
 import logging
 import secrets
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
+from admin.platform.auth import PollingSession
 from admin.platform.qoder.core import endpoints as ep
 from admin.platform.qoder.core.client import UpstreamError
 
@@ -71,12 +74,12 @@ def machine_id_of_local() -> str:
     import os
     import platform
 
-    seed = "%s|%s" % (os.environ.get("USERNAME") or os.getlogin(),
+    seed = "%s|%s" % (os.environ.get("USERNAME") or getpass.getuser(),
                       platform.node() or "")
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
 
 
-class DeviceLogin:
+class DeviceLogin(PollingSession):
     """一次设备授权会话。
 
     用法：
@@ -87,7 +90,7 @@ class DeviceLogin:
     """
 
     def __init__(self, realm: str = "cn"):
-        self.realm = realm or "cn"
+        super().__init__("qoder", realm or "cn")
         self.verifier = _b64url(secrets.token_bytes(32))
         digest = hashlib.sha256(self.verifier.encode()).digest()
         self.challenge = _b64url(digest)
@@ -96,6 +99,8 @@ class DeviceLogin:
         self.created_at = int(time.time())
         self.auth_url = self._build_auth_url()
         self.poll_url = self._build_poll_url()
+        self._poll_lock = threading.Lock()
+        self._credential_cache = None
 
     # ---- URL 构造 ----
     def _build_auth_url(self) -> str:
@@ -129,6 +134,14 @@ class DeviceLogin:
 
     # ---- 轮询 ----
     def poll_once(self) -> dict | None:
+        with self._poll_lock:
+            if self.expired:
+                raise UpstreamError("授权会话已过期", status=408, kind="timeout")
+            if self._credential_cache is None:
+                self._credential_cache = self._poll_once()
+            return dict(self._credential_cache) if self._credential_cache else None
+
+    def _poll_once(self) -> dict | None:
         """轮询一次。
 
         * HTTP 202 / 404 -> `None`（用户还没授权）

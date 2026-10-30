@@ -5224,6 +5224,8 @@ async function platformBeginAuth(spec, storage) {
   const label = (spec && spec.label) || storage;
   const manualCallback = !!(spec && spec.auth && spec.auth.manual_callback);
   const base = `/api/${encodeURIComponent(storage)}/device`;
+  const authBase = spec && spec.auth && spec.auth.lifecycle
+    ? `/api/platforms/${encodeURIComponent(platformId)}/auth` : base;
   const authRequest = async (path, options = {}, timeout = 10000) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -5239,7 +5241,7 @@ async function platformBeginAuth(spec, storage) {
   };
   let start;
   try {
-    start = await authRequest(`${base}/start?realm=${encodeURIComponent(realm)}`, { method: "POST" });
+    start = await authRequest(`${authBase}/start?realm=${encodeURIComponent(realm)}`, { method: "POST" });
   } catch (error) {
     toast("发起授权超时或网络中断，请重试", "err");
     return;
@@ -5262,7 +5264,7 @@ async function platformBeginAuth(spec, storage) {
     ${manualCallback ? `<form id="authCallbackForm" class="mb-3">
       <label for="authCallbackUrl" class="block text-sm mb-2">手动粘贴回调链接</label>
       <p id="authCallbackHint" class="text-xs mb-2" style="color:var(--fg-muted)">
-        通过反向代理或远程访问时，如果授权后页面无法打开，请复制该页面地址栏中的完整链接，粘贴到这里。不要粘贴上方的授权页链接。
+        ${esc(data.callback_hint || "授权完成后，请复制跳转页面地址栏中的完整回调链接（包括客户端协议链接）并粘贴到这里。不要粘贴上方的授权页链接。")}
       </p>
       <textarea id="authCallbackUrl" rows="3" class="w-full border rounded-lg p-2 text-xs"
         style="border-color:var(--border);resize:vertical" maxlength="32768" required
@@ -5273,6 +5275,18 @@ async function platformBeginAuth(spec, storage) {
         <button id="authCallbackSubmit" type="submit" class="console-btn primary">提交回调链接</button>
       </div>
     </form>` : ""}
+    <form id="authBindForm" class="mb-3" hidden>
+      <p class="text-sm mb-2">微信授权已完成，请绑定手机号</p>
+      <label for="authBindPhone" class="text-xs">手机号</label>
+      <input id="authBindPhone" type="tel" inputmode="numeric" maxlength="11" autocomplete="tel-national"
+        class="w-full border rounded-lg p-2 mb-2" placeholder="11 位手机号">
+      <button id="authBindSend" type="button" class="console-btn quiet">发送验证码</button>
+      <label for="authBindCode" class="block text-xs mt-2">短信验证码</label>
+      <input id="authBindCode" inputmode="numeric" maxlength="8" autocomplete="one-time-code"
+        class="w-full border rounded-lg p-2 mb-2" placeholder="短信验证码">
+      <button id="authBindVerify" type="submit" class="console-btn primary">验证并完成登录</button>
+      <p id="authBindError" class="text-xs mt-2" role="status"></p>
+    </form>
     <p id="authStatus" class="text-sm" style="color:var(--fg-muted)" role="status" aria-live="polite">等待授权…</p>
     <div class="flex justify-end mt-4">
       <button onclick="closeModal()" class="console-btn quiet">关闭</button>
@@ -5345,6 +5359,37 @@ async function platformBeginAuth(spec, storage) {
     }
   });
 
+  const bindForm = document.getElementById("authBindForm");
+  let binding = false;
+  const bindAction = async action => {
+    if (binding || finished || !isActive()) return;
+    binding = true;
+    const sendButton = document.getElementById("authBindSend");
+    const verifyButton = document.getElementById("authBindVerify");
+    const error = document.getElementById("authBindError");
+    sendButton.disabled = verifyButton.disabled = true;
+    error.textContent = "";
+    try {
+      const result = await authRequest(`${authBase}/bind/${action}`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({nonce, realm,
+          phone: document.getElementById("authBindPhone").value.trim(),
+          code: document.getElementById("authBindCode").value.trim()}),
+      }, 40000);
+      if (!isActive() || finished) return;
+      if (!result.ok) { error.textContent = errorText(result.data, "手机号验证失败，请重试"); return; }
+      if (action === "send") error.textContent = "验证码已发送，请查看手机短信";
+      else { bindForm.hidden = true; el.textContent = "手机号验证成功，正在保存账号…"; }
+    } catch (e) {
+      if (isActive()) error.textContent = "请求超时或网络中断，请稍后重试";
+    } finally {
+      binding = false;
+      sendButton.disabled = verifyButton.disabled = finished;
+    }
+  };
+  document.getElementById("authBindSend").addEventListener("click", () => bindAction("send"));
+  bindForm.addEventListener("submit", event => { event.preventDefault(); void bindAction("verify"); });
+
   const expires = Number(data.expires_in);
   const deadline = Date.now() + (Number.isFinite(expires) && expires > 0 ? expires : 600) * 1000;
   let pollFailures = 0;
@@ -5352,11 +5397,11 @@ async function platformBeginAuth(spec, storage) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     if (!isActive() || finished) return;
     if (Date.now() >= deadline) break;
-    if (submitting) continue;
+    if (submitting || binding) continue;
     let poll;
     try {
       // 设备授权可能直接等待上游轮询（最长 30 秒），回调模式只查询后台进度。
-      poll = await authRequest(`${base}/poll?nonce=${encodeURIComponent(nonce)}`, {}, manualCallback ? 10000 : 40000);
+      poll = await authRequest(`${authBase}/poll?nonce=${encodeURIComponent(nonce)}&realm=${encodeURIComponent(realm)}`, {}, manualCallback ? 10000 : 40000);
     } catch (error) {
       if (!isActive() || finished) return;
       if (++pollFailures >= 5) {
@@ -5378,6 +5423,12 @@ async function platformBeginAuth(spec, storage) {
     }
     pollFailures = 0;
     if (payload.pending) {
+      if (payload.stage === "bind_phone") {
+        bindForm.hidden = false;
+        accepted = true;
+        if (input) input.value = "";
+        disableForm();
+      }
       if (payload.stage === "exchanging" && input) {
         accepted = true;
         input.value = "";

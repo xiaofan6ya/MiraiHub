@@ -217,7 +217,7 @@ Trae 兑换建连超时最多重试一次，读取超时或上游 HTTP 错误不
 错误链接可修正后重试；过期会话需要重新发起授权。自动回调仍然有效。
 
 平台通过 `PlatformSpec.auth_callback="admin.platform.<name>.auth"` 声明适配器模块。
-`GET /api/platforms` 仅公开 `auth.manual_callback` 能力标记，前端按能力渲染，
+`GET /api/platforms` 公开 `auth.manual_callback` 和 `auth.lifecycle` 能力标记，前端按能力渲染，
 不识别平台名称。适配器模块提供：
 
 ```python
@@ -235,11 +235,45 @@ def parse_callback(params: dict[str, str]) -> dict:
 公开轮询结果不能包含 verifier 或授权码。不同平台、区域的会话不能互相提交。
 未配置适配器的平台不显示输入框，公共接口明确拒绝手动回调。
 
-当前生产适配器为 Trae 国内版 / 国际版（解析 `authCodeInfo`、`code`、`userInfo`），
-旧 `POST /api/trae/device/callback` 保留为公共逻辑的兼容入口。
-Qoder 使用设备轮询，无浏览器回调，继续走 `start -> poll -> claim`；
-其单次查询和保存最多等待 40 秒，以覆盖原有 30 秒上游请求。
-后续使用浏览器回调的平台只需注册适配器、提供上述会话接口，前端无需修改。
+当前六个渠道均接入：Trae 国内版 / 国际版、Qoder 国内版 / 国际版、WorkBuddy、Loomy。
+
+公共生命周期接口（均需管理员身份）：
+
+```text
+POST /api/platforms/<platform_id>/auth/start?realm=...
+GET  /api/platforms/<platform_id>/auth/poll?nonce=...&realm=...
+POST /api/platforms/<platform_id>/auth/callback
+POST /api/platforms/<platform_id>/auth/bind/send
+POST /api/platforms/<platform_id>/auth/bind/verify
+```
+
+适配器还需提供 `start(realm)`、`poll(session)`；需要检查完整 URL 时，
+可提供 `parse_callback_url(value, session)` 替代 `parse_callback(params)`。
+手机号绑定由可选的 `bind(session, action, body)` 实现，其他平台明确拒绝该操作。
+
+- Trae 解析 `authCodeInfo`、`code`、`userInfo`，保留自动回调和旧提交接口。
+- Qoder 和 WorkBuddy 接受与当前 state/nonce 匹配的官方完成链接或客户端协议链接，
+  凭证仍通过官方轮询核验。粘贴链接不会直接视为登录成功，自动轮询仍然可用。
+  Qoder 公共流程在授权成功后直接保存账号；旧设备接口保留兼容。
+- Loomy 使用微信回调中的 code/state 完成兑换；需要绑定手机号时，
+  poll 返回 `pending: true, stage: "bind_phone"`，控制台显示短信验证表单。
+  已绑定账号走已有绑定流程，授权码不会被重复兑换。
+
+Loomy 需要部署者提供应用签名配置文件，默认 `/data/loomy-oauth.json`，
+可用 `LOOMY_AUTH_CONFIG_PATH` 指定位置。必填字段为 `base_url`、`access_key_id`、
+`access_key_secret`、`app_id`、`wechat_app_id`；可选 `wechat_authconf`、`redirect_uri`。
+真实配置不得提交到仓库，建议文件权限 0600；缺少配置时发起授权会明确报错。
+
+会话保存在单进程内存中，重启后需重新授权；轮询任务在后台执行，
+终态结果缓存以避免重复保存账号。过期、跨平台或跨区域的会话会被拒绝。
+
+验证命令（Python 依赖见 requirements.txt；浏览器测试需安装 Playwright 和 Chromium）：
+
+```sh
+python -m unittest discover -s tests -p 'test_*callback.py'
+python -m unittest discover -s tests -p 'test_all_platform_auth.py'
+node tests/test_trae_callback_ui.cjs
+```
 
 **前端轮询，后端不阻塞**：后端阻塞 5 分钟会被网关/浏览器超时切断。
 每 2 秒查询一次，总时限使用 start 返回的 `expires_in`（默认 10 分钟）。

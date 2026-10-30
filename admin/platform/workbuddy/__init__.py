@@ -288,6 +288,7 @@ def install() -> None:
         # 管理契约：账号池 11 项操作 + 任务清单 + 客户端探测 + 概览卡片。
         platform_gateway="admin.platform.workbuddy:WorkBuddyGateway",
         storage_platform=PLATFORM,
+            auth_callback="admin.platform.workbuddy.auth",
         realm="",
         icon=PLATFORM,
         supports_local_scan=True,
@@ -297,7 +298,7 @@ def install() -> None:
             # 动作能力（前端据此渲染按钮）
             # checkin 不在这里：WorkBuddy 的签到走定时任务 daily_checkin，
             # 没有手动接口。声明了但没实现 -> 点了 404。
-            "actions": ["scan", "import", "refresh-quota", "usage"],
+            "actions": ["begin-auth", "scan", "import", "refresh-quota", "usage"],
         },
     ))
     logger.debug("WorkBuddy 平台已登记")
