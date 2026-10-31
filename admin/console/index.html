@@ -5267,20 +5267,47 @@ async function platformBeginAuth(spec, storage) {
       toast("开始授权失败：" + ((data && data.detail) || "无授权地址"), "err");
       return;
     }
+    // 服务端部署时回调不是本机，文案和提示都要跟着变 ——
+    // 否则用户在自己电脑上点链接、授权完跳 127.0.0.1，看到的是「无法访问」。
+    const reachable = data.callback_reachable !== false;
+    const steps = reachable
+      ? ['点下面的链接打开 Trae 授权页', '选择账号并点「授权」',
+         '浏览器会自动跳回本机，本页随即提示成功，无需手动操作']
+      : ['用**任意设备**的浏览器打开下面的链接（手机也行，可以扫二维码）',
+         '选择账号并点「授权」',
+         '浏览器会跳到本网关的回调地址，授权完成后本页自动提示成功'];
     openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
       <ol class="text-sm mb-3" style="color:var(--fg-muted);padding-left:18px">
-        <li>点下面的链接打开 Trae 授权页</li>
-        <li>选择账号并点「授权」</li>
-        <li>浏览器会自动跳回本机端口，本页随即提示成功，无需手动操作</li>
+        ${steps.map(t => '<li>' + t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>') + '</li>').join('')}
       </ol>
-      <p class="text-xs mb-3" style="word-break:break-all">
-        <a href="${esc(data.auth_url)}" target="_blank" rel="noopener"
-           style="color:var(--brand);text-decoration:underline">${esc(data.auth_url)}</a>
-      </p>
+      ${reachable ? '' : `<div class="text-xs mb-3" style="padding:8px 10px;border-radius:8px;background:var(--warn-soft);color:var(--warn)">
+        ⚠ ${esc(data.callback_hint || '回调地址不是本机，请确认它可从外部访问')}
+      </div>`}
+      <div class="flex gap-4 items-start mb-3">
+        <div class="flex-1 min-w-0">
+          <p class="text-xs" style="word-break:break-all">
+            <a href="${esc(data.auth_url)}" target="_blank" rel="noopener"
+               style="color:var(--brand);text-decoration:underline">${esc(data.auth_url)}</a>
+          </p>
+        </div>
+      </div>
       <p id="traeAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待浏览器授权…</p>
       <div class="flex justify-end gap-2 mt-4">
         <button onclick="closeModal()" class="console-btn quiet">关闭</button>
       </div>`);
+    // 服务器部署时链接很长，手机上不方便输入 —— 给一个复制按钮，
+    // 比引一个二维码库更省（项目里没有 QR 依赖，为这一个场景加不合适）。
+    if (!reachable) {
+      const host = document.getElementById('traeAuthStatus');
+      if (host && host.parentElement) {
+        const bar = document.createElement('div');
+        bar.className = 'flex gap-2 mt-2';
+        bar.innerHTML = '<button class="console-btn quiet" onclick="navigator.clipboard.writeText(' +
+          JSON.stringify(data.auth_url).replace(/"/g, '&quot;') +
+          ').then(()=>toast(\'授权链接已复制，可发到手机打开\'))">复制授权链接</button>';
+        host.parentElement.insertBefore(bar, host.nextSibling);
+      }
+    }
 
     const nonce = data.nonce;
     for (let i = 0; i < 150; i += 1) {

@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -150,7 +150,8 @@ def scan_local(_: bool = Depends(require_admin)):
 # 浏览器授权登录（PKCE）
 # ---------------------------------------------------------------------------
 @router.post("/device/start")
-def device_start(realm: str = "cn", _: bool = Depends(require_admin),
+def device_start(realm: str = "cn", request: Request = None,
+                 _: bool = Depends(require_admin),
                  db: Session = Depends(get_db)):
     """起一次浏览器授权：返回授权链接，用户点开登录即可。
 
@@ -193,7 +194,30 @@ def device_start(realm: str = "cn", _: bool = Depends(require_admin),
                                    machine_id=machine_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, detail="开授权会话失败：%s" % str(exc)[:160]) from exc
-    return session.as_dict()
+    payload = session.as_dict()
+    # 把部署形态一并告诉前端：服务器部署且没配公网基址时，
+    # 授权链接里的回调是 127.0.0.1 —— 用户浏览器在别的机器上，跳回来必然失败。
+    # 与其让他授权完看着「打不开」，不如在点之前就提示。
+    callback = payload.get("callback_url") or ""
+    loopback = callback.startswith("http://127.0.0.1") or callback.startswith("http://localhost")
+    # 回环地址在两种场景下都**没问题**：
+    #   · 桌面版：浏览器和网关同机
+    #   · 管理员用本机浏览器打开 localhost 的管理台（源码部署也常这样）
+    # 只有「从**别的机器**的浏览器访问管理台」时，回环才会断开 ——
+    # 这一点用请求来源判断才是准的，不能只看有没有配 WORKBUDDY_DESKTOP。
+    from_remote = False
+    try:
+        host = (request.client.host or "") if request is not None else ""
+        from_remote = host not in ("127.0.0.1", "::1", "localhost", "")
+    except Exception:
+        from_remote = False
+    payload["callback_reachable"] = (not loopback) or not from_remote
+    payload["callback_hint"] = (
+        "" if payload["callback_reachable"]
+        else "当前回调地址是本机回环（%s），而你是从别的机器打开的管理台 ——"
+             "授权完成后浏览器会跳到你**自己电脑**的这个地址，打不开。"
+             "请设置环境变量 WB_OAUTH_PUBLIC_BASE=https://你的域名 后重启服务。" % callback)
+    return payload
 
 
 #: 授权完成后展示给用户的页面（不依赖前端框架，纯静态 HTML）
