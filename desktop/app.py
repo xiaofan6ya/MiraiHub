@@ -35,28 +35,168 @@ class _NullTray:
     state = "stopped"
 
 
+#: PyInstaller onefile 会在 %TEMP% 下解压一份 `_MEIxxxxxx` 运行目录。
+#: 正常退出时它会自删；但**关机/重启/任务管理器结束进程**这类硬杀不会触发
+#: 清理，目录就永远留在 C 盘。实测单份 152 MB，攒十几次就是一个多 GB。
+_MEI_PREFIX = "_MEI"
+
+
+def _mei_in_use(path: str) -> bool:
+    """这个 _MEI 目录是否还挂在别的存活进程上。
+
+    判断方式：用 `handle` 类工具太重，这里直接尝试**独占重命名** ——
+    能改名成功说明没有进程持有里面的文件句柄（Windows 上正在运行的
+    exe/dll 会被锁住，改名会失败）。失败就认为是活的，跳过不删。
+    """
+    try:
+        probe = path + ".delete-probe"
+        os.rename(path, probe)
+        os.rename(probe, path)
+        return False
+    except OSError:
+        return True
+
+
+def cleanup_stale_mei_dirs() -> int:
+    """清理上次异常退出留下的 `_MEI*` 目录，返回释放的字节数。
+
+    ## 为什么在**启动时**清而不是退出时
+
+    被杀进程时没有任何机会跑退出代码（关机、重启、任务管理器结束、蓝屏）。
+    所以唯一可靠的时机是「下一次启动」。
+
+    ## 为什么不会误删自己
+
+    `sys._MEIPASS` 指向当前进程正在用的那个目录，先把它排除；
+    另外还在跑的其它实例（多开、或托盘常驻）会被 `_mei_in_use()`
+    识别为活的而跳过。
+    """
+    import shutil
+    import tempfile
+
+    current = ""
+    mei_base = getattr(sys, "_MEIPASS", "") or ""
+    if mei_base:
+        try:
+            current = os.path.normcase(os.path.abspath(mei_base))
+        except Exception:
+            current = ""
+    # 非 frozen（源码运行）时不该动 TEMP —— 那是别人程序的目录
+    if not getattr(sys, "frozen", False):
+        return 0
+    freed = 0
+    try:
+        entries = os.listdir(tempfile.gettempdir())
+    except OSError:
+        return 0
+    for name in entries:
+        if not name.startswith(_MEI_PREFIX):
+            continue
+        path = os.path.join(tempfile.gettempdir(), name)
+        try:
+            if not os.path.isdir(path):
+                continue
+            if current and os.path.normcase(os.path.abspath(path)) == current:
+                continue
+            if _mei_in_use(path):
+                continue
+            size = 0
+            for root, _dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        size += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                freed += size
+        except Exception:
+            continue
+    return freed
+
+
+#: 默认端口。用户没手动指定时永远先试这个。
+DEFAULT_PORT = 8790
+
+#: 备选端口：首选端口被占时按顺序往下试。
+#: 用固定的一小段而不是随机端口 —— 端口稳定，用户收藏的
+#: `http://127.0.0.1:8790/v1` 才不会某天突然失效。
+FALLBACK_PORTS = (8790, 8791, 8792, 8793, 8794, 8795, 8800, 8080, 8000)
+
+
+def _port_free(port: int) -> bool:
+    """端口能否被我们绑定（含 SO_REUSEADDR，避免 TIME_WAIT 误判）。"""
+    if not 1 <= port <= 65535:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 先看有没有人在听：connect 成功说明已经在跑（自己的旧实例也算）
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
+
 def select_port(preferred: int) -> int:
-    """Keep the configured port unless another listener or reservation owns it."""
+    """选服务端口：**优先稳定，其次随机**。
+
+    ## 为什么不能直接 bind(0)
+
+    原实现只要首选端口绑不上就 `bind(("0.0.0.0", 0))`，让系统给一个随机
+    高位端口（实际见到的 54293、50069 都是这么来的）。问题有两层：
+
+      1. 那个随机端口会被 `save_port()` 写回 config.json，**下次启动
+         直接用它**，于是「8790 明明空着却一直用 54293」。
+      2. 端口每次可能不同，用户收藏的 API 地址、客户端里填的 base_url
+         全都会失效。
+
+    所以这里改成：首选 → 固定备选段 → 最后才随机。随机只在
+    「一整段都被占」时发生，属于兜底而不是常态。
+    """
     preferred = int(preferred)
     if not 1 <= preferred <= 65535:
         raise ValueError("服务端口必须在 1 到 65535 之间")
-    with socket.socket() as sock:
-        try:
-            with socket.socket() as probe:
-                probe.settimeout(.2)
-                if probe.connect_ex(("127.0.0.1", preferred)) == 0:
-                    raise OSError("Port already in use")
-            sock.bind(("0.0.0.0", preferred))
-        except OSError:
-            sock.bind(("0.0.0.0", 0))
+
+    # 动态端口段（IANA 的 ephemeral range）。旧版本 `bind(0)` 拿到的
+    # 54293、50069 都落在这里。
+    #
+    # **这种值不当作「用户指定的端口」**，否则历史遗留的随机端口会被
+    # 永久优先使用 —— 而它本来就是兜底产物，不该有最高优先级。
+    # 这正是「8790 明明空着却一直用 54293」的另一半原因。
+    if 49152 <= preferred <= 65535:
+        order = list(dict.fromkeys([*FALLBACK_PORTS, preferred]))
+    else:
+        order = list(dict.fromkeys([preferred, *FALLBACK_PORTS]))
+
+    for port in order:
+        if _port_free(port):
+            return port
+
+    # 整段都占用了：交给系统分配，但调用方**不应**把这个结果写进 config
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("0.0.0.0", 0))
         return sock.getsockname()[1]
 
 
 def save_port(base: Path, config: dict, port: int) -> None:
-    if config.get("port") != port:
-        # Write only after our own backend confirms readiness, never on a failed start.
-        config["port"] = port
-        atomic_json(base / "config.json", config)
+    """把实际使用的端口写回配置。
+
+    **只有固定端口才落盘**。系统随机分配的端口（>49151 那段）不写 ——
+    否则下次启动会优先用那个随机值，用户就再也回不到 8790 了。
+    这正是「8790 空着却一直跑在 54293」的成因。
+    """
+    if config.get("port") == port:
+        return
+    if port not in (DEFAULT_PORT, *FALLBACK_PORTS):
+        return
+    # Write only after our own backend confirms readiness, never on a failed start.
+    config["port"] = port
+    atomic_json(base / "config.json", config)
 
 
 def configure_environment(base: Path) -> dict:
@@ -698,6 +838,17 @@ def run(tray_mode: bool = False):
     try:
         config = configure_environment(base)
         setup_logging(base)
+
+        # 清掉上次硬杀留下的 _MEI 目录（关机/重启/结束进程都不会触发自删）。
+        # 放在 setup_logging 之后，这样清理量能记进日志；放在起服务之前，
+        # 避免边跑边删占磁盘。
+        try:
+            _freed = cleanup_stale_mei_dirs()
+            if _freed:
+                logging.getLogger("desktop").info(
+                    "已清理上次残留的 _MEI 运行目录，释放 %.1f MB", _freed / 1048576)
+        except Exception:
+            logging.getLogger("desktop").debug("清理 _MEI 目录失败", exc_info=True)
         ensure_webview2(base)
         api = DesktopAPI(base, config)
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True

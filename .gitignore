@@ -146,3 +146,6 @@ docs/
 tests/
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
+
+# 发布公告（只在 GitHub Release 正文使用）
+RELEASE-*.md
