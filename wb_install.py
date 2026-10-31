@@ -262,6 +262,42 @@ def _iter_drive_roots(drives: str):
             yield Path(d)
 
 
+#: 盘根下**最多**展开多少个子目录做二级候选。
+#:
+#: 为什么需要二级：用户常把客户端装在带一层分类目录的位置，例如
+#: `E:\AI\WorkBuddy`、`D:\Programs\WorkBuddy`。只拼盘根（`E:\WorkBuddy`）
+#: 会漏掉这类真实存在且很常见的布局 —— 表现为「明明装了客户端，却一直报
+#: 未发现安装目录」：设备风控令牌抓不到、出站 UA 的版本退化成兜底值。
+#:
+#: 成本：每盘一级子目录约 10~15 个，每个只做一次 `resources/app.asar` 的
+#: is_file 探测（无递归）。实测 5 个盘合计 36 → 70 个候选、冷扫描 12ms。
+#: 这里再设一个上限，防止个别盘根被塞进上百个目录时把扫描拖慢。
+_MAX_SUBDIR_BASES = 40
+
+
+def _iter_subdir_bases(root: Path):
+    """列出盘根下的一级子目录（用于生成二级安装候选）。
+
+    只取目录、不递归；任何 OSError（权限不足、盘未就绪）都静默跳过 ——
+    自动发现是尽力而为的能力，不能因为某个盘的权限问题让整次扫描失败。
+    """
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return
+    count = 0
+    for entry in entries:
+        if count >= _MAX_SUBDIR_BASES:
+            return
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        count += 1
+        yield entry
+
+
 class _WorkBuddyInstall:
     """安装目录与元数据的发现器（带 TTL 缓存 + 线程安全）。"""
 
@@ -528,6 +564,11 @@ class _WorkBuddyInstall:
         for root in _iter_drive_roots(drives):
             for name in _BASE_NAMES:
                 out.append(root / name)
+            # 3b) 盘根下一层子目录：覆盖 E:\AI\WorkBuddy 这类带分类目录的安装位置。
+            #     只做一层、不递归；排在盘根候选之后，命中盘根时不会白扫。
+            for parent in _iter_subdir_bases(root):
+                for name in _BASE_NAMES:
+                    out.append(parent / name)
 
         return _dedup(out)
 
