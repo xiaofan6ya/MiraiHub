@@ -838,7 +838,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261031-r29" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261031-r30" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -5242,6 +5242,42 @@ const PLATFORM_LOGIN_URL = {
   "trae-intl": "https://www.trae.ai/",
 };
 
+// ===== 平台授权形态（由各平台 /meta 的 auth_mode 声明）=====
+//
+// 三个平台的上游能力不一样，前端不该硬编码「有没有授权按钮」：
+//   callback            Trae  —— 浏览器回调，服务器部署要配公网基址
+//   device-poll         Qoder —— 服务端轮询，任意设备授权都行
+//   local-session-only  Loomy —— 上游没有授权接口，只能扫本机
+//
+// 缓存按 storage_platform 存，页面生命周期内只需查一次。
+const _PLATFORM_META_CACHE = new Map();
+
+async function platformAuthMeta(storage) {
+  const key = String(storage || "").toLowerCase();
+  if (_PLATFORM_META_CACHE.has(key)) return _PLATFORM_META_CACHE.get(key);
+  let meta = { auth_mode: "", auth_explain: "" };
+  try {
+    const r = await api(`/api/${encodeURIComponent(key)}/meta`);
+    const { ok, data } = await safeJson(r);
+    if (ok && data) {
+      meta = {
+        auth_mode: String(data.auth_mode || ""),
+        auth_explain: String(data.auth_explain || ""),
+      };
+    }
+  } catch (e) {
+    // 拿不到就按「支持授权」处理，让用户点一下试，而不是直接藏掉入口
+  }
+  _PLATFORM_META_CACHE.set(key, meta);
+  return meta;
+}
+
+/** 该平台是否支持「在线授权登录」。 */
+async function platformSupportsAuth(storage) {
+  const meta = await platformAuthMeta(storage);
+  return meta.auth_mode !== "local-session-only";
+}
+
 async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
@@ -5356,11 +5392,14 @@ async function platformBeginAuth(spec, storage) {
     return;
   }
 
+  // 设备码授权（Qoder 这类）：token 由**服务端轮询**取回，
+  // 浏览器在哪台机器上完全不重要 —— 手机上打开授权也行。
+  // 文案直接这么写，避免服务器部署的用户以为只能在本机点。
   openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
     <ol class="text-sm mb-3" style="color:var(--fg-muted);padding-left:18px">
-      <li>点击下面的链接（或复制到浏览器）</li>
+      <li>用<b>任意设备</b>的浏览器打开下面的链接（手机也行）</li>
       <li>选择要接入的账号并确认授权</li>
-      <li>本页会自动完成，无需再操作</li>
+      <li>本页会自动完成 —— 凭证由服务端轮询取回，与浏览器在哪无关</li>
     </ol>
     <p class="text-xs mb-3" style="word-break:break-all">
       <a href="${esc(authUrl)}" target="_blank" rel="noopener"
@@ -5530,7 +5569,7 @@ async function platformScanLocal(spec, storage) {
     toast(`扫描失败：${(data && data.detail) || r.status}`, "err");
     return;
   }
-  showScanResult(data, spec, storage);
+  await showScanResult(data, spec, storage);
 }
 
 /**
@@ -5799,7 +5838,7 @@ async function loadPlatformBench() {
   });
 }
 
-function showScanResult(data, spec, storage) {
+async function showScanResult(data, spec, storage) {
   const items = (data && data.items) || [];
   const canImport = Boolean(data && data.can_import);
   // 各平台的 items 字段名不同，按可能的键依次取：
@@ -5845,7 +5884,12 @@ function showScanResult(data, spec, storage) {
     : "";
 
   const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
-  const needAuth = !canImport && id === "qoder";
+  // 「要不要显示授权登录按钮」不再硬编码 qoder：
+  // 由各平台 /meta 的 auth_mode 决定（Loomy 是 local-session-only，天然没有）。
+  const authMeta = await platformAuthMeta(storage);
+  const supportsAuth = authMeta.auth_mode !== "local-session-only";
+  const authExplain = authMeta.auth_explain || "";
+  const needAuth = !canImport && supportsAuth;
   const body = `
     <h3 class="font-semibold text-lg mb-2">扫描结果 · ${esc((spec && spec.label) || storage)}</h3>
     <p class="text-sm mb-2" style="color:var(--fg-muted)">
@@ -5865,8 +5909,10 @@ function showScanResult(data, spec, storage) {
     </div>` : ""}
     ${dirBlock}
     ${data && data.hint ? `<p class="text-xs mt-2" style="color:var(--fg-subtle)">${esc(data.hint)}</p>` : ""}
+    ${authExplain ? `<p class="text-xs mt-2" style="color:var(--fg-muted);padding:8px 10px;border-radius:8px;background:var(--surface-2)">
+      ${esc(authExplain)}</p>` : ""}
     <div class="flex justify-end gap-2 mt-4">
-      ${needAuth ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),'${esc(storage)}')"
+      ${(needAuth && supportsAuth) ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),'${esc(storage)}')"
           class="console-btn primary">立即授权登录</button>` : ""}
       ${canImport ? `<button onclick="closeModal();platformImportLocal(window.WBPlatform.spec(),'${esc(storage)}')"
           class="console-btn primary">导入这些凭证</button>` : ""}

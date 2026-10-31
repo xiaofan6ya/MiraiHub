@@ -36,7 +36,12 @@ def meta(_: bool = Depends(require_admin)):
             "realms": [{"key": k, "label": v["label"],
                         "open_api": v["open_api"], "gateway": v["gateway"]}
                        for k, v in endpoints.REGIONS.items()],
-            "auth": "COSY 自签名（/algo 族） + Bearer（openapi / sash 族）"}
+            "auth": "COSY 自签名（/algo 族） + Bearer（openapi / sash 族）",
+            # 设备码授权：凭证由**服务端轮询**取回（deviceToken 端点），
+            # 浏览器在哪台设备上都行，所以服务器部署无需任何回调配置。
+            "auth_mode": "device-poll",
+            "auth_explain": ("Qoder 使用设备码授权：点开链接在任意设备上确认即可，"
+                             "凭证由服务端轮询取回，与浏览器所在机器无关。")}
 
 
 @router.get("/scan-local")

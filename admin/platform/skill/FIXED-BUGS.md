@@ -1296,6 +1296,83 @@ ADMIN_PORT=8795   http://127.0.0.1:8795/authorize   reachable=True
 
 桌面版不需要动任何配置 —— 本地回调就是它的默认路径，也是它的最优路径。
 
+## 五·补24 四个平台的授权形态不同，前端不该硬编码
+
+**背景**
+
+想让「服务器部署也能在线登录」。逐个查过上游能力后，四个平台分三类：
+
+| 平台 | 授权形态 | 服务器部署 |
+|---|---|---|
+| WorkBuddy | 官方页面接力 + `state` 轮询 | 本来就行 |
+| Qoder | 设备码轮询（`deviceToken`） | 本来就行 |
+| Trae | PKCE + 浏览器回调带 AuthCode | 需要公网回调基址 |
+| Loomy | **上游没有登录接口** | 做不到 |
+
+**WorkBuddy 的实现**（`admin/routers/login.py`）
+
+```python
+# 官方登录页没有 X-Frame-Options，可以内嵌 iframe
+# /v2/plugin/auth/token?state= 轮询不需要任何 cookie（实测）
+# 所以服务端能独立拿到凭证，不必碰用户会话
+POST /api/join/official/start   -> {sid, auth_url}
+POST /api/join/official/poll    -> {done, ...}  完成后自动换凭证入库
+```
+
+**Qoder 的实现**（`admin/platform/qoder/core/oauth.py`）
+
+```python
+def poll_once(self):
+    # HTTP 202/404 -> None（还没授权）；200 -> 凭证
+```
+
+设备码流程：`start` 拿 nonce+verifier 拼授权 URL，服务端带这两个值去
+`deviceToken` 轮询。**浏览器在哪台机器上都无所谓。**
+
+**Loomy 为什么不行**
+
+实测它的 API 只有 5 条业务接口，登录相关的全是 404：
+
+```
+/models  /chat/completions  /points/balance  /points/records  /points/first-login
+/auth/login 404   /session 404   /session/refresh 404   /oauth/token 404
+```
+
+凭证只有一个明文 `session`，来自本机
+`C:/Users/Public/Loomy/<sha256(用户名)[:12]>/userData/auth-session.json`，
+而且**没有 refresh**。所以它只能「先在官方 App 登录 → 扫描本机导入」。
+
+**修法：把授权形态交给平台自己声明**
+
+三个平台的 `/meta` 增加两个字段：
+
+```python
+"auth_mode": "callback" | "device-poll" | "local-session-only",
+"auth_explain": "给用户看的一句话说明（含需要配什么）"
+```
+
+前端不再硬编码 `id === "qoder"`：
+
+```js
+const authMeta = await platformAuthMeta(storage);
+const supportsAuth = authMeta.auth_mode !== "local-session-only";
+const needAuth = !canImport && supportsAuth;
+```
+
+- 有授权能力的平台 → 显示「立即授权登录」
+- 没有的（Loomy）→ 隐藏按钮，改为展示 `auth_explain` 解释原因
+
+**顺手修的一个 bug**
+
+`showScanResult()` 原本是同步函数，加 `await` 后必须改成 `async`，
+调用点（`platformScanLocal` 里）同步补 `await`。
+改完跑 `node --check` 验证 —— 这类「await 出现在非 async 函数里」
+只有真正解析时才报，肉眼看不出来。
+
+**教训**：多平台架构里，**能力差异要让平台自己声明**。
+前端一旦写死「qoder 有授权、其它没有」，加第五个平台就得改前端 ——
+正确做法是问平台，平台说有什么就渲染什么。
+
 ## 六、运维
 
 ### 6.1 改完代码没真正重启

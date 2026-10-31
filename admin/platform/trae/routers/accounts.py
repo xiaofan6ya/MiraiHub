@@ -80,6 +80,13 @@ def meta(_: bool = Depends(require_admin)):
                    for r in spec.realms],
         "supports_local_scan": spec.supports_local_scan,
         "notes": spec.notes,
+        # 授权形态声明：PKCE + 浏览器回调带 AuthCode 回来。
+        # 桌面版回调走本机端口；服务器部署必须配 WB_OAUTH_PUBLIC_BASE，
+        # 否则授权完成后浏览器会跳到用户自己电脑而打不开。
+        "auth_mode": "callback",
+        "auth_explain": ("Trae 用浏览器授权 + 回调：桌面版回调走本机；"
+                         "服务器部署需设置 WB_OAUTH_PUBLIC_BASE=https://你的域名，"
+                         "否则授权完成后跳转会失败。"),
         "endpoints": sorted(client.REALM_PATHS) if hasattr(client, "REALM_PATHS")
         else ["/v1/chat/completions", "/v1/responses", "/v1/messages",
               "/v1/messages/count_tokens", "/v1/models", "/v1/balance"],

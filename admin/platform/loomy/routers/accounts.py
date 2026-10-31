@@ -47,6 +47,14 @@ def meta(_: bool = Depends(require_admin)):
         "auth": "双 token 头（Authorization + token）+ traceparent",
         "quota_kind": "metered",
         "note": "Loomy 按对话计量 points_consumed，无剩余额度；无 refresh 机制",
+        # Loomy 上游只有 models / chat / points 几条业务接口，**没有任何登录
+        # 或授权端点**（实测 /auth/login、/session/refresh 等全部 404）。
+        # 凭证只有一个明文 session，来源是本机 auth-session.json。
+        # 所以它做不到「在线授权登录」—— 不是我们没实现，是上游不提供。
+        # 前端据此隐藏授权入口并解释原因。
+        "auth_mode": "local-session-only",
+        "auth_explain": ("Loomy 没有开放授权接口，凭证只能来自官方客户端在本机生成的 "
+                         "auth-session.json。请先在官方 App 登录，再用「扫描本机」导入。"),
     }
 
 
