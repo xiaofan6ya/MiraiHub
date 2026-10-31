@@ -365,6 +365,9 @@ class DesktopAPI:
         self.tray_startup_update_check = False
         self.updates = UpdateService(base)
         self.closing = threading.Event()
+        # 「真正退出」标志：区别于「关窗口收进托盘」。
+        # 关窗处理器靠它决定是 hide 还是放行（见 on_window_closing）。
+        self._quitting = False
         self.start_lock = threading.Lock()
         self.runtime_lock = threading.Lock()
         self.update_lock = threading.Lock()
@@ -623,8 +626,16 @@ class DesktopAPI:
         不拦这一下，用户点 × 就会把服务和托盘一起带走，
         和「关窗口只是收起来、从托盘还能唤回」的预期相反。
 
-        返回 False 拦下关闭。真正退出走托盘菜单的「退出」（`quit`）。
+        **退出流程必须放行**：托盘菜单的「退出」会走 `quit()` → `destroy()`，
+        而 `destroy()` 同样触发本回调。以前这里无条件 `hide()` + 返回 False，
+        于是那个 destroy 被自己拦掉 —— 窗口只是隐藏、进程继续活着，
+        用户点了「退出」只看到「已收进托盘」，软件根本关不掉（线上实测反馈）。
+        现在只要进入了退出流程（`_quitting` / `closing`），直接放行。
+
+        返回 False 拦下关闭；返回 True 允许关闭。
         """
+        if self._quitting or self.closing.is_set():
+            return True
         try:
             if self.window is not None:
                 self.window.hide()
@@ -727,8 +738,27 @@ class DesktopAPI:
                 self.tray.notify("本地服务已退出，可从托盘菜单重新启动")
 
     def quit(self):
-        """Exit the application entirely (tray → 退出)."""
+        """Exit the application entirely (tray → 退出).
+
+        退出必须**真的把进程带走**。之前这里只 `destroy()` 窗口，
+        而窗口的 closing 回调会把它拦下来（hide + 「已收进托盘」提示），
+        结果是「点了退出，界面消失、进程和托盘都还在，再也退不掉」——
+        用户原话：「我都退出了你收个屁托盘」。三处一起修：
+
+          1. 先立 `_quitting` 旗标，让 closing 回调放行（不再 hide）；
+          2. **显式停托盘**：pystray 自带消息循环跑在独立线程里，不停它
+             进程会一直驻留，这也是「退不掉」的另一半原因；
+          3. 兜底强杀：GUI 循环若因 WebView2 偶发不返回，3 秒后 `os._exit(0)`。
+             后端已经在 `stop()` 里拆干净了（含 taskkill /T），
+             少一次「体面收尾」远好过让用户遇到一个关不掉的软件。
+        """
+        self._quitting = True
         self.stop()
+        try:
+            if self.tray is not None:
+                self.tray.stop()
+        except Exception:
+            logging.exception("停止托盘图标失败")
         try:
             import webview
             for window in list(webview.windows):  # emptying the registry ends the loop
@@ -738,6 +768,13 @@ class DesktopAPI:
                     logging.exception("Failed to destroy window during quit")
         except Exception:
             logging.exception("Quit failed")
+
+        def _force_exit():
+            time.sleep(3)
+            logging.getLogger("desktop").warning("GUI 循环未退出，强制结束进程")
+            os._exit(0)
+
+        threading.Thread(target=_force_exit, name="quit-force", daemon=True).start()
         return {"ok": True}
 
     def _smoke_test(self):
