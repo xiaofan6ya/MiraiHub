@@ -17,7 +17,8 @@ from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from admin.db import engine, get_db
-from admin.models import Account, CreditEvent
+from pydantic import BaseModel
+from admin.models import Account, CreditEvent, SystemSetting
 from admin.security import require_admin
 from admin.routers.releases import service
 from desktop.common import VERSION, RELEASES_URL
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/api/maintenance", tags=["maintenance"], dependencies
 
 
 @router.get("/update")
-def update_info():
+def update_info(db: Session = Depends(get_db)):
     from packaging.version import Version, InvalidVersion
     snapshot = service().check()
     candidates = []
@@ -53,7 +54,11 @@ def update_info():
             "docker": f"git status --short\ngit fetch origin --tags\ngit checkout {tag}\ndocker compose --env-file .env.docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple admin\ndocker compose --env-file .env.docker up -d admin\ndocker compose --env-file .env.docker logs --tail=100 admin\n# 拉基础镜像慢时可改用镜像仓库前缀，例如：\n# docker pull docker.m.daocloud.io/library/python:3.12-slim && docker tag docker.m.daocloud.io/library/python:3.12-slim python:3.12-slim",
             "linux": f"git status --short\ngit fetch origin --tags\ngit checkout {tag}\npython -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple\n# 使用当前部署对应的 systemd / supervisor / 启动脚本重启服务",
         }
-    return {"version": VERSION, "latest": {k: latest.get(k) for k in ("tag", "name", "url", "date")} if latest else None,
+    # 备份位置直接并进来 —— 维护页只打这一个接口就能渲染完整面板，
+    # 不用再额外请求 /backup/info（多一次往返，字段也容易漂移）。
+    location = _backup_location(db)
+    return {**location,
+            "version": VERSION, "latest": {k: latest.get(k) for k in ("tag", "name", "url", "date")} if latest else None,
             "available": bool(latest and Version(tag.lstrip("vV")) > Version(VERSION)),
             "error": snapshot.get("error", ""), "releases_url": RELEASES_URL,
             "database": engine.dialect.name, "backup_supported": engine.dialect.name == "sqlite",
@@ -109,20 +114,118 @@ def backup():
         raise
 
 
-@router.get("/backup/info")
-def backup_info():
-    """备份前置探测：前端点按钮**先查这个**，再决定要不要发那次大请求。
+#: 备份下载目录的配置键（存 system_settings）
+BACKUP_DIR_KEY = "backup:dir"
 
-    桌面版报 `Failed to fetch` 时，这个轻量 GET 能立刻区分
-    「后端不可达」和「备份本身有问题」—— 前者这里就会失败，
-    后者这里返回 ok 而下载失败。
+
+def _default_backup_dir() -> str:
+    """默认的备份存放位置。
+
+    优先用「桌面版数据目录」（`WORKBUDDY_DESKTOP_DATA`），因为那是用户
+    唯一确知的应用目录；源码部署没有这个概念时回落到「数据库文件所在目录」。
+
+    **不再用系统 TEMP** —— 那是备份接口内部分片用的临时位置，
+    对用户既不可见也不该被当成「默认保存位置」。
+    """
+    desktop = (os.environ.get("WORKBUDDY_DESKTOP_DATA") or "").strip()
+    if desktop and Path(desktop).is_dir():
+        return str((Path(desktop) / "backups").resolve())
+    db_path = (engine.url.database or "").strip()
+    if db_path:
+        candidate = Path(db_path).resolve().parent / "backups"
+        return str(candidate)
+    return str((Path.cwd() / "backups").resolve())
+
+
+def _read_backup_dir(db: Session) -> str:
+    try:
+        row = db.query(SystemSetting).filter(SystemSetting.key == BACKUP_DIR_KEY).first()
+        value = (row.value or "").strip() if row else ""
+    except Exception:
+        value = ""
+    return value or _default_backup_dir()
+
+
+def _backup_location(db: Session) -> dict:
+    """备份位置信息（`/update` 与 `/backup/info` 共用）。
+
+    抽出来是因为前端两个接口都会渲染这块：`/update` 负责整个维护页，
+    `/backup/info` 是点下载前的轻量探测。两处若各写一份，
+    字段一旦漂移就会出现「探测说能写、面板说不存在」这种幽灵 bug。
     """
     db_path = engine.url.database or ""
     exists = bool(db_path) and Path(db_path).is_file()
     size = Path(db_path).stat().st_size if exists else 0
+    if engine.dialect.name != "sqlite":
+        try:
+            host = engine.url.host or "127.0.0.1"
+            port = engine.url.port or 3306
+            db_path = "%s:%s/%s" % (host, port, db_path)
+        except Exception:
+            pass
+    backup_dir = _read_backup_dir(db)
+    default_dir = _default_backup_dir()
+    writable = True
+    try:
+        Path(backup_dir).mkdir(parents=True, exist_ok=True)
+        probe = Path(backup_dir) / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception:
+        writable = False
     return {"ok": True, "database": engine.dialect.name,
             "backup_supported": engine.dialect.name == "sqlite",
-            "db_exists": exists, "db_size": size}
+            "db_exists": exists, "db_size": size,
+            "db_path": db_path,
+            "backup_dir": backup_dir,
+            "backup_dir_default": default_dir,
+            "backup_dir_is_default": backup_dir == default_dir,
+            "backup_dir_writable": writable,
+            "desktop_mode": bool((os.environ.get("WORKBUDDY_DESKTOP_DATA") or "").strip())}
+
+
+@router.get("/backup/info")
+def backup_info(db: Session = Depends(get_db)):
+    """备份前置探测 + **存放位置展示**。
+
+    前端点按钮**先查这个**，再决定要不要发那次大请求；
+    同时把「数据库在哪、备份默认存哪、能不能改」一并告诉用户 ——
+    之前面板只显示一个大按钮，用户既看不到路径也不知道文件会落到哪里。
+    """
+    return _backup_location(db)
+
+
+class BackupDirIn(BaseModel):
+    path: str = ""
+    reset: bool = False
+
+
+@router.put("/backup/dir")
+def set_backup_dir(body: BackupDirIn, db: Session = Depends(get_db)):
+    """修改备份存放目录。传 `reset=true` 恢复默认。"""
+    if body.reset:
+        target = _default_backup_dir()
+    else:
+        raw = (body.path or "").strip()
+        if not raw:
+            raise HTTPException(400, "请填写目录路径")
+        target = str(Path(raw).expanduser().resolve())
+    try:
+        Path(target).mkdir(parents=True, exist_ok=True)
+        probe = Path(target) / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        raise HTTPException(400, "目录不可写：%s" % exc)
+    row = db.query(SystemSetting).filter(SystemSetting.key == BACKUP_DIR_KEY).first()
+    if row:
+        row.value = target
+    else:
+        db.add(SystemSetting(key=BACKUP_DIR_KEY, value=target))
+    db.commit()
+    return {"ok": True, "backup_dir": target,
+            "backup_dir_default": _default_backup_dir(),
+            "backup_dir_is_default": target == _default_backup_dir()}
 
 
 #: 恢复校验要求的最小表集合 —— 上传文件必须长得像本系统的库，

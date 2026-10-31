@@ -14,8 +14,8 @@
        JS 在凭据确实失效时会移除这个类，登录表单照常出现。 */
     html.console-authed #login{display:none!important}
   </style>
-  <script src="/admin/assets/theme.js"></script>
-  <script src="/admin/assets/filter-combobox.js"></script>
+  <script src="/admin/assets/theme.js?v=20261031-r2"></script>
+  <script src="/admin/assets/filter-combobox.js?v=20261031-r2"></script>
   <!--
     全部静态资源都走本地 /static/vendor/**，不再依赖任何 CDN。
 
@@ -838,7 +838,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261031-r28" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261031-r29" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -2362,7 +2362,7 @@
      必须在 icons.js 之后：它 Object.assign 合并进 WB_MODEL_ICONS。 -->
 <script src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
-<script src="/admin/assets/usage-ip.js"></script>
+<script src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
 <script>
 let _confirmResolve = null;
 
@@ -11518,19 +11518,57 @@ function scheduleLogUsagePoll() {
 //
 // 数据源与风控哨兵相同（/api/sentinel/status 的 traffic 段），不新增后端查询。
 // 只有日志页处于激活状态时才轮询 —— 切走立即停，不留后台空转。
-let _logLiveTimer = null;
-const _LOG_LIVE_MS = 2000;
+let _logLiveSource = null;
+let _logLiveRows = new Map();
 
 function stopLogLive() {
-  if (_logLiveTimer) {
-    clearTimeout(_logLiveTimer);
-    _logLiveTimer = null;
+  if (_logLiveSource) {
+    try { _logLiveSource.close(); } catch (e) { /* 已关闭 */ }
+    _logLiveSource = null;
   }
 }
 
-function scheduleLogLive() {
-  if (_logLiveTimer) clearTimeout(_logLiveTimer);
-  _logLiveTimer = setTimeout(pollLogLive, _LOG_LIVE_MS);
+/** 用 registry 式的合并：按 rid 覆盖，按 ts 倒序保留最近 12 条。 */
+function _logLiveMerge(changed, removed) {
+  (removed || []).forEach(rid => _logLiveRows.delete(String(rid)));
+  (changed || []).forEach(row => {
+    const rid = String(row.rid || "");
+    if (rid) _logLiveRows.set(rid, row);
+  });
+  const all = Array.from(_logLiveRows.values());
+  all.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  if (all.length > 40) {
+    all.slice(40).forEach(r => _logLiveRows.delete(String(r.rid || "")));
+  }
+  return all.slice(0, 12);
+}
+
+function _logLiveRender(rows, running) {
+  const hint = $("#logLiveHint");
+  if (hint) {
+    hint.textContent = running > 0
+      ? "进行中 " + running + " 个 · 实时推送"
+      : "实时推送 · 最近 1 小时 " + _logLiveRows.size + " 条";
+  }
+  const host = $("#logLiveRecent");
+  if (host) {
+    host.innerHTML = rows.length
+      ? rows.map(_logLiveRow).join("")
+      : '<p class="sentinel-empty" style="padding:10px 2px">最近 1 小时还没有请求</p>';
+  }
+}
+
+function _logLiveRenderPlatforms(platforms) {
+  const counts = $("#logLivePlatforms");
+  if (!counts || !platforms) return;
+  counts.innerHTML = platforms.map(row => {
+    const total = Number(row.requests || 0);
+    const failed = Number(row.error || 0) + Number(row.timeout || 0);
+    return `<div class="live-platform-count" data-tooltip="${esc(row.label || row.platform)} · 最近 1 小时">
+      <span>${esc(String(row.label || row.platform).replace(/\s*(国内版|国际版|中国版)/, ""))}</span>
+      <span><b>${total}</b>${failed ? ` <em>${failed} 失败</em>` : ""}</span>
+    </div>`;
+  }).join("");
 }
 
 /** 一条实时请求的单行渲染。
@@ -11560,57 +11598,71 @@ function _logLiveRow(item) {
   </div>`;
 }
 
-async function pollLogLive() {
-  _logLiveTimer = null;
-  if (document.hidden
-      || document.documentElement.dataset.activeTab !== "logs"
-      || !TOKEN) {
-    return;
-  }
-  try {
-    const r = await api("/api/sentinel/traffic?window=3600");
-    const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error("live unavailable");
-    const traffic = data || {};
-    const rows = traffic.recent || [];
-    const running = Number(traffic.running || 0);
-
-    const hint = $("#logLiveHint");
-    if (hint) {
-      hint.textContent = running > 0
-        ? "进行中 " + running + " 个 · 每 2 秒刷新"
-        : "每 2 秒刷新 · 最近 1 小时 " + rows.length + " 条";
-    }
-
-    const counts = $("#logLivePlatforms");
-    if (counts) {
-      counts.innerHTML = (traffic.platforms || []).map(row => {
-        const total = Number(row.requests || 0);
-        const failed = Number(row.error || 0) + Number(row.timeout || 0);
-        return `<div class="live-platform-count" data-tooltip="${esc(row.label || row.platform)} · 最近 1 小时">
-          <span>${esc(String(row.label || row.platform).replace(/\s*(国内版|国际版|中国版)/, ""))}</span>
-          <span><b>${total}</b>${failed ? ` <em>${failed} 失败</em>` : ""}</span>
-        </div>`;
-      }).join("") || "";
-    }
-
-    const host = $("#logLiveRecent");
-    if (host) {
-      host.innerHTML = rows.length
-        ? rows.slice(0, 12).map(_logLiveRow).join("")
-        : '<p class="sentinel-empty" style="padding:10px 2px">最近 1 小时还没有请求</p>';
-    }
-  } catch (e) {
-    const hint = $("#logLiveHint");
-    if (hint) hint.textContent = "实时区暂不可用";
-  }
-  scheduleLogLive();
-}
-
-/** 日志页激活时启动实时区。 */
+/**
+ * 日志页实时区：**SSE 长连接**，不再轮询。
+ *
+ * 轮询的两个代价：没有请求时也在持续打接口（多开标签页更明显），
+ * 以及事件落在两次轮询之间时要等下一拍。SSE 用一条长连接，
+ * 服务端只在内容变化时推一帧，空闲时几乎零流量。
+ *
+ * 兼容性兜底：`EventSource` 不可用（极老的 WebView）时退回 3 秒轮询，
+ * 而不是让区域直接空着。
+ */
 function startLogLive() {
   stopLogLive();
-  pollLogLive();
+  _logLiveRows = new Map();
+  const host = $("#logLiveRecent");
+  if (host) host.innerHTML = '<p class="sentinel-empty" style="padding:10px 2px">正在连接实时通道…</p>';
+
+  if (typeof EventSource === "undefined" || !TOKEN) {
+    // 兜底：没有 EventSource 就退回轮询（频率低于原来，减少空转）
+    let timer = null;
+    const tick = async () => {
+      if (document.hidden || document.documentElement.dataset.activeTab !== "logs") {
+        timer = setTimeout(tick, 3000); return;
+      }
+      try {
+        const r = await api("/api/sentinel/traffic?window=3600");
+        const { ok, data } = await safeJson(r);
+        if (ok && data) {
+          _logLiveMerge(data.recent || [], []);
+          _logLiveRenderPlatforms(data.platforms || []);
+          _logLiveRender(_logLiveMerge([], []), Number(data.running || 0));
+        }
+      } catch (e) { /* 下一拍再试 */ }
+      timer = setTimeout(tick, 3000);
+    };
+    tick();
+    _logLiveSource = { close: () => clearTimeout(timer) };
+    return;
+  }
+
+  const url = "/api/sentinel/traffic/stream?window=3600";
+  const source = new EventSource(url);
+  _logLiveSource = source;
+
+  source.onmessage = (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch (e) { return; }
+    if (payload.type === "snapshot") {
+      _logLiveRows = new Map();
+      (payload.recent || []).forEach(r => {
+        if (r.rid) _logLiveRows.set(String(r.rid), r);
+      });
+      _logLiveRenderPlatforms(payload.platforms || []);
+      _logLiveRender(_logLiveMerge([], []), Number(payload.running || 0));
+    } else {
+      const rows = _logLiveMerge(payload.changed || [], payload.removed || []);
+      if (payload.platforms) _logLiveRenderPlatforms(payload.platforms);
+      _logLiveRender(rows, Number(payload.running || 0));
+    }
+  };
+
+  source.onerror = () => {
+    const hint = $("#logLiveHint");
+    if (hint) hint.textContent = "实时通道断开，正在重连…";
+    // EventSource 自带重连；连续失败时它自己会放弃，这里不做额外处理
+  };
 }
 
 async function pollLogUsageRevision() {
@@ -11649,7 +11701,7 @@ function startLogActivity() {
   if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
   // 两条独立节奏：
   //   pollLogUsageRevision —— 5 秒探一次主键，变了才重拉表格（省查询）
-  //   pollLogLive          —— 2 秒刷新上方实时区（用户要看的"正在发生"）
+  //   startLogLive         —— SSE 长连接推送上方实时区（事件驱动，非轮询）
   pollLogUsageRevision();
   startLogLive();
 }
@@ -13125,23 +13177,23 @@ if (!_localConsoleShell) {
   });
 } else { /* 显示登录 */ }
 </script>
-<script src="/admin/assets/growth_center.js"></script>
-<script src="/admin/assets/date-time-picker.js"></script>
-<script src="/admin/assets/review-improvements.js"></script>
+<script src="/admin/assets/growth_center.js?v=20261031-r2"></script>
+<script src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
+<script src="/admin/assets/review-improvements.js?v=20261031-r2"></script>
 <script src="/static/vendor/marked-12.0.2.min.js"></script>
 <script src="/static/vendor/dompurify-3.4.17.min.js"></script>
-<script src="/admin/assets/release-notes.js"></script>
-<script src="/admin/assets/desktop.js"></script>
-<script src="/admin/assets/profile-transfer.js"></script>
-<script src="/admin/assets/ip-management.js"></script>
-<script src="/admin/assets/key-ip.js"></script>
+<script src="/admin/assets/release-notes.js?v=20261031-r2"></script>
+<script src="/admin/assets/desktop.js?v=20261031-r2"></script>
+<script src="/admin/assets/profile-transfer.js?v=20261031-r2"></script>
+<script src="/admin/assets/ip-management.js?v=20261031-r2"></script>
+<script src="/admin/assets/key-ip.js?v=20261031-r2"></script>
 <script src="/admin/assets/platform-icons.js?v=20261029-loomy-qoder"></script>
 <!-- 平台动作表（扫描/导入/刷新…）：能力由后端 spec.actions 声明，前端只渲染。
      必须在 platform-switch.js **之前**加载 —— 后者要用 actionsFor()。 -->
 <script src="/admin/assets/traffic.js?v=20261029-r2"></script>
 <script src="/admin/assets/platform-actions.js?v=20261028-r10"></script>
 <script src="/admin/assets/platform-switch.js?v=20261028-r10"></script>
-<script src="/admin/assets/agent.js"></script>
+<script src="/admin/assets/agent.js?v=20261031-r2"></script>
 <script>
 /* 模型使用统计：按模型查看当日账号可用性 / 用量 / 日额度估算。 */
 let _modelPoolList = [], _modelPoolCurrent = "";
