@@ -702,9 +702,15 @@ def merge_assets(db, *, api_key_id: int, asset_ids, conversation_id: str = '',
     output = data_dir() / f'{asset_id}.mp4'
     try:
         info = video_merge.merge_videos([asset_path(row) for row in rows], output)
+        # ffmpeg 只写到这个临时 id 上，成品由 _store_asset 用另一个 id 重新落盘。
+        # 不删的话这里会留一份没人登记的文件：`_prune_assets` 只按最旧优先清理，
+        # 等于白占资产配额、还抢在正常资产之前被淘汰。
+        data = output.read_bytes()
     except video_merge.MergeError as exc:
         return {'ok': False, 'error': str(exc)}
-    data = output.read_bytes()
+    finally:
+        # read_bytes 必须先于 unlink；finally 保证成功与失败两条路径都不留残骸。
+        output.unlink(missing_ok=True)
     meta = {'segments': [row.asset_id for row in rows], 'merge_mode': info.get('mode'),
             'source_durations': [row.duration_s for row in rows]}
     credits = sum(float(row.credits or 0) for row in rows)
