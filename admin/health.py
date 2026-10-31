@@ -66,14 +66,30 @@ def model_health(db, hours=24):
         total = sum(distribution.values())
         ok = distribution.get("success", 0) + distribution.get("", 0)
         # Percentiles describe the latest bounded sample; counts use the whole window.
-        samples = db.query(UsageLog.ttfb_ms, UsageLog.latency_ms, UsageLog.total_tokens).filter(
+        samples = db.query(UsageLog.ttfb_ms, UsageLog.latency_ms, UsageLog.total_tokens,
+                           UsageLog.completion_tokens).filter(
             UsageLog.model == model, UsageLog.created_at >= since,
             UsageLog.error_kind.in_(("", "success"))).order_by(
             UsageLog.created_at.desc(), UsageLog.id.desc()).limit(2000).all()
-        # 吞吐 TPS：total_tokens / 端到端耗时。只统计有 token 数且耗时 > 1s 的
-        # 成功请求（<1s 的短请求分母太小，TPS 虚高没有参考意义）。
-        tps_values = [round(t * 1000 / ms, 1) for _ttfb, ms, t in samples
-                      if t and ms and ms >= 1000]
+        # 吞吐 TPS：**completion_tokens / 纯解码耗时**，与逐条日志、DSH 同口径。
+        #
+        # 这里原来写的是「总 Token / 端到端耗时」，两个都错，而且错得离谱：
+        #   · 分子用 total_tokens（含 prompt）—— 命中缓存的 1 万 prompt 被当成
+        #     「生成量」，直接把 TPS 放大一个数量级（面板 300~500 vs 真实 100~200）；
+        #   · 分母用整段 latency —— 首包等待（常常 10~20s）被算成解码时间。
+        # 现在改成与 `bench_router` / 前端耗时列完全相同的口径，并且剔除
+        # 「整包突发」样本：解码段 < 300ms 或折算超过 300 tok/s 的，说明上游
+        # 一次性把整段吐出来了，那个窗口量不出真实出字速度，宁可不计入。
+        tps_values = []
+        for _ttfb, _latency, _total, _completion in samples:
+            if not _completion or not _latency:
+                continue
+            _dec = int(_latency) - int(_ttfb or 0)
+            if _dec < 300:
+                continue
+            _v = float(_completion) * 1000.0 / _dec
+            if 0 < _v <= 300:
+                tps_values.append(round(_v, 1))
         tps_stats = _percentiles(tps_values)
         if tps_values:
             tps_stats["mean"] = round(sum(tps_values) / len(tps_values), 1)

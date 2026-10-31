@@ -244,9 +244,44 @@ def resolve(*selectors: str | None, fallback: str = DEFAULT_PLATFORM) -> tuple[s
 
 
 def spec_of_account(account) -> PlatformSpec | None:
-    """账号行 -> 平台 spec。老数据（platform 为空）按 workbuddy 处理。"""
-    pid = getattr(account, "platform", "") or DEFAULT_PLATFORM
-    return get(pid) or get(DEFAULT_PLATFORM)
+    """账号行 -> 平台 spec。老数据（platform 为空）按 workbuddy 处理。
+
+    ⚠️ 这里用**落库平台名**查（`spec_for_storage`），不是 `get()`：
+    `trae` / `qoder` 是落库名，对外 id 是 `trae-cn` / `trae-intl` /
+    `qoder` / `qoder-intl`。用 `get("trae")` 会返回 None，再退回
+    `get(DEFAULT_PLATFORM)` 就是 WorkBuddy 的 spec —— 拿 WorkBuddy 的协议
+    去刷 Trae 的账号，必回 502（2026-10-31 实测）。
+    """
+    pid = (getattr(account, "platform", "") or "").lower()
+    found = spec_for_storage(pid)
+    if found is not None:
+        return found
+    realm = getattr(account, "domain", "") or ""
+    if pid:
+        for candidate in all_platforms():
+            if candidate.storage() == pid:
+                return candidate
+    return get((getattr(account, "platform", "") or DEFAULT_PLATFORM)) \
+        or get(DEFAULT_PLATFORM)
+
+
+def spec_for_storage(storage: str) -> PlatformSpec | None:
+    """按**落库平台名**找 spec（`trae` -> `trae-cn`，`qoder` -> `qoder`）。
+
+    一个落库平台可能对应多个对外 id（`trae` 有两个区），
+    返回**默认区**的那个，用作「这个平台怎么刷额度 / 怎么列模型」的入口。
+    """
+    key = str(storage or "").strip().lower()
+    if not key:
+        return None
+    matches = [s for s in all_platforms() if s.storage() == key]
+    if not matches:
+        return None
+    # 有固定区的（trae-cn / trae-intl）：优先默认区
+    for spec in matches:
+        if spec.realm and spec.realm == "cn":
+            return spec
+    return matches[0]
 
 
 def load_gateway(spec: PlatformSpec):

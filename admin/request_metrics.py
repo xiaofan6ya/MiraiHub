@@ -458,6 +458,16 @@ class TimingMiddleware:
                     record['first_body_ms'] = elapsed
                     if not record['streaming']:
                         record['first_delta_ms'] = elapsed
+                    # 首个响应体 = 上游已经开始回数据，面板阶段推到 streaming。
+                    # 只在**第一次**推进时写一次，避免每条 SSE 分片都打 Redis。
+                    try:
+                        from admin import traffic_stats
+
+                        rid = scope.get("_wb_traffic_rid")
+                        if rid:
+                            traffic_stats.mark_stage(rid, "streaming")
+                    except Exception:  # noqa: BLE001 - 统计失败不影响转发
+                        pass
             began = time.perf_counter()
             await send(message)
             if message['type'] == 'http.response.body':
@@ -503,6 +513,18 @@ class TimingMiddleware:
                 from admin.platform import registry
                 state = scope.get('state') or {}
                 platform = state.get('platform') or registry.DEFAULT_PLATFORM
+                # Key 展示名：dispatch 在鉴权后写进 scope。
+                # 兜底再读一次 `state`，因为有的分支（聚合 /models）不走
+                # dispatch 的那段代码，key 会落在 state 里。
+                key_label = str(scope.get("_wb_traffic_key") or "")
+                if not key_label:
+                    try:
+                        _k = state.get("api_key") or state.get("key")
+                        if _k is not None:
+                            key_label = str(getattr(_k, "name", "")
+                                            or getattr(_k, "label", ""))[:64]
+                    except Exception:  # noqa: BLE001
+                        key_label = ""
                 traffic_stats.record(
                     platform,
                     outcome=record['outcome'],
@@ -512,6 +534,11 @@ class TimingMiddleware:
                     path=record['path'],
                     # 带上开始时生成的 rid，`record` 会用它清掉 running 占位
                     rid=str(scope.get("_wb_traffic_rid") or ""),
+                    # Key 展示名：由 dispatch 在鉴权后写进 scope。
+                    # **不要**在这里现查数据库 —— 收尾路径上再开一次查询
+                    # 会拖慢每个请求，而且此时事务可能已提交。
+                    key_label=key_label,
+                    client_ip=str(record.get('client_ip') or ""),
                     error=(record.get('request_error') or record.get('upstream_error')
                            or record.get('network_error') or ''))
             except Exception:  # noqa: BLE001 - 统计失败不影响请求结果

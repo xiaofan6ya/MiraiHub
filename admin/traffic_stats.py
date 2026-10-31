@@ -140,12 +140,25 @@ SKIP_PATHS = frozenset({"/v1/models", "/v1/balance", "/v1/models/"})
 
 
 def start(platform: str, *, model: str = "", path: str = "",
-          at: float | None = None) -> str:
+          at: float | None = None, key_label: str = "", client_ip: str = "") -> str:
     """**请求开始**时调一次，立刻在「最近请求」里出现一行 running。
 
     为什么需要它：原来只有 `record()`（请求结束）才写，一个跑 30 秒的任务
     前 28 秒面板上什么都看不到。这里在开始时先落一条 `outcome=running` 的占位，
     结束时由 `record()` 用同一个 `rid` 覆盖掉。
+
+    ## 阶段（stage）
+
+    一条请求在网关里是有先后顺序的，用户想知道「卡在哪一步」：
+
+        received  -> 已到网关（刚收到请求）
+        waiting   -> 已排队/选号（等可用账号、等准入）
+        upstream  -> 已转发上游（等首个增量）
+        streaming -> 上游已开始回数据
+        done      -> 结束
+
+    `start()` 落 `received`；`record()` 结束时写终态。
+    中间阶段由 `mark_stage()` 更新（可选，不更新也不影响正确性）。
 
     返回 `rid`（请求标识），调用方把它传给 `record(..., rid=rid)`。
     绝不抛异常：统计坏了不能影响转发。
@@ -160,12 +173,17 @@ def start(platform: str, *, model: str = "", path: str = "",
             "ts": round(now, 3),
             "platform": platform,
             "outcome": "running",
+            "stage": "received",
             "status": 0,
             "elapsed_ms": 0,
             "model": str(model or "")[:120],
             "path": str(path or "")[:80],
             "error": "",
             "rid": rid,
+            # 下面两个是「谁在用、从哪来」——日志页原来缺这两列，
+            # 用户看不出这条请求是哪个 Key 打的、哪个 IP 来的。
+            "key_label": str(key_label or "")[:64],
+            "client_ip": str(client_ip or "")[:64],
         }
         client = _client()
         if client is not None:
@@ -194,6 +212,51 @@ def start(platform: str, *, model: str = "", path: str = "",
     return rid
 
 
+#: 阶段推进顺序（只允许往后走，不允许回退）
+_STAGES = ("received", "waiting", "upstream", "streaming", "done")
+
+
+def mark_stage(rid: str, stage: str) -> None:
+    """更新进行中请求的阶段，让面板能显示「卡在哪一步」。
+
+    只对还在 running 的记录生效；已结束（`record()` 写过）的不管。
+    绝不抛异常。
+    """
+    if not rid or stage not in _STAGES:
+        return
+    try:
+        client = _client()
+        raw = None
+        if client is not None:
+            try:
+                raw = client.hget(RUNNING_KEY, rid)
+            except Exception:  # noqa: BLE001
+                raw = None
+        if raw is None:
+            with _lock:
+                item = _memory_running.get(rid)
+                if item is None:
+                    return
+                item["stage"] = stage
+                item["elapsed_ms"] = round((time.time() - float(item.get("ts") or 0)) * 1000, 1)
+            return
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        item = json.loads(raw)
+        if not isinstance(item, dict):
+            return
+        raw_stage = str(item.get("stage") or "")
+        # 不回退：迟到的 mark_stage 不该把 streaming 打回 upstream
+        if raw_stage in _STAGES and _STAGES.index(raw_stage) > _STAGES.index(stage):
+            return
+        item["stage"] = stage
+        item["elapsed_ms"] = round((time.time() - float(item.get("ts") or 0)) * 1000, 1)
+        if client is not None:
+            client.hset(RUNNING_KEY, rid, json.dumps(item, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        logger.debug("traffic mark_stage 失败", exc_info=True)
+
+
 def finish_running(rid: str) -> None:
     """请求结束时清掉 running 占位（`record()` 会写入正式记录）。"""
     if not rid:
@@ -212,7 +275,8 @@ def finish_running(rid: str) -> None:
 def record(platform: str, *, outcome: str, status: int = 0,
            elapsed_ms: float = 0, model: str = "", path: str = "",
            error: str = "", at: float | None = None,
-           rid: str = "") -> None:
+           rid: str = "", key_label: str = "", client_ip: str = "",
+           stage: str = "") -> None:
     """记一次请求结果。**绝不抛异常**：统计坏了不能影响转发。
 
     `path` 不是对话端点时直接跳过 —— 口径见 `TRACKED_PATHS`。
@@ -240,14 +304,21 @@ def record(platform: str, *, outcome: str, status: int = 0,
             "ts": round(now, 3),
             "platform": platform,
             "outcome": outcome or "completed",
+            # 终态一律 done；失败/超时由 outcome 表达，不再靠 stage
+            "stage": "done",
             "status": status,
             "elapsed_ms": round(float(elapsed_ms or 0), 1),
             "model": str(model or "")[:120],
             "path": str(path or "")[:80],
             "error": kind[:64],
+            "key_label": str(key_label or "")[:64],
+            "client_ip": str(client_ip or "")[:64],
         }
         if rid:
             item["rid"] = rid
+        # 结束前的最后阶段由调用方给（比如上游已开始回数据就是 streaming），
+        # 但结果记录本身统一按 done 展示 —— 这里只在没有 rid 时兜底用。
+        del stage  # 保留参数位，避免调用方传了就报错
         finish_running(rid)
         day = _day()
         client = _client()
@@ -389,6 +460,27 @@ def snapshot(window: int = 3600) -> dict:
     seen = {str(item.get("rid") or "") for item in recent if item.get("rid")}
     running = [r for r in running if str(r.get("rid") or "") not in seen]
     running.sort(key=lambda item: item.get("ts") or 0, reverse=True)
+
+    # ---- 补齐展示字段（老记录 / 老版本写的记录）----
+    #
+    # 这些字段是后加的：改代码之前写进 Redis 的记录里没有 key_label /
+    # client_ip / stage。前端拿到 None 就只能显示「—」，
+    # 用户会觉得「字段又没了」。这里统一兜底，让新旧记录长得一样：
+    #
+    #   · stage    —— running 的老记录补 "received"（至少能看出「已接收」）
+    #   · key_label / client_ip —— 缺了就给空串，前端显示 "—" 而不是 "undefined"
+    for item in running:
+        if not item.get("stage"):
+            item["stage"] = "received"
+        item.setdefault("key_label", "")
+        item.setdefault("client_ip", "")
+    for item in recent:
+        if not item.get("stage"):
+            # 已结束的记录统一是 done；失败/超时由 outcome 表达
+            item["stage"] = "done"
+        item.setdefault("key_label", "")
+        item.setdefault("client_ip", "")
+
     # 进行中的永远排在正式记录之前
     merged_recent = running + sorted(
         recent, key=lambda item: item.get("ts") or 0, reverse=True)

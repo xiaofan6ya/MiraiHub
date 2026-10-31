@@ -419,6 +419,26 @@ def _stop_reason_of(finish: str | None) -> str:
             "stop": "end_turn"}.get(str(finish or ""), "end_turn")
 
 
+def _anthropic_usage_of(usage: dict) -> dict:
+    """OpenAI usage → Anthropic usage（含缓存读取/写入两个单列字段）。
+
+    少了 `cache_read_input_tokens`，Claude Code 这类客户端的「缓存命中」
+    就恒显示 0，而网关侧账目是对的 —— 必须整份透出。
+    """
+    try:
+        from upstream_compat import anthropic_usage_from
+
+        out = anthropic_usage_from(usage)
+        if out is not None:
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return {"input_tokens": int((usage or {}).get("prompt_tokens") or 0),
+            "output_tokens": int((usage or {}).get("completion_tokens") or 0),
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}
+
+
 async def messages(request):
     # 计时起点：`_bill` 依赖它算总耗时，缺了会抛
     # `name 'started' is not defined` → 客户端看到 502。
@@ -540,7 +560,7 @@ def _stream_anthropic(plan: dict, holder: dict | None = None):
                     yield _anthropic_event("message_delta", {
                         "type": "message_delta",
                         "delta": {"stop_reason": _stop_reason_of(finish)},
-                        "usage": {"output_tokens": int(usage.get("completion_tokens") or 0)}})
+                        "usage": _anthropic_usage_of(usage)})
             frame_usage = inner.get("usage")
             if isinstance(frame_usage, dict) and frame_usage:
                 usage = frame_usage

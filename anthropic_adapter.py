@@ -410,13 +410,7 @@ class AnthropicStreamConverter:
 
         # message_delta
         delta: dict[str, str | None] = {"stop_reason": stop_reason, "stop_sequence": None}
-        usage = None
-        if self._usage:
-            u = self._usage
-            usage = {
-                "input_tokens": u.get("prompt_tokens", 0),
-                "output_tokens": u.get("completion_tokens", 0),
-            }
+        usage = self._anthropic_usage()
         events.append(self._evt("message_delta", {"delta": delta, "usage": usage}))
 
         # message_stop
@@ -445,10 +439,7 @@ class AnthropicStreamConverter:
             "stop_sequence": None,
         }
         if self._usage:
-            resp["usage"] = {
-                "input_tokens": self._usage.get("prompt_tokens", 0),
-                "output_tokens": self._usage.get("completion_tokens", 0),
-            }
+            resp["usage"] = self._anthropic_usage()
         return resp
 
     # ---- 内部 ----
@@ -459,7 +450,6 @@ class AnthropicStreamConverter:
         供非流式（stream=false）响应使用：调用方照常把上游 SSE 逐行喂给
         feed_line()，最后再调本方法拿聚合结果。
         """
-        usage = self._usage or {}
         # Chat 的 finish_reason → Anthropic 的 stop_reason
         stop_map = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens"}
         return {
@@ -470,10 +460,34 @@ class AnthropicStreamConverter:
             "content": self._build_content_blocks(),
             "stop_reason": stop_map.get(self._finish_reason or "stop", "end_turn"),
             "stop_sequence": None,
-            "usage": {
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-            },
+            "usage": (self._anthropic_usage()
+                      or {"input_tokens": 0, "output_tokens": 0,
+                          "cache_read_input_tokens": 0,
+                          "cache_creation_input_tokens": 0}),
+        }
+
+    def _anthropic_usage(self) -> dict | None:
+        """把上游 OpenAI 形态的 usage 翻成 Anthropic 形态。
+
+        **必须带 `cache_read_input_tokens` / `cache_creation_input_tokens`**：
+        Anthropic 协议把缓存命中的输入 token 单列，Claude Code 等客户端
+        据此显示「缓存读取」。以前这里只算 input_tokens / output_tokens，
+        于是这些客户端的缓存命中恒为 0 —— 网关自己记了命中，客户端全看不到。
+        """
+        try:
+            from upstream_compat import anthropic_usage_from
+        except Exception:  # noqa: BLE001
+            anthropic_usage_from = None
+        if anthropic_usage_from is not None:
+            out = anthropic_usage_from(self._usage)
+            if out is not None:
+                return out
+        u = self._usage or {}
+        return {
+            "input_tokens": u.get("prompt_tokens", 0),
+            "output_tokens": u.get("completion_tokens", 0),
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
         }
 
     def error_event(self, message: str, err_type: str = "api_error") -> str:

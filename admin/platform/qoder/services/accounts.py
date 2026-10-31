@@ -356,7 +356,17 @@ def sync_quota(db: Session, account: Account) -> dict:
     account.credits_synced_at = datetime.utcnow()
     expires = usage.get("expiresAt")
     if isinstance(expires, (int, float)) and expires > 0:
-        account.credits_expire_at = datetime.utcfromtimestamp(expires / 1000.0)
+        # ⚠️ 上游的 `expiresAt` 单位**不统一**：Qoder 国内版给毫秒
+        # （1795825334000），国际版给秒（1795825334）。
+        # 统一按「大于 1e11 就当毫秒」判定，否则 `utcfromtimestamp(秒/1000)`
+        # 会落到 1970 年附近甚至溢出 —— Windows 上直接抛
+        # `OSError: [Errno 22] Invalid argument`，整个账号刷新失败
+        # （2026-10-31 实测：qoder-intl 的号全刷不出来）。
+        secs = float(expires) / 1000.0 if float(expires) > 1e11 else float(expires)
+        try:
+            account.credits_expire_at = datetime.utcfromtimestamp(secs)
+        except (OSError, OverflowError, ValueError):
+            account.credits_expire_at = None
     account.credits_snapshot = json.dumps({
         "realm": realm,
         "plan": usage.get("userType") or "",

@@ -149,3 +149,9 @@ scripts/build_trae_icube.py
 
 # 发布公告（只在 GitHub Release 正文使用）
 RELEASE-*.md
+
+# 本地数据集 / 截图（体积大，不进仓库）
+backups/
+screenshots/
+RELEASE-*.md
+

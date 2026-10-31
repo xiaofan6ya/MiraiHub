@@ -168,6 +168,17 @@ def resolve_target(request: Request, payload: dict | None, key) -> tuple[str, st
 
 
 def _auth(db: Session, request: Request):
+    # 进程内自发的调用（「同步模型」经 models._catalog_of 复用本平台的
+    # list_models）：不验 Key，返回 None。调用方对 key 的用法都是
+    # `getattr(key, …, default)` / 判空，None 安全；`resolve_target` 会
+    # 退回到读 `x-platform` 头，与带 Key 时选到的平台一致。
+    #
+    # 不加这一段，Trae 的模型同步永远 401，表现为「同步模型后
+    # Trae 一条模型都进不来」（实测 2026-10-31）。
+    from admin.platform import shared
+
+    if shared.internal(request):
+        return None
     api_key = request.headers.get("x-api-key")
     if not api_key:
         authorization = request.headers.get("authorization") or ""
@@ -640,15 +651,29 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                     yield "data: %s\n\n" % _json.dumps(
                         {"type": "content_block_stop", "index": 0},
                         ensure_ascii=False)
+                    # Anthropic 的 usage 要把缓存命中单列（cache_read_input_tokens），
+                    # 漏了它客户端的命中率恒为 0，而平台侧账目是对的。
+                    _a_u = None
+                    try:
+                        from upstream_compat import anthropic_usage_from
+
+                        _a_u = anthropic_usage_from(usage)
+                    except Exception:  # noqa: BLE001
+                        _a_u = None
+                    if _a_u is None:
+                        _a_u = {"input_tokens":
+                                int((usage or {}).get("prompt_tokens") or 0),
+                                "output_tokens":
+                                int((usage or {}).get("completion_tokens") or 0),
+                                "cache_read_input_tokens": 0,
+                                "cache_creation_input_tokens": 0}
+                    if credit:
+                        _a_u.update({"credit": credit, "credits": credit,
+                                     "cost": credit})
                     yield "data: %s\n\n" % _json.dumps(
                         {"type": "message_delta",
                          "delta": {"stop_reason": finish or "end_turn"},
-                         "usage": {"input_tokens":
-                                   int((usage or {}).get("prompt_tokens") or 0),
-                                   "output_tokens":
-                                   int((usage or {}).get("completion_tokens") or 0),
-                                   **({"credit": credit, "credits": credit,
-                                       "cost": credit} if credit else {})}},
+                         "usage": _a_u},
                         ensure_ascii=False)
                     yield "data: %s\n\n" % _json.dumps(
                         {"type": "message_stop"}, ensure_ascii=False)

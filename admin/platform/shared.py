@@ -86,6 +86,32 @@ def request_token(request) -> str:
     return ""
 
 
+#: scope 里的内部调用标记。
+#:
+#: **只能由进程内代码写入**：Starlette 为真实 HTTP 请求构造的 scope 里
+#: 不会有这个 key，请求头也伪造不出来（我们不从任何头读它），
+#: 所以外部请求无法通过它绕过鉴权。
+INTERNAL_KEY = "_wb_internal"
+
+
+def internal(request) -> bool:
+    """本次调用是不是进程内自发的（模型同步、账号探测等）。
+
+    为什么必须有它：`admin/routers/models._catalog_of()` 为了复用各平台的
+    `list_models()`，构造了一个 `Request(scope)` 在**进程内**直接调用。
+    那条路径的第一行就是 `_auth()` —— 内部调用没有、也不该有 API Key，
+    于是每个非默认平台的「同步模型」都在这里 401 掉，而调用方只看到
+    「平台 XX 未返回模型」，最后整个同步 502。
+
+    实测症状（2026-10-31）：workbuddy 同步到 36 个模型，
+    trae / qoder / loomy 一律 0 个，且不报错。
+    """
+    try:
+        return bool(request.scope.get(INTERNAL_KEY))
+    except Exception:  # noqa: BLE001 - 测试桩可能没有 scope
+        return False
+
+
 def public_platform_of(request, fallback: str) -> str:
     """本次请求实际命中的**对外平台 id**。
 
@@ -136,13 +162,22 @@ def key_row(db: Session, request) -> ApiKey | None:
     return row
 
 
-def authenticate(db: Session, request, *, platform: str = "") -> ApiKey:
+def authenticate(db: Session, request, *, platform: str = "") -> ApiKey | None:
     """校验 Key + 配额 + 哨兵暂停。
 
     平台网关的 /v1 是**对外入口**，必须与 WorkBuddy 同口径鉴权：
     没有 Key、Key 被停用、额度耗尽、平台被哨兵暂停，都在这里拒绝，
     绝不能直接拿号池里的账号去打上游。
+
+    **例外：进程内自发的调用**（`internal(request)`，如「同步模型」经
+    `_catalog_of` 复用平台 `list_models`）。它不来自网络，没有调用方身份
+    可验，也不该消耗任何 Key 的配额，因此直接放行并返回 `None`。
+    调用方对返回值的用法都是 `getattr(key, …, default)` 或判空，
+    `None` 安全；需要 Key 才能决定的事（绑定账号 / 分组）本来也不该
+    作用于内部调用。
     """
+    if internal(request):
+        return None
     token = request_token(request)
     if not token:
         raise PlatformRejected(401, "缺少 API Key", kind="auth_error",

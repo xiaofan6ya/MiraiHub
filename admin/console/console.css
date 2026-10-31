@@ -662,6 +662,30 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   transition:background .12s ease;
 }
 .acc-table tbody td.c-ops { white-space:nowrap; }
+/* 账户名单元格：徽标放在 `.nm`（名字那一行 flex）**下面**，独占一行。
+ *
+ * 踩过的坑（都验证过，别再改回去）：
+ *   1. 放「状态」列 -> 那列只有 ~200px，长文案折成 5 行，行高爆炸
+ *   2. 放进 `.nm` 内部 -> 它是个横向 flex，徽标和名字/UID 抢宽度，
+ *      结果名字被挤成「1...」、徽标也折行
+ *
+ * 现在：`.nm` 只放名字和 UID，徽标是它的兄弟节点，占满整行宽度。
+ * 徽标不折行，完整原因/时间/上游原文都在 tooltip 里。 */
+.acc-table td.c-name .acc-chips {
+  margin-top: 6px;
+}
+.acc-table td.c-name .acc-chips > .gateway-chip,
+.acc-table td.c-name .acc-chips > .limit-chip {
+  white-space: nowrap;
+  max-width: 100%;
+}
+/* 徽标本身允许换行（宁可两行也不要截断） */
+.acc-chips > .gateway-chip,
+.acc-chips > .limit-chip {
+  white-space: normal;
+  line-height: 1.45;
+  text-align: left;
+}
 /* ============================================================================
    用量日志表格：固定宽度布局，确保对齐一致性
    ========================================================================== */
@@ -690,20 +714,33 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
  *   结果/命中率这类两三个字的窄列给 5%。
  *
  * 窄屏保护：表格 min-width 1080px，低于此宽度横向滚动，
- * 不把 12 列压成一团看不清的窄条。 */
-.log-table { min-width: 1080px; }
+ * 不把 12 列压成一团看不清的窄条。
+ *
+ * ## 2026-10-31：耗时列被挤坏
+ *
+ * 用户反馈「耗时字段右边被挤、看不清、变形」。原因是这一列里塞了
+ * **三行内容**（首响应 / 总耗时+进度条 / TPS），而百分比分配给了它 9%，
+ * 配 `table-layout:fixed` 后宽度被硬切，内部 flex 行溢出被裁。
+ *
+ * 修法：耗时列提到 15%，其余列各让一点；同时给这一列设 min-width，
+ * 并让内部进度条 `flex:0 0 44px` 不被压缩（见文件后半段规则）。
+ * 表格 min-width 也提到 1180px —— 12 列内容确实需要这么宽，
+ * 宁可横向滚动，也不要挤成一团看不清。 */
+.log-table { min-width: 1180px; }
 .log-table .log-col-time { width:8%; }
-.log-table .log-col-ip { width:11%; }
-.log-table .log-col-key { width:11%; }
+.log-table .log-col-ip { width:10%; }
+.log-table .log-col-key { width:10%; }
 .log-table .log-col-platform { width:8%; }
-.log-table .log-col-account { width:11%; }
-.log-table .log-col-model { width:13%; }
+.log-table .log-col-account { width:10%; }
+.log-table .log-col-model { width:12%; }
 .log-table .log-col-token { width:7%; }
 .log-table .log-col-hit { width:5%; }
 .log-table .log-col-credit { width:6%; }
-.log-table .log-col-latency { width:9%; }
-.log-table .log-col-purpose { width:6%; }
-.log-table .log-col-result { width:5%; }
+/* 耗时列原来只给 9%，里面是「首响应 + 总耗时 + TPS」三行内容，
+   被挤到看不清、右侧被裁掉。给足 15%，并禁止内容被压缩换行。 */
+.log-table .log-col-latency { width:15%; }
+.log-table .log-col-purpose { width:5%; }
+.log-table .log-col-result { width:4%; }
 
 /* 数值列右对齐 */
 .log-table th:nth-child(6),
@@ -781,8 +818,78 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   transition:background .12s ease;
 }
 /* ============================================================================
+   概览加载态（转圈 + 骨架屏）
+   ========================================================================== */
+/* 状态条转圈：一个细环，跟着品牌色转。 */
+.ov-loading-dot {
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand);
+  display: inline-block;
+  animation: ov-spin .7s linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes ov-spin { to { transform: rotate(360deg); } }
+
+/* 数字骨架：把真实数字盖住，显示一条流动的灰条。
+   `color: transparent` 而不是 `visibility:hidden` —— 后者会让布局塌陷，
+   骨架高度就跟着数字变，加载完会跳一下。 */
+.ov-skeleton {
+  color: transparent !important;
+  position: relative;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    color-mix(in srgb, var(--fg-muted) 12%, var(--surface-2)) 37%,
+    var(--surface-2) 63%
+  );
+  background-size: 400% 100%;
+  animation: ov-shimmer 1.4s ease infinite;
+}
+.ov-skeleton > * { visibility: hidden; }
+@keyframes ov-shimmer {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* 加载中把卡片轻微压暗：一眼能看出「这批数据还没定型」 */
+.ov-card.ov-dim { opacity: .55; transition: opacity .18s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-loading-dot { animation: none; }
+  .ov-skeleton { animation: none; }
+}
+
+/* ============================================================================
    徽章和标签组件优化
    ========================================================================== */
+/* 账号状态徽标容器：冷却 / 模型冷却两枚徽标由 `accountLimitBadge()` 生成。
+ *
+ * 原来两枚 chip 直接内联在账号名后面：
+ *   · 没有上下间距，多枚会挤在一起
+ *   · 没有左对齐（inline-flex + margin-left 让它斜着贴）
+ *   · 窄屏换行后位置参差
+ *
+ * 现在统一放进这个容器：纵向排列、统一左对齐、每枚之间留 4px。 */
+.acc-chips {
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  gap:4px;
+  margin-top:5px;
+}
+.acc-chips > .gateway-chip,
+.acc-chips > .limit-chip {
+  margin-left:0;   /* 容器已左对齐，chip 自己不再往右推 */
+  /* 长文案（含「还剩多久」）要能完整显示：
+     不要 nowrap + ellipsis —— 那会把「冷却 · 账号请求限流 · 23 分钟后恢复」
+     截成「冷却 · 账号消」，用户还是不知道原因。允许换行。 */
+  max-width:100%;
+  white-space:normal;
+  line-height:1.45;
+  text-align:left;
+}
 .limit-chip {
   display:inline-flex;
   align-items:center;
@@ -2793,8 +2900,10 @@ tbody tr:hover > th { background:transparent!important; }
 .tbl th.log-th-latency,
 .log-th-latency { text-align: left !important; }
 /* 内容宽度固定：有 TPS 行和没有 TPS 行的单元格宽度不同，
-   不固定会让整列的「首响应」标签左右漂移。 */
-#logBody .latency-cell { width: 108px; }
+   不固定会让整列的「首响应」标签左右漂移。
+   注意：这里原来是 108px，装不下「首响应 + 进度条 + 数字」，右侧被裁。
+   改成 100% + min-width，让格子跟着列宽走，但保底 148px 不挤压。 */
+#logBody .latency-cell { width: 100%; min-width: 148px; }
 
 /* ============================================================================
    预警管理
@@ -2936,11 +3045,18 @@ tbody tr:hover > th { background:transparent!important; }
 
 /* 「耗时」列：表头与内容统一左对齐，且列宽固定 —— 内容里有 TPS 行和没有
    TPS 行的高度/宽度不同，不固定宽度会让「首响应」标签整体左右漂移。
-   用 `!important` 是因为表格的基础样式（`.tbl th`）在后加载的文件里。 */
-.log-th-latency { text-align: left !important; }
-.col-log-latency, .log-col-latency { width: 108px; }
-#logBody .latency-cell { width: 100%; }
+   用 `!important` 是因为表格的基础样式（`.tbl th`）在后加载的文件里。
 
+   **宽度必须给够**：这一格里塞了三行（首响应 / 总耗时进度条 / TPS），
+   原来 108px 装不下，右侧内容被裁掉、进度条也挤变形。改为按百分比 + 最小宽度，
+   并禁止内部元素被压缩。 */
+.log-th-latency { text-align: left !important; min-width: 150px; }
+.col-log-latency { width: 15%; min-width: 150px; }
+.log-col-latency { width: 15%; min-width: 150px; }
+#logBody .latency-cell { width: 100%; min-width: 148px; }
+#logBody .latency-cell .latency-row { white-space: nowrap; }
+/* 进度条那一行的轨道不允许被 flex 压缩掉 */
+#logBody .latency-cell .pkg-track { flex: 0 0 44px; }
 /* ============================================================================
    平台网关（跨平台调度）
    ========================================================================== */
@@ -3230,11 +3346,21 @@ tbody tr:hover > th { background:transparent!important; }
 .live-request-model { font-family: var(--mono); color: var(--fg-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 日志页实时区多一列「耗时」：在日志场景里它和状态一样重要。 */
-/* 日志页的实时行比哨兵多一列「耗时」，单独定列宽，
-   不去动 `.live-request-row` 本身 —— 哨兵那边只有 4 个格子。 */
+/* 日志页的实时行比哨兵多三列（Key / 客户端 IP / 耗时），单独定列宽，
+   不去动 `.live-request-row` 本身 —— 哨兵那边只有 4 个格子。
+   顺序：时间 | Key | 客户端IP | 模型 | 平台 | 耗时 | 状态 */
 .live-request-row.with-duration {
-  grid-template-columns: 58px minmax(80px, 1fr) 64px 58px 66px;
+  grid-template-columns: 58px minmax(70px, 0.9fr) 104px minmax(90px, 1.4fr)
+                         74px 78px 66px;
 }
+.live-request-key,
+.live-request-ip {
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-request-ip { font-family: var(--mono); font-size: 10.5px; }
 .live-request-ms { color: var(--fg-subtle); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .live-request-status { font-weight: 700; font-variant-numeric: tabular-nums; }
 .live-request-status.ok { color: var(--success, var(--brand-strong)); }
@@ -3244,18 +3370,56 @@ tbody tr:hover > th { background:transparent!important; }
   overflow: hidden; text-overflow: ellipsis; }
 .live-platform-counts {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 6px;
   padding: 8px 12px 12px;
 }
 .live-platform-count {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 6px; padding: 6px 9px; border-radius: 8px;
+  gap: 8px; padding: 6px 9px; border-radius: 8px;
   background: var(--surface-2); border: 1px solid var(--border);
   font-size: 11px; color: var(--fg-muted);
+  /* 高度固定：数字换行会把这一个格子撑高，导致整行卡片高度跳动 */
+  min-height: 30px;
 }
-.live-platform-count b { color: var(--fg); font-variant-numeric: tabular-nums; }
-.live-platform-count em { font-style: normal; color: var(--danger); font-size: 10px; }
+/* 平台名：允许收缩 + 省略号，不挤压右侧数字 */
+.live-platform-count .lpc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 右半区（数字 + 失败数）：**不允许收缩**，否则三位数以上会被挤到换行。
+   两个子元素之间给明确间距，避免「29 11 失败」连读成一片。 */
+.live-platform-count .lpc-values {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+/* 数字用等宽字形 + 固定最小宽度：
+   请求数从 99 -> 100 -> 1000 时，字符宽度一致、占位不跳，
+   否则每刷新一次卡片就「抽搐」一下（用户看到的就是这个）。 */
+.live-platform-count b {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  /* 4 位数起步的宽度，保证 1 位和 4 位都不改变布局 */
+  min-width: 2.6em;
+  text-align: right;
+  display: inline-block;
+}
+.live-platform-count em {
+  font-style: normal; color: var(--danger); font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* 失败数也是等宽，且给个浅底把它和总数分开 */
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
 
 /* ============================================================================
    Key 表单：统一 checkbox 样式 + 账号筛选选择器
@@ -3931,3 +4095,60 @@ tbody tr:hover > th { background:transparent!important; }
   gap: 8px;
   margin-top: 10px;
 }
+
+/* ============================================================================
+   深色模式「暗夜蓝」配色（用户反馈：深色下别再用亮雾蓝）
+   ----------------------------------------------------------------------------
+   问题：深色主题把 --brand 提到 #6E9BC9（亮雾蓝），于是开关、状态徽标、
+   告警条全是**亮蓝色块**，压在近黑背景上刺眼，也不像深色主题。
+   做法：把「面」压成深藏青（深色底 + 冷灰蓝描边），只让文字/数字保留亮蓝
+   作为强调 —— 深色主题的层次感要靠明度，不靠饱和度。
+   ========================================================================== */
+:root[data-theme="dark"] {
+  --brand-soft: rgba(74, 110, 147, .28);
+  --info: #9FBBDA;
+  --info-soft: rgba(38, 60, 88, .55);
+  --info-border: rgba(96, 138, 184, .32);
+  --ok-soft: rgba(52, 199, 123, .16);
+  --warn-soft: rgba(249, 146, 60, .16);
+  --danger-soft: rgba(255, 100, 103, .16);
+}
+
+/* 开关：整块发光 -> 深藏青 + 描边，靠滑块位置表达「已开」 */
+:root[data-theme="dark"] .model-switch span { background: #3a3a3a; }
+:root[data-theme="dark"] .model-switch input:checked + span {
+  background: #2E4E75;
+  box-shadow: inset 0 0 0 1px rgba(120, 160, 200, .45);
+}
+
+/* 状态徽标：绿色回绿、蓝色走深藏青，不再让「正常/启用」显示成蓝色 */
+:root[data-theme="dark"] :is(.bg-emerald-50, .bg-emerald-100, .bg-green-50, .bg-green-100) {
+  background: var(--ok-soft) !important;
+  color: #5BD98F !important;
+}
+:root[data-theme="dark"] :is(.bg-sky-50, .bg-sky-100, .bg-blue-50, .bg-blue-100) {
+  background: var(--info-soft) !important;
+  color: var(--info) !important;
+}
+:root[data-theme="dark"] :is(.bg-indigo-50, .bg-indigo-100, .bg-purple-50, .bg-purple-100,
+  .bg-violet-50, .bg-violet-100) {
+  background: rgba(120, 100, 165, .20) !important;
+  color: #C7B6EC !important;
+}
+
+/* 告警横幅：暗红/暗琥珀，不用亮色块铺满 */
+:root[data-theme="dark"] .ov-alert {
+  background: #2A1D1E;
+  border-color: rgba(255, 100, 103, .35);
+}
+:root[data-theme="dark"] .ov-alert.warn {
+  background: #2B2418;
+  border-color: rgba(251, 146, 60, .35);
+}
+:root[data-theme="dark"] .ov-alert-left strong { color: #FF8A8C; }
+:root[data-theme="dark"] .ov-alert.warn .ov-alert-left strong { color: #FBBF70; }
+
+/* 顶栏「服务已连接」/概览「服务运行中」这类小徽标 */
+:root[data-theme="dark"] .topbar-status,
+:root[data-theme="dark"] .ov-badge-ok { background: rgba(74, 110, 147, .24) !important; }
+:root[data-theme="dark"] .topbar-status { color: var(--info) !important; }

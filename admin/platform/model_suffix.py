@@ -102,6 +102,25 @@ def alias_to_upstream(name: str) -> tuple[str, str]:
             continue
         for upstream_id, readable in table.items():
             if bare == readable or bare == readable.lower():
+                if not storage:
+                    # ⚠️ **真实模型 id 优先于别名**。
+                    #
+                    # `MODEL_NAME_MAP` 里 qoder 那张表写的是「缩写 -> 可读名」，
+                    # 于是 `deepseek-v4-pro` 既可能是**别人的真实 model_id**
+                    # （WorkBuddy 就有这个名字），也可能是 qoder 的 `dmodel`
+                    # 的可读名。没有平台后缀时以前一律当成别名反查，
+                    # 结果把 `deepseek-v4-pro` 改写成 `dmodel` 发给上游：
+                    #
+                    #     400 模型 'dmodel' 不存在或已被禁用   ← 线上真实故障
+                    #
+                    # 所以：能查到这个名字是某个已启用模型时，**不做别名还原**，
+                    # 让它按真实模型走下去（qoder 的可读名另有 platform_of_model
+                    # + upstream_of 那条路负责，不受影响）。
+                    try:
+                        if mr.platform_of_model(bare):
+                            return "", ""
+                    except Exception:  # noqa: BLE001 - 查询失败就按别名处理
+                        logger.debug("platform_of_model 查询失败 %s", bare, exc_info=True)
                 return plat_storage, upstream_id
     return "", ""
 

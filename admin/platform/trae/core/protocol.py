@@ -759,10 +759,22 @@ def stream_anthropic(resp, model: str = "", holder=None, allowed_names=None):
         yield event("content_block_stop", {"index": block_index})
     usage = holder.get("usage") or {}
     stop_reason = "tool_use" if block_index > 1 else "end_turn"
+    # Anthropic usage 必须单列缓存命中，否则客户端命中率恒为 0。
+    _a_u = None
+    try:
+        from upstream_compat import anthropic_usage_from
+
+        _a_u = anthropic_usage_from(usage)
+    except Exception:  # noqa: BLE001
+        _a_u = None
+    if _a_u is None:
+        _a_u = {"input_tokens": int(usage.get("prompt_tokens") or 0),
+                "output_tokens": int(usage.get("completion_tokens") or 0),
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0}
     yield event("message_delta", {
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                  "output_tokens": int(usage.get("completion_tokens") or 0)}})
+        "usage": _a_u})
     yield event("message_stop", {})
 
 

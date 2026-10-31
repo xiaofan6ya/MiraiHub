@@ -1008,8 +1008,179 @@ def _ensure_usage_credit(usage: dict) -> bool:
     return changed
 
 
+#: usage 里表示「输入命中前缀缓存」的所有已知写法。
+#:
+#: 各家协议各写一套，客户端也只认自己那一套：
+#:   * OpenAI 标准      `prompt_tokens_details.cached_tokens`
+#:   * DeepSeek 系      `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+#:   * Anthropic 系     `cache_read_input_tokens` / `cache_creation_input_tokens`
+#:   * 部分网关裸字段   `cached_tokens`
+#: 上游（WorkBuddy /v2/chat/completions）**这些全都会回**，但我们的协议转换层
+#: 只要漏掉其中一套，那个客户端的「缓存命中」就恒为 0 —— 平台自己记了账，
+#: 用户却看不到，这正是线上被投诉的那个 bug。
+_CACHE_READ_KEYS = ("cached_tokens", "cache_read_input_tokens", "prompt_cache_hit_tokens")
+_CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "prompt_cache_write_tokens")
+_PTD_PLACEHOLDERS = {
+    "accepted_prediction_tokens": 0,
+    "audio_tokens": 0,
+    "reasoning_tokens": 0,
+    "rejected_prediction_tokens": 0,
+}
+
+
+def cached_token_count(usage) -> int | None:
+    """从任意形态的 usage 里取「缓存命中的输入 token 数」。取不到返回 None。
+
+    优先读 OpenAI 标准的 `prompt_tokens_details.cached_tokens`，缺失时依次
+    回退到另外三套写法。负值/非数字一律当取不到。
+    """
+    if not isinstance(usage, dict):
+        return None
+    candidates: list = []
+    ptd = usage.get("prompt_tokens_details")
+    if isinstance(ptd, dict):
+        candidates.append(ptd.get("cached_tokens"))
+    for k in _CACHE_READ_KEYS:
+        candidates.append(usage.get(k))
+    for value in candidates:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if n >= 0:
+            return n
+    return None
+
+
+def normalize_usage_cache(usage: dict) -> bool:
+    """把缓存命中字段**补齐成四套同义写法**，就地改写。返回是否改动。
+
+    两件事：
+      1. **补缺**：某套写法不存在时，用权威值填上（幂等）。
+      2. **纠正偏低**：上游确实会同时给 `prompt_tokens_details.cached_tokens=10240`
+         和 `cache_read_input_tokens=0`（后者是它没算，不是真的没命中）。
+         以 `prompt_tokens_details.cached_tokens` 为权威值，把**更小**的同义字段
+         抬上去 —— 只升不降。否则读 `cache_read_input_tokens` 的客户端恒为 0，
+         而平台按 ptd 记了 10240 命中，两边对不上。
+
+    一个缓存字段都没有时**一个也不写**：拿不到真实值就不要伪造 0，
+    否则客户端会以为「上游确实说没命中」，掩盖掉真正的透传缺陷。
+    """
+    if not isinstance(usage, dict):
+        return False
+    cached = cached_token_count(usage)
+    if cached is None:
+        return False
+    # 权威值优先取 OpenAI 标准那套；它缺失时 cached_token_count 已经回退了。
+    ptd0 = usage.get("prompt_tokens_details")
+    if isinstance(ptd0, dict) and isinstance(ptd0.get("cached_tokens"), int):
+        try:
+            cached = max(cached, int(ptd0["cached_tokens"]))
+        except (TypeError, ValueError):
+            pass
+    for k in _CACHE_READ_KEYS:
+        v = usage.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        try:
+            if int(v) > cached:
+                cached = int(v)
+        except (TypeError, ValueError):
+            continue
+
+    changed = False
+
+    ptd = usage.get("prompt_tokens_details")
+    if not isinstance(ptd, dict):
+        ptd = {}
+        usage["prompt_tokens_details"] = ptd
+        changed = True
+    if not isinstance(ptd.get("cached_tokens"), int) or ptd["cached_tokens"] < cached:
+        ptd["cached_tokens"] = cached
+        changed = True
+    for k, v in _PTD_PLACEHOLDERS.items():
+        if k not in ptd:
+            ptd[k] = v
+            changed = True
+
+    for k in _CACHE_READ_KEYS:
+        cur = usage.get(k)
+        if cur is None or (isinstance(cur, (int, float)) and not isinstance(cur, bool)
+                           and int(cur) < cached):
+            if cur != cached:
+                usage[k] = cached
+                changed = True
+
+    # 写入侧（缓存创建）也只补缺，不造数据。
+    write = None
+    for k in _CACHE_WRITE_KEYS:
+        if usage.get(k) is not None:
+            try:
+                write = int(usage[k])
+            except (TypeError, ValueError):
+                write = None
+            if write is not None:
+                break
+    if write is not None:
+        for k in _CACHE_WRITE_KEYS:
+            if k not in usage:
+                usage[k] = write
+                changed = True
+
+    # DeepSeek 的 hit/miss 是**两个**字段，必须自洽：hit + miss == prompt。
+    prompt = usage.get("prompt_tokens")
+    if isinstance(prompt, int) and prompt >= cached:
+        if usage.get("prompt_cache_hit_tokens") != cached:
+            usage["prompt_cache_hit_tokens"] = cached
+            changed = True
+        if usage.get("prompt_cache_miss_tokens") != prompt - cached:
+            usage["prompt_cache_miss_tokens"] = prompt - cached
+            changed = True
+    return changed
+
+
+def anthropic_usage_from(usage) -> dict | None:
+    """把 OpenAI 形态的 usage 翻成 Anthropic 的 usage 对象。
+
+    Anthropic 的语义是**把命中/写入的缓存 token 单列**：
+    `input_tokens` 只算未命中缓存的那部分，缓存部分另计
+    `cache_read_input_tokens` / `cache_creation_input_tokens`。
+    上游只给 Total 的 prompt_tokens，所以这里按「总输入 - 缓存命中」拆开。
+    客户端（Claude Code 等）据此显示命中率，漏字段就恒为 0。
+    """
+    if not isinstance(usage, dict) or not usage:
+        return None
+    try:
+        prompt = int(usage.get("prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        prompt = 0
+    try:
+        completion = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        completion = 0
+    cached = cached_token_count(usage) or 0
+    if cached > prompt:
+        cached = prompt
+    write = 0
+    for k in _CACHE_WRITE_KEYS:
+        if usage.get(k) is not None:
+            try:
+                write = int(usage[k])
+            except (TypeError, ValueError):
+                write = 0
+            break
+    return {
+        "input_tokens": max(0, prompt - cached),
+        "output_tokens": completion,
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": write,
+    }
+
+
 def normalize_stream_chunk(obj: dict) -> int:
-    """归一化一个上游 SSE chunk：清理空 delta 占位符 + 补齐 usage 积分字段。
+    """归一化一个上游 SSE chunk：清空占位 delta + 补齐积分/缓存命中字段。
 
     返回**改动计数**（>0 表示这一行需要重新序列化）。
     """
@@ -1022,6 +1193,8 @@ def normalize_stream_chunk(obj: dict) -> int:
             total += strip_empty_delta_placeholders(delta)
     usage = obj.get("usage")
     if _ensure_usage_credit(usage):
+        total += 1
+    if normalize_usage_cache(usage):
         total += 1
     return total
 

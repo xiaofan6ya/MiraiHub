@@ -1860,7 +1860,15 @@ async def _select_account_with_wait(db, **kwargs):
             if POOL.waf.active():
                 return None, False
             now = datetime.utcnow()
-            query = scope_accounts(db.query(Account), kwargs.get('account_id'), kwargs.get('key_id'))
+            # ⚠️ 必须传 `key=`：`scope_accounts` 里「多选独占」与「独占平台」
+            # 两个分支都靠 `key` 对象取值（`_multi_ids(key)` / `key.platform`）。
+            # 只传 account_id/key_id 时它们恒为空，直接落到「公共池」分支 ——
+            # 于是**被别的 Key 独占的账号照样会被选中**
+            # （用户反馈「设了独占，其他 Key 还能打到这个账号」）。
+            query = scope_accounts(db.query(Account),
+                                   kwargs.get('account_id'),
+                                   kwargs.get('key_id'),
+                                   key=kwargs.get('key'))
             if kwargs.get('exclude_ids'):
                 query = query.filter(~Account.id.in_(kwargs['exclude_ids']))
             config = db.query(ModelConfig).filter(
@@ -1983,7 +1991,7 @@ def _transient_cool_fallback(db: Session, exclude_ids: set | None,
 
 
 def _no_account_reason(db: Session, account_id=None, key_id=None,
-                       model: str = "") -> str:
+                       model: str = "", key=None) -> str:
     """`_select_account` 选不出号时，给出一句**如实**的原因。
 
     原实现固定回「全部禁用或额度耗尽」。这句话在「整池只是被上游临时限流」
@@ -1994,9 +2002,11 @@ def _no_account_reason(db: Session, account_id=None, key_id=None,
     now = datetime.utcnow()
     # 与 `_select_account` 同口径：只看默认平台的账号，
     # 否则会报「全库 N 个账号」这种让用户困惑的数字。
+    # `key` 也要带上，否则「多选独占 / 独占平台」的 Key 报出来的
+    # 可用账号数会把别人独占的号算进去，与实际选号结果对不上。
     accs = scope_accounts(
         db.query(Account).filter(Account.platform == registry.DEFAULT_PLATFORM),
-        account_id, key_id).all()
+        account_id, key_id, key=key).all()
     if not accs:
         if account_id:
             return "绑定账号不存在或绑定已变更；该 Key 不会使用公共账号"
@@ -2460,10 +2470,16 @@ def _aggregate_chat_sse(sse_text: str) -> dict:
             usage = chunk["usage"]
             # 补齐积分类字段（credit / credits / cost 三份），
             # 客户端读哪个都能显示「消耗 N 积分」。
+            # 同时把缓存命中补齐成四套写法：非流式客户端的命中率也读 usage，
+            # 少一套它就恒显示 0（平台自己的账目却是对的）。
             try:
-                from upstream_compat import _ensure_usage_credit
+                from upstream_compat import (
+                    _ensure_usage_credit,
+                    normalize_usage_cache,
+                )
 
                 _ensure_usage_credit(usage)
+                normalize_usage_cache(usage)
             except Exception:  # noqa: BLE001
                 pass
         for choice in (chunk.get("choices") or []):
@@ -2529,14 +2545,20 @@ def _aggregate_chat_sse(sse_text: str) -> dict:
 def _parse_usage(sse_text: str) -> dict:
     """从 chat SSE 文本里找最后一个带 usage 的事件，解析 credits 与 token 明细。
 
-    返回 {"credits", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"}。
+    返回 {"credits", "prompt_tokens", "completion_tokens", "total_tokens",
+    "cached_tokens", "raw"}。
     上游通常只在最后一个事件回传 usage（配合 stream_options.include_usage=True）。
+
+    `raw` 是**上游最后一次给的 usage 原对象**（深拷贝前先做缓存字段归一）。
+    补发的追尾 usage 帧必须基于它重建，而不是只挑几个我们认识的键 ——
+    少抄一个键，客户端那一项就恒为 0（缓存命中就是这么丢的）。
 
     积分字段优先级：usage.credits > usage.credit > usage.cost，均缺失时返回 credits=None，
     由调用方按模型倍率估算（倍率单位为「每千 token」）。
     """
     credits = None
     prompt_tokens = completion_tokens = total_tokens = cached_tokens = None
+    raw_usage: dict | None = None
     for line in sse_text.splitlines():
         line = line.strip()
         if not line.startswith("data:"):
@@ -2591,12 +2613,26 @@ def _parse_usage(sse_text: str) -> dict:
             cached = usage["cached_tokens"]
         if cached is not None:
             cached_tokens = cached
+        # 原样留一份（含缓存命中四套写法），供追尾 usage 帧重建
+        try:
+            snap = json.loads(json.dumps(usage, ensure_ascii=False))
+            if isinstance(snap, dict):
+                try:
+                    from upstream_compat import normalize_usage_cache
+
+                    normalize_usage_cache(snap)
+                except Exception:  # noqa: BLE001
+                    pass
+                raw_usage = snap
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "credits": credits,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cached_tokens": cached_tokens,
+        "raw": raw_usage,
     }
 
 
@@ -2796,7 +2832,8 @@ async def chat_completions(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                account_id=getattr(key, "account_id", None), key_id=key.id,
+                                                key=key)
                         if not acc_i:
                             break
                         tried_accounts += 1
@@ -3099,20 +3136,40 @@ async def chat_completions(
                                                     final_model or "", _toks)
                                         except Exception:  # noqa: BLE001
                                             _final = 0.0
+                                    # **基于上游原始 usage 重建**，不是只挑几个键：
+                                    # 多数客户端（DSH / Cherry Studio / LobeChat 等）
+                                    # 对 usage 是「后到覆盖先到」，我们这一帧是流里
+                                    # 最后一个 usage。以前这里只抄 prompt/completion/
+                                    # total/credits，于是**缓存命中字段被这一帧抹掉**，
+                                    # 客户端恒显示 0，而平台侧账目是对的 —— 线上投诉
+                                    # 的正是这个。现在整份原样带上，只覆盖积分三键。
+                                    _ubase = usage.get("raw")
+                                    _uu = (dict(_ubase)
+                                           if isinstance(_ubase, dict) else {})
+                                    _uu["prompt_tokens"] = usage.get("prompt_tokens") or 0
+                                    _uu["completion_tokens"] = usage.get("completion_tokens") or 0
+                                    _uu["total_tokens"] = usage.get("total_tokens") or 0
+                                    _cached_tok = usage.get("cached_tokens")
+                                    if _cached_tok is not None:
+                                        _uu["cached_tokens"] = _cached_tok
+                                    _uu["credit"] = _final
+                                    _uu["credits"] = _final
+                                    _uu["cost"] = _final
+                                    try:
+                                        from upstream_compat import (
+                                            normalize_usage_cache as _nuc,
+                                        )
+
+                                        _nuc(_uu)
+                                    except Exception:  # noqa: BLE001
+                                        pass
                                     _uframe = {
                                         "id": "chatcmpl-gateway-usage",
                                         "object": "chat.completion.chunk",
                                         "created": int(time.time()),
                                         "model": final_model or "",
                                         "choices": [],
-                                        "usage": {
-                                            "prompt_tokens": usage.get("prompt_tokens") or 0,
-                                            "completion_tokens": usage.get("completion_tokens") or 0,
-                                            "total_tokens": usage.get("total_tokens") or 0,
-                                            "credit": _final,
-                                            "credits": _final,
-                                            "cost": _final,
-                                        },
+                                        "usage": _uu,
                                     }
                                     yield ("data: " + json.dumps(_uframe, ensure_ascii=False)
                                            + "\n\n")
@@ -3345,7 +3402,8 @@ async def responses_proxy(
                         break
                     acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                             model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                account_id=getattr(key, "account_id", None), key_id=key.id,
+                                                key=key)
                     if not acc_i:
                         break
                     tried_ids.add(acc_i.id)
@@ -3515,7 +3573,8 @@ async def responses_proxy(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                account_id=getattr(key, "account_id", None), key_id=key.id,
+                                                key=key)
                         if not acc_i:
                             break
                         tried_ids.add(acc_i.id)
@@ -3824,7 +3883,8 @@ async def anthropic_messages(
                         break
                     acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                             model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                account_id=getattr(key, "account_id", None), key_id=key.id,
+                                                key=key)
                     if not acc_i:
                         break
                     tried_ids.add(acc_i.id)
@@ -3996,7 +4056,8 @@ async def anthropic_messages(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                account_id=getattr(key, "account_id", None), key_id=key.id,
+                                                key=key)
                         if not acc_i:
                             break
                         tried_ids.add(acc_i.id)
@@ -4301,7 +4362,7 @@ def models(
                           key=key)
     if not acc:
         return JSONResponse(status_code=503, headers={"Retry-After": "3"},
-                            content={"error": {"message": f"无可用账号：{_no_account_reason(db, aid, key.id)}",
+                            content={"error": {"message": f"无可用账号：{_no_account_reason(db, aid, key.id, key=key)}",
                                                "type": "server_error", "code": "service_unavailable"}})
     # 换号重试 + 错误处置，与对话端点同口径。
     #
