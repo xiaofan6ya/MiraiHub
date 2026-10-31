@@ -1222,6 +1222,80 @@ def cleanup_stale_mei_dirs() -> int:
 **教训**：静态资源的版本参数不是可选项。没有它，前端改动在用户侧
 等于没改 —— 而开发者本地因为 cache-busting 不生效往往看不出来。
 
+## 五·补23 Trae 授权只能在桌面版用，服务器部署登录不了
+
+**现象**
+
+部署到服务器后点「授权登录」，浏览器跳 `http://127.0.0.1:8790/authorize`
+打不开 —— 这个地址指的是**用户自己电脑**，不是服务器。
+
+**根因**
+
+`callback_url()` 默认拼 `http://127.0.0.1:<port>/authorize`。桌面版浏览器和
+网关同机，没问题；服务器部署时浏览器在用户那边，回环地址必然断开。
+
+**关键认知：Trae 不能像 Qoder 那样纯轮询**
+
+翻遍官方客户端 `out/main.js`，Trae 的全部 oauth 端点只有：
+
+```
+/trae/api/v3/oauth/ExchangeToken        AuthCode 换 token
+/trae/api/v3/oauth/ClearRefreshToken
+/api/v3/trae/{CheckLogin,GetUserInfo,LoginLocal,GenerateTempToken,...}
+```
+
+**没有** `deviceToken/poll` 这类「服务端主动查授权结果」的接口。
+客户端自己也是 `http.createServer()` 起本地服务接 `/authorize` 回调。
+
+对比 Qoder：它有 `deviceToken/poll`，服务端拿 nonce+verifier 直接问，
+**不需要任何回调地址**，所以 Qoder 天生支持服务器部署。
+
+**修法：让回调地址可以是公网地址**
+
+`auth_callback_url` 只是拼进授权页的普通 query 参数，上游不校验它指向哪 ——
+填公网域名，授权完成后浏览器就跳到公网域名。
+
+```python
+def callback_url():
+    base = public_base()          # WB_OAUTH_PUBLIC_BASE
+    if base:
+        return base + CALLBACK_PATH          # https://域名/authorize
+    return "http://%s:%s%s" % (main_host(), main_port(), CALLBACK_PATH)
+```
+
+为什么要一个**完整基址**而不是 host+port：公网需要 HTTPS，反代可能带路径
+前缀（`https://a.com/gw/authorize`），两个零件拼不出来。
+
+**前端配合**
+
+`/device/start` 返回 `callback_reachable` + `callback_hint`：
+
+- 判断依据是**请求来源**，不是「有没有配 WORKBUDDY_DESKTOP」。
+  管理员用本机浏览器打开 localhost 管理台时，回环完全可用 —— 之前按
+  桌面版标志判断，源码部署被误报成不可达。
+- 不可达时弹窗换文案（「用任意设备的浏览器打开」）、显示黄色警告、
+  多一个「复制授权链接」按钮（发到手机上打开）。项目里没有 QR 依赖，
+  为一个场景引库不划算。
+
+**实测**
+
+```
+桌面版            http://127.0.0.1:8790/authorize   reachable=True
+ADMIN_PORT=8795   http://127.0.0.1:8795/authorize   reachable=True
+公网基址          https://2api.example.com/authorize  reachable=True
+带斜杠            https://a.com/authorize            （自动去尾斜杠）
+反代路径前缀      https://a.com/gw/authorize
+```
+
+**两个平台的分工**
+
+| | 授权方式 | 服务器部署 |
+|---|---|---|
+| Qoder | 设备码轮询（服务端主动查） | 原生支持，无需配置 |
+| Trae | 浏览器回调带 AuthCode | 需要 `WB_OAUTH_PUBLIC_BASE` |
+
+桌面版不需要动任何配置 —— 本地回调就是它的默认路径，也是它的最优路径。
+
 ## 六、运维
 
 ### 6.1 改完代码没真正重启

@@ -116,11 +116,29 @@ def main_port() -> str:
     return "8790"
 
 
+#: 显式指定的「对外可达」回调基址（含协议与端口），优先级最高。
+#: 部署在服务器 / 反代后面时设它，例如 https://2api.example.com
+_PUBLIC_ENV = "WB_OAUTH_PUBLIC_BASE"
+
+
+def public_base() -> str:
+    """对外可达的回调基址；空串表示没有配置，退化为本机回环。"""
+    return (os.environ.get(_PUBLIC_ENV) or "").strip().rstrip("/")
+
+
 def main_host() -> str:
     """回调用的主机名。
 
-    默认 `127.0.0.1` —— 回调只在本机浏览器里跳转，不需要暴露到局域网。
-    反代/公网部署时用 `WB_OAUTH_CALLBACK_HOST` 覆盖。
+    ## 三种部署形态
+
+    · **桌面版**：浏览器和网关在同一台机器，`127.0.0.1` 最省事，也不会把
+      授权入口暴露到局域网。
+    · **服务器部署**：浏览器在用户自己电脑上，`127.0.0.1` 指的是**用户本机**
+      而不是服务器 —— 回调必然打不开。这时必须配 `WB_OAUTH_PUBLIC_BASE`。
+    · **反代 / 域名**：同上，填公网域名。
+
+    判断「用户浏览器会不会和网关在同一台机器」不现实，所以这里只按配置走：
+    配了公网基址就用它，没配就是本机。
     """
     return (os.environ.get(_HOST_ENV) or "").strip() or "127.0.0.1"
 
@@ -130,7 +148,19 @@ def callback_url() -> str:
 
     **每次调用都重新读环境变量**，不做模块级缓存 —— 端口是启动后才知道的，
     缓存会让它在服务换端口后还返回旧值。
+
+    优先级：
+      1. `WB_OAUTH_PUBLIC_BASE` —— 显式公网基址（服务器部署用这个）
+      2. `http://<host>:<port>` —— 本机回环（桌面版默认）
+
+    ## 为什么公网基址要单独一个变量
+
+    「主机 + 端口」拼不出 HTTPS、也拼不出反代路径前缀（`/gw/trae`）。
+    公网部署时真正需要的是**一个完整基址**，不是两个零件。
     """
+    base = public_base()
+    if base:
+        return base + CALLBACK_PATH
     return "http://%s:%s%s" % (main_host(), main_port(), CALLBACK_PATH)
 
 
