@@ -213,16 +213,24 @@ function actionsFor(spec) {
       emit();
       // 账号数在 emit 之后再拉一次：切换过程中/新平台首次进入时，
       // account_count 可能还没回来，补一次让卡片上的数字不会是 "—"。
-      loadCounts();
+      //
+      // ⚠️ 这里必须带 `true`（重新请求 /api/platforms），不能只重算缓存：
+      // 「授权登录 / 导入 / 扫描」成功后前端会 `select()` 切到目标平台，
+      // 那一刻账号是刚写进库的，而 `state.items` 还是页面打开时的旧数据 ——
+      // 重算只能得到旧数字，表现就是「账号导进去了，卡片上的数量没变」
+      // （2026-10-31 实测）。
+      loadCounts(true);
     }
   }
 
   /* 账号数：`/api/platforms` 已经随平台一起下发（account_count / realm_counts），
-     一次请求即可 —— 平台多了不该变成 N 次串行请求。
+     但那是**上一次请求的缓存**。导入 / 删除账号后必须重新拉一次，
+     否则卡片上的数字永远停在页面打开那一刻 —— 只有整页刷新才变
+     （这是「导入账号后底部账号数不变」的真正原因，2026-10-31 实测确认）。
      下发的数字缺失时才显示 "—"，绝不猜。 */
-  function loadCounts() {
+  function applyCounts(items) {
     state.counts = {};
-    state.items.forEach(function (item) {
+    (items || []).forEach(function (item) {
       if (item.account_count === undefined || item.account_count === null) return;
       state.counts[item.id] = item.account_count;
       var perRealm = item.realm_counts || {};
@@ -230,8 +238,35 @@ function actionsFor(spec) {
         state.counts[item.id + ":" + realm] = perRealm[realm];
       });
     });
-    render();
-    return Promise.resolve(state);
+  }
+
+  /**
+   * @param {boolean} refresh
+   *   true  = 重新请求 `/api/platforms`（导入/删除/刷新账号后调）
+   *   false = 用已经加载的 items 重算（切平台时调，省一次请求）
+   */
+  function loadCounts(refresh) {
+    if (!refresh) {
+      applyCounts(state.items);
+      render();
+      return Promise.resolve(state);
+    }
+    return fetch("/api/platforms", { headers: { "X-Admin-Token": storedToken() } })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (data && data.items && data.items.length) {
+          // 顺带更新 spec：账号数之外的能力声明 / 区域也会跟着变
+          state.items = data.items;
+        }
+        applyCounts(state.items);
+        render();
+        return state;
+      })
+      .catch(function () {
+        applyCounts(state.items);   // 网络失败时退回旧数字，不清零
+        render();
+        return state;
+      });
   }
 
   function bind() {
@@ -311,7 +346,7 @@ function actionsFor(spec) {
     header: function () {
       return { "X-Platform": window.WBPlatform.route() };
     },
-    refreshCounts: function () { return loadCounts(); },
+    refreshCounts: function () { return loadCounts(true); },
     action: function (name) {
       document.dispatchEvent(new CustomEvent("wb-platform-action", {
         // 带上 spec：`platform` 是对外 id（trae-cn / trae-intl），

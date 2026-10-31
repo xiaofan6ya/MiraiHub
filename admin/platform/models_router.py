@@ -36,15 +36,31 @@ _cache: dict = {"at": 0.0, "payload": {}, "signature": ""}
 
 
 def _signature(db) -> str:
-    """模型配置的指纹：启用数 + 最大 id，变了就重建缓存。"""
+    """模型配置的指纹：启用数 + 最大 id + **分组内容**，变了就重建缓存。
+
+    ## 为什么要算上分组
+
+    缓存是「一次算、多 Key 复用」的。如果指纹只反映 `model_configs`，
+    那么用户**改了分组里的模型**（比如从 8 个减到 4 个）、但模型总数没变时，
+    指纹不变 -> 缓存不失效 -> 分组 Key 仍然拿到旧清单。
+    那就是「改了限制不生效」的另一种表现。
+    """
     from sqlalchemy import func
 
-    from admin.models import ModelConfig
+    from admin.models import ModelConfig, ModelGroupItem
 
     row = (db.query(func.count(ModelConfig.id), func.max(ModelConfig.id),
                     func.sum(ModelConfig.enabled))
            .filter(ModelConfig.enabled == 1).one())
-    return "%s|%s|%s" % (row[0], row[1], row[2])
+    group_sig = ""
+    try:
+        grows = (db.query(func.count(ModelGroupItem.id),
+                          func.max(ModelGroupItem.id))
+                 .one())
+        group_sig = "|%s|%s" % (grows[0] or 0, grows[1] or 0)
+    except Exception:  # noqa: BLE001 - 没有分组表也不该让清单挂掉
+        group_sig = "|0|0"
+    return "%s|%s|%s%s" % (row[0], row[1], row[2], group_sig)
 
 
 #: 各平台的上游没有给能力字段时的兜底值。
@@ -413,11 +429,24 @@ def _entry_targets(row: dict) -> list[tuple[str, str]]:
     return [(_realm_platform_id(storage, r), r) for r in realms]
 
 
-def build_payload(db, *, aggregate_only: bool = False) -> dict:
+def build_payload(db, *, aggregate_only: bool = False,
+                  group_id: int = 0) -> dict:
     """模型清单（OpenAI `/v1/models` 形状）。
 
     `aggregate_only=True`：同一模型跨平台只出一条，落点交给网关调度。
     `aggregate_only=False`：每平台每区一条，多平台同名带 `-平台名` 后缀。
+
+    ## `group_id`：分组限制（2026-10-31 修复）
+
+    绑定了分组的 API Key **只能看到分组内的模型**。之前这里完全没有
+    `group_id` 参数 —— 于是分组 Key 请求 `/v1/models` 拿到全量 54 个，
+    而真正调用时网关又会用 `model_not_in_group` 拦掉，
+    表现为「客户端里能选、一发就 403」，用户完全没法判断能用哪些。
+
+    实测：某分组只允许 4 个模型，`/v1/models` 返回 54 个（越权 50 个）。
+
+    过滤放在**入口**（SQL 的 where）而不是出口，避免把不该给的模型
+    先算出来再丢弃。
     """
     from admin.model_alias import canonical_key, model_display
     from admin.models import ModelConfig
@@ -425,17 +454,37 @@ def build_payload(db, *, aggregate_only: bool = False) -> dict:
 
     now = time.time()
     signature = _signature(db)
-    slot_key = "aggregate" if aggregate_only else "full"
+    # 缓存 key 必须带分组：否则第一个请求的过滤结果会被所有分组复用
+    slot_key = ("agg" if aggregate_only else "full") + (":g%d" % group_id
+                                                        if group_id else "")
     cached = (_cache["payload"].get(slot_key)
               if isinstance(_cache["payload"], dict) else None)
     if (cached is not None and _cache["signature"] == signature
             and now - _cache["at"] < _TTL):
         return cached
 
-    rows = (db.query(ModelConfig)
-            .filter(ModelConfig.enabled == 1)
-            .order_by(ModelConfig.platform.asc(), ModelConfig.model_id.asc())
-            .all())
+    query = (db.query(ModelConfig)
+             .filter(ModelConfig.enabled == 1))
+    # 分组限制：只在 SQL 层收窄，后续逻辑完全不变
+    allowed_ids = None
+    if group_id:
+        try:
+            from admin.routers.groups import effective_group_models
+
+            allowed_ids = effective_group_models(db, int(group_id))
+        except Exception:  # noqa: BLE001 - 读不到分组就按「不限制」退化
+            allowed_ids = None
+        if allowed_ids is not None:
+            if not allowed_ids:
+                # 分组存在但一个可用模型都没有 -> 明确返回空清单，
+                # 而不是退化成「全量」（那正是越权的成因）。
+                empty = {"object": "list", "data": []}
+                _store(slot_key, empty, now, signature)
+                return empty
+            query = query.filter(ModelConfig.model_id.in_(sorted(allowed_ids)))
+
+    rows = query.order_by(ModelConfig.platform.asc(),
+                          ModelConfig.model_id.asc()).all()
 
     # 先算出「哪些 (storage, model_id) 存在 :intl 孪生」——
     # 有孪生说明这个平台**分两套模型表**（Trae），无孪生是共用一份（Qoder）。

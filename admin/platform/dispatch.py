@@ -861,6 +861,16 @@ def _set_state(scope, platform_id: str, realm: str) -> None:
     state = scope.setdefault("state", {})
     state["platform"] = platform_id
     state["realm"] = realm
+    # 平台选定 = 已经过了选路阶段，把实时面板的阶段推到 upstream。
+    # **不影响请求本身**：mark_stage 出错也不该中断转发。
+    try:
+        from admin import traffic_stats
+
+        rid = scope.get("_wb_traffic_rid")
+        if rid:
+            traffic_stats.mark_stage(rid, "upstream")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class PlatformDispatchMiddleware:
@@ -924,8 +934,59 @@ class PlatformDispatchMiddleware:
                             _guess = (_plat or "") if _has else ""
                         except Exception:  # noqa: BLE001
                             _guess = ""
+                        # Key 展示名与客户端 IP：日志页的实时区要显示
+                        # 「谁在用、从哪来」，之前这两列是空的。
+                        #
+                        # `_key_of()` 走 scope 缓存，**首次调用才查库**。
+                        # 有些路径（聚合 /models、非聚合 Key 的预读分支）
+                        # 不会提前调用它，于是这里拿到 None —— 表现为
+                        # 「有的行有 Key 名、有的行是空的」。
+                        # 所以缓存没命中时直接查一次库兜底（结果仍进 scope，
+                        # 后续同一请求不会重复查）。
+                        _key_label = ""
+                        try:
+                            _k = _key_of(request)
+                            if _k is not None:
+                                _key_label = str(getattr(_k, "label", "")
+                                                 or getattr(_k, "name", "")
+                                                 or "")[:64]
+                            else:
+                                # 兜底：从 Authorization 头取原始 Key 再查一次
+                                _raw = ""
+                                try:
+                                    for _hk, _hv in (scope.get("headers") or []):
+                                        if _hk == b"authorization":
+                                            _txt = _hv.decode("latin-1", "replace")
+                                            _raw = _txt.split(" ", 1)[-1].strip()
+                                            break
+                                        if _hk == b"x-api-key":
+                                            _raw = _hv.decode("latin-1",
+                                                              "replace").strip()
+                                            break
+                                except Exception:  # noqa: BLE001
+                                    _raw = ""
+                                if _raw:
+                                    from admin.security import get_key_row
+
+                                    with _db() as _raw_db:
+                                        _row = get_key_row(_raw_db, _raw)
+                                        if _row is not None:
+                                            _key_label = str(getattr(_row, "name", "")
+                                                             or "")[:64]
+                        except Exception:  # noqa: BLE001
+                            _key_label = ""
+                        _client_ip = ""
+                        try:
+                            from admin.client_ip import request_ip
+
+                            _client_ip = str(request_ip(request) or "")[:64]
+                        except Exception:  # noqa: BLE001
+                            _client_ip = ""
                         scope["_wb_traffic_rid"] = traffic_stats.start(
-                            _guess, model=model_name or "", path=path)
+                            _guess, model=model_name or "", path=path,
+                            key_label=_key_label, client_ip=_client_ip)
+                        # 存进 scope，`request_metrics` 结束时好写进 record()
+                        scope["_wb_traffic_key"] = _key_label
                     except Exception:  # noqa: BLE001
                         pass
                 except Exception:  # noqa: BLE001
@@ -949,9 +1010,14 @@ class PlatformDispatchMiddleware:
                     # 落点由网关调度；没开聚合 -> 给全量（带平台后缀），
                     # 让用户自己指定平台。
                     aggregate_only = bool(getattr(key, "aggregate", True))
+                    # **分组限制**：绑了分组的 Key 只能看到组内模型。
+                    # 不传这个参数就会返回全量 —— 客户端能选、调用时又被
+                    # `model_not_in_group` 拦掉，用户完全不知道能用哪些。
+                    _gid = int(getattr(key, "group_id", 0) or 0)
                     with _db() as raw_db:
                         payload = models_router.build_payload(
-                            raw_db, aggregate_only=aggregate_only)
+                            raw_db, aggregate_only=aggregate_only,
+                            group_id=_gid)
                     # **默认输出严格 OpenAI 形状**：`platform` / `platforms`
                     # 这些扩展字段会让严格解析的客户端（Rust serde / Go struct）
                     # 直接报 `error decoding response body`。

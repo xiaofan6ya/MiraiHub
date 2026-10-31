@@ -437,8 +437,14 @@ def summarize(rows: list[Account]) -> dict:
     }
 
 
-def refresh_quota(db: Session, account: Account) -> dict:
+def refresh_quota(db: Session, account: Account, *, force: bool = False) -> dict:
     """刷新额度；顺带保证 token 可用（过期先换），并同步模型目录。
+
+    `force` 透传给 `credentials()` 的 `force_refresh`：强制重新取一次 token
+    再查额度。网关的 `AccountOps.refresh(force=True)` 会用到它 ——
+    少了这个参数会 `TypeError: refresh_quota() got an unexpected keyword
+    argument 'force'`，表现就是 Trae 的单号刷新 / 批量刷新全部 502
+    （2026-10-31 实测）。
 
     模型目录的**合并顺序很重要**（后写覆盖先写）：
 
@@ -449,7 +455,7 @@ def refresh_quota(db: Session, account: Account) -> dict:
     旧模型 —— 这正是「明明客户端有 GPT-6，网关里只有 GPT-5」的成因。
     """
     try:
-        creds = credentials(db, account)
+        creds = credentials(db, account, force_refresh=force)
     except client.UpstreamError as exc:
         return {"ok": False, "error": exc.to_dict()}
     realm = client.normalize_realm(account.domain or creds.get("realm"))

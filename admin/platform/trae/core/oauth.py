@@ -71,8 +71,89 @@ DEFAULT_MACHINE_ID = ("d979d81c1deda7a803cb6b76be69cff63b40dd24ea60d3fabbd"
                       "865607f7ee695")
 DEFAULT_BRAND = "NH5x_NH7x_HHx_HJx_HKx"
 DEFAULT_OS = "Windows 11 Pro"
-APP_VERSION = "3.4.11"
-PLUGIN_VERSION = "2.3.98528"
+#: 客户端版本号 —— 必须和用户实际装的客户端一致。
+#:
+#: ## 这两个值从哪来（别再猜了）
+#:
+#: `%INSTALL%/resources/app/product.json` 里有两个**不同**的字段：
+#:
+#:     "tronBuildVersion": "2.3.98528"   -> 授权链接的 plugin_version
+#:     "appVersion":       "3.4.11"      -> x_app_version / IDEVersion
+#:
+#: 真实抓包（`%APPDATA%/Trae CN/logs/*/main.log` 的
+#: `[exchangeTokenByAuthCode] request`）里也是这一对，且上游回
+#: `[exchangeToken] response success`。**注意 package.json 的 version
+#: 是 1.107.1，那是 VSCode 内核版本，不是 Trae 自己的 appVersion** ——
+#: 拿错一个就回 `10101 无效参数`，而那个错误文案是没填好的模板占位符
+#: （`无效参数：{__Message.field}`），光看码根本看不出是版本号。
+#:
+#: 取值顺序：环境变量 > 自动读本机 product.json > 内置兜底。
+_ENV_APP_VERSION = "TRAE_APP_VERSION"
+_ENV_PLUGIN_VERSION = "TRAE_PLUGIN_VERSION"
+_FALLBACK_APP_VERSION = "3.4.11"
+_FALLBACK_PLUGIN_VERSION = "2.3.98528"
+
+#: 可能的安装根目录（相对各自平台）
+_APP_ROOTS = (
+    r"%LOCALAPPDATA%\Programs\Trae CN",
+    r"%LOCALAPPDATA%\Programs\Trae",
+    r"C:\Program Files\Trae CN",
+    r"C:\Program Files\Trae",
+    r"D:\Trae CN\Trae CN",
+    r"D:\Trae CN",
+    r"D:\Trae",
+    "/opt/trae-cn",
+    "/opt/trae",
+    "/Applications/Trae CN.app",
+    "/Applications/Trae.app",
+)
+
+
+def _read_product_json() -> dict:
+    """读本机 Trae 的 `product.json`，读不到返回空 dict。"""
+    import glob as _glob
+    for root in _APP_ROOTS:
+        expanded = os.path.expandvars(root.rstrip("\\/"))
+        for pattern in (
+            os.path.join(expanded, "resources", "app", "product.json"),
+            os.path.join(expanded, "Contents", "Resources", "app", "product.json"),
+        ):
+            for path in _glob.glob(pattern):
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    if isinstance(data, dict):
+                        return data
+                except Exception:  # noqa: BLE001 - 探测失败不致命
+                    continue
+    return {}
+
+
+def app_version() -> str:
+    """`x_app_version` / `IDEVersion` / `DeviceInfo.ClientVersion`。
+
+    注意读的是 `product.json.appVersion`，**不是** `package.json.version`
+    （后者是 VSCode 内核版本 1.107.1，用它会被上游拒）。
+    """
+    explicit = (os.environ.get(_ENV_APP_VERSION) or "").strip()
+    if explicit:
+        return explicit
+    detected = str(_read_product_json().get("appVersion") or "").strip()
+    return detected or _FALLBACK_APP_VERSION
+
+
+def plugin_version() -> str:
+    """授权链接的 `plugin_version` —— 对应 `product.json.tronBuildVersion`。"""
+    explicit = (os.environ.get(_ENV_PLUGIN_VERSION) or "").strip()
+    if explicit:
+        return explicit
+    detected = str(_read_product_json().get("tronBuildVersion") or "").strip()
+    return detected or _FALLBACK_PLUGIN_VERSION
+
+
+#: 兼容旧引用：模块级常量保留，但授权/换 token 都走函数。
+APP_VERSION = _FALLBACK_APP_VERSION
+PLUGIN_VERSION = _FALLBACK_PLUGIN_VERSION
 
 #: 授权会话（nonce -> session），进程内保存，10 分钟过期
 _SESSIONS: dict = {}
@@ -143,24 +224,40 @@ def main_host() -> str:
     return (os.environ.get(_HOST_ENV) or "").strip() or "127.0.0.1"
 
 
-def callback_url() -> str:
-    """授权完成后的回调地址（指向主服务，不单开端口）。
+def callback_url(base: str = "") -> str:
+    """授权页要用的回调地址 —— **上游强制要求本机回环，不能是域名**。
 
-    **每次调用都重新读环境变量**，不做模块级缓存 —— 端口是启动后才知道的，
-    缓存会让它在服务换端口后还返回旧值。
+    ## 这是个死结，必须认清（2026-10-31 反复实测）
 
-    优先级：
-      1. `WB_OAUTH_PUBLIC_BASE` —— 显式公网基址（服务器部署用这个）
-      2. `http://<host>:<port>` —— 本机回环（桌面版默认）
+        callback = http://127.0.0.1:<port>/authorize  -> 授权页正常，能授权成功
+        callback = https://你的域名/authorize          -> 授权页「登录失败 / 网络错误」
 
-    ## 为什么公网基址要单独一个变量
+    依据：Trae 客户端源码里这个参数是**硬编码**的 ——
 
-    「主机 + 端口」拼不出 HTTPS、也拼不出反代路径前缀（`/gw/trae`）。
-    公网部署时真正需要的是**一个完整基址**，不是两个零件。
+        const k = `http://127.0.0.1:${i}/authorize`;
+        ... &auth_type=local&client_id=...&auth_callback_url=${k}&...
+
+    `auth_type` 恒为 `local`，没有第二种取值；授权页全部 29 个 JS chunk 里
+    也搜不到任何「允许域名回调」的分支。所以这不是配置问题，是上游设计：
+    **它假设调用方是桌面客户端，回调用本机端口接。**
+
+    ## 那服务器部署怎么完成授权
+
+    回环地址在**用户自己电脑**上，服务器收不到 —— 所以「自动回调」
+    在服务器部署下永远不可能成立。唯一可行路径是**手动提交回调链接**：
+
+        1. 用户在自己浏览器完成授权
+        2. 浏览器跳到 http://127.0.0.1:<port>/authorize?...&authCodeInfo=...
+           （打不开是正常的，但**地址栏里那条 URL 带着完整授权码**）
+        3. 把那条 URL 复制回控制台提交
+        4. 服务端解析 AuthCode + 自己会话里的 verifier → 换 token
+
+    实现见 `routers/accounts.py`：
+      · `POST /api/trae/device/callback` —— 手动提交
+      · `GET  /authorize`               —— 自动回调（桌面版走这条）
+
+    `base` 参数保留但**不参与拼授权链接**，只用于展示提示。
     """
-    base = public_base()
-    if base:
-        return base + CALLBACK_PATH
     return "http://%s:%s%s" % (main_host(), main_port(), CALLBACK_PATH)
 
 
@@ -178,9 +275,13 @@ class DeviceLogin:
     """一次 PKCE 授权会话。"""
 
     def __init__(self, realm: str = "cn", *, device_id: str = "",
-                 machine_id: str = "", port: int = 0):
+                 machine_id: str = "", port: int = 0, callback: str = ""):
         self.realm = "intl" if str(realm).lower() == "intl" else "cn"
-        # 客户端源码：randomBytes(48).toString('base64url')，48 字节而非 32
+        #: 回调地址 —— 上游**只接受回环**，所以这里不采用传入值，
+        #: 一律用 `callback_url()`（见它的注释：域名会被授权页直接拒）。
+        #: 参数留着只为兼容调用方，不参与 `auth_url`。
+        self.public_hint = str(callback or "").strip()
+        # 客户端源码：randomBytes(48).toString("base64url")，48 字节而非 32
         self.verifier = _b64url(secrets.token_bytes(48))
         self.challenge = _b64url(hashlib.sha256(self.verifier.encode()).digest())
         self.nonce = str(__import__("uuid").uuid4())
@@ -197,6 +298,14 @@ class DeviceLogin:
         self._done = threading.Event()
         self._server: threading.Thread | None = None
 
+    def callback_url(self) -> str:
+        """拼进授权链接的回调地址 —— 固定回环，上游强制。"""
+        return callback_url()
+
+    def display_callback(self) -> str:
+        """给前端展示的回调地址：就是回环那个（不美化，避免误导用户）。"""
+        return self.callback_url()
+
     # ---- URL ----
     @property
     def auth_url(self) -> str:
@@ -204,7 +313,7 @@ class DeviceLogin:
             "login_version": "1",
             "auth_from": "trae",
             "login_channel": "native_ide",
-            "plugin_version": PLUGIN_VERSION,
+            "plugin_version": plugin_version(),
             "auth_type": "local",
             "client_id": CLIENT_ID,
             "redirect": "0",
@@ -214,19 +323,22 @@ class DeviceLogin:
             # 回调地址**不要**带自定义 query：上游对 auth_callback_url
             # 做前缀比对，多一个 `?nonce=` 就可能不认。
             # 会话靠 `login_trace_id` 关联 —— 它会被上游原样带回到回调里。
-            "auth_callback_url": callback_url(),
+            "auth_callback_url": self.callback_url(),
             "machine_id": self.machine_id,
             "device_id": self.device_id,
             "x_device_id": self.device_id,
             "x_machine_id": self.machine_id,
-            # 客户端取 `getSystemInformation().deviceModel`，拿不到就是空串；
-            # 写死品牌串反而和真实机型不符。
-            "x_device_brand": "",
+            # **必须是机型串**，不能给空。真实客户端日志里就是
+            # `x_device_brand=NH5x_NH7x_HHx_HJx_HKx`（即 DeviceInfo.DeviceModel），
+            # 之前这里给空串，和换 token 时上报的 DeviceModel 对不上 ——
+            # 上游很可能把「授权时上报的指纹」和「换 token 时上报的 DeviceInfo」
+            # 做一致性校验，不一致就回 10101。
+            "x_device_brand": DEFAULT_BRAND,
             "x_device_type": "windows",
             "x_os_version": DEFAULT_OS,
             # 客户端在没有 BOE 环境时传 `undefined`（序列化后为空）
             "x_env": "",
-            "x_app_version": APP_VERSION,
+            "x_app_version": app_version(),
             "x_app_type": "stable",
             "code_challenge": self.challenge,
             "code_challenge_method": "S256",
@@ -242,7 +354,9 @@ class DeviceLogin:
             "realm": self.realm,
             "nonce": self.nonce,
             "auth_url": self.auth_url,
-            "callback_url": callback_url(),
+            # 注意：这里给的是**展示用**地址（可能是公网域名），
+            # 和 `auth_url` 里真正用的回环地址不是一回事 —— 见 `callback_url()`。
+            "callback_url": self.display_callback(),
             "expires_in": _SESSION_TTL,
             "summary": "打开授权链接 → 选择账号登录 → 页面会自动回调并完成授权",
         }
@@ -308,22 +422,93 @@ def _device_keypair() -> tuple[str, str]:
 
 
 def _device_info(device_id: str, machine_id: str, public_key_pem: str,
-                 app_version: str) -> dict:
-    """拼 `DeviceInfo`（字段名逐个对齐客户端源码 `_buildDeviceInfo`）。"""
+                 version: str = "") -> dict:
+    """拼 `DeviceInfo` —— 逐字段对齐真实抓包。
+
+    真实报文（`main.log` 的 `[exchangeTokenByAuthCode] request`）：
+
+        {"DeviceID":"1637612576065600",
+         "MachineID":"b54e128e...dcf3",
+         "PlatformCode":"IDE_PC",
+         "DeviceType":"PC",
+         "DeviceName":"Administrator的电脑",
+         "DeviceModel":"NH5x_NH7x_HHx_HJx_HKx",     ← 是机型串，不是空
+         "ClientVersion":"3.4.11",
+         "DevicePublicKey":"-----BEGIN PUBLIC KEY-----\\n...",
+         "DeviceBrand":"HASEE Computer",             ← 真实品牌
+         "DeviceCPU":"11th Gen Intel(R) Core(TM) i5-11260H",
+         "OSInfo":"windows",                         ← **小写**
+         "OSVersion":"Windows 11 Pro"}
+
+    ## 三处曾经写错的地方
+
+    · `DeviceModel` 原来给空串，真实值是品牌机型串 `NH5x_...`
+    · `OSInfo` 原来给 `"Windows"`（大写 W），真实值是 `"windows"`
+    · `DeviceBrand` / `DeviceCPU` 原来给空串，真实值是具体硬件
+
+    这些看起来「无害」的空值，上游照样算进参数校验里 ——
+    校验失败一律回 `10101 无效参数：{__Message.field}`（模板占位符
+    没被填充），所以只能对着真实报文一比一还原，没法靠猜。
+
+    取不到真实硬件信息时用 `DEFAULT_BRAND` / 一个常见 CPU 串兜底：
+    宁可上报一个「普通机器」，也不要上报空值。
+    """
+    version = str(version or app_version())
     return {
         "DeviceID": str(device_id or DEFAULT_DEVICE_ID),
         "MachineID": str(machine_id or DEFAULT_MACHINE_ID),
         "PlatformCode": "IDE_PC",
         "DeviceType": "PC",
         "DeviceName": os.environ.get("COMPUTERNAME", "Windows-PC"),
-        "DeviceModel": "",
-        "ClientVersion": app_version,
+        "DeviceModel": DEFAULT_BRAND,
+        "ClientVersion": version,
         "DevicePublicKey": public_key_pem,
-        "DeviceBrand": "",
-        "DeviceCPU": "",
-        "OSInfo": "Windows",
+        "DeviceBrand": _detect_brand(),
+        "DeviceCPU": _detect_cpu(),
+        "OSInfo": "windows",
         "OSVersion": DEFAULT_OS,
     }
+
+
+#: 取不到硬件信息时的兜底（都是真实客户端上报过的普通机器配置）
+_FALLBACK_BRAND = "HASEE Computer"
+_FALLBACK_CPU = "11th Gen Intel(R) Core(TM) i5-11260H"
+
+
+def _detect_brand() -> str:
+    """本机品牌（Windows 读注册表，失败用兜底）。"""
+    if os.name != "nt":
+        return _FALLBACK_BRAND
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\BIOS")
+        try:
+            value, _ = winreg.QueryValueEx(key, "SystemManufacturer")
+            return str(value or "").strip() or _FALLBACK_BRAND
+        finally:
+            key.Close()
+    except Exception:  # noqa: BLE001 - 探测失败不致命
+        return _FALLBACK_BRAND
+
+
+def _detect_cpu() -> str:
+    """本机 CPU 型号（Windows 读注册表，失败用兜底）。"""
+    if os.name != "nt":
+        return _FALLBACK_CPU
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+        try:
+            value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            return str(value or "").strip() or _FALLBACK_CPU
+        finally:
+            key.Close()
+    except Exception:  # noqa: BLE001
+        return _FALLBACK_CPU
 
 
 def exchange_token(code: str, verifier: str, *, realm: str = "cn",
@@ -353,6 +538,18 @@ def exchange_token(code: str, verifier: str, *, realm: str = "cn",
 
     `DeviceInfo.DevicePublicKey` 必须是真实的 EC P-256 公钥（PEM），
     客户端用 `generateKeyPairSync("ec", {{namedCurve:"P-256"}})` 生成。
+
+    ## 请求头要带 `x-cloudide-token: ""`
+
+    客户端 `_doExchangeToken` 的 headers 来自 `getHeaders(t)`，它无条件返回
+    `{{"Content-Type": "application/json", "x-cloudide-token": t}}`，
+    `exchangeTokenByAuthCode` 传的是**空串**。少了这个头会掉进上游另一条
+    校验分支，同样回 10101，看不出区别。
+
+    ## 版本号必须和客户端一致
+
+    `IDEVersion` / `DeviceInfo.ClientVersion` 用 `app_version()` 自动探测
+    本机真实版本；写死旧号（原 `3.4.11`）会被当成过期客户端。
     """
     import urllib.error
     import urllib.request
@@ -361,13 +558,14 @@ def exchange_token(code: str, verifier: str, *, realm: str = "cn",
     if not base:
         base = "https://api.trae.com.cn" if realm == "cn" else "https://api.trae.ai"
 
+    version = app_version()
     _priv_pem, pub_pem = _device_keypair()
     payload = {
         "ClientID": CLIENT_ID,
         "AuthCode": str(code or ""),
         "CodeVerifier": str(verifier or ""),
-        "DeviceInfo": _device_info(device_id, machine_id, pub_pem, APP_VERSION),
-        "IDEVersion": APP_VERSION,
+        "DeviceInfo": _device_info(device_id, machine_id, pub_pem, version),
+        "IDEVersion": version,
     }
     req = urllib.request.Request(
         base + EXCHANGE_PATH,
@@ -376,7 +574,10 @@ def exchange_token(code: str, verifier: str, *, realm: str = "cn",
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "Trae/%s" % APP_VERSION,
+            # 客户端真实请求里就有这个空头（`getHeaders("")`），
+            # 少了它会掉进上游的另一条校验分支，同样回 10101 看不出区别。
+            "x-cloudide-token": "",
+            "User-Agent": "Trae/%s" % version,
         })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

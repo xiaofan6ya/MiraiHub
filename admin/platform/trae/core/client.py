@@ -249,15 +249,40 @@ def realm_of(account) -> str:
     return "intl"
 
 
+#: 判断一个时间戳是毫秒还是秒的分界线。
+#:
+#: 秒级时间戳在 2286 年才会到 1e11，毫秒级现在就已经是 1.79e12，
+#: 所以拿 1e11 当分界不会误判。
+_MS_THRESHOLD = 1e11
+
+
 def expiry_of(account) -> float:
-    """access token 到期时间（epoch 秒）；取不到返回 0。"""
+    """access token 到期时间（**统一成 epoch 秒**）；取不到返回 0。
+
+    ## 为什么必须归一化单位
+
+    Trae 上游返回的 `TokenExpireAt` 是**毫秒**时间戳：
+
+        "TokenExpireAt": 1794379894461      # 2026-11-12
+
+    但这个函数历史上按「秒」处理，于是：
+
+      · `is_expired()` 永远算成「还早」—— 1794379894461 秒 ≈ 5.7 万年，
+        结果是 token 真过期了也不刷新，请求一路 401；
+      · 前端 `new Date(expires_at * 1000)` 又乘了一次 1000，
+        渲染成 **`+058840-07-03 10:57`**（用户看到的就是这个）。
+
+    所以入口这里统一归一化成秒，全链路只认秒。
+    """
     data = as_mapping(account)
-    for key in ("expired_at", "expiredAt", "expires_at"):
+    for key in ("expired_at", "expiredAt", "expires_at", "TokenExpireAt"):
         value = data.get(key)
-        if isinstance(value, (int, float)) and value > 0:
-            return float(value)
         if isinstance(value, str) and value.strip().isdigit():
-            return float(value.strip())
+            value = int(value.strip())
+        if isinstance(value, (int, float)) and value > 0:
+            number = float(value)
+            # 毫秒 -> 秒（上游给的都是毫秒）
+            return number / 1000.0 if number > _MS_THRESHOLD else number
     return 0.0
 
 

@@ -156,6 +156,63 @@ def scan_local(_: bool = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 # 浏览器授权登录（PKCE）
 # ---------------------------------------------------------------------------
+#: 这些主机名代表「本机回环」，不可能被外部浏览器访问到。
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0")
+
+
+def _infer_public_base(request: Request | None) -> str:
+    """从**这次请求**推导出对外可达的基址（含协议），推不出来返回空串。
+
+    ## 为什么必须按请求推导
+
+    原来只在 `WB_OAUTH_PUBLIC_BASE` 配了的时候才用公网地址，否则无条件
+    退回 `http://127.0.0.1:<port>/authorize`。线上部署几乎没人会去配这个
+    变量，于是授权链接里的 `auth_callback_url` 永远是 127.0.0.1 ——
+    上游把用户浏览器重定向到**用户自己电脑**的 127.0.0.1，页面打不开，
+    控制台一直停在「等待浏览器授权」。
+
+    真正的答案是「用户是怎么访问到我的」：那就在 `Host` 头里。
+    反代（nginx / 宝塔）会带 `X-Forwarded-Host` / `X-Forwarded-Proto`
+    / `X-Forwarded-For`，优先用它们，其次退回 `Host`。
+
+    安全：只取**协议 + 主机 + 可选端口**，路径 / query 一律丢弃，
+    避免被人塞进 `evil.com/../` 这类东西影响回调地址。
+    """
+    if request is None:
+        return ""
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+
+    def first(name: str) -> str:
+        raw = headers.get(name) or ""
+        # `X-Forwarded-*` 可能是逗号分隔的多跳，第一段才是最初的客户端所见
+        return raw.split(",")[0].strip()
+
+    host = first("x-forwarded-host") or first("host")
+    host = host.split("/")[0].strip()          # 防 `host/path` 注入
+    if not host:
+        return ""
+    # 去掉可能残留的 userinfo（user@host）
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    bare = host.split(":")[0].strip().lower()
+    if bare in _LOOPBACK_HOSTS:
+        return ""                              # 回环推导不出公网地址
+
+    proto = (first("x-forwarded-proto") or "").strip().lower()
+    if proto not in ("http", "https"):
+        # 没有反代透传时按 request.url.scheme 判断（uvicorn 直连时是 http）
+        try:
+            proto = str(request.url.scheme or "").lower()
+        except Exception:  # noqa: BLE001
+            proto = ""
+        if proto not in ("http", "https"):
+            proto = "http"
+    # 反代把 https 终结在 443 时，`X-Forwarded-Proto: https` 已由上面覆盖
+    return "%s://%s" % (proto, host)
+
+
 @router.post("/device/start")
 def device_start(realm: str = "cn", request: Request = None,
                  _: bool = Depends(require_admin),
@@ -196,34 +253,78 @@ def device_start(realm: str = "cn", request: Request = None,
     except Exception:  # noqa: BLE001 - 拿不到就用默认值
         logger.debug("读取本机设备指纹失败", exc_info=True)
 
+    # 回调地址**只能是回环**：上游授权页对 auth_callback_url 强制要求
+    # `http://127.0.0.1:<port>/authorize`（`auth_type=local` 写死），
+    # 换成域名会直接「登录失败 / 网络错误」。详见 core/oauth.py 的 callback_url()。
+    #
+    # 所以服务器部署时浏览器必然跳到用户自己电脑 —— 靠「手动粘贴回调链接」补完。
+    # 这里把「用户在哪个域上」传给会话，只用于生成提示文案。
+    display_hint = _infer_public_base(request)
+
     try:
         session = trae_oauth.start(value, device_id=device_id,
-                                   machine_id=machine_id)
+                                   machine_id=machine_id, callback=display_hint)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, detail="开授权会话失败：%s" % str(exc)[:160]) from exc
     payload = session.as_dict()
-    # 把部署形态一并告诉前端：服务器部署且没配公网基址时，
-    # 授权链接里的回调是 127.0.0.1 —— 用户浏览器在别的机器上，跳回来必然失败。
-    # 与其让他授权完看着「打不开」，不如在点之前就提示。
+    # ---- 判断「浏览器能不能回到这个回调地址」----
+    #
+    # 回调地址永远是 `http://127.0.0.1:<port>/authorize`（上游强制）。
+    # 「能不能到达」取决于**用户浏览器跑在哪台机器**：
+    #
+    #   · 桌面版：浏览器和网关同机 -> 127.0.0.1 真的能打开 -> 自动回调可用
+    #   · 服务器部署：浏览器在用户自己电脑 -> 打不开 -> 必须手动粘贴
+    #
+    # ## 为什么不能只看 request.client.host
+    #
+    # 线上走 nginx 反代时，`request.client.host` **恒为 127.0.0.1**
+    # （nginx 连的是本机 uvicorn）。原来就靠这一个值判断，于是
+    # 线上永远被当成「本机访问」-> `reachable=true` -> 手动回调表单
+    # 被整块隐藏 -> 用户只看到一个链接和「等待浏览器授权…」，
+    # 既不知道要复制、也没有地方粘贴。这就是用户报的那个问题。
+    #
+    # 正确判据是**浏览器地址栏里的 Host**：`X-Forwarded-Host` / `Host`
+    # 不是回环，就说明用户是从外部访问的，127.0.0.1 一定到不了。
     callback = payload.get("callback_url") or ""
-    loopback = callback.startswith("http://127.0.0.1") or callback.startswith("http://localhost")
-    # 回环地址在两种场景下都**没问题**：
-    #   · 桌面版：浏览器和网关同机
-    #   · 管理员用本机浏览器打开 localhost 的管理台（源码部署也常这样）
-    # 只有「从**别的机器**的浏览器访问管理台」时，回环才会断开 ——
-    # 这一点用请求来源判断才是准的，不能只看有没有配 WORKBUDDY_DESKTOP。
-    from_remote = False
+    loopback_callback = (callback.startswith("http://127.0.0.1")
+                         or callback.startswith("http://localhost"))
+
+    # 用户浏览器访问网关用的主机名（反代会透传 X-Forwarded-Host）
+    browser_host = ""
     try:
-        host = (request.client.host or "") if request is not None else ""
-        from_remote = host not in ("127.0.0.1", "::1", "localhost", "")
-    except Exception:
-        from_remote = False
-    payload["callback_reachable"] = (not loopback) or not from_remote
+        if request is not None:
+            headers = request.headers
+            forwarded = (headers.get("x-forwarded-host") or "").split(",")[0].strip()
+            browser_host = forwarded or (headers.get("host") or "").strip()
+    except Exception:  # noqa: BLE001
+        browser_host = ""
+    browser_bare = browser_host.split(":")[0].strip().lower()
+    # 用户在**外部主机**上打开控制台（不是 127.0.0.1 / localhost）
+    browser_is_remote = bool(browser_bare) and browser_bare not in (
+        "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0")
+
+    # 直连 socket 也参考一下（桌面版源码部署时 host 是 127.0.0.1 且没有反代头）
+    socket_host = ""
+    try:
+        socket_host = (request.client.host or "") if request is not None else ""
+    except Exception:  # noqa: BLE001
+        socket_host = ""
+    socket_is_local = socket_host in ("127.0.0.1", "::1", "localhost", "")
+
+    if loopback_callback:
+        # 回环回调：只要浏览器不是本机，就必然打不开
+        reachable = socket_is_local and not browser_is_remote
+    else:
+        # 非回环回调（理论上不会出现，上游强制回环）—— 按可达处理
+        reachable = True
+    payload["callback_reachable"] = reachable
+    payload["browser_host"] = browser_host
     payload["callback_hint"] = (
-        "" if payload["callback_reachable"]
-        else "当前回调地址是本机回环（%s），而你是从别的机器打开的管理台 ——"
-             "授权完成后浏览器会跳到你**自己电脑**的这个地址，打不开。"
-             "请设置环境变量 WB_OAUTH_PUBLIC_BASE=https://你的域名 后重启服务。" % callback)
+        "" if reachable
+        else "授权完成后，浏览器会跳转到**你自己电脑**的本机地址（%s），"
+             "打不开是正常的 —— 授权码就在地址栏那条链接里。"
+             "把它复制下来粘到下面的输入框提交，即可完成授权。"
+             % callback)
     return payload
 
 
@@ -263,81 +364,229 @@ _CALLBACK_PAGE = """<!DOCTYPE html>
     text-align: left;
   }}
   .hint {{ margin-top: 20px; font-size: 12px; color: {subtle}; }}
+  .copy {{
+    margin-top: 22px; width: 100%; border: 0; cursor: pointer;
+    padding: 13px 18px; border-radius: 10px; font-size: 14.5px;
+    font-weight: 600; font-family: inherit; color: #fff;
+    background: {brand}; transition: filter .15s ease, transform .1s ease;
+  }}
+  .copy:hover {{ filter: brightness(1.08); }}
+  .copy:active {{ transform: scale(.985); }}
+  .copy.done {{ background: {okBg}; color: {okFg}; }}
+  .copy.err {{ background: {errBg}; color: {errFg}; }}
+  .steps {{ margin: 18px 0 0; padding-left: 20px; text-align: left;
+           color: {muted}; font-size: 13px; line-height: 1.9; }}
+  .steps li::marker {{ color: {brand}; font-weight: 700; }}
+  .url {{
+    margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+    background: {codeBg}; border: 1px solid {border};
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+    color: {muted}; word-break: break-all; text-align: left;
+    max-height: 96px; overflow: auto;
+  }}
+  .tip {{ margin-top: 12px; font-size: 12px; color: {subtle}; }}
 </style></head>
 <body><div class="card">
   <div class="icon">{icon}</div>
   <h1>{title}</h1>
   <p>{message}</p>
   {detail}
-  <p class="hint">这个页面可以关闭了，回到控制台会看到结果。</p>
-</div></body></html>"""
+  {copy_block}
+  <p class="hint">{hint}</p>
+</div>
+<script>
+(function () {{
+  var btn = document.getElementById("copyBtn");
+  if (!btn) return;
+  var raw = btn.getAttribute("data-url") || "";
+  var fallback = document.getElementById("urlBox");
+
+  function flash(cls, text, back) {{
+    btn.classList.remove("done", "err");
+    btn.classList.add(cls);
+    btn.textContent = text;
+    setTimeout(function () {{
+      btn.classList.remove(cls);
+      btn.textContent = back;
+    }}, 2200);
+  }}
+
+  btn.addEventListener("click", function () {{
+    // 优先用 Clipboard API；它要求安全上下文（https 或 localhost）。
+    // 本页是 http://127.0.0.1，属于 localhost，通常可用；
+    // 万一被浏览器策略拒绝，就退回 execCommand 老办法。
+    function legacy() {{
+      try {{
+        var ta = document.createElement("textarea");
+        ta.value = raw;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return ok;
+      }} catch (e) {{ return false; }}
+    }}
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(raw).then(function () {{
+        flash("done", "✓ 已复制，回控制台会自动填入", "复制这条链接");
+      }}).catch(function () {{
+        if (legacy()) {{
+          flash("done", "✓ 已复制，回控制台会自动填入", "复制这条链接");
+        }} else {{
+          flash("err", "复制失败，请手动选中下方链接", "复制这条链接");
+          if (fallback) fallback.style.outline = "2px solid #b91c1c";
+        }}
+      }});
+    }} else if (legacy()) {{
+      flash("done", "✓ 已复制，回控制台会自动填入", "复制这条链接");
+    }} else {{
+      flash("err", "当前浏览器不支持自动复制，请手动选中下方链接", "复制这条链接");
+      if (fallback) fallback.style.outline = "2px solid #b91c1c";
+    }}
+  }});
+}})();
+</script>
+</body></html>"""
 
 _ICON_OK = ('<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>')
 _ICON_FAIL = ('<svg viewBox="0 0 24 24"><path d="M18 6 6 18"/>'
               '<path d="m6 6 12 12"/></svg>')
 
 
-def _callback_page(ok: bool, title: str, message: str, detail: str = "") -> HTMLResponse:
-    """渲染授权结果页（跟随系统深浅色）。"""
+def _callback_page(ok: bool, title: str, message: str, detail: str = "",
+                   copy_url: str = "", hint: str = "") -> HTMLResponse:
+    """渲染授权结果页（跟随系统深浅色）。
+
+    `copy_url` 非空时渲染「一键复制」按钮 —— 服务器部署场景下，用户浏览器
+    落在 127.0.0.1 打不开，但**地址栏里那条 URL 带着完整授权码**。
+    与其让用户自己去地址栏选中复制（手机上几乎做不到），不如页面直接给按钮，
+    点一下就复制好，回控制台自动填进去。
+    """
     if ok:
         colors = dict(bg="#f6f7f9", fg="#111827", surface="#ffffff",
                       border="#e5e7eb", muted="#6b7280", subtle="#9ca3af",
-                      iconBg="#dcfce7", iconFg="#15803d", codeBg="#f9fafb")
+                      iconBg="#dcfce7", iconFg="#15803d", codeBg="#f9fafb",
+                      brand="#2563eb", okBg="#dcfce7", okFg="#15803d",
+                      errBg="#fee2e2", errFg="#b91c1c")
         icon = _ICON_OK
     else:
         colors = dict(bg="#f6f7f9", fg="#111827", surface="#ffffff",
                       border="#fecaca", muted="#6b7280", subtle="#9ca3af",
-                      iconBg="#fee2e2", iconFg="#b91c1c", codeBg="#fef2f2")
+                      iconBg="#fee2e2", iconFg="#b91c1c", codeBg="#fef2f2",
+                      brand="#2563eb", okBg="#dcfce7", okFg="#15803d",
+                      errBg="#fee2e2", errFg="#b91c1c")
         icon = _ICON_FAIL
-    html = _CALLBACK_PAGE.format(
+
+    copy_block = ""
+    if copy_url:
+        # 用 html.escape 防止 URL 里的引号/尖括号打断属性
+        import html as _html
+
+        safe = _html.escape(copy_url, quote=True)
+        copy_block = (
+            '<button id="copyBtn" class="copy" type="button" '
+            'data-url="%s">复制这条链接</button>'
+            '<ol class="steps">'
+            '<li>点上面的按钮，链接会复制到剪贴板</li>'
+            '<li>回到控制台，链接会<b>自动填入</b>授权弹窗</li>'
+            '<li>若没有自动填入，到输入框里手动粘贴即可</li>'
+            '</ol>'
+            '<div id="urlBox" class="url">%s</div>'
+            '<p class="tip">复制失败时，可以手动选中上面这段文字。</p>'
+            % (safe, safe)
+        )
+
+    html_out = _CALLBACK_PAGE.format(
         title=title, message=message, icon=icon,
         detail=(f'<div class="detail">{detail}</div>' if detail else ""),
+        copy_block=copy_block,
+        hint=hint or "这个页面可以关闭了，回到控制台会看到结果。",
         bg=colors["bg"], fg=colors["fg"], surface=colors["surface"],
         border=colors["border"], muted=colors["muted"],
         subtle=colors["subtle"], iconBg=colors["iconBg"],
-        iconFg=colors["iconFg"], codeBg=colors["codeBg"])
-    return HTMLResponse(html, status_code=200)
+        iconFg=colors["iconFg"], codeBg=colors["codeBg"],
+        brand=colors["brand"], okBg=colors["okBg"], okFg=colors["okFg"],
+        errBg=colors["errBg"], errFg=colors["errFg"])
+    return HTMLResponse(html_out, status_code=200)
+
+
+def _parse_trae_callback(query: dict) -> dict:
+    """从回调参数里取出授权码 / 用户信息 / host。
+
+    自动回调和「手动粘贴链接」共用这一段 —— 两边解析口径必须一致，
+    否则会出现「自动回调能成功、手动粘贴同一个链接却失败」。
+
+    返回 `{"code":..., "user_info":..., "host":...}`，
+    解析不出授权码时 `code` 为空串（由调用方决定怎么报错）。
+    """
+    import json as _json
+    import urllib.parse as _up
+
+    def one(name: str) -> str:
+        value = query.get(name)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        return str(value or "").strip()
+
+    def obj(name: str) -> dict:
+        raw = one(name)
+        if not raw:
+            return {}
+        try:
+            parsed = _json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:  # noqa: BLE001 - 非法 JSON 按空处理
+            logger.debug("%s 解析失败", name, exc_info=True)
+            return {}
+
+    # Trae 的回调**不是** OAuth 标准形状：
+    #   authCodeInfo = {"AuthCode":..,"ExpireAt":..,"ExpireDuration":..}
+    #   userInfo     = {"UserID":..,"ScreenName":..,"TenantID":..}
+    # 只找 `code` 会永远拿不到码。
+    real_code = one("code")
+    if not real_code:
+        info = obj("authCodeInfo")
+        real_code = str(info.get("AuthCode") or info.get("authCode") or "").strip()
+    return {"code": real_code, "user_info": obj("userInfo"), "host": one("host")}
 
 
 @router.get("/device/callback")
-def device_callback(code: str = "", state: str = "", nonce: str = "",
-                    login_trace_id: str = "", loginTraceID: str = "",
-                    authCodeInfo: str = "", userInfo: str = "", host: str = "",
-                    userRegion: str = "",
+def device_callback(request: Request, code: str = "", state: str = "",
+                    nonce: str = "", login_trace_id: str = "",
+                    loginTraceID: str = "", authCodeInfo: str = "",
+                    userInfo: str = "", host: str = "", userRegion: str = "",
                     error: str = "", error_description: str = ""):
     """Trae 授权完成后的回调（走**主服务 8790**，不单开端口）。
 
     上游把用户浏览器重定向到这里，带上 `code`。
-    这里只负责把 code 交给对应的会话，真正的换 token 由前端轮询触发 ——
-    这样浏览器能立刻看到一个好看的「授权完成」页。
+
+    ## 两种落点，两种处理
+
+    · **桌面版 / 本机直连控制台**：浏览器和网关同机，这里能匹配到会话，
+      直接把 code 交给它，控制台轮询随即完成授权。
+
+    · **服务器部署**：`auth_callback_url` 被上游强制成 `127.0.0.1`，
+      于是浏览器跳到了**用户自己电脑**的那个端口。如果用户本机也跑着一份
+      网关，这个请求就会落到本机实例 —— 而会话在服务器进程里，
+      本机匹配不到。这时**不能只说「会话已失效」就完事**：
+      地址栏里那条 URL 仍然带着有效授权码，用户需要把它交到服务器上。
+
+      所以这里渲染「一键复制」按钮：复制当前 URL，回控制台自动填。
     """
     from admin.platform.trae.core import oauth as trae_oauth
 
     # ---- 1) 从真实回调里取授权码 ----
-    # Trae 的回调**不是** OAuth 标准形状，它的参数是：
-    #   authCodeInfo = {"AuthCode":"...","ExpireAt":...,"ExpireDuration":...}
-    #   userInfo     = {"UserID":"...","ScreenName":"...","TenantID":"..."}
-    #   loginTraceID / host / userRegion
-    # 只找 `code` 会永远拿不到码。
-    import json as _json
+    parsed = _parse_trae_callback({
+        "code": code, "authCodeInfo": authCodeInfo,
+        "userInfo": userInfo, "host": host,
+    })
+    real_code = parsed["code"]
+    user_info = parsed["user_info"]
 
-    real_code = str(code or "").strip()
-    if not real_code and authCodeInfo:
-        try:
-            info = _json.loads(authCodeInfo)
-            real_code = str(info.get("AuthCode") or info.get("authCode") or "").strip()
-        except Exception:  # noqa: BLE001 - 解析失败按空处理
-            logger.debug("authCodeInfo 解析失败", exc_info=True)
-
-    # ---- 2) 从 userInfo 里预取账号信息（换 token 后仍以接口返回为准）----
-    user_info: dict = {}
-    if userInfo:
-        try:
-            user_info = _json.loads(userInfo) or {}
-        except Exception:  # noqa: BLE001
-            user_info = {}
-
-    # ---- 3) 找会话 ----
+    # ---- 2) 找会话 ----
     key = (nonce or login_trace_id or loginTraceID or state or "").strip()
     session = trae_oauth.get(key) if key else None
     if session is None:
@@ -345,7 +594,25 @@ def device_callback(code: str = "", state: str = "", nonce: str = "",
         # 这时退到「最近的未完成会话」—— 用户同一时刻只会发起一次授权，
         # 直接报「会话已失效」会让真实授权永远完不成。
         session = trae_oauth.latest_pending()
+
+    # 本页面的完整 URL —— 交给用户复制，服务器端解析后就能完成授权。
+    try:
+        current_url = str(request.url)
+    except Exception:  # noqa: BLE001
+        current_url = ""
+
     if session is None:
+        # 有授权码 => 大概率是「浏览器在本机、会话在服务器」。
+        # 给出复制按钮，并说清下一步，而不是让用户以为白授权了一次。
+        if real_code and current_url:
+            return _callback_page(
+                False, "还差一步：把这条链接交给服务器",
+                "授权本身已经成功，但这次回调落在了<b>你自己电脑</b>上"
+                "（Trae 只允许本机地址接收回调），服务器没收到。",
+                detail="",
+                copy_url=current_url,
+                hint="复制后回到控制台，链接会自动填入授权弹窗；"
+                     "若未自动填入，手动粘贴到输入框再点「提交回调链接」。")
         return _callback_page(
             False, "授权会话已失效",
             "这个链接对应的授权已经结束或超时了，请回到控制台重新发起授权。")
@@ -361,10 +628,86 @@ def device_callback(code: str = "", state: str = "", nonce: str = "",
             "回调里没有拿到授权码，请回到控制台重新发起。")
     # 把 userInfo 一起交给会话（换 token 后如果接口不回 UserID，用它兜底）
     session.user_info = user_info
-    session.deliver(code=real_code, host=host)
+    session.deliver(code=real_code, host=parsed["host"])
     return _callback_page(
         True, "授权完成",
         "账号正在写入号池，请回到控制台查看结果。")
+
+
+class CallbackSubmitIn(BaseModel):
+    """手动粘贴回调链接的请求体。"""
+
+    nonce: str = ""
+    callback_url: str = ""
+
+
+@router.post("/device/callback")
+def device_callback_submit(body: CallbackSubmitIn,
+                           _: bool = Depends(require_admin)):
+    """手动提交回调链接 —— **服务器部署的必经之路**。
+
+    ## 为什么需要它
+
+    上游授权页**只接受回环回调地址**（见 `core/oauth.py` 的 `callback_url()`），
+    所以服务器部署时，用户浏览器授权完必然跳到 `http://127.0.0.1:<port>/authorize`
+    —— 那个地址在**用户自己电脑**上，打不开是正常的。
+
+    但地址栏里的 URL 里带着完整授权码。把它复制回来提交，服务端照样能完成授权。
+    这是唯一不改 `auth_callback_url` 又能让线上可用的办法。
+
+    ## 只解析，不访问
+
+    整个流程**不对 callback_url 发起任何请求**，只做字符串解析 ——
+    否则这就是个 SSRF 入口。参数里带了 `nonce` 用于绑定会话，
+    防止把别人的回调链接提交到自己的会话上。
+    """
+    import urllib.parse as _up
+
+    from admin.platform.trae.core import oauth as trae_oauth
+
+    raw = str(body.callback_url or "").strip()
+    if not raw:
+        raise HTTPException(400, detail="请粘贴授权后跳转页面的完整回调链接")
+
+    # 用户可能整条复制也可能只贴 query 部分，两种都接受
+    if "?" in raw:
+        query_str = raw.split("?", 1)[1]
+    elif "=" in raw:
+        query_str = raw
+    else:
+        raise HTTPException(400, detail="链接里没有找到回调参数，请复制授权后跳转页面的完整地址")
+    query_str = query_str.split("#", 1)[0]
+    try:
+        parsed_query = _up.parse_qs(query_str, keep_blank_values=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, detail="回调链接格式无法解析") from exc
+
+    parsed = _parse_trae_callback(parsed_query)
+    if not parsed["code"]:
+        raise HTTPException(
+            400,
+            detail="链接里没有授权码。请确认复制的是**授权完成后跳转页面的地址**，"
+                   "不是 Trae 授权页本身的链接。")
+
+    # 会话按 nonce 绑定；链接里带 loginTraceID 时用它交叉校验，防串号
+    nonce = str(body.nonce or "").strip()
+    trace_in_url = ""
+    for key in ("loginTraceID", "login_trace_id", "state", "nonce"):
+        value = parsed_query.get(key)
+        if value:
+            trace_in_url = str(value[0] or "").strip()
+            break
+    session = trae_oauth.get(nonce) if nonce else None
+    if session is None:
+        session = trae_oauth.latest_pending()
+    if session is None:
+        raise HTTPException(404, detail="授权会话已过期，请重新点一次「授权登录」")
+    if nonce and trace_in_url and trace_in_url != nonce and session.nonce != nonce:
+        raise HTTPException(400, detail="这条回调链接不属于本次授权会话，请重新发起")
+
+    session.user_info = parsed["user_info"]
+    session.deliver(code=parsed["code"], host=parsed["host"])
+    return {"ok": True, "summary": "回调已接收，正在完成授权…"}
 
 
 @router.get("/device/poll")
@@ -504,6 +847,7 @@ def _finish_trae_account(db: Session, session, token_data: dict,
 
     account = (db.query(Account)
                .filter(Account.platform == PLATFORM, Account.uid == str(uid)).first())
+    is_new = account is None
     if account is None:
         account = Account(platform=PLATFORM, uid=str(uid),
                           name=screen or str(uid) or "Trae",
@@ -515,8 +859,50 @@ def _finish_trae_account(db: Session, session, token_data: dict,
         account.status = "active"
     db.commit()
     db.refresh(account)
+
+    # ---- 平台首个账号：自动同步一次模型 ----
+    #
+    # 模型清单是从账号凭证向上游拉的 —— 平台上还没有可用账号时永远拉不到，
+    # 面板上那个平台的模型列表会一直是空的。所以「0 -> 1」这一刻要同步一次；
+    # 之后再加账号不再自动同步（避免批量导入时反复打上游）。
+    model_sync = {}
+    try:
+        from admin.platform import model_sync as _model_sync
+
+        model_sync = _model_sync.sync_models_if_first(
+            db, PLATFORM, exclude_ids=(account.id,))
+    except Exception as exc:  # noqa: BLE001 - 同步失败不影响授权成功
+        logger.warning("Trae 首个账号模型同步异常（账号已入库）: %s", exc)
+        model_sync = {"attempted": True, "ok": False,
+                      "summary": "账号已入库，但模型同步未完成：%s" % str(exc)[:160]}
+
+    # ---- 立刻拉一次额度快照 ----
+    #
+    # 不刷的话，账号虽然进了号池，但列表里的积分 / 剩余额度全是 0
+    # （`balance_remain` / `balance_total` / `credits_snapshot` 停在默认值），
+    # 必须手动点「刷新快照」才出数据 —— 用户会以为「授权成功但账号没用」。
+    #
+    # 这里**不能让额度拉取失败影响授权结果**：凭证已经落库了，
+    # 拉不到额度是上游临时问题，下次定时任务会补，只需把错误写进字段。
+    quota_error = ""
+    try:
+        info = trae_pool.refresh_quota(db, account)
+        if not info.get("ok"):
+            errors = info.get("errors") or []
+            quota_error = str((errors[0] or {}).get("message")
+                              if errors and isinstance(errors[0], dict) else "")[:200]
+        db.refresh(account)
+    except Exception as exc:  # noqa: BLE001 - 额度失败不影响授权成功
+        logger.warning("Trae 授权后拉取额度失败（账号已入库）: %s", exc)
+        quota_error = str(exc)[:200]
+
     return {"ok": True, "account_id": account.id, "uid": uid,
-            "summary": "授权成功，账号已写入号池"}
+            "balance_remain": int(account.balance_remain or 0),
+            "balance_total": int(account.balance_total or 0),
+            "quota_error": quota_error,
+            "model_sync": model_sync,
+            "summary": "授权成功，账号已写入号池"
+                       + ("；" + model_sync["summary"] if model_sync.get("summary") else "")}
 
 
 @router.post("/import-local")

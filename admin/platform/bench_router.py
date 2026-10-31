@@ -101,12 +101,15 @@ def platform_speed(hours: int = Query(default=24, ge=1, le=720),
             #   · 无分段数据（非流式）      -> **不参与 TPS 统计**，
             #     宁可少一个样本，也不要给一个错一个数量级的数字
             gen_ms = int(latency or 0) - int(ttfb or 0)
-            # **下限保护**：非流式上游（Loomy）的 ttfb 和 latency 只差几毫秒，
-            # 直接相除会算出 12000 tok/s 这种荒谬值。
-            # 物理上任何模型都不可能快过 ~1000 tok/s，低于 100ms 的「生成段」
-            # 一律视为没有分段数据（那几毫秒是网络/解析抖动，不是解码时间）。
-            MIN_DECODE_MS = 100
-            MAX_TPS = 1000.0
+            # **上下界保护**：非流式上游（Loomy）的 ttfb 与 latency 只差几毫秒，
+            # 直接相除会算出 12000 tok/s 这种荒谬值；而上游「整包突发」
+            # （一次把整段答案吐出来）也会让窗口缩到只剩网络 RTT。
+            # 线上实测真实出字 30~200 tok/s，所以：
+            #   · 解码段 < 300ms   → 量不出来
+            #   · 折算 > 300 tok/s → 一定是突发，不是解码速度
+            # 两种都不计入统计，宁可少样本也不给错一个数量级的数字。
+            MIN_DECODE_MS = 300
+            MAX_TPS = 300.0
             if completion and gen_ms >= MIN_DECODE_MS:
                 tps = float(completion) / (gen_ms / 1000.0)
                 if 0 < tps <= MAX_TPS:

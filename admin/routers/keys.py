@@ -79,6 +79,12 @@ def _normalize_platform(value: str | None) -> str:
 
 
 def _mask(key: str) -> str:
+    """把 Key 打成「前 10 + **** + 后 4」的展示串。
+
+    `key` 可能为 None（老数据 / 导入数据集里 `key_prefix` 为 NULL），
+    这里统一兜成空串 —— 一个字段为 NULL 不该让整个列表接口 500。
+    """
+    key = key or ""
     return key[:10] + "****" + key[-4:] if len(key) > 16 else key[:6] + "****"
 
 
@@ -149,7 +155,10 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
             "id": k.id,
             "name": k.name,
             "key_prefix": k.key_prefix,
-            "masked": _mask(k.key_prefix + "****************"),
+            # `key_prefix` 允许为 NULL（老库 / 导入数据集里的行没有这个字段），
+            # 直接拼接会抛 `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'`
+            # —— 整个 /api/keys 500，Key 页面直接空白。必须兜成空串。
+            "masked": _mask((k.key_prefix or "") + "****************"),
             "credit_limit": k.credit_limit,
             "credit_used": k.credit_used,
             "unlimited": bool(k.unlimited),

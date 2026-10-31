@@ -72,6 +72,21 @@ class HealthCheckBatchIn(BaseModel):
         return value
 
 
+class RefreshBatchIn(BaseModel):
+    """批量刷新的目标账号。
+
+    **不传就按当前平台作用域取**（`X-Platform`），绝不退化成全库 ——
+    拿默认平台的协议去刷其它平台的账号，每个号必然失败一次。
+    """
+    account_ids: Optional[list[int]] = None
+
+    @validator('account_ids')
+    def limit_refresh_ids(cls, value):
+        if value is not None and len(value) > 5000:
+            raise ValueError('一次最多刷新 5000 个账号')
+        return value
+
+
 def _uid_of(auth_json: str) -> str:
     """从 auth_json 里取 uid；取不到返回空串。"""
     try:
@@ -1009,9 +1024,10 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
             if not (f.endswith(".bak") or ".bak-" in f)
         ]
     added = 0
+    updated = 0
     skipped = 0
     errors = []
-    seen = _existing_uid_index(db)   # 已存在的 uid 跳过；同批内也去重
+    seen = _existing_uid_index(db)   # 已存在的 uid 更新凭证；同批内也去重
     for name in names:
         path = os.path.join(d, name)
         if not os.path.isfile(path):
@@ -1036,9 +1052,35 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
             continue
         meta = backend.parse_auth_meta(auth)
         uid = meta.get("uid")
-        if uid and uid in seen:
-            skipped += 1
-            continue  # 同 uid 多文件 / 已存在，只导入一次
+        # ---- 已存在则**更新凭证**，不重复插入 ----
+        #
+        # 这里原来是「命中 uid 就 skipped++，什么都不做」。两个问题：
+        #   1. 用户重新登录后 token 变了，导入却被跳过 -> 库里还是旧 token，
+        #      表现为「明明重新登录过，却一直是失效状态」；
+        #   2. 反而是**不认识的 uid** 每次都新建一行 —— 「导入本机」点几次
+        #      就多几行重复账号。
+        #
+        # 正确语义：同一个 uid 只保留一行，重复导入只是**刷新它的凭证**。
+        existing = seen.get(uid) if uid else None
+        if existing is not None:
+            try:
+                _apply_meta(existing, auth)
+                existing.status = "active"
+                # 换凭证后旧的失败计数应当清零，否则刚刷新就被熔断挡住
+                existing.session_dead_fails = 0
+                existing.consecutive_fails = 0
+                existing.cool_until = None
+                existing.cool_kind = ""
+                existing.last_err_msg = ""
+                db.commit()
+                db.refresh(existing)
+                _refresh_balance(existing, with_expiry=True)
+                db.commit()
+                updated += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 - 更新失败按错误报，不新建
+                errors.append(f"{name}: 更新既有账号失败（{exc}）")
+                continue
         acc = Account()
         # 这是**本机客户端自己写的**登录态，可信度天然高于网页上传，
         # 故不做额外的上游验证；`_refresh_balance` 已经会真调一次上游，
@@ -1054,7 +1096,8 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
         else:
             errors.append(f"账号 {acc.id}({acc.name}) 余额刷新失败（稍后可手动刷新）")
         db.commit()
-    return {"added": added, "skipped": skipped, "errors": errors}
+    return {"added": added, "updated": updated, "skipped": skipped,
+            "errors": errors}
 
 
 @router.get("/{acc_id}/export")
@@ -1109,6 +1152,66 @@ def inject_to_client(acc_id: int, body: InjectIn, _: bool = Depends(require_admi
     return {"ok": True, "target": target, "backup": backup, "account": acc.name, "uid": acc.uid}
 
 
+def _refresh_one_account(db, account) -> dict:
+    """按**账号所属平台**刷新它的余额与到期快照。
+
+    ## 为什么必须分派（这是多平台下的关键）
+
+    原来这里固定用 `backend.AccountSession` —— 那是 **WorkBuddy 的实现**。
+    用它去刷 Trae / Qoder / Loomy 的账号时，上游会把它当鉴权失败：
+    每个号必然失败一次，还会给好号加上 `session_dead_fails`，
+    最后把健康账号标成「登录态失效」。账号一多，整批刷新就是「点了卡住」。
+
+    平台自己的 `AccountOps.refresh()` 走各自的协议（COSY 签名 / icube /
+    明文 token），并负责把余额写回统一列。
+    """
+    from admin.platform import registry
+
+    storage = (getattr(account, "platform", "") or "").strip().lower()
+    if storage in ("", registry.DEFAULT_PLATFORM):
+        # 默认平台：保持原实现（要 AccountSession 拿 balance + 逐包快照）
+        original = account.auth_json
+        with backend.AccountSession(original) as session:
+            try:
+                balance = session.fetch_balance()
+                account.balance_total = int(balance.get('total') or 0)
+                account.balance_remain = int(balance.get('remain') or 0)
+                account.last_sync_at = datetime.utcnow()
+                summary = _sync_credit_snapshot(account, session.fetch_credit_details())
+                complete = (summary.get('collection') or {}).get('complete', True)
+                db.query(Account).filter(
+                    Account.id == account.id,
+                    Account.auth_json == original).update(
+                    {Account.auth_json: session.updated_json()},
+                    synchronize_session=False)
+                db.commit()
+                return {'ok': complete is True,
+                        'status': 'refreshed' if complete else 'error',
+                        'reason': '余额与到期快照已刷新' if complete
+                                  else '余额已刷新，账单来源不完整，保留旧到期快照'}
+            except Exception:
+                db.rollback()
+                raise
+
+    spec = registry.spec_of_account(account)
+    if spec is None or spec.storage() != storage:
+        # 兜底：按落库名精确找。绝不退回默认平台 —— 拿 WorkBuddy 的协议
+        # 去刷 Trae / Qoder 的账号，上游必然 502。
+        spec = registry.spec_for_storage(storage)
+    gateway = registry.load_platform_gateway(spec, account.domain or "") if spec else None
+    ops = gateway.account_ops() if (gateway is not None
+                                    and hasattr(gateway, "account_ops")) else None
+    if ops is None or not hasattr(ops, "refresh"):
+        return {'ok': False, 'status': 'skipped',
+                'reason': '平台 %s 没有提供刷新实现' % (storage or '?')}
+    result = ops.refresh(db, account.id, force=True) or {}
+    ok = bool(result.get('ok', True))
+    return {'ok': ok, 'status': 'refreshed' if ok else 'error',
+            'reason': result.get('error') or result.get('message')
+                      or ('余额已刷新' if ok else '刷新失败'),
+            'platform': storage}
+
+
 def _run_refresh_batch(ids, job):
     from admin import maintenance
     from admin.growth_center import identity
@@ -1134,27 +1237,14 @@ def _run_refresh_batch(ids, job):
                         item.update(status='skipped', reason='账号正在刷新，已跳过重复执行')
                     else:
                         seen.add(uid)
-                        original = account.auth_json
                         try:
-                            with backend.AccountSession(original) as session:
-                                try:
-                                    balance = session.fetch_balance()
-                                    account.balance_total = int(balance.get('total') or 0)
-                                    account.balance_remain = int(balance.get('remain') or 0)
-                                    account.last_sync_at = datetime.utcnow()
-                                    summary = _sync_credit_snapshot(account, session.fetch_credit_details())
-                                    complete = (summary.get('collection') or {}).get('complete', True)
-                                    item.update(ok=complete is True, status='refreshed' if complete else 'error',
-                                                reason='余额与到期快照已刷新' if complete else '余额已刷新，账单来源不完整，保留旧到期快照')
-                                finally:
-                                    db.query(Account).filter(Account.id == account_id, Account.auth_json == original).update(
-                                        {Account.auth_json:session.updated_json()}, synchronize_session=False)
-                                    db.commit()
+                            item.update(_refresh_one_account(db, account))
                         except Exception as error:
                             db.rollback()
                             evidence = _remember_upstream_error(account, error)
                             db.commit()
-                            item.update(reason=f"本网关：刷新失败；上游 HTTP={evidence['http_status'] or '未记录'} / code={evidence['code'] or '未返回'}；原文：{evidence['raw']}",
+                            item.update(status='error',
+                                        reason=f"本网关：刷新失败；上游 HTTP={evidence['http_status'] or '未记录'} / code={evidence['code'] or '未返回'}；原文：{evidence['raw']}",
                                         upstream_error=evidence)
                         finally:
                             try:
@@ -1172,22 +1262,43 @@ def _run_refresh_batch(ids, job):
 
 
 @router.post('/refresh-batch')
-def refresh_batch(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    key = 'account-refresh'
+def refresh_batch(body: RefreshBatchIn | None = None,
+                  request: Request = None,
+                  _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """批量刷新余额与到期快照。
+
+    **只刷指定账号 / 当前平台**，绝不退化成「全库」：
+    原来这里是 `db.query(Account).all()`，多平台部署下会拿默认平台的
+    协议去刷所有平台的账号，每个号必然失败一次，账号一多就是「点了卡住」
+    （2026-10-31 实测复现）。前端现在会显式传 `account_ids`。
+    """
+    from admin.platform import scope as platform_scope
+
+    platform, realm = platform_scope.from_request(request)
+    query = db.query(Account).order_by(Account.id)
+    if body is not None and body.account_ids:
+        query = query.filter(Account.id.in_(body.account_ids))
+    else:
+        query = platform_scope.filter_accounts(query, db, platform, realm)
+    ids = [account.id for account in query.all()]
+    if not ids:
+        raise HTTPException(400, '当前范围没有可刷新的账号')
+    # job 键带平台：否则在 Trae 上点刷新会「复用」还在跑的默认平台任务，
+    # 前端看到进度条、结果却是别的平台的账号。
+    key = 'account-refresh:' + (platform or 'all')
     running = jobrunner.RUNNER.get(key)
     if running and running.status == 'running':
-        return {'reused':True, **running.snapshot()}
-    ids = [account.id for account in db.query(Account).order_by(Account.id).all()]
-    if not ids:
-        raise HTTPException(400, '没有可刷新的账号')
-    job = jobrunner.RUNNER.start(key, len(ids), lambda job:_run_refresh_batch(ids, job), title='刷新全部账号')
+        return {'reused': True, **running.snapshot()}
+    job = jobrunner.RUNNER.start(key, len(ids), lambda job: _run_refresh_batch(ids, job),
+                                 title='刷新账号')
     return job.snapshot()
 
 
-def _start_health_check(ids: list[int]):
+def _start_health_check(ids: list[int], platform: str = ""):
     if not ids:
         raise HTTPException(400, '没有可检查的账号')
-    key = 'account-health-check'
+    # job 键带平台，理由同 refresh_batch：避免跨平台复用同一个进度条
+    key = 'account-health-check:' + (platform or 'all')
     running = jobrunner.RUNNER.get(key)
     if running and running.status == 'running':
         return {'reused': True, **running.snapshot()}
@@ -1200,13 +1311,24 @@ def _start_health_check(ids: list[int]):
 
 @router.post('/health-check-batch')
 def health_check_batch(body: HealthCheckBatchIn,
+                       request: Request = None,
                        _: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """Asynchronously check balance, model catalog and one real chat per account."""
+    """Asynchronously check balance, model catalog and one real chat per account.
+
+    `account_ids` 为空时按**当前平台作用域**取，不再退化成全库 ——
+    对默认平台账号做三项检查会真的打一次对话，拿它去测别的平台账号
+    既必然失败也浪费额度。
+    """
+    from admin.platform import scope as platform_scope
+
+    platform, realm = platform_scope.from_request(request)
     query = db.query(Account)
-    if body.account_ids is not None:
+    if body.account_ids:
         query = query.filter(Account.id.in_(body.account_ids))
+    else:
+        query = platform_scope.filter_accounts(query, db, platform, realm)
     ids = [row.id for row in query.order_by(Account.id).all()]
-    return _start_health_check(ids)
+    return _start_health_check(ids, platform)
 
 
 @router.post('/{acc_id}/health-check')
@@ -1714,8 +1836,22 @@ def patch_account(
         acc.name = body["name"]
     if "status" in body and body["status"] in ("active", "disabled"):
         acc.status = body["status"]
-        if acc.status == 'disabled' and acc.cool_kind == 'session_dead':
-            acc.cool_kind = 'manual_disabled'
+        if acc.status == "disabled":
+            # ⚠️ 手动停用**必须**标记 `manual_disabled`，否则 `ban_recheck`
+            # 会把它当成「上游风控临时禁用」自动解封回来。
+            #
+            # 原实现只改 `session_dead` 一种，`account_fault`（11140 等）
+            # 和 `hard_credit` 全部漏掉 —— 那些号的 `cool_until` 一旦到期，
+            # `_should_probe` 就返回 (True, 'disabled') 进入复核队列，
+            # 探测通过即 `_unban`，手动禁用在下一次巡检时静默失效
+            # （用户实测：禁用了账号，过一阵它自己又活了）。
+            #
+            # `_should_probe` 里对 `manual_disabled` 有明确的提前返回
+            # （`return False, "manual"`），所以这里统一标记即可。
+            acc.cool_kind = "manual_disabled"
+        elif acc.cool_kind == "manual_disabled":
+            # 手动恢复启用时把标记清掉，否则下次冷却会带着过期语义。
+            acc.cool_kind = ""
     db.commit()
     return {"id": acc.id, "ok": True}
 

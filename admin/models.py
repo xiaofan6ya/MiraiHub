@@ -203,10 +203,41 @@ class UsageLog(Base):
         Index("ix_usage_logs_model_created", "model", "created_at"),
         Index("ix_usage_logs_error_created", "error_kind", "created_at"),
         Index("ix_usage_logs_ip_created", "client_ip", "created_at"),
+        # **概览聚合专用覆盖索引**（2026-10-31 新增）。
+        #
+        # 首页概览要按时间范围做 4 个 SUM/COUNT 聚合：
+        #     SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens),
+        #            SUM(total_tokens), SUM(cached_tokens), SUM(credits)
+        #     FROM usage_logs WHERE created_at >= ?
+        #
+        # 只有 `(created_at, id)` 时，每匹配一行都要**回表**读那 5 个字段。
+        # 30 天窗口命中 22 万行 = 22 万次随机回表，线上实测 107ms/次。
+        # 把聚合用到的列全部放进索引后，MySQL 可以走**覆盖索引**（Using index），
+        # 不再回表 —— 这是减少扫描量最直接的一招。
+        #
+        # 列顺序有讲究：`created_at` 必须在最前（范围条件），
+        # 其余列只被 SUM 读取，顺序不影响走索引，按业务可读性排。
+        Index("ix_usage_logs_overview", "created_at", "error_kind",
+              "prompt_tokens", "completion_tokens", "total_tokens",
+              "cached_tokens", "credits"),
         # The list endpoint orders by the monotonic primary key. These
         # companions avoid a filesort when a filtered page uses keyset/ID
         # pagination.
         Index("ix_usage_logs_account_id", "account_id", "id"),
+        # **积分统计 / 按账号汇总的覆盖索引**（2026-11-01 新增）。
+        #
+        # 这两处的 SQL 形状都是
+        #     SELECT account_id|model, COUNT(*), SUM(credits), SUM(total_tokens)
+        #     FROM usage_logs WHERE created_at >= ? AND error_kind IN ('','success')
+        #     GROUP BY account_id|model ORDER BY SUM(credits) DESC
+        # 只用 `(account_id, created_at)` 时 `credits/total_tokens/error_kind`
+        # 都不在索引里，22 万行要逐行回表 —— 线上实测 `/api/credits/usage`
+        # 单次 **12.7 秒**（打开积分统计页就是白屏十几秒）。
+        # 把聚合列全放进索引变成覆盖扫描后，实测两条 SQL 各 0.25~0.43 秒。
+        Index("ix_usage_logs_account_credits", "account_id", "created_at",
+              "error_kind", "credits", "total_tokens"),
+        Index("ix_usage_logs_model_credits", "model", "created_at",
+              "error_kind", "credits"),
         Index("ix_usage_logs_key_id", "api_key_id", "id"),
         Index("ix_usage_logs_model_id", "model", "id"),
     )

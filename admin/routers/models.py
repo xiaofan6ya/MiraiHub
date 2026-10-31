@@ -17,6 +17,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import logging
@@ -952,9 +953,10 @@ def model_busy(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     return payload
 
 
-def _do_sync_models(db: Session, account_id: int | None = None) -> dict:
+def _do_sync_models(db: Session, account_id: int | None = None,
+                    platform: str = "") -> dict:
     with _sync_lock:
-        return _sync_models_locked(db, account_id)
+        return _sync_models_locked(db, account_id, platform)
 
 
 def _catalog_of(acc, platform: str, db) -> dict:
@@ -989,14 +991,24 @@ def _catalog_of(acc, platform: str, db) -> dict:
 
     spec = _spec_for_storage(platform)
     if spec is None:
-        return {"models": [], "official": []}
+        # 平台注册表没加载 / 该 storage 没有对应平台时，**必须带原因**返回：
+        # 静默返回空清单会让调用方以为「上游没给模型」，而真正的原因是
+        # 装配缺失 —— 实测过 4 个平台全 0 条且无任何报错，极难排查。
+        return {"models": [], "official": [],
+                "reason": "平台 %r 未登记（注册表里没有它的 storage），"
+                          "请确认 admin.platform.loader.load_platforms() 已执行"
+                          % (platform or "?")}
     gateway = registry.load_platform_gateway(spec, spec.realm)
     if gateway is None or not callable(getattr(gateway, "list_models", None)):
-        return {"models": [], "official": []}
+        return {"models": [], "official": [],
+                "reason": "平台 %s 没有提供 list_models（%s）"
+                          % (spec.id, getattr(spec, "platform_gateway", "") or "-")}
 
     # `list_models` 需要 Request 来读平台/区域头。
     # 构造最小 scope —— 同进程内调用，不走网络。
     from starlette.requests import Request
+
+    from admin.platform.shared import INTERNAL_KEY
 
     scope = {
         "type": "http",
@@ -1004,11 +1016,25 @@ def _catalog_of(acc, platform: str, db) -> dict:
         "path": "/v1/models",
         "headers": [(b"x-platform", (spec.id or platform).encode())],
         "query_string": b"",
+        # 内部调用标记：让平台的 `_auth()` 放行（见 shared.internal 的说明）。
+        # 没有它，非默认平台的模型同步永远 401 —— 实测 workbuddy 拿到 36 个
+        # 模型，trae / qoder / loomy 一律 0 个且不报错。
+        INTERNAL_KEY: True,
     }
     response = _call_maybe_async(gateway.list_models, Request(scope))
     payload = _response_json(response)
-    return _normalize_catalog({"models": payload.get("data")
-                               or payload.get("models") or []})
+    # 平台自己的说明（「号池没有可用 X 账号，仅返回配置目录」这类）带出去，
+    # 同步结果里能直接看出「0 条到底是上游没给，还是没号」。
+    status = getattr(response, "status_code", 200)
+    models = payload.get("data") or payload.get("models") or []
+    out = _normalize_catalog({"models": models})
+    if not out["models"]:
+        out["reason"] = str(payload.get("note")
+                            or payload.get("detail")
+                            or ("上游返回 HTTP %s 且没有模型" % status))[:200]
+    elif payload.get("note"):
+        out["reason"] = str(payload.get("note"))[:200]
+    return out
 
 
 def _call_maybe_async(fn, *args):
@@ -1045,12 +1071,31 @@ def _spec_for_storage(storage: str):
 
     Trae / Qoder 都是「一个落库平台 + 多个对外 id」，
     所以必须比对 `spec.storage()` 而不是 `spec.id`。
+
+    ⚠️ 查不到时要**先补一次装配再查**：`admin/server.py` 在 import 时会调
+    `load_platforms()`，但调度器 / CLI / 测试可能跑在它之前。那种情况下
+    注册表里只有 `workbuddy`（非空，所以「空表才加载」的判断不成立），
+    其余平台一律被判成「未登记」，模型同步静默返回 0 条 ——
+    这个失败方式极难查，实测在 2026-10-31 就踩过。
     """
-    for pid in registry.ids():
-        item = registry.get(pid)
-        if item is not None and item.storage() == storage:
-            return item
-    return None
+
+    def find(name: str):
+        for pid in registry.ids():
+            item = registry.get(pid)
+            if item is not None and item.storage() == name:
+                return item
+        return None
+
+    hit = find(storage)
+    if hit is not None:
+        return hit
+    try:
+        from admin.platform.loader import load_platforms
+
+        load_platforms()
+    except Exception:  # noqa: BLE001 - 装配失败就返回 None，由调用方报原因
+        return None
+    return find(storage)
 
 
 def _response_json(response) -> dict:
@@ -1084,84 +1129,165 @@ def _normalize_catalog(data) -> dict:
     return {"models": list(models or []), "official": list(official or [])}
 
 
-def _fetch_catalog(db, account_id=None) -> dict:
-    """取模型目录：{"models": 全量, "official": 官方前端可见子集（官方顺序）}。"""
-    query = db.query(Account).filter(Account.status == "active")
-    if account_id is not None:
-        query = query.filter(Account.id == account_id)
-    else:
-        query = scope_accounts(query)
-    candidates = query.order_by(Account.balance_remain.desc(), Account.id.asc()).all()
-    if not candidates:
-        raise HTTPException(status_code=503, detail="无可用账号（无法连接后端获取模型列表）")
+def _catalog_for_platform(db, storage: str) -> dict:
+    """同步**一个落库平台**的模型目录。
+
+    与 `_fetch_catalog` 的区别（这是多平台下的关键）：
+    `_fetch_catalog` 是「按余额高低随便找个能用的号拉一份目录」，
+    拿到第一份就 `break` —— 于是「同步模型」实际只覆盖了余额最高的
+    那一个平台，其余平台永远是空的。用户切到 Qoder / Loomy 再看，
+    就是一片空白（这条路径在 2026-10-31 实测复现）。
+
+    ## 为什么会话必须分开处理（这里是踩过的坑）
+
+    平台自己的 `list_models()` **内部会再选一次号**（`shared.select_account`）。
+    如果外层先 `account_slot(acc)` 把这个号占住，内层就选不到它 ——
+    一个账号都没有时直接返回空目录。Loomy 只有 1 个号，
+    所以它必然失败；Qoder / Trae 有多个号，侥幸轮到下一个才通过。
+    实测：`account_slot` 内调 `select_account` 返回 `None`。
+
+    所以：
+      * 默认平台（workbuddy）走 `AccountSession`，**必须**占号 —— 它要那个号的 token；
+      * 其它平台**不占号**，把它交给平台网关自己选（它有完整的
+        冷却 / 在途 / 绑定判断，比这里更准）。
+    """
+    query = (db.query(Account)
+             .filter(Account.status == "active", Account.platform == storage)
+             .order_by(Account.balance_remain.desc(), Account.id.asc()))
+    rows = query.all()
+    if not rows:
+        return {"models": [], "official": [], "platform": storage,
+                "reason": "该平台没有可用（active）账号"}
+
+    if storage not in ("", registry.DEFAULT_PLATFORM):
+        # 非默认平台：直接问平台网关，**不占号**（避免与它内部的选号自锁）。
+        try:
+            catalog = _catalog_of(rows[0], storage, db)
+        except Exception as error:  # noqa: BLE001
+            db.rollback()
+            return {"models": [], "official": [], "platform": storage,
+                    "reason": "%s: %s" % (type(error).__name__,
+                                          str(error)[:160])}
+        catalog["platform"] = storage
+        return catalog
+
     last_error = None
-    attempts = 0
-    catalog: dict = {}
-    platform_of_last_account = ""
-    for acc in candidates:
-        platform = (getattr(acc, "platform", "") or "").strip().lower()
-        platform_of_last_account = platform or registry.DEFAULT_PLATFORM
+    for acc in rows:
         try:
             from admin import maintenance
+
             with maintenance.account_slot(acc, db) as reason:
                 if reason:
+                    last_error = "账号忙碌/受保护：%s" % reason
                     continue
-                attempts += 1
-                catalog = _catalog_of(acc, platform, db)
+                catalog = _catalog_of(acc, storage, db)
                 if catalog.get("models"):
-                    break
-                last_error = RuntimeError("平台 %s 未返回模型" % (platform or "?"))
-        except Exception as error:
+                    catalog["platform"] = storage
+                    return catalog
+                last_error = catalog.get("reason") or "平台 %s 未返回模型" % storage
+        except Exception as error:  # noqa: BLE001 - 单号失败换下一个
             db.rollback()
             try:
                 maintenance.note_failure(db, acc, error)
                 db.commit()
             except Exception:  # noqa: BLE001
                 db.rollback()
-            last_error = error
-            if attempts >= 3:
-                raise HTTPException(
-                    status_code=502,
-                    detail="获取模型目录失败，请稍后重试：%s"
-                           % str(last_error)[:160]) from error
-    else:
-        if last_error is None:
-            raise HTTPException(status_code=503, detail="账号处于保护或在途占用，稍后同步模型")
-        raise HTTPException(status_code=502, detail="获取模型目录失败，请稍后重试")
-
-    # 把「这份目录来自哪个平台」带出去 —— 写库时要用它，
-    # 不能用默认值 workbuddy（否则多平台同名模型会冲突）
-    if isinstance(catalog, dict):
-        catalog.setdefault("platform", platform_of_last_account)
-    return catalog
+            last_error = "%s: %s" % (type(error).__name__, str(error)[:140])
+    return {"models": [], "official": [], "platform": storage,
+            "reason": str(last_error or "该平台没有可用账号接手")[:200],
+            "tried": tried}
 
 
-def _sync_models_locked(db: Session, account_id: int | None = None) -> dict:
-    """从后端拉取可用模型列表并同步到本地数据库（upsert）。
+def _catalog_platforms(db) -> list[str]:
+    """需要同步的全部**落库平台**（去重，默认平台在前）。
 
-    需要有效的 active 账号；余额为 0 也允许查询模型目录。
+    `trae-cn` / `trae-intl` 共用 storage `trae`，只同步一次；
+    某个平台从来没登记过账号的，也照样列出来 —— 让同步结果里能看到
+    「这个平台没有账号」，而不是它悄悄消失。
     """
-    # A newly imported account can have a stale/empty local balance until its
-    # background refresh completes.  Model discovery only needs a valid token,
-    # so do not reject it based on the cached credit value.
-    catalog = _fetch_catalog(db, account_id)
-    models_raw = catalog.get("models") or []
-    official = [m.get("id") for m in catalog.get("official", [])
-                if isinstance(m, dict) and m.get("id")]
-    _store_official_order(db, official,
-                          str(catalog.get("platform") or ""))
+    out: list[str] = []
+    default = registry.DEFAULT_PLATFORM
+    if default:
+        out.append(default)
+    for pid in registry.ids():
+        item = registry.get(pid)
+        storage = (item.storage() if item is not None else "") or ""
+        if storage and storage not in out:
+            out.append(storage)
+    for (storage,) in (db.query(Account.platform).distinct().all()):
+        key = (storage or "").strip().lower()
+        if key and key not in out:
+            out.append(key)
+    return out
 
-    import re
+
+def _fetch_catalog(db, account_id=None, platform: str = "") -> dict:
+    """取模型目录。
+
+    `platform` 非空：只取这一个落库平台（前端按平台同步时用）。
+    `platform` 为空：**遍历所有平台**，每个平台各拉一份并合并。
+
+    返回形状统一为 `{"bundles": [每平台一份], "problems": {平台: 原因}}`。
+    `bundles` 才是 `_sync_models_locked` 真正消费的字段；
+    `models` / `official` 是各平台合并后的扁平清单（兼容旧调用方）。
+
+    `account_id` 非空时保持原语义：只按这一个账号取（手工排障用）。
+    """
+    if account_id is not None:
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if acc is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        storage = (getattr(acc, "platform", "") or "").strip().lower() \
+            or registry.DEFAULT_PLATFORM
+        one = _catalog_of(acc, storage, db)
+        one["platform"] = storage
+        return {"bundles": [one], "models": one.get("models") or [],
+                "official": one.get("official") or [], "platform": storage}
+
+    targets = [platform] if platform else _catalog_platforms(db)
+    bundles: list[dict] = []
+    problems: dict[str, str] = {}
+    for storage in targets:
+        got = _catalog_for_platform(db, storage)
+        if got.get("models"):
+            bundles.append(got)
+        else:
+            problems[storage] = str(got.get("reason") or "未返回模型")[:200]
+    if not bundles:
+        raise HTTPException(
+            status_code=502,
+            detail="所有平台都没取到模型目录：" + "；".join(
+                "%s=%s" % (k, v) for k, v in problems.items())[:400])
+    return {"bundles": bundles, "problems": problems,
+            "models": [m for b in bundles for m in (b.get("models") or [])],
+            "official": [m for b in bundles for m in (b.get("official") or [])]}
+
+
+def _sync_one_platform(db: Session, bundle: dict) -> dict:
+    """把**一个平台**的目录 upsert 进 model_configs。
+
+    按 `(platform, model_id)` 去重，不是只按 `model_id` ——
+    不同平台有同名模型（DeepSeek-V4.1-Flash 在三个平台都有），
+    只按 model_id 会互相覆盖，插入时还会撞 uq_model_platform。
+    """
+    models_raw = bundle.get("models") or []
+    target_platform = str(bundle.get("platform")
+                          or registry.DEFAULT_PLATFORM).strip().lower()
 
     added = 0
     updated = 0
-    # ⚠️ 按 (platform, model_id) 去重，不是只按 model_id ——
-    # 不同平台有同名模型（DeepSeek-V4.1-Flash 在三个平台都有），
-    # 只按 model_id 会互相覆盖，插入时还会撞 uq_model_platform。
-    target_platform = str(catalog.get("platform")
-                          or registry.DEFAULT_PLATFORM).strip().lower()
-    seen = {(p, m) for p, m in db.query(ModelConfig.platform,
-                                        ModelConfig.model_id).all()}
+    # ⚠️ 去重键必须**小写**：唯一键 `uq_model_platform` 在 MySQL 的
+    # `utf8mb4_*_ci` 排序规则下是**大小写不敏感**的，而 Trae 的上游
+    # 同时给出 `DeepSeek-V4.1-Flash` 和 `deepseek-v4.1-flash` ——
+    # 用区分大小写的集合去重时两条都当成新记录，INSERT 直接撞
+    # `(1062) Duplicate entry 'trae-deepseek-v4.1-flash-system'`，
+    # 整个同步失败、一条都进不来（2026-10-31 实测）。
+    # 归一成小写后与数据库的判定口径一致。
+    def _key(plat: str, mid: str) -> tuple[str, str]:
+        return (str(plat or "").lower(), str(mid or "").lower())
+
+    seen = {_key(p, m) for p, m in db.query(ModelConfig.platform,
+                                            ModelConfig.model_id).all()}
     for m in models_raw:
         mid = m.get("id")
         if not mid:
@@ -1179,11 +1305,13 @@ def _sync_models_locked(db: Session, account_id: int | None = None) -> dict:
             continue
         # 解析积分倍率（三种上游格式见 _parse_multiplier）
         multiplier, raw_credits = _parse_multiplier(m)
-        if (target_platform, mid) in seen:
+        if _key(target_platform, mid) in seen:
             # 已存在：覆盖倍率 / 原始 credits / 备注（保留用户启停状态）
+            # 同 platform 下大小写不同的写法也归到**库里那条**上，
+            # 否则会一直尝试插入并一直撞唯一键。
             mc = db.query(ModelConfig).filter(
                 ModelConfig.platform == target_platform,
-                ModelConfig.model_id == mid).first()
+                func.lower(ModelConfig.model_id) == str(mid).lower()).first()
             if mc:
                 mc.credit_multiplier = multiplier
                 mc.credits_raw = str(raw_credits)
@@ -1194,7 +1322,7 @@ def _sync_models_locked(db: Session, account_id: int | None = None) -> dict:
                     mc.note = m.get("name") or ""
                 updated += 1
             continue
-        seen.add((target_platform, mid))
+        seen.add(_key(target_platform, mid))
         mc = ModelConfig(
             level="system",
             # ⚠️ 必须显式带 platform。不传会用列默认值（workbuddy），
@@ -1213,21 +1341,62 @@ def _sync_models_locked(db: Session, account_id: int | None = None) -> dict:
         db.add(mc)
         added += 1
     db.commit()
+    return {"platform": target_platform, "fetched": len(models_raw),
+            "added": added, "updated": updated}
+
+
+def _sync_models_locked(db: Session, account_id: int | None = None,
+                        platform: str = "") -> dict:
+    """从后端拉取可用模型列表并同步到本地数据库（upsert）。
+
+    需要有效的 active 账号；余额为 0 也允许查询模型目录。
+
+    **逐个平台同步**：`_fetch_catalog` 现在返回 `bundles`（每平台一份），
+    不再只取第一个能出模型的平台 —— 否则切到其它平台看模型配置是空的。
+    `platform` 非空时只同步这一个落库平台。
+    """
+    catalog = _fetch_catalog(db, account_id, platform)
+    bundles = catalog.get("bundles") or []
+    per: dict[str, dict] = {}
+    added = updated = fetched = 0
+    for bundle in bundles:
+        stats = _sync_one_platform(db, bundle)
+        per[stats["platform"]] = stats
+        added += stats["added"]
+        updated += stats["updated"]
+        fetched += stats["fetched"]
+        official = [m.get("id") for m in (bundle.get("official") or [])
+                    if isinstance(m, dict) and m.get("id")]
+        _store_official_order(db, official, stats["platform"])
+
     total = db.query(ModelConfig).count()
     enabled_count = db.query(ModelConfig).filter(ModelConfig.enabled == 1).count()
     return {
-        "total_fetched": len(models_raw),
+        "total_fetched": fetched,
         "added": added,
         "updated": updated,
         "total_in_db": total,
         "enabled": enabled_count,
+        # 每平台明细 + 没取到的平台及原因（前端直接展示，
+        # 不再出现「同步完成但某个平台还是空的」这种无解释状态）
+        "platforms": per,
+        "problems": catalog.get("problems") or {},
     }
 
 
 @router.post("/sync")
-def sync_models(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """从后端拉取可用模型列表并同步到本地数据库（upsert）。"""
-    result = _do_sync_models(db)
+def sync_models(platform: str = "",
+                _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """从后端拉取可用模型列表并同步到本地数据库（upsert）。
+
+    `?platform=qoder` 只同步这一个**落库平台**；不传则所有平台各同步一份。
+    """
+    from admin.platform import scope as platform_scope
+
+    storage = ""
+    if platform:
+        storage = platform_scope.parse(platform)[0] or platform.strip().lower()
+    result = _do_sync_models(db, None, storage)
     _invalidate_routing_cache()
     return result
 

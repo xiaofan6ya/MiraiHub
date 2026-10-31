@@ -680,6 +680,28 @@ def _anthropic_to_openai(body: dict) -> dict:
     return out
 
 
+def _anthropic_usage_of(usage) -> dict:
+    """OpenAI usage → Anthropic usage（含缓存读取/写入两个单列字段）。
+
+    Anthropic 协议把缓存命中的输入 token 单独列在
+    `cache_read_input_tokens`，Claude Code 等客户端据此显示「缓存读取」。
+    漏了它，客户端命中率恒为 0，而网关侧账目是对的 —— 必须整份透出。
+    """
+    try:
+        from upstream_compat import anthropic_usage_from
+
+        out = anthropic_usage_from(usage)
+        if out is not None:
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    u = usage if isinstance(usage, dict) else {}
+    return {"input_tokens": int(u.get("prompt_tokens") or 0),
+            "output_tokens": int(u.get("completion_tokens") or 0),
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}
+
+
 def _openai_to_anthropic(result: dict, model: str) -> dict:
     """OpenAI 响应 → Anthropic message 结构。"""
     choice = (result.get("choices") or [{}])[0]
@@ -695,10 +717,7 @@ def _openai_to_anthropic(result: dict, model: str) -> dict:
         "model": model,
         "content": [{"type": "text", "text": text}] if text else [],
         "stop_reason": stop,
-        "usage": {
-            "input_tokens": int(usage.get("prompt_tokens") or 0),
-            "output_tokens": int(usage.get("completion_tokens") or 0),
-        },
+        "usage": _anthropic_usage_of(usage),
     }
 
 
@@ -730,6 +749,7 @@ async def _forward_stream_anthropic(body: dict, request, model: str):
     async def relay():
         msg_id = "msg_loomy_" + str(int(time.time() * 1000))
         started = False
+        usage_seen: dict = {}
         async for frame in inner.body_iterator:
             text = frame.decode("utf-8", "replace") if isinstance(frame, bytes) else str(frame)
             for line in text.split("\n"):
@@ -743,6 +763,8 @@ async def _forward_stream_anthropic(body: dict, request, model: str):
                     chunk = json.loads(payload)
                 except ValueError:
                     continue
+                if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                    usage_seen = chunk["usage"]
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
                 piece = delta.get("content") or delta.get("reasoning_content") or ""
@@ -754,7 +776,7 @@ async def _forward_stream_anthropic(body: dict, request, model: str):
                         yield ("data: %s\n\n" % json.dumps(
                             {"type": "message_delta",
                              "delta": {"stop_reason": "end_turn"},
-                             "usage": {"output_tokens": 0}},
+                             "usage": _anthropic_usage_of(usage_seen)},
                             ensure_ascii=False)).encode()
                         yield ("data: %s\n\n" % json.dumps(
                             {"type": "message_stop"},

@@ -25,6 +25,7 @@ from admin.platform.registry import (
     normalize_realm,
     register,
     resolve,
+    spec_for_storage,
     spec_of_account,
 )
 
@@ -38,5 +39,6 @@ __all__ = [
     "normalize_realm",
     "register",
     "resolve",
+    "spec_for_storage",
     "spec_of_account",
 ]
