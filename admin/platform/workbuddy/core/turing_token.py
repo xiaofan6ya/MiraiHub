@@ -33,9 +33,28 @@ import threading
 import time
 from pathlib import Path
 
-# 项目根目录（admin/ 的上一级）
-_ROOT = Path(__file__).resolve().parent.parent
-_HELPER = _ROOT / "turing_helper.js"
+def _helper_path() -> Path:
+    """定位 `turing_helper.js`。
+
+    不能写死 ``parent.parent``：实现文件搬进 ``admin/platform/workbuddy/core/``
+    之后层数变了，写死会算出 ``admin/platform/workbuddy/turing_helper.js``
+    （不存在），`_HELPER.is_file()` 恒为 False —— 设备风控令牌于是永远返回
+    None，面板一直显示「原生 SDK 令牌不可用」，即使用户本机装了客户端、
+    手动跑 helper 也能拿到令牌。
+
+    这里逐级向上找，源码运行与 PyInstaller onedir 打包（helper 被 datas
+    打到 `_internal/` 根）都能命中；以后文件再搬家也不会重犯。
+    """
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        candidate = base / "turing_helper.js"
+        if candidate.is_file():
+            return candidate
+    # 找不到时返回按层次推算的候选路径，仅用于诊断展示。
+    return here.parents[4] / "turing_helper.js"
+
+
+_HELPER = _helper_path()
 
 #: 成功结果的缓存时长（秒）。Turing SDK 自身也有缓存，这里再兜一层避免频繁 fork node。
 _CACHE_TTL = 600
