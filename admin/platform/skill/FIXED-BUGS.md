@@ -1035,6 +1035,123 @@ for tname, table in Base.metadata.tables.items():
 **教训**：给模型加字段时，**同一提交里必须加迁移** ——
 否则源码运行（新库）永远正常，只有老用户升级后才会炸。
 
+## 五·补18 桌面版端口漂移到随机高位端口
+
+**现象**
+
+`http://127.0.0.1:8790/v1` 明明没被占用，桌面版却跑在 `54293`（或 `50069`）
+这种随机端口，而且重启也一直用它。用户收藏的 API 地址、客户端里填的
+base_url 全都失效。
+
+**根因（两层）**
+
+第一层，端口选择只会「首选或随机」：
+
+```python
+try:
+    sock.bind(("0.0.0.0", preferred))
+except OSError:
+    sock.bind(("0.0.0.0", 0))   # 系统随便给一个
+return sock.getsockname()[1]
+```
+
+`0.0.0.0:8790` 绑不上（TIME_WAIT 堆积、端口在保留段、需要特权的场景都会
+`WinError 10013`）时，直接落到 `bind(0)`，拿到 49152–65535 段的随机端口。
+
+第二层更隐蔽：那个随机端口被 `save_port()` **写回 config.json**，
+下次启动 `preferred` 就读到 54293 —— 于是随机值变成了「用户指定的端口」，
+永远优先。**8790 从此再也回不去。**
+
+**修法**
+
+1. 端口顺序改成：首选 → 固定备选段（8790, 8791, … 8080, 8000）→ 最后才随机
+2. 首选值如果落在 **49152–65535 动态段**，视为历史兜底产物，**降到最低优先级**
+3. 随机端口**不落盘**：`save_port()` 只接受固定段内的值
+
+```python
+if 49152 <= preferred <= 65535:      # 历史随机端口
+    order = [*FALLBACK_PORTS, preferred]
+else:
+    order = [preferred, *FALLBACK_PORTS]
+```
+
+**验证**
+
+```
+8790 空闲，config=54293  -> 8790   （回到默认）
+8790 空闲，config=8790   -> 8790
+8790 被占，config=8790   -> 8791   （固定备选，不再随机）
+```
+
+**教训**：兜底策略的产物**不能反过来成为默认值**。任何「失败了就选个随机的
+再存起来」的写法，本质是在把临时状态固化成配置。
+
+## 五·补19 授权回调地址写死端口
+
+**现象**
+
+桌面版点「授权登录」，浏览器跳转到 `http://127.0.0.1:8790/authorize` 打不开
+（页面转圈或连接被拒）。服务实际跑在别的端口。
+
+**根因**
+
+```python
+MAIN_PORT = os.environ.get("WB_OAUTH_CALLBACK_PORT", "8790")
+def callback_url():
+    return "http://%s:%s%s" % (MAIN_HOST, MAIN_PORT, CALLBACK_PATH)
+```
+
+模块级常量 + 硬编码默认值。桌面版每个用户的端口都可能不同
+（见五·补18），写死 8790 必然对不上。
+
+**修法**
+
+`callback_url()` **每次调用都重新读环境变量**，并按真实优先级取值：
+
+```
+1. ADMIN_PORT            —— 运行期真实监听端口（桌面版 --backend <port> 注入）
+2. WB_OAUTH_CALLBACK_PORT —— 显式覆盖（反代/公网部署）
+3. 8790                   —— 源码直接跑时的兜底
+```
+
+关键点：**不做模块级缓存**。端口是启动后才知道的，缓存会让服务换端口后
+仍然返回旧值。
+
+## 五·补20 桌面版硬杀后 C 盘残留 `_MEI` 目录
+
+**现象**
+
+`%TEMP%` 下堆了十几个 `_MEIxxxxxx` 目录，单份 152 MB，实测累计
+**1933 MB**。用户描述「关机或重启后一直拉屎在 C 盘」。
+
+**根因**
+
+PyInstaller onefile 每次启动把运行时解压到 `%TEMP%/_MEIxxxxxx`，正常退出
+会自删。但**硬杀**（关机、重启、任务管理器结束进程、蓝屏）没有机会跑清理
+代码，目录就永久留下。
+
+**修法**
+
+在**下一次启动时**清理 —— 这是唯一可靠的时机：
+
+```python
+def cleanup_stale_mei_dirs() -> int:
+    current = os.path.normcase(os.path.abspath(sys._MEIPASS))
+    for name in os.listdir(tempfile.gettempdir()):
+        if not name.startswith("_MEI"): continue
+        path = ...
+        if os.path.abspath(path) == current: continue   # 排除自己
+        if _mei_in_use(path): continue                  # 排除活着的实例
+        shutil.rmtree(path, ignore_errors=True)
+```
+
+`_mei_in_use()` 用**独占重命名探针**判断：Windows 上正在运行的 exe/dll
+有文件句柄，改名会失败 —— 失败即认为活着，跳过。
+
+只在 `sys.frozen` 为真时执行（源码运行不该动系统 TEMP）。
+
+**验证**：实测清理 12 个目录，释放 1879.8 MB，正在用的 2 个正确保留。
+
 ## 六、运维
 
 ### 6.1 改完代码没真正重启

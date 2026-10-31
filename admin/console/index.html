@@ -838,8 +838,8 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261030-r27" />
-<link rel="stylesheet" href="/admin/assets/traffic.css?v=20261030-r1">
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261031-r28" />
+<link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
@@ -1817,13 +1817,26 @@
       <div class="page-head">
         <div>
           <h1>用量日志</h1>
-          <p>用量记录在请求结束后写入；要实时看正在处理的请求，请到「风控哨兵」面板。</p>
+          <p>上方实时区随请求动态刷新；下方表格是已结束请求的落库记录，可筛选、导出。</p>
         </div>
         <div id="logActions" class="flex flex-wrap gap-2">
           <button onclick="exportLogs()" class="px-3 py-1.5 rounded-lg border text-sm" data-tooltip="导出当前筛选结果为 CSV"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></svg></span> 导出</button>
           <button onclick="exportLogs(true)" class="px-3 py-1.5 rounded-lg border text-sm" data-tooltip="含脱敏诊断，最多导出最近 1000 条">导出诊断</button>
           <button onclick="loadLogs(1)" class="px-3 py-1.5 rounded-lg border text-sm" data-tooltip="刷新"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span> 刷新</button>
         </div>
+      </div>
+
+      <!-- 请求动态（实时区）
+           放在这里而不是只留在哨兵：用户排查问题时习惯在「用量日志」看实时请求，
+           跑到别的面板会打断思路。数据源与哨兵同一个接口（/api/sentinel/status），
+           不新增后端查询；只在日志页激活时轮询，切走即停。 -->
+      <div class="card mb-4" id="logLiveCard">
+        <div class="sentinel-card-head">
+          <h3>请求动态</h3>
+          <span id="logLiveHint">每 2 秒刷新</span>
+        </div>
+        <div id="logLivePlatforms" class="live-platform-counts"></div>
+        <div id="logLiveRecent" class="live-request-list"></div>
       </div>
 
       <!-- 按账号查询区：这是「使用记录再新增按账号查询」的入口 -->
@@ -11496,16 +11509,108 @@ function logFilterSignature() {
 let _logUsagePollTimer = null;
 const _LOG_USAGE_POLL_MS = 5000;
 
-function stopLogActivity() {
-  if (_logUsagePollTimer) {
-    clearTimeout(_logUsagePollTimer);
-    _logUsagePollTimer = null;
-  }
-}
-
 function scheduleLogUsagePoll() {
   if (_logUsagePollTimer) clearTimeout(_logUsagePollTimer);
   _logUsagePollTimer = setTimeout(pollLogUsageRevision, _LOG_USAGE_POLL_MS);
+}
+
+// ===== 用量日志页：请求动态（实时区）=====
+//
+// 数据源与风控哨兵相同（/api/sentinel/status 的 traffic 段），不新增后端查询。
+// 只有日志页处于激活状态时才轮询 —— 切走立即停，不留后台空转。
+let _logLiveTimer = null;
+const _LOG_LIVE_MS = 2000;
+
+function stopLogLive() {
+  if (_logLiveTimer) {
+    clearTimeout(_logLiveTimer);
+    _logLiveTimer = null;
+  }
+}
+
+function scheduleLogLive() {
+  if (_logLiveTimer) clearTimeout(_logLiveTimer);
+  _logLiveTimer = setTimeout(pollLogLive, _LOG_LIVE_MS);
+}
+
+/** 一条实时请求的单行渲染。
+ *
+ *  刻意复用哨兵的 `live-request-*` 类与 `sentinelToneOf()` / `sentinelClock()`：
+ *  同一个数据源就该长一个样，用户在两个面板之间切换时不用重新认。
+ *  唯一多出来的是「耗时」列 —— 在日志页看实时请求，多半就是想看这个。
+ */
+function _logLiveRow(item) {
+  const tone = sentinelToneOf(item);
+  const status = Number(item.status || 0);
+  const running = item.outcome === "running";
+  const label = running ? "进行中"
+    : item.outcome === "timeout" ? "超时"
+    : status ? String(status) : (item.outcome || "—");
+  // 字段名以 traffic_stats.snapshot() 为准：elapsed_ms（毫秒，浮点）。
+  // 之前读 latency_ms/latency 都是猜的，永远拿不到值 → 一直显示「—」。
+  const ms = Number(item.elapsed_ms || item.latency_ms || item.latency || 0);
+  const runningCls = running ? " live-request-running" : "";
+  // with-duration：这一行比哨兵多一列「耗时」，用独立的 5 列网格。
+  return `<div class="live-request-row with-duration${runningCls}">
+    <span class="live-request-time">${sentinelClock(item.ts)}</span>
+    <span class="live-request-model" data-tooltip="${esc(item.error || item.path || "")}">${esc(item.model || item.path || "—")}</span>
+    <span class="live-request-platform">${esc(item.platform || "—")}</span>
+    <span class="live-request-ms">${running ? "…" : (ms ? Math.round(ms) + " ms" : "—")}</span>
+    <span class="live-request-status ${tone}">${esc(label)}</span>
+  </div>`;
+}
+
+async function pollLogLive() {
+  _logLiveTimer = null;
+  if (document.hidden
+      || document.documentElement.dataset.activeTab !== "logs"
+      || !TOKEN) {
+    return;
+  }
+  try {
+    const r = await api("/api/sentinel/traffic?window=3600");
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error("live unavailable");
+    const traffic = data || {};
+    const rows = traffic.recent || [];
+    const running = Number(traffic.running || 0);
+
+    const hint = $("#logLiveHint");
+    if (hint) {
+      hint.textContent = running > 0
+        ? "进行中 " + running + " 个 · 每 2 秒刷新"
+        : "每 2 秒刷新 · 最近 1 小时 " + rows.length + " 条";
+    }
+
+    const counts = $("#logLivePlatforms");
+    if (counts) {
+      counts.innerHTML = (traffic.platforms || []).map(row => {
+        const total = Number(row.requests || 0);
+        const failed = Number(row.error || 0) + Number(row.timeout || 0);
+        return `<div class="live-platform-count" data-tooltip="${esc(row.label || row.platform)} · 最近 1 小时">
+          <span>${esc(String(row.label || row.platform).replace(/\s*(国内版|国际版|中国版)/, ""))}</span>
+          <span><b>${total}</b>${failed ? ` <em>${failed} 失败</em>` : ""}</span>
+        </div>`;
+      }).join("") || "";
+    }
+
+    const host = $("#logLiveRecent");
+    if (host) {
+      host.innerHTML = rows.length
+        ? rows.slice(0, 12).map(_logLiveRow).join("")
+        : '<p class="sentinel-empty" style="padding:10px 2px">最近 1 小时还没有请求</p>';
+    }
+  } catch (e) {
+    const hint = $("#logLiveHint");
+    if (hint) hint.textContent = "实时区暂不可用";
+  }
+  scheduleLogLive();
+}
+
+/** 日志页激活时启动实时区。 */
+function startLogLive() {
+  stopLogLive();
+  pollLogLive();
 }
 
 async function pollLogUsageRevision() {
@@ -11542,7 +11647,20 @@ async function pollLogUsageRevision() {
 
 function startLogActivity() {
   if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+  // 两条独立节奏：
+  //   pollLogUsageRevision —— 5 秒探一次主键，变了才重拉表格（省查询）
+  //   pollLogLive          —— 2 秒刷新上方实时区（用户要看的"正在发生"）
   pollLogUsageRevision();
+  startLogLive();
+}
+
+/** 离开日志页时停掉实时区，避免后台空转。 */
+function stopLogActivity() {
+  if (_logUsagePollTimer) {
+    clearTimeout(_logUsagePollTimer);
+    _logUsagePollTimer = null;
+  }
+  stopLogLive();
 }
 
 
