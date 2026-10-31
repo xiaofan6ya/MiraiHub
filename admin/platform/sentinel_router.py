@@ -21,7 +21,8 @@ from __future__ import annotations
 import json
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -137,6 +138,106 @@ def sentinel_traffic(window: int = Query(default=3600, ge=60, le=86400),
     from admin import traffic_stats
 
     return traffic_stats.snapshot(window)
+
+
+@router.get("/traffic/stream")
+async def sentinel_traffic_stream(window: int = Query(default=3600, ge=60, le=86400),
+                                  request: Request = None,
+                                  _: bool = Depends(require_admin)):
+    """实时流量 **SSE 推送**（替代前端轮询）。
+
+    ## 为什么用 SSE 而不是轮询
+
+    轮询是「每 N 秒问一次」，代价有两块：
+
+      1. **空转**：没有请求的时候也在打接口，一个打开的页面就是一条
+         持续的 QPS；多开几个标签页更明显。
+      2. **延迟**：事件发生在两次轮询之间时要等到下一拍，最坏 2N。
+
+    SSE 是「有事就推」，连接保持一条长连接，服务端每 500ms 采样一次，
+    **只有内容变了才发一帧** —— 空闲时几乎零流量，有请求时首帧延迟
+    不超过一个采样周期。
+
+    ## 为什么发 diff 而不是每次全量
+
+    全量快照包含最近 1 小时的明细（最多上百条），每秒重发一遍纯属浪费。
+    这里只推「变了的行」+ 「平台计数」，前端按 `rid` 合并。
+
+    ## 断线处理
+
+    客户端断开（关页面 / 网络断）时 `request.is_disconnected()` 为真，
+    生成器立即退出，不会留下僵尸任务。nginx 侧建议关掉对该路径的
+    缓冲（`proxy_buffering off`），否则会攒包一起发。
+    """
+    import asyncio
+    import json as _json
+    from admin import traffic_stats
+
+    async def event_stream():
+        last_rows: dict[str, dict] = {}
+        last_counts: str = ""
+        last_running = -1
+        # 首帧带一份全量，前端不用额外再打一次 /traffic
+        first = True
+        idle = 0
+        while True:
+            if request is not None and await request.is_disconnected():
+                break
+            try:
+                snap = traffic_stats.snapshot(window)
+            except Exception as exc:  # noqa: BLE001 - 采样失败不该断流
+                yield "event: error\ndata: %s\n\n" % _json.dumps(
+                    {"message": str(exc)[:200]}, ensure_ascii=False)
+                await asyncio.sleep(2)
+                continue
+
+            rows = snap.get("recent") or []
+            current = {str(r.get("rid") or ""): r for r in rows if r.get("rid")}
+            counts = _json.dumps(snap.get("platforms") or [], ensure_ascii=False, sort_keys=True)
+            running = int(snap.get("running") or 0)
+
+            payload = None
+            if first:
+                payload = {"type": "snapshot", "platforms": snap.get("platforms") or [],
+                           "recent": rows, "running": running,
+                           "totals": snap.get("totals") or {},
+                           "now": snap.get("now") or 0}
+                first = False
+                idle = 0
+            else:
+                # 新增或状态变化的行（running -> completed 会被覆盖）
+                changed = [r for rid, r in current.items()
+                           if rid not in last_rows or last_rows[rid] != r]
+                removed = [rid for rid in last_rows if rid not in current]
+                if changed or removed or counts != last_counts or running != last_running:
+                    payload = {"type": "delta", "changed": changed,
+                               "removed": removed, "running": running,
+                               "now": snap.get("now") or 0}
+                    if counts != last_counts:
+                        payload["platforms"] = snap.get("platforms") or []
+                        payload["totals"] = snap.get("totals") or {}
+                    idle = 0
+                else:
+                    idle += 1
+
+            last_rows = current
+            last_counts = counts
+            last_running = running
+
+            if payload is not None:
+                yield "data: %s\n\n" % _json.dumps(payload, ensure_ascii=False)
+            elif idle and idle % 30 == 0:
+                # 每 15 秒一个注释心跳，防止中间层（nginx / 代理）掐闲置连接
+                yield ": keep-alive\n\n"
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/traffic/reset")

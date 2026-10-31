@@ -118,6 +118,7 @@ window.WBReview = (() => {
           '<button class="console-btn" onclick="WBReview.pickRestore()"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>恢复备份</button>' +
           '<input type="file" id="restoreFileInput" accept=".db,application/octet-stream" hidden onchange="WBReview.confirmRestore(this)" /></div>' :
           '<p class="maintenance-backup-help">当前数据库请使用管理工具完成备份' + (data.mysql_backup_command ? '，也可以在终端使用以下命令。' : '。') + '</p>') +
+        backupPathBlock(data) +
         (data.mysql_backup_command ? commandBlock('maintenance-command-backup', data.mysql_backup_command) : '') +
         '<p class="maintenance-private-note"><i class="fa-solid fa-lock" aria-hidden="true"></i>备份包含账号凭据和 API Key，请私密保存。</p></section>' +
         '<section class="card maintenance-step"><div class="maintenance-step-head"><span class="maintenance-step-number">02</span><div><h2>升级与重启</h2><p>选择当前的部署方式，在项目目录执行对应命令。</p></div></div>' +
@@ -147,6 +148,83 @@ window.WBReview = (() => {
    *   3. 拿 blob 触发下载
    * 这样同一句「失败了」也能区分是哪一环，不用再猜。
    */
+  /**
+   * 备份存放位置：**显示出来、并且能改**。
+   *
+   * 之前面板只有一个下载按钮 —— 用户既不知道数据库在哪，也不知道
+   * 文件会存到哪，更没法换目录（实际落点是浏览器默认下载目录，
+   * 而内部临时文件用的是系统 TEMP，两者都不是用户能预期的位置）。
+   *
+   * 这里把三件事说清楚：
+   *   1. 数据库文件在哪（只读，仅供确认）
+   *   2. 备份默认存哪（可改，落库到 system_settings）
+   *   3. 目录不可写时直接标红，而不是等到点下载才失败
+   */
+  function backupPathBlock(data) {
+    if (!data || !data.ok) return '';
+    const writable = data.backup_dir_writable !== false;
+    const isDefault = data.backup_dir_is_default !== false;
+    const rows = [];
+    if (data.db_path) {
+      rows.push('<div class="maintenance-path-row"><span class="maintenance-path-label">数据库文件</span>' +
+        '<code class="maintenance-path-value" title="' + esc(data.db_path) + '">' + esc(data.db_path) + '</code></div>');
+    }
+    rows.push('<div class="maintenance-path-row"><span class="maintenance-path-label">备份存放位置</span>' +
+      '<code class="maintenance-path-value' + (writable ? '' : ' is-bad') + '" title="' + esc(data.backup_dir) + '">' +
+      esc(data.backup_dir) + '</code>' +
+      (writable ? '' : '<span class="maintenance-path-warn">不可写</span>') +
+      '</div>');
+    return '<div class="maintenance-path-block">' + rows.join('') +
+      '<div class="maintenance-path-actions">' +
+      '<button class="console-btn quiet" onclick="WBReview.editBackupDir()"><i class="fa-solid fa-folder-open" aria-hidden="true"></i>修改位置</button>' +
+      (isDefault ? '' : '<button class="console-btn quiet" onclick="WBReview.resetBackupDir()">恢复默认</button>') +
+      '</div>' +
+      (data.backup_supported
+        ? '<p class="maintenance-backup-help">下载时会保存到浏览器的下载目录；上面这个位置用于「恢复备份」时的默认查找路径。</p>'
+        : '<p class="maintenance-backup-help">当前是 ' + esc(String(data.database || '').toUpperCase()) + ' 数据库，页面不支持在线下载备份；上方的命令请自行执行，执行结果可放到这个目录，方便用「恢复备份」导回。</p>') +
+      '</div>';
+  }
+
+  /** 修改备份目录：用浏览器原生 prompt，避免再引一套弹窗。 */
+  async function editBackupDir() {
+    let current = '';
+    try {
+      const pr = await api('/api/maintenance/backup/info');
+      const { ok, data } = await safeJson(pr);
+      if (ok && data) current = data.backup_dir || '';
+    } catch (e) { /* 取不到就让用户直接填 */ }
+    const value = window.prompt('备份存放目录（绝对路径）', current);
+    if (value === null) return;
+    try {
+      const r = await api('/api/maintenance/backup/dir', {
+        method: 'PUT',
+        body: JSON.stringify({ path: value }),
+      });
+      const { ok, data } = await safeJson(r);
+      if (!ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      toast('备份位置已更新：' + (data.backup_dir || ''));
+      loadUpdate();
+    } catch (e) {
+      toast('修改失败：' + (e.message || '未知错误'), 'error');
+    }
+  }
+
+  /** 恢复默认备份目录。 */
+  async function resetBackupDir() {
+    try {
+      const r = await api('/api/maintenance/backup/dir', {
+        method: 'PUT',
+        body: JSON.stringify({ reset: true }),
+      });
+      const { ok, data } = await safeJson(r);
+      if (!ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      toast('已恢复默认位置：' + (data.backup_dir || ''));
+      loadUpdate();
+    } catch (e) {
+      toast('恢复失败：' + (e.message || '未知错误'), 'error');
+    }
+  }
+
   async function backup() {
     try {
       // ---- 1) 探测 ----
@@ -267,7 +345,7 @@ window.WBReview = (() => {
     if (value !== null && (!Number.isInteger(value) || value < 0 || value > 2147483647)) return toast('请输入非负整数或留空','err');
     try { await json('/api/accounts/' + id, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_in_flight:value})}); closeModal(); loadAccounts(); } catch (error) { toast(error.message,'err'); }
   }
-  return {loadJournal, resetJournal, journalPage:delta => loadJournal(Math.max(1,page+delta)), loadUpdate, selectInstall, toggleCnSource, backup, pickRestore, confirmRestore, doRestore, doRestartService, accountLimit, saveLimit};
+  return {loadJournal, resetJournal, journalPage:delta => loadJournal(Math.max(1,page+delta)), loadUpdate, selectInstall, toggleCnSource, backup, pickRestore, confirmRestore, doRestore, doRestartService, accountLimit, saveLimit, editBackupDir, resetBackupDir};
 })();
 document.addEventListener('DOMContentLoaded', () => {
   if (document.documentElement.dataset.activeTab === 'journal') WBReview.loadJournal(1);

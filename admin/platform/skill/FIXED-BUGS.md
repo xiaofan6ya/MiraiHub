@@ -1152,6 +1152,76 @@ def cleanup_stale_mei_dirs() -> int:
 
 **验证**：实测清理 12 个目录，释放 1879.8 MB，正在用的 2 个正确保留。
 
+## 五·补21 实时区用轮询会空转，应走 SSE
+
+**现象**
+
+用量日志页的「请求动态」每 2 秒打一次 `/api/sentinel/traffic`。空闲时也在
+持续请求，多开标签页更明显；有请求时又要等到下一拍才显示。
+
+**根因**
+
+选了轮询。轮询的两块固有代价：
+
+- **空转**：无事发生也在打接口，一个打开的页面就是一条持续 QPS
+- **延迟**：事件落在两次轮询之间时要等到下一拍，最坏 2N
+
+**修法：SSE + diff 推送**
+
+```
+后端 GET /api/sentinel/traffic/stream
+  · 每 500ms 采样一次 traffic_stats.snapshot()
+  · 只推「变了的行」+ 平台计数，空闲时不发数据
+  · 每 15 秒一个注释心跳，防中间层掐闲置连接
+  · request.is_disconnected() → 生成器立即退出，不留僵尸任务
+
+前端 new EventSource(...)
+  · onmessage 按 rid 合并，按 ts 倒序保留最近 12 条
+  · EventSource 不可用时退回 3 秒轮询（不是直接空着）
+```
+
+关键响应头：`X-Accel-Buffering: no` —— nginx 默认会缓冲 SSE，
+不加这个会把整段攒着一次发，实时性完全丧失。
+
+**实测**
+
+```
+0.0s  snapshot  recent=3 running=0
+2.2s  delta     1 条变 running      ← 请求开始
+4.3s  delta     1 条变 completed    ← 请求结束
+```
+
+空闲 8 秒只 1 帧（首帧快照），有请求时事件驱动。
+
+**教训**：实时数据用 SSE，不要轮询。轮询只适合「低频、可容忍延迟」的场景。
+
+## 五·补22 备份面板看不到路径、也改不了
+
+**现象**
+
+维护页「备份数据」只有一个下载按钮：用户不知道数据库在哪、不知道备份存哪、
+也没法换目录。
+
+**根因（三层）**
+
+1. `/api/maintenance/update` 压根**不返回**备份位置字段
+2. 前端 `backupPathBlock(data)` 判断 `!data.ok` 直接返回空串 ——
+   而 `/update` 的返回里连 `ok` 都没有
+3. 静态资源 `<script src="/admin/assets/review-improvements.js">` **没有版本参数**，
+   浏览器一直用缓存里的旧 JS，代码改了也不生效
+
+**修法**
+
+- 抽出 `_backup_location(db)`，`/update` 与 `/backup/info` 共用一份
+  （两处各写一份，字段一漂移就会出现「探测说能写、面板说不存在」）
+- 新增 `PUT /api/maintenance/backup/dir`，落库到 `system_settings`
+- 面板显示两行：数据库文件（MySQL 补成 `host:port/db`，不含账号密码）、
+  备份存放位置（可改、可恢复默认、不可写时标红）
+- **所有 `/admin/assets/*` 静态资源统一加 `?v=`**，根治缓存问题
+
+**教训**：静态资源的版本参数不是可选项。没有它，前端改动在用户侧
+等于没改 —— 而开发者本地因为 cache-busting 不生效往往看不出来。
+
 ## 六、运维
 
 ### 6.1 改完代码没真正重启
