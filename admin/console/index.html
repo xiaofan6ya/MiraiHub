@@ -2469,14 +2469,14 @@ function uiSelectHTML(id, opts) {
   const cls = opts.class || "border rounded-lg px-3 py-2 text-sm";
 
   return `<div class="ui-select" id="${id}">
-    <div class="ui-select-btn ${cls}" onclick="uiSelectToggle('${id}', event)">
+    <div class="ui-select-btn ${cls}" onclick="uiSelectToggle(${jsv(id)}, event)">
       <span class="ui-select-label truncate">${esc(label)}</span>
       <span class="wb-icon ui-select-arrow"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
     </div>
     <div class="ui-select-panel">
       ${options.map(o => `
         <div class="ui-select-opt ${String(o.value) === val ? "sel" : ""}"
-             data-value="${esc(String(o.value))}" onclick="uiSelectPick('${id}',this.dataset.value,event)">
+             data-value="${esc(String(o.value))}" onclick="uiSelectPick(${jsv(id)},this.dataset.value,event)">
           <span class="truncate">${esc(o.label)}</span>
           ${String(o.value) === val ? '<span class="wb-icon ui-select-check"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>' : ""}
         </div>`).join("") || '<div class="ui-select-opt text-slate-400">无可选项</div>'}
@@ -8111,7 +8111,7 @@ async function scanLocal(){
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
           ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
-          <button onclick="importOne('${encodeURIComponent(it.file)}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
+          <button onclick="importOne(${jsv(it.file)})" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
         </div>
       </td>
     </tr>`;
@@ -8135,7 +8135,7 @@ async function scanLocal(){
           <div class="flex flex-wrap items-center gap-1.5 mt-2">
             ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
             ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
-            <button onclick="importOne('${encodeURIComponent(it.file)}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
+            <button onclick="importOne(${jsv(it.file)})" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
           </div>
         </div>
       </div>
@@ -9526,7 +9526,7 @@ function keyAccountPicker(prefix, accounts, selected, platform) {
     return `<label class="key-picker-row" data-search="${esc(
         `${item.name || ""} ${item.uid || ""} ${item.id} ${item.platform || ""}`.toLowerCase())}">
       <input type="checkbox" value="${item.id}" ${on ? "checked" : ""}
-             data-acc-prefix="${prefix}" onchange="keyAccChange('${prefix}')">
+             data-acc-prefix="${prefix}" onchange="keyAccChange(${jsv(prefix)})">
       <span class="key-picker-row-main">
         <span class="key-picker-row-name">${name}</span>
         <span class="key-picker-row-sub">${sub || "—"}</span>
@@ -9538,7 +9538,7 @@ function keyAccountPicker(prefix, accounts, selected, platform) {
     <label class="text-xs text-slate-500">独占绑定账号（可选，多选）</label>
     <div class="mt-1">
       <button type="button" class="key-picker-trigger"
-              onclick="keyAccToggle('${prefix}')">
+              onclick="keyAccToggle(${jsv(prefix)})">
         <span class="key-picker-summary${picked.size ? " has-value" : ""}"
               id="${prefix}AccountSummary">${esc(summary)}</span>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
@@ -9547,12 +9547,12 @@ function keyAccountPicker(prefix, accounts, selected, platform) {
       <div class="key-picker-pop" id="${prefix}AccountPop" hidden>
         <input class="key-picker-search" id="${prefix}AccountSearch"
                placeholder="搜索账号 / UID / 平台" autocomplete="off"
-               oninput="keyAccFilter('${prefix}', this.value)">
+               oninput="keyAccFilter(${jsv(prefix)}, this.value)">
         <div class="key-picker-list" id="${prefix}AccountList">${list}</div>
         <div class="key-picker-foot">
           <span>${rows.length} 个可选账号</span>
           <button type="button" class="key-picker-clear"
-                  onclick="keyAccClear('${prefix}')">清空选择</button>
+                  onclick="keyAccClear(${jsv(prefix)})">清空选择</button>
         </div>
       </div>
       <input type="hidden" id="${prefix}AccountIds"
@@ -14058,7 +14058,7 @@ function donutChart(rows, valueKey, opts) {
         stroke="${_PIE_COLORS[i % _PIE_COLORS.length]}" stroke-width="${SW}"
         stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-offset}"
         transform="rotate(-90 80 80)"
-        onmousemove="showTip(event, '${tip.replace(/'/g, "&#39;")}')" onmouseleave="hideTip()"></circle>`;
+        onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()"></circle>`;
     offset += len;
     return seg;
   }).join("");
@@ -14138,7 +14138,7 @@ function trendChart(rows) {
     const dots = `
       <circle cx="${cx}" cy="${y(r.prompt_tokens)}" r="2.5" fill="#3b82f6" pointer-events="none"></circle>
       <circle cx="${cx}" cy="${y(r.completion_tokens)}" r="2.5" fill="#22c55e" pointer-events="none"></circle>`;
-    return `<g class="chart-hit" onmousemove="showTip(event, '${tip.replace(/'/g, "&#39;")}')" onmouseleave="hideTip()">
+    return `<g class="chart-hit" onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()">
       ${dots}
       <circle cx="${cx}" cy="${H / 2}" r="${Math.max(8, (W - PAD * 2) / Math.max(1, n) / 2)}" fill="transparent"></circle>
     </g>`;

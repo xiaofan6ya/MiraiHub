@@ -132,6 +132,15 @@
     <div class="steps"><i class="on"></i><i></i></div>
 
     <div class="row">
+      <label for="inviteCode">邀请码</label>
+      <div class="field" id="inviteField">
+        <input id="inviteCode" type="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" maxlength="64" placeholder="请输入管理员提供的邀请码" />
+      </div>
+      <div class="ferr" id="inviteErr"></div>
+    </div>
+
+    <div class="row">
       <label for="mobile">手机号</label>
       <div class="field" id="mobileField">
         <select id="country" aria-label="地区">
@@ -229,7 +238,11 @@
     countdown(Math.max(0, Math.ceil(((saved.retryUntil || 0)-Date.now())/1000)));
     if (!saved.sid) return;
     try {
-      var response = await fetch('/api/join/status/' + encodeURIComponent(saved.sid), {cache:'no-store'});
+      var stHeaders = {};
+      var stCode = inviteValue();
+      if (stCode) stHeaders["X-Join-Invite"] = stCode;
+      var response = await fetch('/api/join/status/' + encodeURIComponent(saved.sid),
+                                 {cache:'no-store', headers: stHeaders});
       if (!response.ok) throw new Error('无法恢复登录会话');
       var state = await response.json();
       if (!state.alive || state.consumed) { sid = ''; WBPhone.clear('wb_join_phone'); return; }
@@ -249,17 +262,67 @@
     }
   }
 
+  // 预填邀请码（来自分享链接），并记住本次会话的选择。
+  (function () {
+    var el = $("inviteCode");
+    if (el && INVITE) {
+      el.value = INVITE;
+      try { sessionStorage.setItem("mh_invite", INVITE); } catch (e) {}
+    } else {
+      try {
+        var saved = sessionStorage.getItem("mh_invite");
+        if (saved && el) el.value = saved;
+      } catch (e) {}
+    }
+    if (el) {
+      el.addEventListener("input", function () {
+        try { sessionStorage.setItem("mh_invite", el.value.trim()); } catch (e) {}
+      });
+    }
+  })();
+
   function show(id) {
     ["step1", "step2", "step3", "stepOfficial"].forEach(function (k) {
       $(k).classList.toggle("hidden", k !== id);
     });
   }
 
+  // 邀请码：从 URL 查询参数预填（带码分享链接），用户也可手动改。
+  var INVITE = "";
+  try {
+    var q = new URLSearchParams(location.search);
+    INVITE = (q.get("invite_code") || q.get("invite") || "").trim();
+  } catch (e) { INVITE = ""; }
+
+  function inviteValue() {
+    var el = $("inviteCode");
+    var v = (el && el.value || "").trim();
+    return v || INVITE;
+  }
+
+  // 邀请码必填校验：没有有效凭证服务端一律 404。
+  function requireInvite() {
+    if (!inviteValue()) {
+      $("inviteErr").textContent = "请先填写邀请码";
+      var f = $("inviteField");
+      if (f) f.focus();
+      return false;
+    }
+    $("inviteErr").textContent = "";
+    return true;
+  }
+
   function api(path, body) {
+    var payload = body || {};
+    // 邀请码同时放 body 与 header：body 兼容旧客户端，header 避免落进 URL 日志。
+    var code = inviteValue();
+    if (code) payload.invite_code = code;
+    var headers = { "Content-Type": "application/json" };
+    if (code) headers["X-Join-Invite"] = code;
     return fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
+      headers: headers,
+      body: JSON.stringify(payload)
     }).then(function (r) {
       return r.text().then(function (t) {
         var d = {};
@@ -350,6 +413,8 @@
   }
 
   function officialStart() {
+    // 邀请码必填：没有有效凭证服务端一律 404。
+    if (!requireInvite()) return;
     officialStop();
     offUrl = ""; offSid = ""; offWin = null;
     show("stepOfficial");
@@ -496,6 +561,8 @@
 
   function send() {
     if (busy || Date.now() < retryUntil) return;
+    // 邀请码必填：没有有效凭证服务端一律 404。
+    if (!requireInvite()) return;
     clearAllFieldErr();
     var mobile = ($("mobile").value || "").replace(/\D/g, "");
     var country = $('country').value;

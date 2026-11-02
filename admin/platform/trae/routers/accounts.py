@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from admin.db import get_db
 from admin.models import Account, AccountModelCooldown
 from admin.platform.registry import get as get_platform
-from admin.security import require_admin
+from admin.security import require_admin, clean_display_name
 from admin.platform.trae.core import catalog, client
 from admin.platform.trae.services import accounts as trae_accounts
 from admin.platform.trae.services import desktop_catalog
@@ -954,7 +954,7 @@ def patch_account(acc_id: int, body: PatchIn, _: bool = Depends(require_admin),
                   db: Session = Depends(get_db)):
     account = _get(db, acc_id)
     if body.name is not None:
-        account.name = body.name[:120]
+        account.name = clean_display_name(body.name[:120], account.name)
     if body.status in ("active", "disabled"):
         account.status = body.status
         if body.status == "active":

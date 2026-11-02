@@ -27,6 +27,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from admin.models import Account
+from admin.security import clean_display_name
 from admin.platform.trae.core import client, icube
 
 logger = logging.getLogger("admin.platform.trae.accounts")
@@ -326,7 +327,7 @@ def upsert(db: Session, record: dict) -> tuple[Account, bool]:
         account.balance_remain = 0
         created = True
     account.platform = PLATFORM
-    account.name = _display_name(payload)
+    account.name = clean_display_name(_display_name(payload))
     account.uid = uid
     account.domain = realm
     account.auth_json = json.dumps(payload, ensure_ascii=False)

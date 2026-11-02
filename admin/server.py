@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from admin.config import settings
 from admin.db import SessionLocal, get_db, init_db, wait_database_ready
+from sqlalchemy.orm import Session
 from admin.models import SystemSetting
 from admin.routers import (accounts, credits, groups,
                            growth, keys, login as login_router, logs, models,
@@ -27,6 +28,8 @@ from admin.security import (
 )
 from admin.gateway_limits import GatewayAdmissionMiddleware
 from admin.ip_access import IPBlockMiddleware
+from admin.routers import join_invites
+join_invites_router = join_invites.router
 from admin.routers import releases
 from admin.routers import audio
 from admin.routers import images
@@ -153,6 +156,7 @@ app.add_middleware(
     request_timeout=getattr(settings, 'GATEWAY_REQUEST_TIMEOUT', 160),
     dynamic_settings=True,
 )
+from admin import join_invite
 from admin.join_limits import JoinAdmissionMiddleware
 app.add_middleware(JoinAdmissionMiddleware, max_active=settings.JOIN_MAX_CONCURRENT)
 
@@ -290,6 +294,7 @@ app.include_router(releases.router)
 # 自助上传页（无需后台登录态）：复刻 WorkBuddy 手机号登录页，
 # 让「发给朋友」这一诉求成立 —— 对方不需要知道后台口令。
 app.include_router(login_router.public_router)
+app.include_router(join_invites_router)
 
 
 @app.on_event("startup")
@@ -641,16 +646,22 @@ def console_asset(file_path: str, request: Request):
 
 @app.get("/join")
 @app.get("/join/")
-def join_index():
+def join_index(request: Request, db: Session = Depends(get_db)):
     """公开注册页（复刻 WorkBuddy 手机号登录页）。
 
-    这是要「直接发给别人」的地址：对方打开即可用手机号 + 验证码完成注册，
-    服务端自动完成整条 auth 授权 —— **无需后台口令、无需邀请码、无需客户端**，
-    手机浏览器即可完成。
+    **2026-11-02 安全事件后改为需凭证**：这个入口曾是完全公开的，攻击者
+    据此把带 XSS 载荷的自有账号塞进号池。
 
-    页面本身不含任何敏感数据；服务端唯一的防线是发码节流
-    （见 admin/routers/login.py 的 `_check_sms_quota`）。
+    现在是 **fail-closed**：
+      * 后台一张有效凭证都没有 → 页面直接 404（整个自助入口关闭）
+      * 生成了凭证 → 页面可访问，但用户必须填对邀请码才能完成注册
+
+    页面本身不含任何敏感数据；服务端防线是**凭证 + 发码节流**
+    （见 admin/routers/login.py 的 `_check_join_invite` 与 `_check_sms_quota`）。
     """
+    if not join_invite.has_any_invite(db):
+        # 入口未开通：与"页面不存在"表现一致，不泄露自助注册的存在。
+        raise HTTPException(status_code=404, detail="页面不存在")
     return FileResponse(STATIC_DIR / "join.html")
 
 

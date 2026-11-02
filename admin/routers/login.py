@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from admin import wb_login
 from admin.db import get_db
+from admin import join_invite
 from admin.models import Account
 from admin.ratelimit import client_ip_from_request
 from admin.security import clean_display_name, require_admin
@@ -445,7 +446,8 @@ def login_status(sid: str, _: bool = Depends(require_admin)):
 
 
 @public_router.get("/api/join/status/{sid}")
-def join_status(sid: str):
+def join_status(sid: str, request: Request, db: Session = Depends(get_db)):
+    _check_join_invite(None, request, db)
     return login_status(sid, True)
 
 
@@ -476,7 +478,53 @@ class JoinIn(BaseModel):
     mobile: str = ""
     country_code: str = "86"
     sms_code: str = ""
+    #: 自助入口凭证（后台生成）。也可放在 X-Join-Invite 头或 invite_code 查询参数。
+    invite_code: Optional[str] = ""
 
+
+
+# ---------------------------------------------------------------------------
+# 自助入口凭证校验（2026-11-02 安全事件新增）
+# ---------------------------------------------------------------------------
+#
+# 背景：`/join` 与 `/api/join/*` 曾是完全公开的入口。攻击者用自己的
+# WorkBuddy 账号（昵称改成 XSS 载荷）走这条通道入库，2026-11-02 的入侵
+# 就是这么发生的。
+#
+# 现在改为 **fail-closed**：
+#   * 后台一张有效凭证都没有 → 整个自助入口关闭（404，不泄露原因）
+#   * 生成了凭证 → 请求必须携带其中一张才放行
+#
+# 凭证从三处取（优先级从高到低）：请求体字段 / 请求头 / 查询参数。
+# 三处都支持是为了兼容不同客户端：手机浏览器用表单字段，桌面端用请求头，
+# 分享链接用查询参数。
+#
+# 失败一律返回 404 而不是 403 —— 不告诉调用者"入口存在但凭证不对"，
+# 避免变成一个可用于探测有效凭证的 oracle。
+def _extract_invite_code(body, request: Request) -> str:
+    """从请求体 / 请求头 / 查询参数里取邀请码。"""
+    code = getattr(body, "invite_code", "") if body is not None else ""
+    if not code:
+        code = request.headers.get("x-join-invite", "") or ""
+    if not code:
+        code = request.query_params.get("invite_code", "") or ""
+    return (code or "").strip()
+
+
+def _check_join_invite(body, request: Request, db: Session) -> str:
+    """校验自助入口凭证。失败直接抛 404（入口关闭或凭证无效，不区分）。
+
+    返回通过校验的明文凭证（调用方在成功入库后用它消耗次数）。
+    """
+    code = _extract_invite_code(body, request)
+    ok, reason = join_invite.check_invite(db, code)
+    if not ok:
+        _logger.warning("自助入口凭证校验失败 reason=%s ip=%s path=%s",
+                        reason, client_ip_from_request(request),
+                        request.url.path)
+        # 404 而非 403：不暴露"入口存在"这一信息。
+        raise HTTPException(status_code=404, detail="页面不存在")
+    return code
 
 def _mask_name(name: str) -> str:
     """模糊化账号名（公开接口回显用）：保留首尾，中间打码。"""
@@ -701,8 +749,9 @@ def _try_session_slot(sess):
 
 
 @public_router.post("/api/join/start")
-def join_start(body: JoinIn, request: Request):
-    """公开：发起一次注册会话。"""
+def join_start(body: JoinIn, request: Request, db: Session = Depends(get_db)):
+    """公开：发起一次注册会话（需后台生成的凭证）。"""
+    _check_join_invite(body, request, db)
     with _upstream_slot("join_start"):
         try:
             sess = wb_login.start_login()
@@ -712,8 +761,9 @@ def join_start(body: JoinIn, request: Request):
 
 
 @public_router.post("/api/join/send")
-def join_send(body: JoinIn, request: Request):
-    """公开：发短信验证码。"""
+def join_send(body: JoinIn, request: Request, db: Session = Depends(get_db)):
+    """公开：发短信验证码（需后台生成的凭证）。"""
+    _check_join_invite(body, request, db)
     ip = client_ip_from_request(request)
     return _send_guarded(body, ip)
 
@@ -728,6 +778,7 @@ def join_verify(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     返回刻意只说「注册成功」：本流程等价于用手机号注册/登录这个服务，
     不向用户暴露「凭证正在被收进号池」这类内部实现细节。
     """
+    invite = _check_join_invite(body, request, db)
     try:
         sess = wb_login.get_session(body.sid)
     except wb_login.WbLoginError as e:
@@ -735,6 +786,9 @@ def join_verify(body: JoinIn, request: Request, db: Session = Depends(get_db)):
 
     with _session_slot(sess, "verify"), _upstream_slot("verify"):
         out = _verify_and_store(sess, body.sms_code, db)
+
+    # 真正入库成功后才消耗凭证次数（前面失败不浪费邀请码）。
+    join_invite.consume_invite(db, invite)
 
     # 公开接口**不回显** uid / 账号 id，只回模糊化的账号名，
     # 避免陌生人靠反复登录枚举号池内容。
@@ -764,11 +818,14 @@ def join_verify(body: JoinIn, request: Request, db: Session = Depends(get_db)):
 
 class OfficialIn(BaseModel):
     sid: Optional[str] = ""
+    #: 自助入口凭证（后台生成）。也可放在 X-Join-Invite 头或 invite_code 查询参数。
+    invite_code: Optional[str] = ""
 
 
 @public_router.post("/api/join/official/start")
-def join_official_start(body: OfficialIn, request: Request):
-    """公开：发起「官方页面接力」——只拿 state + authUrl。"""
+def join_official_start(body: OfficialIn, request: Request, db: Session = Depends(get_db)):
+    """公开：发起「官方页面接力」——只拿 state + authUrl（需后台生成的凭证）。"""
+    _check_join_invite(body, request, db)
     with _upstream_slot("official_start"):
         try:
             sess = wb_login.start_official_login()
@@ -790,6 +847,7 @@ def join_official_poll(body: OfficialIn, request: Request, db: Session = Depends
     并发保护：并发洪峰下闸门可能已满，此时**不报错**，直接回 `done=false`
     让前端下一轮再来 —— 轮询本来就是每 2.5s 一次，对用户完全无感。
     """
+    invite = _check_join_invite(body, request, db)
     try:
         sess = wb_login.get_session(body.sid)
     except wb_login.WbLoginError as e:
@@ -828,6 +886,8 @@ def join_official_poll(body: OfficialIn, request: Request, db: Session = Depends
             with _upstream_slot("poll_finalize"):
                 credential, meta = wb_login.build_credential_from_token(token)
                 out = _store_verified_credential(credential, meta, db)
+                # 入库成功才消耗凭证次数。
+                join_invite.consume_invite(db, invite)
                 out["invitation"] = wb_login.try_bind_invitation(sess, credential)
         except HTTPException as he:
             if he.status_code == 503:

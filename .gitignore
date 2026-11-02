@@ -171,3 +171,6 @@ backups/
 screenshots/
 RELEASE-*.md
 
+
+# ===== 本地备份目录（改代码前的快照，勿入库） =====
+_backup_*/

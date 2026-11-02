@@ -39,6 +39,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from admin.models import Account
+from admin.security import clean_display_name
 from admin.platform.qoder.core import client, endpoints
 
 logger = logging.getLogger("admin.platform.qoder.accounts")
@@ -221,10 +222,10 @@ def _upsert(db: Session, payload: dict) -> Account:
                     .filter(Account.platform == PLATFORM,
                             Account.uid == uid).first())
     if existing is None:
-        existing = Account(platform=PLATFORM, name=payload["name"] or uid or "Qoder",
+        existing = Account(platform=PLATFORM, name=clean_display_name(payload["name"] or uid or "Qoder"),
                            uid=uid or "", status="active")
         db.add(existing)
-    existing.name = payload["name"] or existing.name or uid or "Qoder"
+    existing.name = clean_display_name(payload["name"] or existing.name or uid or "Qoder")
     existing.uid = uid or existing.uid
     existing.domain = payload["realm"]
     existing.auth_json = json.dumps(payload, ensure_ascii=False)

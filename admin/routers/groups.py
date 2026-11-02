@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from admin.db import get_db
 from admin.models import ApiKey, ModelConfig, ModelGroup, ModelGroupItem
-from admin.security import require_admin
+from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -136,7 +136,7 @@ def update_group(group_id: int, body: GroupIn, _: bool = Depends(require_admin),
     if not body.models:
         raise HTTPException(status_code=400, detail="请至少选择一个模型")
 
-    g.name = name
+    g.name = clean_display_name(name, g.name)
     g.note = body.note or ""
     db.query(ModelGroupItem).filter(ModelGroupItem.group_id == group_id).delete()
     for mid in dict.fromkeys(body.models):

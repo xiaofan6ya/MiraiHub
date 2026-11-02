@@ -330,6 +330,40 @@ class BlockedIP(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class JoinInvite(Base):
+    """自助注册入口的**后台生成凭证**（邀请码）。
+
+    背景：`/join` 与 `/api/join/*` 曾是完全公开的入口，攻击者据此把带 XSS
+    载荷的自有账号塞进号池（2026-11-02 入侵）。现在入口改为 fail-closed：
+    后台一张有效凭证都没有 → 整个自助入口关闭。
+
+    安全设计：
+      * `code_hash` 存 PBKDF2 哈希，**不存明文** —— 库被拖走也换不出邀请码。
+      * `code_prefix` 只留前 8 位供后台肉眼识别（够排查，不够用）。
+      * `max_uses` 限次（0 = 不限），`expires_at` 限时间，`enabled` 可随时撤销。
+    """
+
+    __tablename__ = "join_invites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #: PBKDF2 哈希，明文只在生成时返回一次。
+    code_hash = Column(String(255), nullable=False, index=True)
+    #: 明文前 8 位，仅供后台识别与日志排查。
+    code_prefix = Column(String(16), nullable=False, default="")
+    #: 备注（谁用这张码、给谁的）。
+    note = Column(String(200), default="")
+    #: 最大可用次数。0 = 不限次数（不推荐）。
+    max_uses = Column(Integer, nullable=False, default=1)
+    used_count = Column(Integer, nullable=False, default=0)
+    #: 1 = 可用；0 = 已撤销。
+    enabled = Column(Integer, nullable=False, default=1)
+    #: 过期时间（UTC）。NULL = 不过期（不推荐，后台生成时会强制加上限）。
+    expires_at = Column(DateTime, nullable=True)
+    #: 生成者标识（后台账号名），便于追责与审计。
+    created_by = Column(String(120), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ClientIdentity(Base):
     """Client-reported identifiers; never a verified hardware identity."""
     __tablename__ = "client_identities"

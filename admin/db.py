@@ -124,6 +124,12 @@ def init_db() -> bool:
         # 也就是**风控静默失效**。这种失效比报错更危险，所以迁移必须补齐。
         _ensure_column("blocked_ips", "expires_at", "DATETIME", "NULL")
 
+        # join_invites 表（自助注册凭证）由 create_all 自动建表 —— 它是
+        # 全新的表而非老表的加列，所以不需要 _ensure_column。
+        #
+        # 语义是 fail-closed：表里一张有效凭证都没有 → `/join` 与
+        # `/api/join/*` 整体关闭（见 admin/join_invite.py）。
+
         # 迁移：给 api_keys 表加 key_full 列（若不存在）
         _ensure_column("api_keys", "key_full", "VARCHAR(2048)", "DEFAULT ''")
 

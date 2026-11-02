@@ -37,6 +37,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from admin.models import Account
+from admin.security import clean_display_name
 from admin.platform.loomy.core import client, endpoints
 
 logger = logging.getLogger("admin.platform.loomy.accounts")
@@ -234,11 +235,11 @@ def import_record(db: Session, record: dict) -> dict:
                                             Account.uid == uid).first()
     if existing is None:
         existing = Account(platform=PLATFORM,
-                           name=str(record.get("name") or uid or "Loomy"),
+                           name=clean_display_name(str(record.get("name") or uid or "Loomy")),
                            uid=uid, status="active")
         db.add(existing)
 
-    existing.name = str(record.get("name") or existing.name or uid or "Loomy")
+    existing.name = clean_display_name(str(record.get("name") or existing.name or uid or "Loomy"))
     existing.uid = uid or existing.uid
     existing.domain = realm
     existing.auth_json = json.dumps({

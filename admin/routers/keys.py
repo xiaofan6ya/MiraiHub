@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from admin.account_binding import validate_binding, validate_bindings
 from admin.db import get_db
 from admin.models import Account, ApiKey, BlockedIP, ModelGroup, UsageLog
-from admin.security import hash_key, require_admin
+from admin.security import hash_key, require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/keys", tags=["keys"])
 _OK_KINDS = ("", "success")
@@ -212,7 +212,7 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
     aids = validate_bindings(db, body.account_ids or [], None)
     aid = None if aids else validate_binding(db, body.account_id)
     k = ApiKey(
-        name=body.name or "未命名",
+        name=clean_display_name(body.name, "未命名"),
         key_hash=hash_key(raw),
         key_prefix=raw[:14],
         key_full=_encode_key(raw),
@@ -392,7 +392,7 @@ def patch_key(key_id: int, body: dict, _: bool = Depends(require_admin), db: Ses
     if "aggregate" in body:
         k.aggregate = bool(body.get("aggregate"))
     if "name" in body:
-        k.name = body["name"]
+        k.name = clean_display_name(body["name"], k.name)
     if "credit_limit" in body:
         value = body["credit_limit"]
         if value is None or value == "":
