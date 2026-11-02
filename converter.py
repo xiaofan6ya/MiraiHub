@@ -35,12 +35,80 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
-from admin.upstream_errors import UpstreamError
 
 import upstream_compat
 
 # 连接池：减少重复 TLS 握手； MaxIdleConnsPerHost=20 设计。
 _HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+
+
+# ---------------------------------------------------------------------------
+# 循环导入守卫
+# ---------------------------------------------------------------------------
+#
+# `from admin.upstream_errors import UpstreamError` 这一行看起来无害，但它会把
+# `admin` 包初始化一遍；而 `admin/__init__.py` 里的 `_install_module_aliases()`
+# 会导入 `admin.platform.workbuddy.core.backend`，那个模块第 17 行写的是
+#
+#     from converter import BACKEND, CredentialError, CredentialManager
+#
+# 于是：converter(第 38 行) → admin → admin.backend → converter(第 114 行还没跑到)
+# → `BACKEND` 尚未定义 → ImportError: partially initialized module。
+#
+# 两个后果，都真实存在过：
+#   * `import converter` 单独跑必失败（1.0.1 起就如此）—— 意味着任何把
+#     converter 当独立模块加载的场景（排查脚本、单元测试、pyinstaller 的
+#     不同入口顺序）都会炸；
+#   * 服务本身不炸，纯粹是因为 `main.py` 恰好**先** import converter、
+#     在 admin 装配前就把 BACKEND 定义好了。这种「靠调用顺序活着」的耦合
+#     迟早被某次重构打破。
+#
+# 修法：把这条 admin 依赖挪到 `BACKEND` 等常量定义**之后**（见文件末尾的
+# 延迟导入）。`UpstreamError` 只在请求处理路径上用到，不需要在导入期就有。
+def _upstream_error():
+    """延迟取 `admin.upstream_errors.UpstreamError`。
+
+    调用点在运行期（请求处理），那时 `admin` 早已初始化完成，不会有
+    部分初始化问题。返回类本身，供 except 子句与抛出处使用。
+    """
+    from admin.upstream_errors import UpstreamError
+    return UpstreamError
+
+
+def __getattr__(name: str):
+    """模块级按需属性（PEP 562）。
+
+    只服务一个符号：`UpstreamError`。它在导入期**不能**直接绑定（那会把
+    `admin` 包提前拉起来，见上面的循环导入说明），但外部代码——
+    测试、排障脚本、将来可能的第三方集成——一直把它当
+    `converter.UpstreamError` 用。用 `__getattr__` 保住这个名字的可用性，
+    同时把真正的导入推迟到第一次访问时。
+
+    找不到别的名字时抛标准 AttributeError，不要静默返回 None ——
+    那会让 `hasattr` 判断和拼写错误都变成「看起来存在」。
+    """
+    if name == "UpstreamError":
+        value = _upstream_error()
+        # 绑定到模块字典：后续访问走正常属性查找，不再进本函数。
+        globals()["UpstreamError"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class CredentialError(RuntimeError):
+    """Invalid local credentials; fixed messages contain no token values."""
+
+
+#: 平台后端基址。
+#:
+#: **必须定义在 `CredentialManager` 与 `CredentialError` 之后**（这里是文件
+#: 靠前的位置，两者都已经在下面定义完成 —— 见循环导入说明）：
+#: `admin.platform.workbuddy.core.backend` 在导入期就 `from converter import
+#: BACKEND, CredentialError, CredentialManager`，而这条导入链可能由
+#: `import converter` 自身触发（converter → admin 包 → admin.backend → 回来）。
+#: 三个符号谁晚定义，谁就是 ImportError 的现场。
+BACKEND = "https://copilot.tencent.com"
+DEFAULT_DOMAIN = "www.codebuddy.cn"
 
 
 def _stream_timeout() -> httpx.Timeout:
@@ -111,8 +179,7 @@ from anthropic_adapter import (
 # 常量
 # ---------------------------------------------------------------------------
 
-BACKEND = "https://copilot.tencent.com"
-DEFAULT_DOMAIN = "www.codebuddy.cn"
+# BACKEND / DEFAULT_DOMAIN 已提前到文件头部（循环导入需要，见那里的说明）。
 #: 出站 User-Agent：客户端档案中有明确来源时才使用。
 #: 不生成随机 UA，也不把服务器的运行时信息冒充成桌面客户端。
 #: 形状对齐官方桌面端三段式：`WorkBuddy/<客户端版本> WorkBuddy/<版本> CLI/<CLI版本>`。
@@ -220,9 +287,6 @@ def _get_turing_device_token() -> str | None:
     ``None`` and is not used to build outbound model headers.
     """
     return None
-
-class CredentialError(RuntimeError):
-    """Invalid local credentials; fixed messages contain no token values."""
 
 
 class CredentialManager:
@@ -543,13 +607,13 @@ class CredentialManager:
         except Exception as e:
             raise RuntimeError(f"后端请求网络失败 {method} {path}: {e}")
         if r.status_code != 200:
-            raise UpstreamError(f"后端请求失败 {method} {path}", r.status_code, r.text)
+            raise _upstream_error()(f"后端请求失败 {method} {path}", r.status_code, r.text)
         try:
             data = r.json()
         except Exception as e:
-            raise UpstreamError(f"后端返回非 JSON {method} {path}", r.status_code, r.text) from e
+            raise _upstream_error()(f"后端返回非 JSON {method} {path}", r.status_code, r.text) from e
         if not isinstance(data, dict) or data.get("code") != 0:
-            raise UpstreamError(f"后端请求失败 {method} {path}", r.status_code, r.text)
+            raise _upstream_error()(f"后端请求失败 {method} {path}", r.status_code, r.text)
         return data
 
     def _request_backend_soft(self, method: str, path: str, json_body: dict | None = None) -> dict:
@@ -569,7 +633,7 @@ class CredentialManager:
         try:
             return r.json()
         except Exception as e:
-            raise UpstreamError(f"后端返回非 JSON {method} {path}", r.status_code, r.text) from e
+            raise _upstream_error()(f"后端返回非 JSON {method} {path}", r.status_code, r.text) from e
 
     def _enterprise_path_key(self) -> str:
         """返回模型列表 endpoint 里的 enterprise 段：personal 或 enterpriseId。"""

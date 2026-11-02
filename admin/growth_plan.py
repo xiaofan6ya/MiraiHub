@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
-from admin.backend import AccountSession
 from admin.models import Account, SystemSetting
 
 _LEASE_KEY = "growth_plan:lease"
@@ -342,6 +341,14 @@ def run_growth_plan(db, *, budget_seconds=180, progress=None, now=None, lease=No
             state = _read(db, key)
             state["identity"] = identity
             from admin.growth_center import load_snapshot, observe, store_snapshot, record_result, SECTIONS
+            # 延迟导入 `AccountSession`：它所在的 `admin.backend` 是个模块别名，
+            # 而真实现（平台目录下的 core/backend.py）在导入期反向依赖 converter。
+            # 如果这里写模块级 `from admin.backend import AccountSession`，
+            # 那么 scheduler 在导入期装配 runner 时就会把这条链拉起来 ——
+            # 一旦此时 converter 还没装完，别名装配失败又被 scheduler 的
+            # `except` 吞掉，只在 stderr 留一条吓人的 traceback。
+            # 本函数在运行期才被调用，那时所有模块都已就绪，零风险。
+            from admin.backend import AccountSession
             snapshot = load_snapshot(db, account)
             sess = None
             try:
