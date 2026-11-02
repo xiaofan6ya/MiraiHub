@@ -15,7 +15,7 @@
     html.console-authed #login{display:none!important}
   </style>
   <script src="/admin/assets/theme.js?v=20261031-r2"></script>
-  <script src="/admin/assets/filter-combobox.js?v=20261031-r2"></script>
+  <script src="/admin/assets/filter-combobox.js?v=20261102-ui1"></script>
   <!--
     全部静态资源都走本地 /static/vendor/**，不再依赖任何 CDN。
 
@@ -59,13 +59,17 @@
          产品色 #3E6A99(主)/#4C7CAC(次)/#E4EDF6(软填充)/#f2fcfa(软底)；
          中性 #ffffff/#fafafa/#f0f0f0/#f7f8f9(页底)/#0a0a0a(墨)；
          主按钮 #1a1a1a + 白字。深色模式沿用原青绿，见下方暗色块。 */
-      --brand:#3E6A99;            /* 浅色模式主色（雾蓝，见下方说明） */
+      /* 主色：高饱和正蓝（参考 deepseek 品牌蓝 #4D6BFE）。
+       * 原来用 #3E6A99 的雾蓝，饱和度只有 43%，在白底上发灰、显脏；
+       * 换成 #3F63E8（略压一点饱和，避免大面积刺眼）后通透很多。 */
+      --brand:#4176e6;
+      --brand-hover:#5686fe;
       /* rgba() 光晕/阴影用的 RGB 分量 —— 深色模式会换成更亮的一档，
          这样「选中态的光晕」在深底上才不会灰掉。 */
-      --brand-rgb:62,106,153;
+      --brand-rgb:65,118,230;
       --brand-strong:#33587F;     /* hover / 强调，深一档 */
-      --brand-ink:#3E6A99;        /* 主色文字（白底对比度 6.2:1） */
-      --brand-soft:#E4EDF6;
+      --brand-ink:#2f5cbf;        /* 主色文字（白底对比度 6.2:1） */
+      --brand-soft:#c4d3f0;
       --brand-grad:linear-gradient(135deg,#4C7CAC 0%,#3E6A99 100%);
 
       /* 中性面（官方中性 token） */
@@ -155,17 +159,25 @@
         --bg:#141414; --surface:#1f1f1f; --surface-2:#292929; --surface-3:#353535;
         --border:#353535; --border-soft:rgba(255,255,255,.06);
         --fg:#ffffff; --fg-muted:rgba(255,255,255,.62); --fg-subtle:rgba(255,255,255,.40);
-        --brand:#6E9BC9; --brand-strong:#87B0D6; --brand-ink:#9BC0E2;
-  --brand-rgb:110,155,201;
+        /* 深色主题：强调色**不靠浅蓝填充**，靠「深蓝面 + 亮蓝字」分层。
+         * 参考站深色下的蓝面是 #152443 / #172554 这种深藏蓝，
+         * 亮蓝（#93C5FD 级）只用在文字和 1px 描边上 —— 这是它看着干净的关键。
+         * 原来 #6E9BC9 又浅又灰，大面积铺开就像蒙了一层灰。 */
+        /* 深色主题**不挂主题色**：参考站的深色界面是纯中性灰
+         * （#141414 / #1f1f1f / #242424 / #313131 + 白 10% 描边），
+         * 蓝色只出现在极少数图标上。所以这里把 brand 系列压成
+         * 「亮灰白」——强调靠明度对比，不靠色相。 */
+        --brand:#d2d3e0; --brand-strong:#e6e7ef; --brand-ink:#d2d3e0;
+        --brand-rgb:210,211,224;
       /* 深色模式下 brand 更亮，白字对比不足；选中态改用深墨色文字。 */
       --on-brand:#0B1725;
-        --brand-soft:rgba(110,155,201,.16);
+        --brand-soft:rgba(255,255,255,.10);
         --warn:#fb923c; --warn-bar:#f97316; --warn-soft:rgba(249,115,22,.18);
         --danger:#ff6467; --ok:#4ade80;
         --sh-1:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.45);
         --sh-2:0 2px 4px rgba(0,0,0,.45), 0 14px 34px rgba(0,0,0,.5);
         --sh-pop:0 10px 30px rgba(0,0,0,.6);
-        --c1:#6E9BC9; --c2:#59c5bf; --c3:#92b3fb; --c4:#c2a7f4;
+        --c1:#6aadec; --c2:#5cc4b0; --c3:#7FAEFF; --c4:#c48ae0;
         --c5:#ebb761; --c6:#f79494; --c7:#6dbbe8; --c8:#a7c474;
       }
     body{
@@ -867,12 +879,12 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261101-v101" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261102-ui1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
-  <link rel="stylesheet" href="/admin/assets/desktop.css?v=20261026-no-hover-border-1" />
+  <link rel="stylesheet" href="/admin/assets/desktop.css?v=20261102-ui1" />
   <script>if(new URLSearchParams(location.search).get('desktop')==='1') document.documentElement.classList.add('desktop-mode');</script>
 </head>
 <body>
@@ -930,46 +942,14 @@
         <!-- 平台管理：放在**最上面**。它是全局数据上下文的开关，
              每次进来第一件事就是确认「我现在在哪个平台」，所以排在内容型
              面板（账号池/用量/日志）之前。 -->
-        <div class="side-group">
-          <div class="side-group-title">总览</div>
-        <button class="side-item" data-tab="overview"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 4-6"/></svg></span> 概览</button>
-        <button class="side-item" data-tab="sentinel"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 3 6v6c0 5 3.8 9.2 9 10 5.2-.8 9-5 9-10V6z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span> 风控哨兵<span class="side-dot hidden" id="sideSentinelDot">0</span></button>
-        </div>
-        <div class="side-group">
-          <div class="side-group-title">平台</div>
-        <button class="side-item" data-tab="platforms"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span> 平台管理</button>
-        <button class="side-item" data-tab="gateway"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><path d="m5.6 5.6 2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg></span> 平台网关</button>
-        </div>
-        <div class="side-group">
-          <div class="side-group-title">账号</div>
-        <button class="side-item" data-tab="accounts"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3"/></svg> 账号池</button>
-        <button class="side-item" data-tab="credits"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h12M6 22h12M7 2v5l10 10v5M17 2v5L7 17v5"/></svg> 积分到期
-          <span class="side-dot hidden" id="sideExpiringDot">0</span></button>
-        <button class="side-item" data-tab="journal"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></svg></span> 积分流水</button>
-        <button class="side-item" data-tab="growth"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21v-9m0 5C3 18 2 10 3 4c6 0 9 3 9 8m0 5c9 1 10-7 9-13-6 0-9 3-9 8"/></svg> 成长计划</button>
-        </div>
-        <div class="side-group">
-          <div class="side-group-title">调用</div>
-        <button class="side-item" data-tab="usage"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z"/></svg> 使用记录</button>
-        <button class="side-item" data-tab="logs"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg> 用量日志</button>
-        <button class="side-item" data-tab="keys"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-5-5 3-3m-1 5 3-3"/></svg> API Keys</button>
-        <button class="side-item" data-tab="ip"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 22V2"/></svg></span> IP 管理</button>
-        </div>
-        <div class="side-group">
-          <div class="side-group-title">配置</div>
-        <button class="side-item" data-tab="models"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg></span> 模型配置</button>
-        <button class="side-item" data-tab="groups"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 10 5-10 5L2 8Zm-9 10 9 5 9-5M3 18l9 5 9-5"/></svg> 分组管理</button>
-        <button class="side-item" data-tab="agent"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></span> 智能体</button>
-        <button class="side-item" data-tab="schedules"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4v5h5m-5 0a9 9 0 1 1 0 7M12 7v5l3 2"/></svg> 定时任务</button>
-        </div>
-        <div class="side-group">
-          <div class="side-group-title">系统</div>
-        <button class="side-item" data-tab="client"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0m-13 5v-5a5 5 0 0 1 10 0v3m-7 5v-8a2 2 0 0 1 4 0v5m-1 5a12 12 0 0 0 4-4M3 16v-1"/></svg> 客户端参数</button>
-        <button class="side-item" data-tab="sync"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18a5 5 0 1 1 1-10 6 6 0 0 1 11 1 4 4 0 0 1 0 8m-6 4V11m-4 4 4-4 4 4"/></svg> 同步设置</button>
-        <button class="side-item" data-tab="alerts"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span> 预警管理</button>
-        <button class="side-item" data-tab="settings"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-1 3-3 1-2 3 2 2v3l2 2 3-1 2 2 3-1 1-3 3-1 1-3-3-2V7l-3-2-2 1Z"/><circle cx="12" cy="12" r="3"/></svg> 设置</button>
-        <button class="side-item" data-tab="maintenance"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg></span> 更新与备份</button>
-        </div>
+        <button class="side-item" data-tab="overview" data-group-tabs="overview,sentinel" data-group-title="概览"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 4-6"/></svg> 概览</button>
+        <button class="side-item" data-tab="platforms" data-group-tabs="platforms,gateway" data-group-title="平台"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> 平台</button>
+        <button class="side-item" data-tab="accounts" data-group-tabs="accounts,credits,journal,growth" data-group-title="账号"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3"/></svg> 账号</button>
+        <button class="side-item" data-tab="usage" data-group-tabs="usage,logs,keys,ip" data-group-title="调用"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z"/></svg> 调用</button>
+        <button class="side-item" data-tab="models" data-group-tabs="models,groups,schedules" data-group-title="配置"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg> 配置</button>
+        <button class="side-item" data-tab="client" data-group-tabs="client,sync,alerts" data-group-title="接入"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0m-13 5v-5a5 5 0 0 1 10 0v3m-7 5v-8a2 2 0 0 1 4 0v5m-1 5a12 12 0 0 0 4-4M3 16v-1"/></svg> 接入</button>
+        <button class="side-item" data-tab="agent" data-group-tabs="agent" data-group-title="智能体"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg> 智能体</button>
+        <button class="side-item" data-tab="settings" data-group-tabs="settings,maintenance" data-group-title="系统"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-1 3-3 1-2 3 2 2v3l2 2 3-1 2 2 3-1 1-3 3-1 1-3-3-2V7l-3-2-2 1Z"/><circle cx="12" cy="12" r="3"/></svg> 系统</button>
         <!-- 抽屉内的退出入口（移动端顶栏放不下，收进菜单更自然） -->
         <button class="side-item side-item-quit" onclick="logout()"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg></span> 退出登录</button>
         <div class="theme-controls mobile-theme-controls" role="group" aria-label="主题">
@@ -994,13 +974,14 @@
 
     <main class="app-main">
       <header class="desktop-topbar">
-        <div class="topbar-heading pywebview-drag-region"><div class="topbar-breadcrumb">MiraiHub <span>/</span> 工作台</div><h2 id="topbarTitle">平台管理</h2></div>
+        <div class="topbar-heading pywebview-drag-region"><div class="topbar-breadcrumb">MiraiHub <span>/</span> <span id="topbarGroup">平台</span></div><h2 id="topbarTitle" class="sr-only">平台管理</h2></div>
         <div class="topbar-actions">
           <span class="topbar-status"><span></span><span id="topbarMode">服务已连接</span></span>
-          <button type="button" class="topbar-endpoint" onclick="navigator.clipboard.writeText(location.origin+'/v1').then(()=>{this.querySelector('span').textContent='已复制 API 地址';setTimeout(()=>this.querySelector('span').textContent='复制 API 地址',1800)})" data-tooltip="复制当前 API 地址"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9h11v11H9zM4 15H3V3h12v1"/></svg><span>复制 API 地址</span></button>
+          <button type="button" class="topbar-endpoint" onclick="copyApiBase()" data-tooltip="复制当前 API 地址"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9h11v11H9zM4 15H3V3h12v1"/></svg><span>复制 API 地址</span></button>
           <button type="button" class="topbar-update" onclick="WBDesktop.openUpdates()" data-tooltip="版本与更新" aria-label="版本与更新"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button>
         </div>
       </header>
+      <div class="topbar-subnav" id="topbarSubnav" role="tablist" aria-label="页面切换"></div>
       <div class="app-body">
         <section id="overview" class="stat-grid block-gap"></section>
 
@@ -1009,7 +990,7 @@
          刻意做「一屏看完」，而不是几张小卡片点到别处才看到数字。 -->
     <section id="panel-overview" class="hidden">
       <div class="ov-action-bar">
-        <div class="ov-page-title">总览</div>
+        <p class="panel-subtitle">余额、用量、缓存命中与账号状态的总览 —— 都是当前平台口径。</p>
         <div class="ov-action-btns">
           <button type="button" class="console-btn quiet" onclick="loadOverview(true)">
             <span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新
@@ -1124,9 +1105,9 @@
          上游封号常常连坐（一次违规对话可能连带整批账号），
          所以这里不仅要「看」，还要能一键暂停，避免继续送人头。 -->
     <section id="panel-sentinel" class="hidden">
-      <header class="page-head">
+      <header class="page-head page-head--compact">
         <div>
-          <h1>风控哨兵</h1>
+          
           <p>实时监测上游封控信号（403 / 11140 / 4015 等）与每个平台的请求结果。
             同一窗口内多个账号被风控时判定为批次级封控，可立即暂停该平台止损。</p>
         </div>
@@ -1205,9 +1186,9 @@
          哪个平台积分/额度多的、快到期/结束的平台优先，
          然后可以禁用某个网关，这样就不能再用它的模型权益。」 -->
     <section id="panel-gateway" class="hidden">
-      <header class="page-head">
+      <header class="page-head page-head--compact">
         <div>
-          <h1>平台网关</h1>
+          
           <p>配置跨平台调度策略：一个 Key 请求同一个模型时，先交给哪个平台。
             禁用的平台不参与调度，但其账号仍可查看与管理。</p>
         </div>
@@ -1322,12 +1303,16 @@
          区域 + 平台专属动作 + 该平台概览）本身就是一屏内容，混在账号列表
          上方会让「我在看哪个平台」和「我在管哪个账号」两件事互相干扰。 -->
     <section id="panel-platforms" class="hidden">
-      <header class="page-head">
+      <header class="page-head page-head--compact">
         <div>
-          <h1>平台管理</h1>
+          
           <p>在这里切换平台与区域。切换后，账号池 / 使用记录 / 用量日志 / 积分到期
             都只统计该平台。</p>
         </div>
+        <!-- 扫描 / 导入 / 刷新额度这些动作用户是要「对当前平台」发起的，
+             放在页头右上角，与切换区域分开；原来它们漂在卡片网格下面，
+             看着像网格的一部分，5 张卡片时还会多出一行空白。 -->
+        <div id="platformActions" class="platform-actions"></div>
       </header>
       <div id="platformSwitch" class="platform-switch" role="group" aria-label="平台切换">
         <div class="platform-switch-head">
@@ -1337,7 +1322,6 @@
         <div id="platformCards" class="platform-cards" role="tablist"></div>
         <div class="platform-switch-foot">
           <div id="platformRealmTabs" class="platform-realms" role="tablist" hidden></div>
-          <div id="platformActions" class="platform-actions"></div>
         </div>
       </div>
       <!-- 当前平台概览：切过来第一眼要能看到「这个平台有几个号、多少额度」，
@@ -1357,9 +1341,9 @@
 
     <!-- 账号面板 -->
     <section id="panel-accounts">
-      <header class="page-head">
+      <header class="page-head page-head--compact">
         <div>
-          <h1>账号池</h1>
+          
           <p id="accountPoolSubtitle">统一管理账号、可用积分与登录状态。</p>
         </div>
       </header>
@@ -1450,10 +1434,14 @@
       <!-- 对外对接信息：把系统接口 / 模型列表 / baseurl 放出来，方便把 Key 共享给他人 -->
       <div class="card p-4 mb-3 api-share-card">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-semibold text-wb"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg></span> 对外对接信息（共享用）</h3>
+          <button type="button" class="api-share-toggle" onclick="toggleApiShare(this)" aria-expanded="false">
+            <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg></span>
+            对外对接信息（共享用）
+            <span class="api-share-caret" aria-hidden="true">▾</span>
+          </button>
           <button onclick="loadShareInfo()" class="text-xs text-slate-400 hover-brand"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新</button>
         </div>
-        <div class="grid gap-2 text-sm api-share-grid">
+        <div class="grid gap-2 text-sm api-share-grid is-collapsed" id="apiShareGrid">
           <div class="flex items-center gap-2 flex-wrap api-share-row">
             <label id="shareAddressLabel" class="text-slate-400 w-32 shrink-0">连接地址</label>
             <div id="shareAddressWrap" class="share-address-select"></div>
@@ -1511,7 +1499,7 @@
         </div>
       </div>
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2 panel-toolbar">
-        <h2 class="font-semibold">API Keys（对外共享）</h2>
+        <p class="panel-subtitle">对外共享的调用凭证：每个 Key 单独计量、限额与封禁，共享出去不影响后台登录。</p>
         <div class="tools flex flex-wrap gap-2">
           <button onclick="activateTab('credits')" class="console-btn quiet" data-tooltip="账号调度策略"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/></svg></span><span id="keySelectionPolicy">账号调度策略</span></button>
           <button onclick="loadKeys()" class="console-btn quiet" data-tooltip="刷新 Key 和 IP 统计"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新</button>
@@ -1537,10 +1525,9 @@
 
     <section id="panel-ip" class="hidden">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2 panel-toolbar">
-        <h2 class="font-semibold">IP 管理</h2>
+        <p class="panel-subtitle">封禁后，该 IP 的全部 /v1 与 /gw 请求直接返回 403「该 IP 已被封禁」，在鉴权和转发上游之前拦截。</p>
         <button type="button" onclick="WBIP.load()" class="console-btn quiet"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新</button>
       </div>
-      <p class="text-xs text-slate-400 mb-3">封禁后，该 IP 的全部 /v1 与 /gw 请求直接返回 403「该 IP 已被封禁」，在鉴权和转发上游之前拦截。</p>
       <form id="ipBlockForm" class="card p-4 flex flex-wrap gap-3 items-end mb-4" onsubmit="event.preventDefault();WBIP.add()">
         <label class="flex flex-col gap-1 text-sm">IP 地址<input id="ipBlockAddress" required maxlength="64" placeholder="IPv4 或 IPv6" class="border rounded-lg px-3 py-2" /></label>
         <label class="flex flex-col gap-1 text-sm flex-1">备注<input id="ipBlockNote" maxlength="255" placeholder="例如：异常刷请求" class="border rounded-lg px-3 py-2" /></label>
@@ -1732,14 +1719,13 @@
     <!-- 使用记录面板 -->
     <section id="panel-usage" class="hidden">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2 panel-toolbar">
-        <h2 class="font-semibold">使用记录</h2>
+        <p class="panel-subtitle">统计平台全部 Key 的用量：请求数、Token、积分与平均耗时。数据来自本地 usage_logs，随请求实时累计。</p>
         <div class="flex flex-wrap gap-2 tools items-center">
           <div class="w-32" id="usageDaysSel"></div>
           <div class="w-28" id="usageGrainSel"></div>
           <button onclick="loadUsageStats()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span> 刷新</button>
         </div>
       </div>
-      <p class="text-xs text-slate-400 mb-3">统计平台全部 Key 的用量：请求数、Token、积分与平均耗时。数据来自本地 usage_logs，随请求实时累计。</p>
 
       <!-- 筛选：按 平台 / Key / 模型 / 端点。筛选后所有图与卡片同步变化。
            平台放第一位：它是「这张图是全平台合计，还是只看某一家」的开关。
@@ -1827,10 +1813,9 @@
 
     <section id="panel-schedules" class="hidden">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
-        <h2 class="font-semibold">定时任务</h2>
+        <p class="panel-subtitle">定时统计积分、同步模型、各平台签到与保活。调度线程随服务启动运行，到点自动执行并回填结果。列表按平台分组，不随顶部平台切换隐藏。</p>
         <button onclick="openAddSchedule()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> 新建任务</button>
       </div>
-      <p class="text-xs text-slate-400 mb-3">定时统计积分、同步模型、各平台签到与保活。调度线程随服务启动运行，到点自动执行并回填结果。列表按平台分组，不随顶部平台切换隐藏。</p>
       <div class="card overflow-hidden">
         <div class="overflow-x-auto">
           <table class="tbl min-w-lg">
@@ -1849,8 +1834,7 @@
     <section id="panel-logs" class="hidden">
       <div class="page-head">
         <div>
-          <h1>用量日志</h1>
-          <p>筛选条件下方是**请求动态**（实时刷新，正在发生的请求）；再往下是按账号汇总与落库记录表格，可筛选、导出。</p>
+          <p>筛选条件下方是请求动态（实时刷新，正在发生的请求）；再往下是按账号汇总与落库记录表格，可筛选、导出。</p>
         </div>
         <div id="logActions" class="flex flex-wrap gap-2">
           <button onclick="exportLogs()" class="px-3 py-1.5 rounded-lg border text-sm" data-tooltip="导出当前筛选结果为 CSV"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></svg></span> 导出</button>
@@ -1862,12 +1846,11 @@
       <!-- 按账号查询区：这是「使用记录再新增按账号查询」的入口 -->
       <div class="card p-3 mb-4">
         <div class="flex flex-wrap gap-3 items-center">
-          <label class="model-switch"><input id="logCaptureEnabled" type="checkbox" role="switch" disabled onchange="WBUsage.setCapture(this.checked)"><span aria-hidden="true"></span>记录请求详情（内存缓存）</label>
+          <label class="model-switch" data-tooltip="记录请求详情" data-tooltip-description="开启后记录新请求的入站正文和各次发往上游的实际正文，仅供管理员审核。凭据脱敏，正文可能含完整对话；不写数据库。关闭停止新记录，已有缓存可手动清空。"><input id="logCaptureEnabled" type="checkbox" role="switch" disabled onchange="WBUsage.setCapture(this.checked)"><span aria-hidden="true"></span>记录请求详情（内存缓存）</label>
           <button type="button" class="console-btn quiet" onclick="WBUsage.captureStatus()">刷新状态</button>
           <button type="button" class="console-btn quiet" onclick="WBUsage.clearCache()">清空详情缓存</button>
+          <p id="logCaptureHint" class="text-xs m-0" style="color:var(--fg-muted)">读取开关状态…</p>
         </div>
-        <p id="logCaptureHint" class="text-xs mt-2" style="color:var(--fg-muted)">读取开关状态…</p>
-        <p class="text-xs mt-1" style="color:var(--fg-muted)">开启后记录新请求的入站正文和各次发往上游的实际正文，仅供管理员审核。凭据脱敏，正文可能含完整对话；不写数据库。关闭停止新记录，已有缓存可手动清空。</p>
       </div>
       <div class="card p-3 mb-4">
         <div class="flex flex-wrap gap-2 items-end">
@@ -1966,7 +1949,7 @@
     <!-- 客户端参数面板：UA / 版本号 / 风控头 / 桌面指纹 -->
     <section id="panel-client" class="hidden">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
-        <h2 class="font-semibold">客户端参数（UA / 版本号 / 风控头）</h2>
+        <p class="panel-subtitle">UA、版本号与风控头按平台分别保存，改完保存即生效，不需要重启服务。</p>
         <div class="flex flex-wrap gap-2">
           <button onclick="detectClient()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" data-tooltip="扫描本机安装的 WorkBuddy，读取真实的版本号与风控配置"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></span> 探测本机客户端</button>
           <button onclick="toggleClientSource()" id="clientSourceBtn" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" data-tooltip="切换取值策略"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span> 取值策略</button>
@@ -1981,22 +1964,34 @@
 
       <!-- 平台切换：客户端参数按平台分开（各平台探测方式不同） -->
       <div id="clientPlatformBar" class="card p-3 mb-3 flex flex-wrap items-center gap-2"></div>
-      <!-- 扫描位置：各平台自己的目录 / 凭据 / 上游地址 -->
-      <div class="card p-5 mb-3">
-        <div class="flex flex-wrap justify-between items-center gap-2 mb-2">
+      <!-- 扫描位置：各平台自己的目录 / 凭据 / 上游地址。
+           默认折叠：这是排障用的只读信息（5 条长路径），却原来占着首屏
+           266px，把真正要编辑的参数表挤到 1000px 以下。 -->
+      <details class="card p-5 mb-3 diag-card" id="clientProbeCard">
+        <summary class="diag-summary">
           <h3 class="font-semibold text-sm">扫描位置</h3>
-          <button onclick="detectClient()" class="console-btn quiet">重新探测</button>
+          <span class="diag-tip">探测到的目录与凭据位置</span>
+          <span class="diag-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="diag-body">
+          <div class="flex flex-wrap justify-between items-center gap-2 mb-2">
+            <span class="text-[11px] text-slate-400">这些目录里没有凭据文件不代表未登录，仅表示未在本机落盘。</span>
+            <button onclick="detectClient()" class="console-btn quiet">重新探测</button>
+          </div>
+          <div id="clientProbeBody" class="text-xs text-slate-500"></div>
         </div>
-        <div id="clientProbeBody" class="text-xs text-slate-500"></div>
-      </div>
+      </details>
 
-      <div class="card p-5 mb-3">
-        <div class="flex flex-wrap justify-between items-center gap-2 mb-2">
+      <details class="card p-5 mb-3 diag-card">
+        <summary class="diag-summary">
           <h3 class="font-semibold text-sm">运行时诊断</h3>
-          <span class="text-[11px] text-slate-400">只显示能力状态与头名称，不显示令牌或设备标识</span>
+          <span class="diag-tip">能力状态与请求头名称（不含令牌）</span>
+          <span class="diag-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="diag-body">
+          <div id="clientRuntimeDiagnostics" class="text-xs text-slate-500"></div>
         </div>
-        <div id="clientRuntimeDiagnostics" class="text-xs text-slate-500"></div>
-      </div>
+      </details>
 
       <div class="card p-5 mb-3">
         <h3 class="font-semibold text-sm mb-2">生效中的 User-Agent</h3>
@@ -2024,10 +2019,16 @@
         <div id="clientHeaders"></div>
       </div>
 
-      <div class="card p-5 mb-3">
-        <h3 class="font-semibold text-sm mb-2">取值来源（排障用）</h3>
-        <div id="clientSources" class="text-xs font-mono text-slate-500 max-h-64 overflow-auto"></div>
-      </div>
+      <details class="card p-5 mb-3 diag-card">
+        <summary class="diag-summary">
+          <h3 class="font-semibold text-sm">取值来源</h3>
+          <span class="diag-tip">每个参数来自现场探测还是存档（排障用）</span>
+          <span class="diag-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="diag-body">
+          <div id="clientSources" class="text-xs font-mono text-slate-500 max-h-64 overflow-auto"></div>
+        </div>
+      </details>
 
       <div id="clientStatus" class="text-sm text-slate-500 mt-4"></div>
     </section>
@@ -2059,7 +2060,6 @@
     <section id="panel-credits" class="hidden">
       <div class="page-head">
         <div>
-          <h1>积分到期</h1>
           <p>按到期时间展示账号风险。实际新会话由下方调度策略分配；平台按 7 天判定「快到期」，这部分额度不用完就会作废。</p>
         </div>
         <div class="flex flex-wrap gap-2">
@@ -2170,7 +2170,7 @@
     </section>
 
     <section id="panel-journal" class="hidden">
-      <div class="page-head"><div><h1>积分流水</h1><p>查看奖励与余额变动，追溯每一笔积分。</p></div></div>
+      <div class="page-head"><div><p>查看奖励与余额变动，追溯每一笔积分。</p></div></div>
       <div class="card journal-card">
         <div class="journal-filters">
           <div class="journal-field"><span id="journalAccountLabel">账号</span><select id="journalAccount" aria-label="账号"><option value="">全部账号</option></select></div>
@@ -2186,16 +2186,16 @@
       </div>
     </section>
     <section id="panel-maintenance" class="hidden">
-      <div class="page-head"><div><h1>更新与备份</h1><p>检查正式版本、备份数据库，并按部署方式执行升级。</p></div><button class="console-btn" onclick="WBReview.loadUpdate()">检查更新</button></div>
+      <div class="page-head"><div><p>检查正式版本、备份数据库，并按部署方式执行升级。</p></div><button class="console-btn" onclick="WBReview.loadUpdate()">检查更新</button></div>
       <div id="maintenanceInfo" aria-live="polite">点击检查更新获取版本信息。</div>
     </section>
     <!-- 预警管理：把哨兵的封控信号推到邮件 / 飞书 / QQ 机器人。
          哨兵负责「发现」，这里负责「叫醒人」—— 没有这一步，连坐封号
          只会在面板里静静躺着，等有人偶然打开控制台才被发现。 -->
     <section id="panel-alerts" class="hidden">
-      <header class="page-head">
+      <header class="page-head page-head--compact">
         <div>
-          <h1>预警管理</h1>
+          
           <p>风控哨兵判定批次封控时，通过下列渠道通知管理员。同一平台的同一业务码
             10 分钟内只通知一次，避免连坐时被刷屏。</p>
         </div>
@@ -2371,7 +2371,7 @@
        style="background:var(--surface); box-shadow:var(--sh-pop); border:1px solid var(--border)"></div>
 </div>
 
-<div id="toasts" class="toast flex flex-col gap-2"></div>
+<div id="toasts" class="toast"></div>
 
   <!-- 全局确认框：替换原生 confirm，样式与主题一致 -->
   <div id="confirmMask">
@@ -2530,6 +2530,39 @@ function uiSelectSet(id, value, notify = true) {
 }
 const $ = (s) => document.querySelector(s);
 const TOKEN_KEY = "wb_admin_token";
+/* 用量日志 SSE 句柄。
+ *
+ * **必须在这里声明**：`activateTab()` 在模块顶层（首屏）就会调用，
+ * 而它会经 stopLogActivity → stopLogUsageStream 访问这两个变量。
+ * 之前把它们声明在 12000 行之后，导致首屏执行到那时抛
+ * 「Cannot access '_logUsageReconnect' before initialization」，
+ * 整个控制台主脚本从那一行起全部失效（页面看起来"点了没反应"）。
+ */
+let _modelBusyTimer = null;
+let _modelBusy = {};
+let _modelHealthLoading = null;
+let _modelBatchBusy = false;
+let _sentinelTimer = null;
+let _actionTipTimer = null;
+let _actionTipHideTimer = null;
+let _accountResourceTimer = null;
+let _jobTimer = null;
+let _unpackTimer = null;
+let _appSource = null;
+let _schedulePollTimer = null;
+let _chartTipTimer = null;
+let _modalCloseTimer = null;
+let _logUsageSource = null;
+let _logUsageReconnect = null;
+let _logUsagePollTimer = null;
+let _logLiveSource = null;
+let _logLiveRows = new Map();
+
+
+
+
+
+
 let TOKEN = localStorage.getItem(TOKEN_KEY) || "";
 // 桌面托盘的「在浏览器中打开」会带一次性 JWT（?token=）：普通浏览器没有 pywebview 桥，
 // ?desktop=1 的免密通道走不通。取到即存 localStorage 并清掉参数，避免 token 留在地址栏/历史里。
@@ -2649,6 +2682,9 @@ function _loadEnd() {
   if (_apiBarTimer) { clearTimeout(_apiBarTimer); _apiBarTimer = null; }
   const bar = document.getElementById("globalLoadBar");
   if (bar) bar.classList.remove("on");
+  // 这一屏的数据都回来了：把面板骨架屏收掉（内容早就在它下面布局好了，
+  // 淡出时不会位移，所以不会有「抽搐」）。
+  try { _panelSkeletonFlush(); } catch (e) { /* 骨架只是装饰，不能影响请求 */ }
 }
 
 async function _apiRaw(path, opts = {}) {
@@ -2856,15 +2892,119 @@ async function safeJson(r) {
   try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
   catch (e) { return { ok: false, status: r.status, data: { detail: t || ("HTTP " + r.status), _parse_error: true } }; }
 }
-function toast(msg, type = "ok") {
-  const c = type === "ok" ? "bg-emerald-600" : "bg-red-600";
-  const el = document.createElement("div");
-  el.className = `text-white text-sm px-4 py-2 rounded-lg shadow ${c} fade-in`;
-  el.textContent = msg;
-  $("#toasts").appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+/* ============================================================================
+   按钮防呆：点下去立刻转圈 + 禁用，防重复提交
+   ----------------------------------------------------------------------------
+   参考站（workbuddy.cn）每个交互按钮都有这层：点下去图标立刻变成转圈，
+   按钮同时 disabled —— 用户马上知道「收到了」，也不会连点造成重复请求。
+
+   为什么不能只靠 `btn.disabled = true`：禁用态只是变灰，看不出在干什么；
+   而「保存/导入/同步」这类操作常常要等 1~3 秒，没有转圈就会以为按钮没反应，
+   于是再点一次 —— 那才是真正制造重复数据的来源。
+
+   用法：
+       await wbBusy(btn, () => api(...))          // 自动转圈 / 恢复
+       wbBusyStart(btn); ...; wbBusyDone(btn)     // 手动控制
+   ========================================================================== */
+const _WB_BUSY_SPIN = '<span class="wb-busy-spin"><svg viewBox="0 0 24 24" aria-hidden="true">'
+  + '<circle cx="12" cy="12" r="9" stroke-width="2.4" stroke-linecap="round" '
+  + 'fill="none" stroke="currentColor" stroke-dasharray="42 14"/></svg></span>';
+
+function wbBusyStart(btn) {
+  if (!btn || btn.dataset.wbBusy === "1") return false;
+  btn.dataset.wbBusy = "1";
+  btn.dataset.wbPrevHtml = btn.innerHTML;
+  btn.dataset.wbPrevDisabled = btn.disabled ? "1" : "0";
+  btn.disabled = true;
+  btn.classList.add("is-busy");
+  // 文本前插一个转圈；原本的图标保留，视觉上是「图标 + 转圈 + 文字」
+  btn.insertAdjacentHTML("afterbegin", _WB_BUSY_SPIN);
+  return true;
 }
-let _modalCloseTimer = null;
+
+function wbBusyDone(btn, html) {
+  if (!btn || btn.dataset.wbBusy !== "1") return;
+  btn.dataset.wbBusy = "0";
+  btn.classList.remove("is-busy");
+  const prev = html != null ? html : (btn.dataset.wbPrevHtml || "");
+  btn.innerHTML = prev;
+  btn.disabled = btn.dataset.wbPrevDisabled === "1";
+  delete btn.dataset.wbPrevHtml;
+  delete btn.dataset.wbPrevDisabled;
+}
+
+/** 包一层异步任务：自动转圈/恢复，异常时恢复原样并把错误抛出去。 */
+async function wbBusy(btn, task) {
+  if (!wbBusyStart(btn)) return undefined;   // 已在忙碌中，忽略重复点击
+  try {
+    return await task();
+  } finally {
+    wbBusyDone(btn);
+  }
+}
+
+/* 兜底：任何带 `data-busy` 的按钮在表单提交时自动转圈（不改业务代码）。 */
+document.addEventListener("click", event => {
+  const btn = event.target.closest && event.target.closest("button[data-busy]");
+  if (!btn || btn.disabled) return;
+  // 200ms 没结束就点亮，避免瞬时操作闪一下
+  setTimeout(() => {
+    if (document.body.contains(btn) && btn.dataset.wbBusy !== "1") {
+      wbBusyStart(btn);
+      setTimeout(() => wbBusyDone(btn), 6000);  // 安全阀，防卡死
+    }
+  }, 200);
+}, true);
+
+/* 右下角提示（复刻 workbuddy.cn 的 toast 规格）
+ *
+ * 参考站实测规则：
+ *   position:fixed; left:50%; translate(-50%)   → 居中偏上，不是右下角
+ *   min-height:48px; padding:13px 16px; radius:12px
+ *   图标 18×18，按状态着色：成功 #40C8AE / 失败 #FF5263 / 信息 #3B82F6
+ *   进场 _slideIn .3s（translateY(-10px) 渐入），离开 opacity .3s ease-in
+ *
+ * 为什么要图标：纯文字条在扫视时很难一眼区分成功/失败，图标是状态的第一
+ * 视觉锚点；参考站连「关闭按钮」都给了，说明它把 toast 当正经消息而非闪现。
+ * 位置从右下角改到顶部居中，是因为右下角长期被浏览器/系统通知占用，
+ * 而且我们的操作按钮多在右上，提示在顶部跟视线落点更近。
+ */
+const TOAST_ICONS = {
+  ok: '<path d="M20 6 9 17l-5-5"/>',
+  err: '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+  warn: '<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+};
+
+function toast(msg, type = "ok") {
+  const kind = type === "err" || type === "error" ? "err"
+             : type === "warn" ? "warn"
+             : type === "info" ? "info" : "ok";
+  const host = $("#toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = `wb-toast wb-toast--${kind}`;
+  el.setAttribute("role", kind === "err" ? "alert" : "status");
+  el.innerHTML = `<span class="wb-toast-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${
+    TOAST_ICONS[kind] || TOAST_ICONS.ok}</svg></span>
+    <span class="wb-toast-msg"></span>
+    <button type="button" class="wb-toast-close" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>`;
+  el.querySelector(".wb-toast-msg").textContent = msg;
+  const dismiss = () => {
+    if (el.dataset.leaving) return;
+    el.dataset.leaving = "1";
+    el.classList.add("is-leaving");
+    setTimeout(() => el.remove(), 300);   // 与 .3s 淡出对齐
+  };
+  el.querySelector(".wb-toast-close").addEventListener("click", dismiss);
+  host.appendChild(el);
+  // 首次出现才挂上间距（避免空容器撑高度）
+  host.classList.add("has-toast");
+  setTimeout(dismiss, kind === "err" ? 4200 : 3000);
+}
+
 function openModal(html, widthClass) {
   if (_modalCloseTimer) { clearTimeout(_modalCloseTimer); _modalCloseTimer = null; }
   $("#modal").classList.remove("closing");
@@ -2906,46 +3046,66 @@ function closeModal() {
 async function copyRawText(text) {
   const value = String(text ?? "");
   if (!value) return false;
+  const ok = await writeClipboard(value);
+  toast(ok ? ("已复制 " + value) : "复制失败，请手动选中", ok ? "ok" : "err");
+  return ok;
+}
+
+/**
+ * 写剪贴板：先走 Clipboard API，失败立刻回落 execCommand。
+ *
+ * 为什么必须双路径：`navigator.clipboard` 只在**安全上下文**可用
+ * （https 或 localhost）。桌面壳 / 安卓 WebView / 反代到内网 IP 时，
+ * `writeText` 会直接 reject（`Write permission denied` / `NotAllowedError`）
+ * 或者根本不存在 —— 只调一次而不兜底，用户看到「已复制」的提示，
+ * 剪贴板里却什么都没有，还会以为是自己粘贴姿势不对。
+ *
+ * 不弹 toast：这一层只负责「成功没有」，提示文案由调用方决定
+ * （有的要显示具体值，有的只要一句「已复制 API 地址」）。
+ */
+async function writeClipboard(value) {
+  const text = String(value ?? "");
+  if (!text) return false;
   try {
     if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(value);
-      toast("已复制 " + value, "ok");
+      await navigator.clipboard.writeText(text);
       return true;
     }
   } catch (_) { /* 落到 execCommand */ }
   const previous = document.activeElement;
   const field = document.createElement("textarea");
-  field.value = value;
+  field.value = text;
   field.readOnly = true;
+  // 1px + opacity:0 而不是 display:none —— 后者无法获得选区。
   field.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
   document.body.append(field);
   field.select();
-  field.setSelectionRange(0, value.length);
+  field.setSelectionRange(0, text.length);
   let ok = false;
   try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
   field.remove();
   previous?.focus?.({ preventScroll: true });
-  toast(ok ? ("已复制 " + value) : "复制失败，请手动选中", ok ? "ok" : "err");
+  return ok;
+}
+
+/**
+ * 复制「当前 API 地址」—— 顶栏与概览卡两处共用。
+ *
+ * 原来这两处都写成内联 `navigator.clipboard.writeText(...).then(...)`：
+ * 没有 catch，非安全上下文下连 .then 都不会执行，按钮文字永远不变，
+ * 用户只会觉得「点了没反应」。
+ */
+async function copyApiBase() {
+  const ok = await writeClipboard(location.origin + "/v1");
+  toast(ok ? "已复制 API 地址" : "复制失败，请手动选中地址", ok ? "ok" : "err");
   return ok;
 }
 
 async function copyText(sel){
   const source = $(sel); if(!source) return;
   const text = source.value ?? source.textContent ?? '';
-  try {
-    if (!navigator.clipboard) throw new Error('Clipboard unavailable');
-    await navigator.clipboard.writeText(text);
-    toast('已复制'); return;
-  } catch (_) {}
-  const previous = document.activeElement;
-  const field = document.createElement('textarea');
-  field.value = text; field.readOnly = true;
-  field.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
-  document.body.append(field); field.select(); field.setSelectionRange(0, text.length);
-  let copied = false;
-  try { copied = document.execCommand('copy'); } catch (_) {}
-  finally { field.remove(); previous?.focus?.({preventScroll:true}); }
-  toast(copied ? '已复制' : '复制失败，请选中文字复制', copied ? 'ok' : 'err');
+  const ok = await writeClipboard(text);
+  toast(ok ? '已复制' : '复制失败，请选中文字复制', ok ? 'ok' : 'err');
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -3041,7 +3201,24 @@ function enterApp() {
   loadAccounts(); loadKeys(); loadModels(); loadSchedules(); loadSyncConfig(); loadShareInfo();
   // 还原地址栏里的面板（刷新后停在原页面，而不是跳回「账号」首页）。
   // updateUrl:false —— 地址栏本来就是这个值，不必再写一次。
-  activateTab(_tabFromUrl(), { updateUrl: false });
+  //
+  // **必须延后一拍**：本函数在脚本顶层就被调用，而 activateTab 会触发
+  // 各面板的初始化（openLogsPanel / scheduleModelBusy / stopLogLive …），
+  // 它们要读大量声明在文件后半段的模块级状态（`_logFolded` / `_logPage` /
+  // `_modelBusyTimer` …）。脚本还没执行到那些 `let` 时就读，会抛
+  // 「Cannot access before initialization」——**整个控制台脚本从那一处起失效**，
+  // 表现为「页面出来了但点什么都没反应」。
+  //
+  // 用 setTimeout(0) 把激活推迟到当前脚本执行完之后，那时所有 let 都已就位。
+  // 不改成 DOMContentLoaded 是因为 enterApp 也可能在登录后异步调用，
+  // 那时 DOM 早就 ready 了，再等事件会永远不触发。
+  setTimeout(() => {
+    try {
+      activateTab(_tabFromUrl(), { updateUrl: false });
+    } catch (e) {
+      console.error("首屏面板激活失败", e);
+    }
+  }, 0);
 }
 
 // Tabs
@@ -3108,6 +3285,96 @@ let _activeTab = TAB_DEFAULT;
  * 用 `replaceState` 而不是 `pushState`：切面板不该在历史栈里堆一长串，
  * 浏览器「后退」应当离开本页，而不是在面板之间来回跳。
  */
+/* ============================================================================
+   侧栏 8 组 + 顶部子标签
+   ----------------------------------------------------------------------------
+   问题（issue #4）：6 个分组下 21 个入口，900px 高屏幕只显示一半，要滚动；
+   而且每页还有自己的大标题，页面名重复出现三次，第一屏被吃掉一截。
+
+   做法：侧栏只留 8 个组入口，组内页面用**顶部子标签**切换 —— 不用滚动，
+   一屏装得下。`data-tab` / `activateTab()` 语义完全不变，深链照旧可用。
+   ========================================================================== */
+/** 从侧栏 DOM 读出分组结构：[{title, tabs[], firstTab}] */
+function _navGroups() {
+  const out = [];
+  document.querySelectorAll('#sideNav .side-item[data-group-tabs]').forEach(el => {
+    const tabs = String(el.dataset.groupTabs || '').split(',').map(t => t.trim())
+      .filter(Boolean);
+    out.push({ title: el.dataset.groupTitle || '', tabs,
+               firstTab: el.dataset.tab || tabs[0] || '' });
+  });
+  return out;
+}
+
+/** 当前 tab 属于哪个组 */
+function _groupOfTab(name) {
+  const groups = _navGroups();
+  for (const g of groups) {
+    if (g.tabs.includes(name)) return g;
+  }
+  return groups[0] || { title: '', tabs: [name], firstTab: name };
+}
+
+/** tab -> 中文名（从页面标题取，避免再维护一份映射） */
+function _tabLabel(name) {
+  const side = document.querySelector(`#sideNav .side-item[data-tab="${name}"]`);
+  if (side) return (side.textContent || '').trim();
+  // 组内非首项：从子标签按钮自身取（渲染时带 data-label）
+  const btn = document.querySelector(`#topbarSubnav [data-subtab="${name}"]`);
+  if (btn) return (btn.textContent || '').trim();
+  return name;
+}
+
+const _SUB_TAB_LABELS = {
+  overview: '概览', sentinel: '风控哨兵',
+  platforms: '平台管理', gateway: '平台网关',
+  accounts: '账号池', credits: '积分到期', journal: '积分流水', growth: '成长计划',
+  usage: '使用记录', logs: '用量日志', keys: 'API Keys', ip: 'IP 管理',
+  models: '模型配置', groups: '分组管理', schedules: '定时任务',
+  client: '客户端参数', sync: '同步设置', alerts: '预警管理',
+  agent: '智能体',
+  settings: '设置', maintenance: '更新与备份',
+};
+
+/** 渲染顶部子标签 + 面包屑 + 侧栏高亮 */
+function _renderNavForTab(name) {
+  const group = _groupOfTab(name);
+  // 侧栏：整组高亮（点组内任一页，该组都算当前）
+  document.querySelectorAll('#sideNav .side-item').forEach(el => {
+    const tabs = String(el.dataset.groupTabs || '').split(',').map(t => t.trim());
+    el.classList.toggle('active', tabs.includes(name));
+  });
+  // 面包屑：组名 / 页面名
+  const bg = document.getElementById('topbarGroup');
+  if (bg) bg.textContent = group.title || '';
+  // 子标签
+  // 子标签：这一行就是「当前页面名」的唯一表达（顶栏 h2 只留给读屏软件）。
+  // 单页组也渲染成静态标签，而不是整行隐藏 —— 否则「智能体」页会比其他页
+  // 高出一行，来回切换时正文整体上下跳。
+  const bar = document.getElementById('topbarSubnav');
+  if (bar) {
+    const single = group.tabs.length <= 1;
+    bar.classList.toggle('is-single', single);
+    bar.innerHTML = group.tabs.map(tab => {
+      const label = _SUB_TAB_LABELS[tab] || tab;
+      const on = tab === name;
+      if (single) {
+        return `<span class="subnav-item is-static" role="tab" aria-selected="true"
+          data-subtab="${tab}">${label}</span>`;
+      }
+      return `<button type="button" role="tab" data-subtab="${tab}"
+        aria-selected="${on ? 'true' : 'false'}"
+        class="subnav-item${on ? ' active' : ''}">${label}</button>`;
+    }).join('');
+    bar.querySelectorAll('button[data-subtab]').forEach(btn => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.subtab));
+    });
+  }
+  // 手机抽屉里"当前页"文字
+  const cur = document.getElementById('sideCurrent');
+  if (cur) cur.textContent = _SUB_TAB_LABELS[name] || name;
+}
+
 function activateTab(name, opts) {
   if (!TABS.includes(name)) name = TAB_DEFAULT;
   _activeTab = name;
@@ -3121,13 +3388,22 @@ function activateTab(name, opts) {
   });
   TABS.forEach(t => { const el = $(`#panel-${t}`); if (el) el.classList.toggle("hidden", t !== name); });
 
+  // 先铺骨架屏，再触发这一屏的请求（请求在下面按面板分发）。
+  // 顺序很重要：骨架必须在 `loadXxx()` **之前**进 DOM，否则第一帧还是空白。
+  if (!opts || opts.skeleton !== false) panelSkeletonShow(name);
+
   // 移动端顶栏的「当前面板名」：抽屉收起时用户也得知道自己停在哪。
   // 用 data-label / 首个文本节点，而**不是** textContent —— 后者会把
   // 「积分到期」旁边的角标数字一起读进去（实测变成 "积分到期 3"）。
+  // 侧栏组高亮 / 子标签 / 面包屑由统一函数处理（见 _renderNavForTab）
+  try { _renderNavForTab(name); } catch (e) { /* 导航渲染失败不影响页面 */ }
   const cur = $("#sideCurrent");
   if (cur) cur.textContent = _sideTabLabel(name);
   const topTitle = $("#topbarTitle");
-  if (topTitle) topTitle.textContent = _sideTabLabel(name);
+  // 页面标题用**页面名**，不是侧栏组名。
+  // 侧栏改成 8 组之后 `_sideTabLabel()` 读到的是「账号」这种组名，
+  // 直接用它会让顶栏标题变成组名（切到积分流水也显示「账号」）。
+  if (topTitle) topTitle.textContent = _SUB_TAB_LABELS[name] || _sideTabLabel(name);
 
   if (!opts || opts.updateUrl !== false) {
     try {
@@ -3388,6 +3664,267 @@ function _ovSetLoading(on) {
   });
 }
 
+/* ============================================================================
+   面板骨架屏（从真实 DOM 克隆）
+   ----------------------------------------------------------------------------
+   第一版是「一套手写模板贴到所有面板」，问题是**结构对不上**：
+   账号池是「工具条 + 4 张统计卡 + 一张大表」，日志是「筛选条 + 实时卡片 +
+   汇总表 + 明细表」，模型页是网格卡片……用同一套 4 卡 + 6 行去凑，
+   有的面板骨架比真实内容矮、有的高，数据灌进来时照样撑开 —— 抽的根源没解决。
+
+   现在是**预渲染**：把面板现有的静态外壳（卡片、工具条、表头、列宽）
+   整棵克隆一份，再把每个文字节点按它自己的实测尺寸替换成灰条。
+   因为克隆体用的是同一批 class，在同一个父容器里布局，所以
+   列宽、卡片宽度、行高、内边距全部与真实页面**逐像素一致**。
+
+   为什么这条能消掉「被数字撑开」：
+   真实数字（如 1,159,592）比占位符「—」宽得多，直接渲染会把卡片撑开
+   1~2px、整行重排。骨架用的是**实测宽度**的灰条，且数据到达前下层内容
+   是 visibility:hidden（仍占位），所以从骨架切到真实内容时盒子尺寸不变。
+   ========================================================================== */
+const _panelSkelTimers = new Map();
+//: 已进入过的面板。二次进入不再铺骨架 —— 那时用户已经看过内容，
+//: 再盖一层等于「每次切 tab 都闪一下」，比没有更烦。
+const _panelSeen = new Set();
+//: 每个面板骨架屏「亮起来的时刻」，用来保证最短显示时长。
+const _panelSkelAt = new Map();
+//: 骨架屏最短显示 240ms。
+//:
+//: 本地/局域网请求常常 30~60ms 就回来，骨架刚贴上去就被收 —— 视觉上是
+//: **一道白闪**，比不做骨架还难受。宁可让它多待 200ms（用户看到的是
+//: 「稳定地加载了一下」），也不要闪一下消失。
+const PANEL_SKELETON_MIN_MS = 240;
+
+/** 造一根灰条。尺寸来自真实元素的实测值，所以不会把盒子撑变形。 */
+function _psBar(width, height) {
+  const bar = document.createElement("span");
+  bar.className = "ps-bar";
+  bar.style.width = Math.max(8, Math.round(width)) + "px";
+  bar.style.height = Math.max(7, Math.round(height)) + "px";
+  return bar;
+}
+
+/** 把克隆体里的文字换成灰条（宽度按元素自身实测）。 */
+function _psBlankTextNodes(root) {
+  const nodes = root.querySelectorAll("*");
+  for (const el of nodes) {
+    if (el.classList.contains("ps-bar")) continue;
+    if (el.closest(".panel-skeleton") !== root && el !== root) continue;
+    // 只处理「叶子」：没有元素子节点、但有文字
+    if (el.children.length) continue;
+    const text = (el.textContent || "").trim();
+    if (!text) continue;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;      // 隐藏元素不处理
+    // 大数字（KPI）保留更高的灰条，视觉上才像「数字位」
+    const isBig = /stat-value|ov-big|kpi-value|num/.test(el.className || "");
+    const h = isBig ? Math.min(Math.max(rect.height * 0.62, 14), 34)
+                    : Math.min(Math.max(rect.height * 0.55, 8), 15);
+    el.textContent = "";
+    el.appendChild(_psBar(Math.min(rect.width, isBig ? rect.width * 0.86 : rect.width), h));
+  }
+}
+
+/** 表格体是空的（首开时还没数据）：按表头列宽合成几行占位。 */
+function _psFillEmptyTables(root) {
+  const tables = root.querySelectorAll("table");
+  for (const table of tables) {
+    const head = table.querySelector("thead");
+    const body = table.querySelector("tbody");
+    if (!head || !body) continue;
+    if (body.querySelector("tr")) continue;          // 已有行就不动
+    const heads = [...head.querySelectorAll("th")];
+    if (!heads.length) continue;
+    const widths = heads.map(th => {
+      const r = th.getBoundingClientRect();
+      return r.width || 0;
+    });
+    const rows = Math.min(8, Math.max(4, Math.round(340 / 44)));
+    for (let i = 0; i < rows; i++) {
+      const tr = document.createElement("tr");
+      tr.className = "ps-ph-row";
+      heads.forEach((th, idx) => {
+        const td = document.createElement("td");
+        // 继承表头的对齐方式，右对齐的数字列灰条也靠右，看起来才像真表
+        if ((th.className || "").includes("text-right")) td.className = "text-right";
+        const w = (widths[idx] || 80) * (0.42 + (i % 3) * 0.08);
+        td.appendChild(_psBar(w, 10));
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    }
+  }
+}
+
+/** 表格列宽锁死：`table-layout:fixed` 下百分比会按父容器重新计算，
+ * 而骨架层和真实表格的父容器不同（账号表外面裹着可滚动卡片），
+ * 算出来的列宽能差几十像素 —— 切过去时列边界会跳。这里把每个 th 的
+ * **实测宽度**写成固定像素，克隆体就与真实表格逐列对齐了。 */
+/** 表格列宽锁死。
+ *
+ * 为什么需要：多数表格是 `table-layout:auto` —— 列宽由**内容**决定。
+ * 骨架里的内容换成了灰条，内容宽度变了，列宽自然跟着变；等真实数据回来，
+ * 列边界会横着跳一下（高度能对上、宽度对不上，肉眼就是「抖」）。
+ *
+ * 做法：把真实表头的实测宽度写成 `<colgroup><col style="width:Npx">`。
+ * `table-layout:fixed` 下 colgroup 是**权威值**，内容再怎么变列宽都不动。
+ * 配对按「列数 + 文档顺序」：面板里常有多张表（汇总表 + 明细表），
+ * 按列数分组后再按下标配，比按表头文本稳（文本此时已被灰条替换）。
+ */
+function _psLockTableColumns(realRoot, cloneRoot) {
+  const group = root => {
+    const map = new Map();
+    for (const t of root.querySelectorAll("table")) {
+      const n = t.querySelectorAll("thead th").length;
+      if (!n) continue;
+      if (!map.has(n)) map.set(n, []);
+      map.get(n).push(t);
+    }
+    return map;
+  };
+  const realMap = group(realRoot);
+  for (const [n, cloneTables] of group(cloneRoot)) {
+    const realTables = realMap.get(n) || [];
+    cloneTables.forEach((cloneTable, i) => {
+      const realTable = realTables[i];
+      if (!realTable) return;
+      const widths = [...realTable.querySelectorAll("thead th")]
+        .map(th => Math.round(th.getBoundingClientRect().width));
+      if (!widths.length || widths.some(w => w <= 0)) return;
+      cloneTable.querySelectorAll("colgroup").forEach(c => c.remove());
+      const cg = document.createElement("colgroup");
+      // **必须显式标 pixel，并且带 !important 级别的来源**：
+      // 账号表自己写了 `th:nth-child(n){width:34%/22%/…}`，选择器权重比
+      // `colgroup>col` 高，单靠 style.width 会被它压过去（实测剩下 10~14px
+      // 的偏差就是这么来的）。这里直接写行内 `width: Npx` 到 **th 本身**，
+      // 行内样式权重最高，才能压住那条 nth-child 规则。
+      for (const w of widths) {
+        const col = document.createElement("col");
+        col.style.width = w + "px";
+        cg.appendChild(col);
+      }
+      cloneTable.insertBefore(cg, cloneTable.firstChild);
+      cloneTable.style.tableLayout = "fixed";
+      cloneTable.style.width = Math.round(realTable.getBoundingClientRect().width) + "px";
+      // 再把每列宽度写到 th 上（行内样式，压住 .acc-table nth-child 的百分比）
+      [...cloneTable.querySelectorAll("thead th")].forEach((th, i) => {
+        if (widths[i]) {
+          th.style.setProperty("width", widths[i] + "px", "important");
+          th.style.setProperty("min-width", widths[i] + "px", "important");
+        }
+      });
+    });
+  }
+}
+
+/** 用真实结构预渲染一层骨架，返回要插进面板的元素。 */
+function _panelSkeletonFromDom(panel) {
+  const sk = document.createElement("div");
+  sk.className = "panel-skeleton";
+  sk.setAttribute("aria-hidden", "true");
+  // 克隆现有外壳：卡片 / 工具条 / 表头 / 列宽都跟着走过来
+  const clone = document.createElement("div");
+  clone.className = "ps-clone";
+  for (const child of [...panel.children]) {
+    if (child.classList && child.classList.contains("panel-skeleton")) continue;
+    clone.appendChild(child.cloneNode(true));
+  }
+  // id 必须去掉：同一份 DOM 出现两次，任何 getElementById 都会拿错节点
+  clone.querySelectorAll("[id]").forEach(n => n.removeAttribute("id"));
+  sk.appendChild(clone);
+  panel.insertBefore(sk, panel.firstChild);
+
+  // **宽度上下文必须对齐**。
+  // 账号表用 `table-layout:fixed` + 百分比列宽（名称 34% / 到期 22%），
+  // 百分比是相对**最近的定宽祖先**算的：真实表格外面裹着
+  // `#accountTableWrap`（带 padding 的卡片），骨架层里没有这层，
+  // 于是算出来的列宽和真实表格差几十像素 —— 切过去时列会跳一下。
+  // 这里把每个顶层子节点的**实测宽度**写到克隆副本上，让它按真实宽度排版。
+  const kids = [...clone.children];
+  const reals = [...panel.children].filter(
+    n => !(n.classList && n.classList.contains("panel-skeleton")));
+  kids.forEach((node, i) => {
+    const real = reals[i];
+    if (!real) return;
+    const box = real.getBoundingClientRect();
+    if (box.width > 0) node.style.width = Math.round(box.width) + "px";
+  });
+
+  // 插进 DOM 后才有真实布局，这时再量尺寸、换灰条。
+  // **顺序关键**：先锁列宽（此时测到的仍是真实表头宽度）→ 再补占位行
+  // （列宽已固定，占位行按列排，不会反过来影响列宽）→ 最后清文字换灰条。
+  // 反了就会用「占位行决定的列宽」去锁，等于白锁。
+  _psLockTableColumns(panel, clone);
+  _psFillEmptyTables(clone);
+  _psBlankTextNodes(clone);
+  return sk;
+}
+
+/** 铺骨架屏。`force` 用于「面板本来就是空的」这种必须铺的情况。
+ *
+ * 判断依据是「这个面板有没有被用户看过」（`_panelSeen`），**不是**「里面有没有
+ * `.card`」—— 每个面板的卡片外壳本来就是静态 HTML，用 `.card` 判断会把首开
+ * 也一起跳过，等于永远不铺骨架（实测踩过）。
+ */
+function panelSkeletonShow(name, force) {
+  if (!name || name === "overview") return;      // 概览有自己的加载态
+  const panel = document.getElementById("panel-" + name);
+  if (!panel) return;
+  const first = !_panelSeen.has(name);
+  _panelSeen.add(name);
+  if (!first && !force) return;                  // 二次进入：不闪
+  let sk = panel.querySelector(":scope > .panel-skeleton");
+  if (sk) sk.remove();                           // 结构变了（如切换平台）就重建
+  sk = _panelSkeletonFromDom(panel);
+  sk.classList.add("is-on");
+  // 盖住时把下层内容藏起来 —— 否则「骨架 + 已渲染内容」会叠成双重影像。
+  // 用 visibility（不是 display）保证内容仍在原地布局，淡出后原位露出。
+  panel.classList.add("is-skel");
+  _panelSkelAt.set(name, Date.now());
+  // 兜底：少数面板不经过 `api()`（纯本地渲染/脚本自己接管），1.8s 后自动收，
+  // 宁可少显示一会儿，也不要让骨架屏盖住真实内容。
+  clearTimeout(_panelSkelTimers.get(name));
+  _panelSkelTimers.set(name, setTimeout(() => panelSkeletonHide(name), 1800));
+}
+
+function panelSkeletonHide(name) {
+  const panel = document.getElementById("panel-" + name);
+  const sk = panel && panel.querySelector(":scope > .panel-skeleton");
+  if (!sk) return;
+  // 最短显示时长：还没亮够 240ms 就延后收，否则就是「白闪」
+  const shownAt = _panelSkelAt.get(name) || 0;
+  const age = Date.now() - shownAt;
+  if (age < PANEL_SKELETON_MIN_MS) {
+    clearTimeout(_panelSkelTimers.get(name));
+    _panelSkelTimers.set(name, setTimeout(
+      () => panelSkeletonHide(name), PANEL_SKELETON_MIN_MS - age + 10));
+    return;
+  }
+  _panelSkelAt.delete(name);
+  clearTimeout(_panelSkelTimers.get(name));
+  _panelSkelTimers.delete(name);
+  // **同一帧内「摘掉骨架 + 放出内容」**，中间不留过渡。
+  //
+  // 为什么不做淡出：骨架是一整层不透明底色，任何 >0 的透明度都会让它
+  // 与下层真实内容重叠一段（灰条 + 真实文字错开半行 = 用户说的重影）。
+  // 0.2s / 0.12s / 0.08s 三档都试过，仍有可见的重叠窗口。
+  //
+  // 之所以敢直接切：骨架的卡片位置、列宽、行高与真实内容逐像素一致
+  // （cloned DOM + colgroup 锁宽 + 实测宽度灰条），所以这一下是
+  // 「同形状替换」，看不出跳变，也不会闪。
+  sk.remove();
+  panel.classList.remove("is-skel");
+}
+
+/** 这一批请求全部结束：把所有还在闪的骨架屏收掉。 */
+function _panelSkeletonFlush() {
+  document.querySelectorAll(".panel-skeleton.is-on").forEach(sk => {
+    const panel = sk.parentElement;
+    if (!panel || !panel.id) return;
+    panelSkeletonHide(panel.id.replace(/^panel-/, ""));
+  });
+}
+
 function renderOverview(data, platforms, sentinel) {
   const acc = data.accounts || {};
   const today = data.today || {};
@@ -3403,7 +3940,7 @@ function renderOverview(data, platforms, sentinel) {
       <span class="ov-muted">当前统计：${esc(platformLabel)}</span>
       <span class="ov-muted">${esc((platforms && platforms.items || []).length)} 个平台</span>
       <span class="ov-code">${esc(location.origin)}/v1</span>
-      <button type="button" class="ov-mini-btn" onclick="navigator.clipboard.writeText(location.origin+'/v1').then(()=>toast('已复制 API 地址'))">复制</button>
+      <button type="button" class="ov-mini-btn" onclick="copyApiBase()">复制</button>
     </div>
     <div class="ov-status-right">
       <span class="ov-muted">更新于 ${fmtTime(new Date().toISOString().slice(0,19), false)}</span>
@@ -3621,7 +4158,7 @@ document.addEventListener("click", event => {
 
    数据每次刷新现取，不做前端缓存 —— 封控是分钟级事件，缓存只会误导。
    ========================================================================== */
-let _sentinelTimer = null;
+
 let _sentinelData = null;
 
 async function loadSentinel(force) {
@@ -3674,7 +4211,7 @@ function renderSentinel(data) {
           : ""}
         ${pausedKeys.length
           ? pausedKeys.map(k => `<button type="button" class="console-btn quiet"
-              onclick="sentinelResume('${esc(k === "all" ? "" : k)}')">恢复 ${esc(k)}</button>`).join("")
+              onclick="sentinelResume(${jsv(k === "all" ? "" : k)})">恢复 ${esc(k)}</button>`).join("")
           : ""}
       </div>
     </div>
@@ -4099,6 +4636,18 @@ document.addEventListener("keydown", (e) => {
 });
 
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+/* 把任意值安全地嵌进「内联 onclick 里的 JS 参数位」。
+ *
+ * 为什么不能直接用 esc()：esc 只做 HTML 实体转义（& < > "），
+ * 而 onclick="fn('${...}')" 是**先由 HTML 解析器解码属性、再交给 JS 解析**，
+ * 所以单引号/反斜杠/换行都还在 JS 语义里，一个 ' 就能闭合字符串跳出参数位。
+ * 这里改成 JSON.stringify（处理 \ " 换行 控制字符）+ esc（处理 & < > "），
+ * 产出的 `&quot;…&quot;` 解码后是合法的双引号 JS 字符串字面量。
+ */
+function jsv(v){
+  return esc(JSON.stringify(v == null ? "" : String(v))
+    .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029"));
+}
 /* 内联 SVG 图标（lucide 路径，数据见 icons.js，取自官方客户端 bundle）。
  * 用法：ic('trash') / ic('spinner','wb-ic-spin') / ic('rotate','text-indigo-600')
  * 找不到的图标退化成空串而不是抛错 —— 少一个图标远好过整页白屏。 */
@@ -4197,9 +4746,19 @@ function statCard(label, value, opts) {
   const cls = opts.tone ? ` is-${opts.tone}` : "";
   const icon = opts.icon ? ic(opts.icon, opts.iconColor || "") : "";
   const sub = opts.sub ? `<div class="stat-sub">${opts.sub}</div>` : "";
+  // 数值统一过一遍千分位：同一个「11351」在概览是 11,351、在账号池是 11351，
+  // 是 issue #4 里最扎眼的一处不一致。字符串（如「会话鉴权」）原样输出。
+  const shown = opts.raw ? value : fmtAuto(value);
   return `<div class="stat${cls}">
     <div class="stat-label">${icon}${esc(label)}</div>
-    <div class="stat-value">${value}</div>${sub}</div>`;
+    <div class="stat-value">${shown}</div>${sub}</div>`;
+}
+
+/** 统计卡的默认数值格式：整数千分位，小数最多两位，非数字原样返回。 */
+function fmtAuto(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return v;
+  if (Number.isInteger(v)) return v.toLocaleString("zh-CN");
+  return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
 /**
@@ -4216,7 +4775,9 @@ function statCard(label, value, opts) {
  *       抹成整数会让「这个包还剩多少」失真，对账时对不上。
  */
 function fmtCredit(n) {
-  return String(Math.round(Number(n) || 0));
+  // 与表格里的 fmtInt 保持同一口径（千分位、取整）：
+  // 概览 11,351 / 账号池 11351 这种差异不该存在。
+  return (Math.round(Number(n) || 0)).toLocaleString("zh-CN");
 }
 
 /** 单个积分包的精确保留（最多两位小数，整数不补 .00）。 */
@@ -4369,7 +4930,14 @@ function accExpiryCell(a) {
 
 function consoleIcon(name) {
   const paths = {"fa-user-group": "<circle cx=\"9\" cy=\"7\" r=\"3\"/><path d=\"M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3\"/>", "fa-hourglass-half": "<path d=\"M6 2h12M6 22h12M7 2v5l10 10v5M17 2v5L7 17v5\"/>", "fa-chart-pie": "<path d=\"M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z\"/>", "fa-key": "<circle cx=\"8\" cy=\"8\" r=\"5\"/><path d=\"m12 12 9 9m-5-5 3-3m-1 5 3-3\"/>", "fa-cubes": "<path d=\"m12 3 8 4v10l-8 4-8-4V7Zm-8 4 8 4 8-4M12 11v10\"/>", "fa-layer-group": "<path d=\"m12 3 10 5-10 5L2 8Zm-9 10 9 5 9-5M3 18l9 5 9-5\"/>", "fa-clock-rotate-left": "<path d=\"M3 4v5h5m-5 0a9 9 0 1 1 0 7M12 7v5l3 2\"/>", "fa-list": "<path d=\"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01\"/>", "fa-fingerprint": "<path d=\"M4 12a8 8 0 0 1 16 0m-13 5v-5a5 5 0 0 1 10 0v3m-7 5v-8a2 2 0 0 1 4 0v5m-1 5a12 12 0 0 0 4-4M3 16v-1\"/>", "fa-cloud-arrow-up": "<path d=\"M6 18a5 5 0 1 1 1-10 6 6 0 0 1 11 1 4 4 0 0 1 0 8m-6 4V11m-4 4 4-4 4 4\"/>", "fa-gear": "<path d=\"m10 3-1 3-3 1-2 3 2 2v3l2 2 3-1 2 2 3-1 1-3 3-1 1-3-3-2V7l-3-2-2 1Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>", "fa-seedling": "<path d=\"M12 21v-9M12 16C5 16 3 11 3 7c6 0 9 3 9 9Zm0-4c0-6 3-9 9-9 0 6-3 9-9 9Z\"/>", "fa-cat": "<path d=\"m5 9-1-6 6 3h4l6-3-1 6a8 8 0 1 1-14 0Zm4 4h.01M15 13h.01m-4 4h2\"/>", "fa-list-ul": "<path d=\"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01\"/>", "fa-chart-line": "<path d=\"M3 3v18h18M6 15l4-5 4 3 6-7\"/>", "fa-right-to-bracket": "<path d=\"M14 3h6v18h-6M3 12h12m-4-4 4 4-4 4\"/>", "fa-rotate": "<path d=\"M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1\"/>", "fa-file-export": "<path d=\"M12 3H4v18h12v-5M9 10h12m-4-4 4 4-4 4\"/>", "fa-power-off": "<path d=\"M12 2v10M6 5a9 9 0 1 0 12 0\"/>", "fa-trash": "<path d=\"M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7\"/>"};
-  const extraPaths = {"fa-heart-pulse": "<path d=\"M3 12h4l2-6 4 12 2-6h6\"/>"};
+  /** 补充图标：paths 之外用到的（漏一个就是一个空按钮 —— 账号行的
+   *  「账号并发上限」「更多操作」以前就是这个原因什么都没有画出来）。 */
+  const extraPaths = {
+    "fa-heart-pulse": "<path d=\"M3 12h4l2-6 4 12 2-6h6\"/>",
+    "fa-sliders": "<path d=\"M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0\"/><circle cx=\"16\" cy=\"6\" r=\"2\"/><circle cx=\"10\" cy=\"12\" r=\"2\"/><circle cx=\"18\" cy=\"18\" r=\"2\"/>",
+    "fa-ellipsis": "<circle cx=\"5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"19\" cy=\"12\" r=\"1.6\"/>",
+    "fa-snowflake": "<path d=\"M12 2v20M4 6l16 12M20 6 4 18\"/><path d=\"m9 4 3 3 3-3M9 20l3-3 3 3\"/>"
+  };
   const path = paths[name] || extraPaths[name];
   return path ? `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>` : '';
 }
@@ -4541,8 +5109,8 @@ function upstreamEvidenceHtml(info) {
 //   4. 测量前把 `visibility` 留在 hidden，浏览器仍会完成布局，所以量到的是
 //      最终尺寸，不会闪。
 let _actionTipTarget = null;
-let _actionTipTimer = null;
-let _actionTipHideTimer = null;
+
+
 const ACTION_TIP_GAP = 8;
 const ACTION_TIP_EDGE = 8;
 
@@ -4694,19 +5262,148 @@ async function clearAccountCooldown(accountId) {
   loadAccounts();
 }
 
+/* 账号行操作：**常用 3 个 + 「更多」菜单**。
+ *
+ * 原来一行 12 个图标，不悬停根本分不清谁是谁（issue #4 的反馈）。
+ * 现在：
+ *   · 外面留 3 个高频动作（重登 / 健康检查 / 刷新）
+ *   · 其余收进「更多」，菜单里**带文字**，不用猜图标
+ * 菜单用 fixed 定位，避免被表格的 overflow 裁掉。
+ */
+const ACC_PRIMARY_OPS = ["重新登录", "三项健康检查：积分、模型列表、真实对话", "刷新余额与到期快照"];
+
+function accOpsHtml(a, ops) {
+  const primary = [];
+  const rest = [];
+  for (const item of ops) {
+    (ACC_PRIMARY_OPS.includes(item[3]) ? primary : rest).push(item);
+  }
+  const btn = ([fn, ic, col, ttl]) =>
+    `<button onclick="${fn}" class="${col}" data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}" aria-label="${ttl}">${consoleIcon(ic)}</button>`;
+  const menuItems = rest.map(([fn, ic, col, ttl]) => `
+    <div class="acc-menu-item" role="menuitem" tabindex="0"
+         onclick="event.stopPropagation();this.parentElement.classList.remove('open');${fn}">
+      <span class="acc-menu-icon ${col}">${consoleIcon(ic)}</span>
+      <span class="acc-menu-text">${esc(ttl.replace('（逐包到期日）', ''))}</span>
+    </div>`).join("");
+  return `${primary.map(btn).join("")}
+    <div class="acc-more">
+      <button class="acc-more-btn" data-tooltip="更多操作"
+              aria-haspopup="true" aria-label="更多操作"
+              onclick="event.stopPropagation();toggleAccMenu(this)">
+        ${consoleIcon("fa-ellipsis")}
+      </button>
+      <div class="acc-menu" role="menu">${menuItems}</div>
+    </div>`;
+}
+
+/** 打开/关闭「更多」菜单（同页面只允许一个打开）。 */
+function toggleAccMenu(btn) {
+  const box = btn.parentElement;
+  const wasOpen = box.classList.contains("open");
+  document.querySelectorAll(".acc-more.open").forEach(el => el.classList.remove("open"));
+  if (!wasOpen) {
+    box.classList.add("open");
+    // 展开瞬间收掉「更多操作」提示气泡：它固定在按钮上方，
+    // 会和刚弹出来的菜单叠在一起，第一眼像是菜单标题。
+    try { if (typeof hideActionTooltip === "function") hideActionTooltip(); } catch (e) {}
+    // 把菜单定位到按钮下方，避免被表格 overflow 裁掉
+    const menu = box.querySelector(".acc-menu");
+    if (menu) {
+      const r = btn.getBoundingClientRect();
+      const mh = menu.offsetHeight || 260;
+      // 下方放不下就向上翻：表格最后一行点「更多」时菜单原来会掉到视口外，
+      // 用户以为按钮没反应。
+      const below = window.innerHeight - r.bottom;
+      const openUp = below < mh + 12 && r.top > mh + 12;
+      menu.style.top = Math.round(openUp ? r.top - mh - 4 : r.bottom + 4) + "px";
+      menu.style.left = Math.round(Math.min(r.left, window.innerWidth - 208)) + "px";
+      menu.classList.toggle("drop-up", openUp);
+    }
+  }
+  event.stopPropagation();
+}
+
+// 点空白处关闭
+document.addEventListener("click", () => {
+  document.querySelectorAll(".acc-more.open").forEach(el => el.classList.remove("open"));
+}, true);
+
+// 令牌有效期徽标 —— 两条时间线，两套颜色。
+//
+// WorkBuddy 的凭证里有**两条**独立的时间线，混成一条会得出完全错误的结论：
+//
+//   accessToken   30 天。过期**不是终态**：`/v2/plugin/auth/token/refresh`
+//                 只要一个 `X-Refresh-Token` 头就换新令牌（实测 access 已过期、
+//                 签名被伪造、甚至完全不带 Authorization，三种都是 200）。
+//                 所以 access「剩 N 天」只是「下次保活该刷了」的提示。
+//   refreshToken  60 天滑动窗口，每次刷新成功整体后移。**这才是死亡线**：
+//                 窗口过了就再也换不了令牌，只能重新授权登录（要手机验证码）。
+//
+// 因此：access 快到期 → 黄，不影响服务；refresh 窗口告急 → 橙；真过期 → 红。
+// 只有最后一种需要人来处理，前两种等一次保活就好。
+function tokenBadge(a) {
+  // `token_supported` 为 false 的平台（Trae / Qoder / Loomy）不渲染任何徽标：
+  // 它们的凭证结构不同，这套解析器读不出东西是**预期**，不是异常。
+  if (a.token_supported === false) return "";
+
+  const bits = [];
+  const access = a.token_state;
+  const renewal = a.renewal_state;
+
+  // access：只报「已过期」（还能自动救回来，标黄）和「无法解析」。
+  // 「剩 N 天」按 30 天周期会长期显示，属于噪音，收进 tooltip。
+  if (access === "expired") {
+    bits.push(a.renewable
+      ? { text: "令牌待刷新", color: "var(--warn)", title: "accessToken 已过期，但续期窗口仍在 —— 跑一次保活即可自动换新，不需要重新登录" }
+      : { text: "凭据已过期", color: "var(--danger)", title: "accessToken 已过期且续期窗口已关闭，只能重新授权登录" });
+  }
+
+  // refresh：真正需要人关注的只有这里。
+  if (renewal === "expired") {
+    bits.push({ text: "续期窗口已关闭", color: "var(--danger)",
+      title: "refreshToken 的 60 天滑动窗口已过，无法再换新令牌。只能重新授权登录（需手机验证码）。" });
+  } else if (renewal === "expiring") {
+    bits.push({ text: `续期剩 ${a.renewal_days_left} 天`, color: "#f97316",
+      title: `refreshToken 续期窗口只剩 ${a.renewal_days_left} 天。每次保活成功刷新都会把窗口整体后移 60 天；若持续缩短说明保活没跑成，请检查定时任务与网络。` });
+  } else if (renewal === "unknown" && a.renewal_known === false && a.has_refresh_token) {
+    // 有 refreshToken 但推不出到期时间：凭证格式异常，值得试一次刷新把它写正。
+    bits.push({ text: "续期窗口未知", color: "var(--fg-muted)",
+      title: "凭证里有 refreshToken，但推不出它的到期时间（缺少 refreshExpiresAt / refreshExpiresIn，也不是 JWT）。跑一次保活刷新会把两个字段都补上。" });
+  }
+
+  // 两条时间线都读不出来、连 refreshToken 都没有 —— 这不是「正常」，
+  // 是凭证本身坏了（加密凭证缺解密密钥 / 结构异常）。必须留一个可见标记，
+  // 否则一个彻底用不了的号在列表上和健康号长得一模一样。
+  if (!bits.length && access === "unknown" && !a.has_refresh_token) {
+    bits.push({ text: "凭据无法解析", color: "var(--danger)",
+      title: "读不出 accessToken 的 exp，也没有 refreshToken。可能是加密凭证且本机缺少解密密钥，或凭证结构损坏。建议重新导入或授权登录。" });
+  }
+
+  if (!bits.length) return "";
+
+  const detail = [
+    a.token_expires_at ? `accessToken 到期 ${fmtTime(String(a.token_expires_at).replace("T", " "), false)}` : "",
+    a.renewal_expires_at ? `refreshToken 窗口至 ${fmtTime(String(a.renewal_expires_at).replace("T", " "), false)}` : "",
+    a.renewable ? "可自动续期：一次刷新即换新，无需人工。" : "",
+  ].filter(Boolean).join("　");
+
+  return bits.map(b => `<span class="c-uid" style="color:${b.color};font-weight:600" data-tooltip="${esc(b.title)}" data-tooltip-description="${esc(detail)}">${esc(b.text)}</span>`).join(" ");
+}
+
 function accRow(a) {
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
   const ops = [
     [`WBReview.accountLimit(${a.id})`, "fa-sliders", "text-indigo-600", "账号并发上限"],
     [`openReauthAccount(${a.id})`, "fa-key", "text-emerald-600", "重新登录"],
-    [`growthTasks(${a.id},'${esc(a.name||'')}')`, "fa-seedling", "text-emerald-600", "成长任务"],
+    [`growthTasks(${a.id},${jsv(a.name||'')})`, "fa-seedling", "text-emerald-600", "成长任务"],
     [`catTravel(${a.id})`, "fa-cat", "text-pink-600", "猫猫旅行"],
-    [`viewCreditDetails(${a.id},'${esc(a.name||'')}')`, "fa-list-ul", "text-amber-600", "积分明细（逐包到期日）"],
-    [`viewRequestUsage(${a.id},'${esc(a.name||'')}')`, "fa-chart-line", "text-blue-600", "请求用量"],
+    [`viewCreditDetails(${a.id},${jsv(a.name||'')})`, "fa-list-ul", "text-amber-600", "积分明细（逐包到期日）"],
+    [`viewRequestUsage(${a.id},${jsv(a.name||'')})`, "fa-chart-line", "text-blue-600", "请求用量"],
     [`healthCheckAcc(${a.id})`, "fa-heart-pulse", "text-emerald-600", "三项健康检查：积分、模型列表、真实对话"],
     [`injectAcc(${a.id})`, "fa-right-to-bracket", "text-violet-600", "注入本机客户端"],
     [`refreshAcc(${a.id})`, "fa-rotate", "text-indigo-600", "刷新余额与到期快照"],
-    [`exportAcc(${a.id},'${esc(a.name||'')}')`, "fa-file-export", "text-sky-600", "导出登录态"],
+    [`exportAcc(${a.id},${jsv(a.name||'')})`, "fa-file-export", "text-sky-600", "导出登录态"],
     [`toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
     [`delAcc(${a.id})`, "fa-trash", "text-red-500", "删除"],
   ];
@@ -4722,6 +5419,7 @@ function accRow(a) {
       <div class="nm">
         <b data-tooltip="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
         <span class="c-uid" data-tooltip="账号 UID" data-tooltip-description="${esc(a.uid || '（该账号未提供 UID）')}">${esc(a.uid || "-")}</span>
+        ${tokenBadge(a)}
         ${a.bound_key_id ? `<small class="text-indigo-600">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</small>` : ''}
         ${a.post_login_automation ? `<small style="color:var(--fg-muted)" data-tooltip="登录后自动任务" data-tooltip-description="${esc((a.post_login_automation.result?.errors || []).join('；') || '由账号登录后自动排队的收尾任务（余额、模型、权益同步）')}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
           ${a.resource_initialization && a.resource_initialization.status !== 'completed' ? `<small style="color:var(--fg-muted)" data-tooltip="资源初始化" data-tooltip-description="${esc((a.resource_initialization.errors || []).join('；') || '账号导入后会自动同步余额与模型目录')}">${esc(({queued:'余额与模型初始化排队中',running:'正在初始化余额与模型',failed:'初始化未完成，可刷新余额或同步模型',invalid_credential:'账号凭证不完整，请重新导入或授权登录',unsupported_region:'国际版凭证无法访问当前国内接口，请更换国内版凭证',auth_required:'上游鉴权失败，请重新授权登录'})[a.resource_initialization.status] || '')}</small>` : ''}
@@ -4729,15 +5427,14 @@ function accRow(a) {
       ${accountLimitBadge(a)}
     </td>
     <td class="col-status" data-label="状态">${badge(a.status)}</td>
-    <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${a.balance_total}</td>
-    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}">${a.balance_remain}</td>
+    <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${fmtInt(a.balance_total)}</td>
+    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}">${fmtInt(a.balance_remain)}</td>
     <td data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
-    <td class="c-ops" data-label="操作">${ops.map(([fn, ic, col, ttl]) =>
-      `<button onclick="${fn}" class="${col}" data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}" aria-label="${ttl}">${consoleIcon(ic)}</button>`).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, ops)}</td>
   </tr>`;
 }
 
-let _accountResourceTimer = null;
+
 let _accountPage = 1;
 let _overviewRefreshing = false;
 setInterval(async () => {
@@ -5627,23 +6324,11 @@ async function platformBeginAuth(spec, storage) {
       if (copyBtn) {
         copyBtn.addEventListener("click", async () => {
           const url = data.auth_url || "";
-          try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              await navigator.clipboard.writeText(url);
-            } else {
-              const ta = document.createElement("textarea");
-              ta.value = url;
-              ta.style.position = "fixed";
-              ta.style.top = "-1000px";
-              document.body.appendChild(ta);
-              ta.select();
-              document.execCommand("copy");
-              document.body.removeChild(ta);
-            }
+          if (await writeClipboard(url)) {
             copyBtn.textContent = "已复制";
             toast("授权链接已复制");
             setTimeout(() => { copyBtn.textContent = "复制授权链接"; }, 2000);
-          } catch (e) {
+          } else {
             toast("复制失败，请手动选中链接复制", "err");
           }
         });
@@ -6098,7 +6783,7 @@ async function platformUsageDetail(spec, storage) {
       <td class="py-2 px-2 text-right text-xs tnum">${today || "—"}</td>
       <td class="py-2 px-2 text-right text-xs tnum">${credit ? fmtCredit(credit) : "—"}</td>
       <td class="py-2 pl-2 text-right">
-        <button class="console-btn quiet" onclick="platformUsageOne('${prefix}', ${Number(a.id)}, '${esc(a.name || "")}')">上游明细</button>
+        <button class="console-btn quiet" onclick="platformUsageOne(${jsv(prefix)}, ${Number(a.id)}, ${jsv(a.name || "")})">上游明细</button>
       </td></tr>`;
   }).join("");
   box.innerHTML = `<h3 class="font-semibold text-lg mb-1">用量明细 · ${esc((spec && spec.label) || storage)}</h3>
@@ -6234,7 +6919,7 @@ async function loadGatewaySpeed() {
       <span class="gw-speed-sub">${fmtNum(r.requests)}</span>
     </div>`;
   }).join("") + `<p class="bench-note">
-    表中均为**平均值**（悬停看中位数）。TTFT 越低越好、TPS 越高越好。
+    表中均为<b>平均值</b>（悬停看中位数）。TTFT 越低越好、TPS 越高越好。
     想固定用某个平台：复制带 <code>-平台名</code> 后缀的模型 id 即可
     （如 <code>DeepSeek-V4.1-Flash-loomy</code>），网关会直接路由到该平台。
   </p>`;
@@ -6376,9 +7061,9 @@ async function showScanResult(data, spec, storage) {
     ${authExplain ? `<p class="text-xs mt-2" style="color:var(--fg-muted);padding:8px 10px;border-radius:8px;background:var(--surface-2)">
       ${esc(authExplain)}</p>` : ""}
     <div class="flex justify-end gap-2 mt-4">
-      ${(needAuth && supportsAuth) ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),'${esc(storage)}')"
+      ${(needAuth && supportsAuth) ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),${jsv(storage)})"
           class="console-btn primary">立即授权登录</button>` : ""}
-      ${canImport ? `<button onclick="closeModal();platformImportLocal(window.WBPlatform.spec(),'${esc(storage)}')"
+      ${canImport ? `<button onclick="closeModal();platformImportLocal(window.WBPlatform.spec(),${jsv(storage)})"
           class="console-btn primary">导入这些凭证</button>` : ""}
       <button onclick="closeModal()" class="console-btn quiet">关闭</button>
     </div>`;
@@ -6681,7 +7366,7 @@ async function catTravel(id) {
      2. 弹窗每 1.5 秒轮询一次进度，实时追加已完成账号；
      3. 关掉弹窗不会中断后台执行（线程还在跑），重新点按钮能看到进度。
    ========================================================================== */
-let _jobTimer = null;
+
 let _accountActionBusy = false;
 let _accountJob = null;
 
@@ -6984,8 +7669,8 @@ function renderGrowthTasks(d){
       <td class="px-3 py-2 text-amber-600 font-medium">${t.reward_credit || 0}</td>
       <td class="px-3 py-2 text-xs text-slate-400 max-w-[16rem]">${esc(t.strategy || "")}</td>
       <td class="px-3 py-2 text-right whitespace-nowrap">
-        ${canClaim ? `<button onclick="growthDoClaim(${d.account_id},'${esc(t.task_code)}',this)" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">领奖</button>` : ""}
-        ${canRun ? `<button onclick="growthDoRun(${d.account_id},'${esc(t.task_code)}',this)" class="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 ml-1">完成</button>` : ""}
+        ${canClaim ? `<button onclick="growthDoClaim(${d.account_id},${jsv(t.task_code)},this)" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">领奖</button>` : ""}
+        ${canRun ? `<button onclick="growthDoRun(${d.account_id},${jsv(t.task_code)},this)" class="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 ml-1">完成</button>` : ""}
       </td>
     </tr>`;
   }).join("");
@@ -7007,7 +7692,7 @@ function renderGrowthTasks(d){
       <button onclick="growthDoClaim(${d.account_id},null,this)" ${claimable.length ? "" : "disabled"}
         class="text-sm px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed">
         <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5A4.8 8 0 0 1 12 8a4.8 8 0 0 1 4.5-5 2.5 2.5 0 0 1 0 5"/></svg></span> 领取全部奖励 (${claimable.length})</button>
-      <button onclick="growthTasks(${d.account_id},'${esc(d.name || "")}')" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50">
+      <button onclick="growthTasks(${d.account_id},${jsv(d.name || "")})" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50">
         <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span> 刷新</button>
     </div>
     <div class="card overflow-auto max-h-[55vh]">
@@ -7247,7 +7932,7 @@ async function viewCreditDetails(id, name, force){
   openModal(`<h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></svg></span> 积分明细 — ${esc(name)}</h3>
     <div class="flex items-center justify-between mb-3 gap-2">
       <p class="text-xs m-0" style="color:var(--fg-muted)">按到期时间升序 —— 排最前的就是最先作废的包。</p>
-      <button onclick="viewCreditDetails(${id},'${esc(name)}',true)" id="cdReloadBtn"
+      <button onclick="viewCreditDetails(${id},${jsv(name)},true)" id="cdReloadBtn"
               class="text-xs px-2-5 py-1.5 rounded-lg border hover:bg-slate-50 whitespace-nowrap">
         <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg></span>重新采集</button>
     </div>
@@ -7973,7 +8658,7 @@ function renderCreditAccounts(d) {
                 data-tooltip="下移 · 降低真实使用优先级"
                 data-tooltip-description="${esc('把「' + a.account_name + '」与下一名对调。保存后立刻影响真实选号顺序，在途请求继续执行；只有手动排序模式下才会生效。')}"
                 ${i === rows.length - 1 ? 'disabled' : ''}><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></span></button>
-        <button type="button" class="console-btn quiet credit-op-btn" onclick="viewCreditDetails(${a.account_id},'${esc(a.account_name)}')"
+        <button type="button" class="console-btn quiet credit-op-btn" onclick="viewCreditDetails(${a.account_id},${jsv(a.account_name)})"
                 aria-label="查看 ${esc(a.account_name)} 的全部积分包"
                 data-tooltip="积分明细 · 逐包到期日"
                 data-tooltip-description="查看该账号全部积分包的余额、总额度与到期日（按到期升序，排最前的最先作废）。默认读库内快照，秒开；要最新数据请在弹窗里点「重新采集」。"
@@ -8426,18 +9111,17 @@ async function copyExport() {
   const d = await _fetchExport();
   if (!d) return;
   const text = d.items.map(x => JSON.stringify(JSON.parse(x))).join("\n");
-  try {
-    await navigator.clipboard.writeText(text);
+  if (await writeClipboard(text)) {
     toast(`已复制 ${d.count} 个账号到剪贴板`, "ok");
-  } catch (e) {
-    // 非 HTTPS / 无权限时降级：把内容放进文本框让用户手动复制
-    openModal(`
+    return;
+  }
+  // 剪贴板彻底不可用时降级：把内容放进文本框让用户手动复制
+  openModal(`
       <h3 class="font-bold mb-3">手动复制（剪贴板不可用）</h3>
       <textarea class="w-full border rounded-lg p-2 text-xs h-60 font-mono">${esc(text)}</textarea>
       <div class="flex justify-end mt-3">
         <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
       </div>`);
-  }
 }
 
 /** 导出单个账号。 */
@@ -8551,8 +9235,8 @@ function keyRow(k) {
           : `<span class="text-xs text-slate-300" data-tooltip="全部模型" data-tooltip-description="未绑定分组，可用全部已启用的模型。">全部模型</span>`}</td>
       <td class="px-4 py-3 col-status">${k.status==="active"?'<span class="badge bg-emerald-100 text-emerald-700">正常</span>':'<span class="badge bg-slate-100 text-slate-500">已停用</span>'}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
-        <button onclick="viewKeyUsage(${k.id},'${esc(k.name||'')}')" class="text-blue-600 hover:text-blue-800 mr-1" data-tooltip="查看用量" data-tooltip-description="按模型与时间范围查看该 Key 的调用次数、Token 与积分消耗。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></svg></span></button>
-        <button onclick="viewKeyFull(${k.id},'${esc(k.name||'')}')" class="text-violet-600 hover:text-violet-800 mr-1" data-tooltip="查看完整 Key" data-tooltip-description="显示该 Key 的完整密钥，可复制给客户端使用。等同凭据，请勿外传。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></span></button>
+        <button onclick="viewKeyUsage(${k.id},${jsv(k.name||'')})" class="text-blue-600 hover:text-blue-800 mr-1" data-tooltip="查看用量" data-tooltip-description="按模型与时间范围查看该 Key 的调用次数、Token 与积分消耗。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></svg></span></button>
+        <button onclick="viewKeyFull(${k.id},${jsv(k.name||'')})" class="text-violet-600 hover:text-violet-800 mr-1" data-tooltip="查看完整 Key" data-tooltip-description="显示该 Key 的完整密钥，可复制给客户端使用。等同凭据，请勿外传。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></span></button>
         <button onclick="editKey(${k.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" data-tooltip="调整限额" data-tooltip-description="修改积分限额、并发与每分钟请求数。已用量不清零。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg></span></button>
         <button onclick="toggleKeyStatus(${k.id},this)" class="${k.status==='active'?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} mr-1" data-tooltip="${k.status==='active'?'停用 Key':'启用 Key'}" data-tooltip-description="${k.status==='active'?'停用后该 Key 立即无法调用网关，配额与用量记录保留，可随时恢复。':'恢复后该 Key 按剩余额度继续可用。'}" aria-label="${k.status==='active'?'停用':'启用'} API Key">${ic(k.status==='active'?'pause':'play')}</button>
         <button onclick="deleteKey(${k.id})" class="text-red-500 hover:text-red-700" data-tooltip="删除 Key" data-tooltip-description="删除后该 Key 立即无法调用网关，用量记录保留。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
@@ -8570,6 +9254,29 @@ async function loadKeys(){
   } catch (_) {}
 }
 /* 对外对接信息：暴露 baseurl + 启用模型列表，供把 Key 共享给外部使用 */
+/** 对接说明卡的折叠开关（默认收起，把 Key 列表顶到第一屏）。
+ *
+ * 顺手把展开状态记在 localStorage：常看的人不用每次都点开。
+ */
+function toggleApiShare(btn) {
+  const box = document.getElementById('apiShareGrid');
+  if (!box) return;
+  const open = box.classList.toggle('is-collapsed') === false;
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  try { localStorage.setItem('wb_api_share_open', open ? '1' : '0'); } catch (e) {}
+}
+
+/** 恢复上次的展开状态（首屏渲染时调用一次）。 */
+function restoreApiShareState() {
+  const box = document.getElementById('apiShareGrid');
+  const btn = document.querySelector('.api-share-toggle');
+  if (!box) return;
+  let open = false;
+  try { open = localStorage.getItem('wb_api_share_open') === '1'; } catch (e) {}
+  box.classList.toggle('is-collapsed', !open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 async function loadShareInfo() {
   const selected = uiSelectValue('shareAddress');
   const choices = new Map([[location.origin, '当前访问 · ' + location.host]]);
@@ -9239,9 +9946,9 @@ async function deleteKey(id){ if(!await uiConfirm({message:"确认删除该 Key�
 
 /* ==================== 模型配置 ==================== */
 const MODEL_BUSY_LABELS = {idle:'空闲', normal:'空闲', busy:'轻微拥堵', congested:'极度拥堵', unavailable:'不可用', unknown:'未知'};
-let _modelBusy = {}, _modelBusyTimer = null, _modelBusyLoading = false;
+
 let _modelHealth = {}, _modelProbes = {}, _modelProbeBusy = false;
-let _modelHealthLoading = null;
+
 async function loadModelHealth(manual = false) {
   const button = $('#modelHealthRefresh');
   if (manual && button) { button.disabled = true; button.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>正在刷新…'; }
@@ -9861,7 +10568,7 @@ async function enableAllModels(enabled){
   } catch(e) { toast(e.message, 'err'); }
   finally { _modelBatchBusy = false; }
 }
-let _modelBatchBusy = false;
+
 async function speedTestModel(modelId, btn){
   if(_modelProbeBusy || (btn && btn.disabled)) return;
   _modelProbeBusy = true;
@@ -10280,7 +10987,7 @@ async function renderClientPlatformBar() {
     const on = storage === clientPlatform();
     chips.push(`<button type="button"
       class="console-btn ${on ? "primary" : "quiet"}"
-      onclick="selectClientPlatform('${esc(storage)}')"
+      onclick="selectClientPlatform(${jsv(storage)})"
       aria-pressed="${on ? "true" : "false"}">${esc(spec.label || storage)}</button>`);
   }
   host.innerHTML = `<span class="text-xs" style="color:var(--fg-subtle)">平台</span>`
@@ -10351,7 +11058,7 @@ function renderClientScanBody(data, storage) {
     <div class="mb-2">
       <div style="color:var(--fg-subtle);margin-bottom:2px">扫描目录</div>
       ${dirs.length
-        ? `<ul>${dirs.map(d => `<li><code>${esc(String(d))}</code></li>`).join("")}</ul>`
+        ? `<ul class="scan-dir-list">${dirs.map(d => `<li><code class="wrap-anywhere">${esc(String(d))}</code></li>`).join("")}</ul>`
         : `<div>${dash}</div>`}
     </div>
     <div class="mb-2">
@@ -11338,8 +12045,8 @@ async function toggleClientSource(){
    所以走后台任务 + 轮询进度，避免请求挂死、界面「点了没反应」。
    生产环境用 ADMIN_DEV_TOOLS=0 整体关闭（接口 404，本区域自动隐藏）。
 */
-let _unpackTimer = null;
-let _appSource = null;
+
+
 
 function _fmtBytes(n){
   n = Number(n)||0;
@@ -11350,7 +12057,14 @@ function _fmtBytes(n){
 }
 function _fmtTime(ts){
   if(!ts) return "—";
-  try { return new Date(ts*1000).toLocaleString(); } catch(e){ return "—"; }
+  // 不写死 locale：浏览器语言是 en-US 时会渲染成 10/31/2026, 10:10:32 PM，
+  // 和全站其他「2026-10-31 22:10」对不上，而且要二次换算时区。
+  try {
+    const d = new Date(Number(ts) * 1000);
+    const p = n => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  } catch(e){ return "—"; }
 }
 
 async function loadAppSource(){
@@ -11563,7 +12277,7 @@ async function changePassword(){
 
 /* ==================== 定时任务 ==================== */
 let _schedules = [];
-let _schedulePollTimer = null;
+
 const _scheduleRequests = new Set();
 
 // 任务类型 -> 人话名称。结果里有 summary 就用它，这样每个任务都统一可读。
@@ -11597,7 +12311,9 @@ function scheduleResultSummary(s){
     const bad = (obj.detail||[]).filter(x=>!x.ok).length;
     const cls = bad ? "text-amber-700" : "text-slate-600";
     const elapsed = obj.elapsed_s ? `<span class="text-slate-400 ml-1">${obj.elapsed_s}s</span>` : "";
-    return `<span class="${cls}">${esc(String(obj.summary))}</span>${elapsed}`;
+    // 摘要按纯文本渲染（表格单元格不解析 markdown）。老版本摘要里带 `**强调**`，
+    // 历史数据仍然存在库里，这里统一次掉，别让页面露出星号。
+    return `<span class="${cls}">${esc(String(obj.summary).replace(/\*\*/g, ""))}</span>${elapsed}`;
   }
 
   // 兜底：老数据没有 summary 时，按类型拼
@@ -11757,7 +12473,7 @@ async function loadSchedules(){
         <button onclick="runSchedule(${s.id})" class="text-emerald-600 hover:text-emerald-800 mr-1" data-tooltip="立即运行"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span></button>
         <button onclick="toggleSchedule(${s.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" data-tooltip="启停"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg></span></button>
         <button onclick="editSchedule(${s.id})" class="text-slate-500 hover:text-slate-800 mr-1" data-tooltip="编辑"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg></span></button>
-        <button onclick="delSchedule(${s.id})" class="text-red-500 hover:text-red-700" data-tooltip="删除 Key" data-tooltip-description="删除后该 Key 立即无法调用网关，用量记录保留。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+        <button onclick="delSchedule(${s.id})" class="text-red-500 hover:text-red-700" data-tooltip="删除定时任务" data-tooltip-description="删除后该任务不再执行，历史执行结果保留在日志里。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
       </td>
     </tr>`).join("") || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">${
       hidden > 0
@@ -12044,7 +12760,7 @@ let _logLoadSeq = 0;
 let _logListController = null, _logAccountController = null, _logAccountSeq = 0;
 let _logAccountsPromise = null, _logAccountsAt = 0, _logAccountsDays = null;
 const _logTotals = new Map();
-let _logUsageRevision = null, _logUsageDirty = false, _logUsageBusy = false, _logUsageAt = 0;
+
 let _logSummaryDirty = true, _logSummaryAt = 0, _logSummaryBusy = false, _logSummarySeq = 0;
 let _logSummaryController = null, _logSummarySignature = '';
 const _logFolded = {summary:false};
@@ -12082,7 +12798,7 @@ function logFilterSignature() {
  * 保留的只有这个轻量探针：`include_history=false` 时后端只执行
  * `SELECT id ORDER BY id DESC LIMIT 1`，比原来的采样轻一个量级。
  */
-let _logUsagePollTimer = null;
+
 const _LOG_USAGE_POLL_MS = 5000;
 
 function scheduleLogUsagePoll() {
@@ -12094,8 +12810,8 @@ function scheduleLogUsagePoll() {
 //
 // 数据源与风控哨兵相同（/api/sentinel/status 的 traffic 段），不新增后端查询。
 // 只有日志页处于激活状态时才轮询 —— 切走立即停，不留后台空转。
-let _logLiveSource = null;
-let _logLiveRows = new Map();
+
+
 
 function stopLogLive() {
   if (_logLiveSource) {
@@ -12281,53 +12997,113 @@ function startLogLive() {
   };
 }
 
-async function pollLogUsageRevision() {
-  _logUsagePollTimer = null;
-  if (document.hidden
-      || document.documentElement.dataset.activeTab !== 'logs'
-      || !TOKEN) {
+/* 「用量日志」表格的实时更新：**SSE 推送，不再轮询**。
+ *
+ * 原来的实现是每 5 秒 `api('/api/logs/requests')` 探一次 `usage_revision`，
+ * 而且刷新条件写死 `_logPage === 1` —— 翻到第 2 页之后表格就再也不动了，
+ * 用户只能手动刷新整个页面。上方「请求动态」早就是 SSE，两个区域行为不一致，
+ * 观感上就是「上面实时、下面不实时」。
+ *
+ * 现在：服务端 `/api/logs/usage/stream` 只在有新行时推一帧，
+ * 前端收到就重拉**当前页**（保留页码与筛选），空闲时零流量。
+ */
+
+function startLogUsageStream() {
+  stopLogUsageStream();
+  if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+  if (typeof EventSource === 'undefined') {
+    // 极老 WebView 没有 EventSource：退回 8 秒轮询，至少不会完全静止
+    const tick = async () => {
+      _logUsagePollTimer = null;
+      if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+      try {
+        const r = await api('/api/logs/requests?include_history=false');
+        const { ok, data } = await safeJson(r);
+        if (ok && data && data.usage_revision != null
+            && _logUsageRevision !== null
+            && data.usage_revision !== _logUsageRevision) {
+          _logUsageRevision = data.usage_revision;
+          refreshLogTable();
+        }
+      } catch (e) { /* 下一拍再试 */ }
+      _logUsagePollTimer = setTimeout(tick, 8000);
+    };
+    tick();
     return;
   }
-  try {
-    const r = await api('/api/logs/requests?include_history=false');
-    const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error('revision unavailable');
-    const rev = data && data.usage_revision;
-    if (rev != null && _logUsageRevision !== null && rev !== _logUsageRevision) {
-      _logUsageDirty = true;
-      _logSummaryDirty = true;
+  const open = async () => {
+    let ticket = '';
+    try {
+      const r = await api('/api/logs/requests/ticket');
+      const { ok, data } = await safeJson(r);
+      if (ok) ticket = (data && data.ticket) || '';
+    } catch (e) { /* 拿不到票就用普通 cookie 会话 */ }
+    const qs = ticket ? ('?ticket=' + encodeURIComponent(ticket)) : '';
+    let src;
+    try {
+      src = new EventSource('/api/logs/usage/stream' + qs);
+    } catch (e) {
+      return;
     }
-    if (rev != null) _logUsageRevision = rev;
-    if (_logUsageDirty && _logPage === 1 && !_logUsageBusy && _logSelReady) {
-      _logUsageBusy = true;
-      Promise.resolve(loadLogs(1, true)).finally(() => { _logUsageBusy = false; });
-    }
-    if (_logSummaryDirty && !_logFolded.summary
-        && Date.now() - _logSummaryAt >= 30000) {
-      loadLogSummary(true);
-    }
-  } catch (e) {
-    // 网络抖动：下一轮再试，不打断页面
-  } finally {
-    if (document.documentElement.dataset.activeTab === 'logs') scheduleLogUsagePoll();
+    _logUsageSource = src;
+    src.addEventListener('usage', event => {
+      let rev = null;
+      try { rev = JSON.parse(event.data).usage_revision; } catch (e) { /* ignore */ }
+      if (rev != null) _logUsageRevision = rev;
+      refreshLogTable();
+    });
+    src.addEventListener('reauth', () => {
+      // 连接到期：换票重连（不重建整页）
+      try { src.close(); } catch (e) { /* ignore */ }
+      _logUsageSource = null;
+      clearTimeout(_logUsageReconnect);
+      _logUsageReconnect = setTimeout(open, 500);
+    });
+    src.onerror = () => {
+      // EventSource 自己会重连；这里只在彻底关闭时补一次
+      if (src.readyState === 2) {
+        clearTimeout(_logUsageReconnect);
+        _logUsageReconnect = setTimeout(open, 3000);
+      }
+    };
+  };
+  open();
+}
+
+function stopLogUsageStream() {
+  clearTimeout(_logUsageReconnect);
+  _logUsageReconnect = null;
+  if (_logUsageSource) {
+    try { _logUsageSource.close(); } catch (e) { /* ignore */ }
+    _logUsageSource = null;
+  }
+  if (_logUsagePollTimer) {
+    clearTimeout(_logUsagePollTimer);
+    _logUsagePollTimer = null;
+  }
+}
+
+/** 有新日志时重拉表格：**保持当前页码与筛选**，不跳回第 1 页。 */
+function refreshLogTable() {
+  if (!_logSelReady || _logUsageBusy) return;
+  _logUsageBusy = true;
+  Promise.resolve(loadLogs(_logPage || 1, true))
+    .finally(() => { _logUsageBusy = false; });
+  if (!_logFolded.summary && Date.now() - _logSummaryAt >= 30000) {
+    loadLogSummary(true);
   }
 }
 
 function startLogActivity() {
   if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
-  // 两条独立节奏：
-  //   pollLogUsageRevision —— 5 秒探一次主键，变了才重拉表格（省查询）
-  //   startLogLive         —— SSE 长连接推送上方实时区（事件驱动，非轮询）
-  pollLogUsageRevision();
+  // 两条独立 SSE：上方「请求动态」、下方「用量日志表格」
+  startLogUsageStream();
   startLogLive();
 }
 
 /** 离开日志页时停掉实时区，避免后台空转。 */
 function stopLogActivity() {
-  if (_logUsagePollTimer) {
-    clearTimeout(_logUsagePollTimer);
-    _logUsagePollTimer = null;
-  }
+  stopLogUsageStream();
   stopLogLive();
 }
 
@@ -12626,10 +13402,44 @@ async function loadLogs(page, silent = false) {
 }
 
 /** 单条日志行（抽出来便于与汇总区共用配色）。 */
+/** 命中率能否显示：上游给了缓存字段、且有输入 token。
+ *
+ * 「上游没给」和「命中率为 0」是两件事 —— 前者显示 —，后者才显示 0.00%。
+ * 各处表格统一用这个判定，避免有的地方显示 0、有的地方显示 —。
+ */
+function cacheRateOf(row) {
+  const pt = Number((row && row.prompt_tokens) || 0);
+  const raw = row ? row.cached_tokens : undefined;
+  const has = raw !== null && raw !== undefined;
+  if (!pt || !has) return null;
+  return Math.min(100, Number(raw || 0) / pt * 100);
+}
+
 function hitRateHtml(l) {
-  // 命中率 = 缓存命中 token / 输入(prompt) token；无输入或不支持的请求显示 —
-  const pt = Number(l.prompt_tokens || 0), ct = Number(l.cached_tokens || 0);
+  // 命中率 = 缓存命中 token / 输入(prompt) token。
+  //
+  // **三种情况都显示 “—”，不要显示 0%**：
+  //   1. 没有输入 token（老记录 / 非推断请求）—— 分母不存在；
+  //   2. 上游根本没回缓存字段（`cached_tokens` 是 null，不是 0）；
+  //   3. 记录里压根没有这个字段（历史行）。
+  //
+  // 为什么 2 必须区分：Trae 这类上游**不返回缓存统计**，之前被渲染成
+  // 「0.00%」，用户以为「缓存没命中」。而「上游没给」和「命中率为零」
+  // 是两件事 —— 前者应该显示未知（—），后者才是真的 0。
+  // 区分依据：`cached_tokens` 为 null/undefined 表示上游没给；
+  // 显式给了 0 才认为是真的没命中（此时显示 0.00% 是诚实的）。
+  const pt = Number(l.prompt_tokens || 0);
+  const rawCached = l.cached_tokens;
+  const hasCacheField = rawCached !== null && rawCached !== undefined;
   if (!pt) return `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
+  if (!hasCacheField) {
+    return `<div class="leading-tight tnum"
+      data-tooltip="缓存命中未知"
+      data-tooltip-description="该平台上游没有返回缓存统计（不是命中率为 0）">
+      <span class="text-xs" style="color:var(--fg-subtle)">—</span>
+    </div>`;
+  }
+  const ct = Number(rawCached || 0);
   const pct = Math.min(100, ct / pt * 100);
   const tone = pct >= 60 ? "var(--ok)" : pct >= 30 ? "#d97706" : "var(--fg-subtle)";
   return `<div class="leading-tight tnum" data-tooltip="缓存命中 ${fmtK(ct)} / 输入 ${fmtK(pt)}">
@@ -12918,7 +13728,7 @@ async function loadLogSummary(silent = false) {
           <td class="text-right tnum" style="color:${x.failed_requests > 0 ? 'var(--danger)' : 'var(--fg-subtle)'}">${x.failed_requests}</td>
           <td class="text-right tnum font-medium" style="color:var(--warn)">${fmtCredit(x.credits)}</td>
           <td class="text-right tnum" style="color:var(--fg-muted)">${fmtK(x.total_tokens)}</td>
-          <td class="text-right tnum font-medium" style="color:${x.prompt_tokens ? (x.cached_tokens / x.prompt_tokens >= .6 ? 'var(--ok)' : x.cached_tokens / x.prompt_tokens >= .3 ? '#d97706' : 'var(--fg-subtle)') : 'var(--fg-subtle)'}" data-tooltip="缓存命中 ${fmtK(x.cached_tokens||0)} / 输入 ${fmtK(x.prompt_tokens||0)}">${x.prompt_tokens ? Math.min(100, x.cached_tokens / x.prompt_tokens * 100).toFixed(2) + '%' : '—'}</td>
+          <td class="text-right tnum font-medium" style="color:${cacheRateOf(x) == null ? 'var(--fg-subtle)' : (cacheRateOf(x) >= 60 ? 'var(--ok)' : cacheRateOf(x) >= 30 ? '#d97706' : 'var(--fg-subtle)')}" data-tooltip="${cacheRateOf(x) == null ? '缓存命中未知' : '缓存命中 ' + fmtK(x.cached_tokens||0) + ' / 输入 ' + fmtK(x.prompt_tokens||0)}" data-tooltip-description="${cacheRateOf(x) == null ? '该平台上游没有返回缓存统计（不是命中率为 0）' : ''}">${cacheRateOf(x) == null ? '—' : cacheRateOf(x).toFixed(2) + '%'}</td>
           <td class="text-right tnum" style="color:var(--fg-muted)">${x.avg_latency_ms ? (x.avg_latency_ms/1000).toFixed(2)+'s' : '—'}</td>
           <td class="text-xs" style="color:var(--fg-subtle)">${fmtTime(x.last_used_at, false)}</td>
           <td><div class="pkg-track" style="margin:0"><i style="width:${Math.max(2, x.credits/maxC*100)}%"></i></div></td>
@@ -13044,7 +13854,7 @@ function renderGroups() {
       <td class="px-4 py-3 text-slate-500 text-xs">${esc(g.note || "-")}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
         <button onclick="openGroupEditor(${g.id})" class="text-blue-600 hover:text-blue-700 mr-3" data-tooltip="编辑"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg></span></button>
-        <button onclick="deleteGroup(${g.id}, '${esc(g.name)}')" class="text-red-500 hover:text-red-600" data-tooltip="删除"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+        <button onclick="deleteGroup(${g.id}, ${jsv(g.name)})" class="text-red-500 hover:text-red-600" data-tooltip="删除"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
       </td>
     </tr>`;
   }).join("");
@@ -13132,7 +13942,7 @@ function renderGeModels() {
       return `
       <label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 cursor-pointer text-sm">
         <input type="checkbox" ${_geSelected.has(m.model_id) ? "checked" : ""}
-               onchange="geToggle('${esc(m.model_id)}', this.checked)" />
+               onchange="geToggle(${jsv(m.model_id)}, this.checked)" />
         <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0 w-[86px] truncate"
               style="background:var(--surface-2);color:var(--fg-muted)"
               data-tooltip="${esc(label)}">${esc(label)}</span>
@@ -13203,6 +14013,17 @@ function fmtNum(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return String(Math.round(n));
+}
+
+/** 千分位整数（**不缩写**）：表格里的积分/余额用这个。
+ *
+ * 为什么不复用 `fmtNum`：它会把 4118 缩成 "4.1K"，而概览显示 "4,118" ——
+ * 同一个数在两处长得不一样（issue #4 的反馈）。
+ * 表格列宽足够，用千分位更易读，也不会因为单位切换而左右跳。
+ */
+function fmtInt(n) {
+  const v = Math.round(Number(n) || 0);
+  return v.toLocaleString('zh-CN');
 }
 /* 注意：`fmtCredit` 定义在上面（组件区），**不要在这里再定义一次** ——
  * 之前这里有一份 `return n.toFixed(2)` 的重复实现，因为声明在后，
@@ -13618,7 +14439,7 @@ async function loadUsageStats() {  initUsageSelects();
         strip.innerHTML = `<span class="usage-platform-strip-label">平台分布</span>` +
           rows.map(p => `<button type="button" class="usage-platform-chip${p.value === d.platform ? " active" : ""}"
               data-usage-platform="${esc(p.value)}"
-              onclick="setUsagePlatform('${esc(p.value)}')"
+              onclick="setUsagePlatform(${jsv(p.value)})"
               data-tooltip="${esc(p.label)} · 点击只看该平台">
               <b>${esc(p.label)}</b>
               <span>${fmtNum(p.requests)} 次</span>
@@ -13733,7 +14554,7 @@ function _ensureTip() {
   }
   return t;
 }
-let _chartTipTimer = null;
+
 function showTip(ev, html) {
   clearTimeout(_chartTipTimer);
   const t = _ensureTip();
@@ -13804,7 +14625,7 @@ if (!_localConsoleShell) {
 </script>
 <script src="/admin/assets/growth_center.js?v=20261031-r2"></script>
 <script src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
-<script src="/admin/assets/review-improvements.js?v=20261031-r2"></script>
+<script src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
 <script src="/static/vendor/marked-12.0.2.min.js"></script>
 <script src="/static/vendor/dompurify-3.4.17.min.js"></script>
 <script src="/admin/assets/release-notes.js?v=20261031-r2"></script>

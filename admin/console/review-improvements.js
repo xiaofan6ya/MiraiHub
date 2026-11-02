@@ -32,7 +32,11 @@ window.WBReview = (() => {
     const delta = Number(row.delta);
     const sign = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'neutral';
     const confirmed = row.kind === 'confirmed';
-    return '<tr><td>' + esc(new Date(row.created_at).toLocaleString()) + '</td><td>' +
+    // created_at 是 UTC 的无时区字符串，直接 new Date().toLocaleString()
+    // 会 ①按浏览器语言渲染成 10/31/2026, 10:10:32 PM ②当成**本地时间**解析，
+    // 少加 8 小时。统一走全站的 fmtTime（UTC → 北京时间 24 小时制）。
+    const when = typeof fmtTime === 'function' ? fmtTime(row.created_at) : String(row.created_at || '—');
+    return '<tr><td class="journal-time">' + esc(when) + '</td><td>' +
       esc(row.account_name || '#' + row.account_id) + '<small class="journal-account-id">#' + Number(row.account_id) +
       '</small></td><td><span class="journal-kind ' + (confirmed ? 'confirmed' : '') + '">' +
       (confirmed ? '确认奖励' : '余额观察') + '</span></td><td>' + esc(sourceLabel(row.source)) +

@@ -29,9 +29,17 @@ def is_blocked_ip(ip):
         now = time.monotonic()
         if now >= _refresh_at:
             try:
+                from datetime import datetime
+                from sqlalchemy import or_
+                utcnow = datetime.utcnow()
                 with SessionLocal() as db:
+                    # 只取「启用中且未过期」的封禁。
+                    # expires_at 为 NULL 表示永久（人工封禁），过期的自动封禁应视为
+                    # 已解除 —— 自动规则基于启发式，必然存在误判，必须能自行恢复。
                     _blocked = frozenset(row.ip for row in db.query(BlockedIP.ip)
-                                         .filter(BlockedIP.enabled == 1))
+                                         .filter(BlockedIP.enabled == 1)
+                                         .filter(or_(BlockedIP.expires_at.is_(None),
+                                                     BlockedIP.expires_at > utcnow)))
                     _blocked_devices = frozenset((row.kind, row.digest) for row in
                         db.query(ClientIdentity.kind, ClientIdentity.digest).filter(ClientIdentity.blocked == 1))
             except Exception:

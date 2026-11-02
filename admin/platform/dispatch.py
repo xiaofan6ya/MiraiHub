@@ -873,6 +873,32 @@ def _set_state(scope, platform_id: str, realm: str) -> None:
         pass
 
 
+def _mark_waiting(scope) -> None:
+    """把此次请求标成「排队中」（选号 / 等可用账号 / 等并发名额）。
+
+    为什么需要它：面板的阶段枚举里一直有 `waiting`，但**从来没人写过** ——
+    请求刚进来时是「已接收」，`_set_state()` 一被调用就直接跳到「转发上游」。
+    于是「在号池里等一个可用账号」这段时间在面板上完全看不出来，
+    用户只看到一条「已接收」的请求挂在那儿几十秒（Trae 排队时尤其明显）。
+
+    真正的排队点有三处：
+      · 选号（可能因为冷却/在途全满而 wait）
+      · 平台网关里等上游连接建立
+      · 上游已连接但还没吐出第一帧（这个属于 upstream/streaming 之间，
+        由 `request_metrics` 在收到首个数据块时推进到 streaming）
+
+    这里只处理第一处：进入选号之前先标 `waiting`。
+    """
+    try:
+        from admin import traffic_stats
+
+        rid = scope.get("_wb_traffic_rid")
+        if rid:
+            traffic_stats.mark_stage(rid, "waiting")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class PlatformDispatchMiddleware:
     """把非默认平台的 `/v1/*` 请求转交给该平台的网关实现。"""
 
@@ -1029,6 +1055,10 @@ class PlatformDispatchMiddleware:
                     return await JSONResponse(payload)(scope, receive, send)
                 except Exception:  # noqa: BLE001 - 聚合失败退回原路径
                     logger.debug("聚合 /v1/models 失败，回退单平台", exc_info=True)
+
+        # 接下来这段（后缀解析 / 平台反查 / 选号）就是用户眼里的「排队」：
+        # 先把阶段推到 waiting，面板才不会一直停在「已接收」。
+        _mark_waiting(scope)
 
         # ---- 2) 解析目标平台 ----
         # 模型名自带平台后缀时（`deepseek-v4.1-flash-workbuddy`），

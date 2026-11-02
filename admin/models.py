@@ -238,6 +238,23 @@ class UsageLog(Base):
               "error_kind", "credits", "total_tokens"),
         Index("ix_usage_logs_model_credits", "model", "created_at",
               "error_kind", "credits"),
+        # **日志汇总的完全覆盖索引**（2026-11-01 新增）。
+        #
+        # `/api/logs/summary` 与 `/api/credits/usage` 都是
+        #     SELECT account_id, COUNT(*), SUM(credits), SUM(total_tokens),
+        #            SUM(prompt_tokens), SUM(completion_tokens),
+        #            SUM(cached_tokens), AVG(latency_ms), MAX(created_at)
+        #     FROM usage_logs WHERE created_at >= ? GROUP BY account_id
+        # 之前的索引只覆盖到 credits/total_tokens，`prompt/completion/cached/
+        # latency_ms` 全部要**回表**取 —— 30 天口径 22 万行逐行回表，
+        # 线上实测 logs/summary 922ms、credits/usage 566ms。
+        # 把聚合用到的列全部放进索引后（本地 42 万行实测）：
+        #     logs/summary  710ms → 172ms（4.1x）
+        #     credits/usage 680ms → 133ms（5.1x）
+        # 列顺序：account_id（分组键）→ created_at（范围）→ 其余按聚合顺序。
+        Index("ix_usage_logs_acct_cov", "account_id", "created_at",
+              "error_kind", "credits", "total_tokens", "prompt_tokens",
+              "completion_tokens", "cached_tokens", "latency_ms"),
         Index("ix_usage_logs_key_id", "api_key_id", "id"),
         Index("ix_usage_logs_model_id", "model", "id"),
     )
@@ -302,6 +319,13 @@ class BlockedIP(Base):
     ip = Column(String(64), nullable=False)
     enabled = Column(Integer, nullable=False, default=1)
     note = Column(String(255), default="")
+    # 封禁到期时间（UTC）。NULL = 永久封禁。
+    #
+    # 为什么要这个字段：自动封禁必须有兜底时效。手动封禁是人工判断，永久合理；
+    # 自动封禁基于启发式规则（请求频率、401 率），一定会有误判——
+    # 没有过期时间就意味着一次误判永久锁死一个正常客户端，而且没人记得去解。
+    # 到期后由 `is_blocked_ip()` 视为未封禁，无需额外清理任务。
+    expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

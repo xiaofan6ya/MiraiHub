@@ -427,6 +427,38 @@ class TimingMiddleware:
         token = current.set(record)
         with _lock:
             _active[record['id']] = record
+
+        # **请求一开始就在实时区落一行 running**。
+        #
+        # 原来只有 `platform/dispatch.py` 会调 `traffic_stats.start()`，
+        # 而**不带平台后缀**的普通对话请求走主应用 `routers/proxy.py`，
+        # 完全绕开 dispatch —— 于是这些请求在「请求动态」里：
+        #   1. 进行中看不到（只有结束后由 record() 补一条）；
+        #   2. Key 列是空的（`_wb_traffic_key` 没人写）。
+        # 线上表现就是「明明多个 Key 在跑，动态区只看到一个 Key」。
+        #
+        # 这里做**幂等**埋点：dispatch 已经建过 rid 时直接复用，
+        # 不会产生两行；它没建过才补一个。
+        try:
+            if not scope.get("_wb_traffic_rid"):
+                from admin import traffic_stats
+                from admin.platform import registry
+
+                _model = ""
+                try:
+                    import json as _json
+
+                    _body = scope.get("_wb_body") or b""
+                    if _body:
+                        _model = str(_json.loads(_body).get("model") or "")[:120]
+                except Exception:  # noqa: BLE001
+                    _model = ""
+                scope["_wb_traffic_rid"] = traffic_stats.start(
+                    "", model=_model, path=scope.get("path", ""),
+                    key_label=_key_label_from_scope(scope),
+                    client_ip=str(record.get("client_ip") or ""))
+        except Exception:  # noqa: BLE001 - 埋点失败不影响请求
+            pass
         async def timed_receive():
             began = time.perf_counter()
             reading_upload = not record['upload_complete']
@@ -525,6 +557,19 @@ class TimingMiddleware:
                                             or getattr(_k, "label", ""))[:64]
                     except Exception:  # noqa: BLE001
                         key_label = ""
+                if not key_label:
+                    # **最后兜底：直接从 Authorization 头解析 Key 名**。
+                    #
+                    # 为什么必须有这一步：`_wb_traffic_key` 只有
+                    # `platform/dispatch.py` 会写。而**不带平台后缀**的普通
+                    # 对话请求走的是主应用 `routers/proxy.py`，那条路径完全
+                    # 不碰 dispatch —— 于是实时区里这些行的 Key 列恒为空。
+                    # 线上实测：同一个页面里，带后缀的请求显示「米帆」，
+                    # 主应用请求显示「—」，看起来就像“只有 1 个 Key 在跑”。
+                    #
+                    # 用带 TTL 的进程内缓存：同一个 Key 只查一次库，
+                    # 收尾路径上不会因为这里多开一次查询而变慢。
+                    key_label = _key_label_from_scope(scope)
                 traffic_stats.record(
                     platform,
                     outcome=record['outcome'],
@@ -550,3 +595,60 @@ class TimingMiddleware:
                     await _finish_thread(save, record)
             finally:
                 current.reset(token)
+
+
+#: Key 展示名缓存：`原始 key -> (过期时间, 展示名)`。
+#: 收尾路径上每个请求都要取 Key 名，直连数据库会把延迟加上去，
+#: 而 Key 名字几乎不变，缓存 5 分钟足够。
+_KEY_LABEL_CACHE: dict[str, tuple[float, str]] = {}
+_KEY_LABEL_TTL = 300.0
+_KEY_LABEL_LOCK = __import__("threading").Lock()
+
+
+def _raw_key_of(scope) -> str:
+    """从 ASGI scope 的请求头里取原始 API Key（Bearer 或 x-api-key）。"""
+    for name, value in (scope.get("headers") or []):
+        try:
+            if name == b"authorization":
+                text = value.decode("latin-1", "replace").strip()
+                if " " in text:
+                    text = text.split(" ", 1)[1].strip()
+                if text:
+                    return text
+            elif name == b"x-api-key":
+                text = value.decode("latin-1", "replace").strip()
+                if text:
+                    return text
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def _key_label_from_scope(scope) -> str:
+    """把请求头里的 Key 翻成「Key 名字」，带缓存。失败返回空串（不抛）。"""
+    raw = _raw_key_of(scope)
+    if not raw:
+        return ""
+    now = __import__("time").monotonic()
+    with _KEY_LABEL_LOCK:
+        hit = _KEY_LABEL_CACHE.get(raw)
+        if hit and hit[0] > now:
+            return hit[1]
+    label = ""
+    try:
+        from admin.db import SessionLocal
+        from admin.security import get_key_row
+
+        with SessionLocal() as db:
+            row = get_key_row(db, raw)
+            if row is not None:
+                label = str(getattr(row, "name", "")
+                            or getattr(row, "label", "") or "")[:64]
+    except Exception:  # noqa: BLE001 - 解析失败只是少个展示名
+        label = ""
+    with _KEY_LABEL_LOCK:
+        # 顺手清过期项，避免长期运行堆积
+        for stale in [k for k, (exp, _v) in _KEY_LABEL_CACHE.items() if exp <= now]:
+            _KEY_LABEL_CACHE.pop(stale, None)
+        _KEY_LABEL_CACHE[raw] = (now + _KEY_LABEL_TTL, label)
+    return label

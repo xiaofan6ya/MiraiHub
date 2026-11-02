@@ -758,7 +758,9 @@ def run_keepalive_tokens(db, schedule=None) -> dict:
     if refreshed:
         summary += f"，其中 {refreshed} 个刷新了 token"
     if dead_ids:
-        summary += (f"，**{len(dead_ids)} 个登录态已失效**"
+        # 这里是**纯文本**摘要（直接渲染进表格单元格），不要写 markdown 星号：
+        # 前端不会解析，页面上会原样露出 `**`。
+        summary += (f"，{len(dead_ids)} 个登录态已失效"
                     f"（{'、'.join('#' + str(i) for i in dead_ids[:5])}"
                     f"{' 等' if len(dead_ids) > 5 else ''}，"
                     f"{dead_disabled} 个已自动禁用，其余待人工重登）")
@@ -1189,7 +1191,33 @@ def _run_one(s: Schedule, db, now: datetime):
         from admin.models import SystemSetting
         pending = db.get(SystemSetting, "keepalive:pending")
         if not (pending and pending.value not in ("", "[]")) and not _keepalive_due(s, now):
-            # 还没到今天的计划时刻 → 顺延到下一个计划时刻（正常等待）
+            # 还没到今天的计划时刻。**但没有直接顺延**：
+            #
+            # 续期窗口（refreshToken，60 天）是账号唯一的死亡线，而这条预设
+            # 节奏一旦在整点错过就是一整天。所以这里多做一件事：如果按兜底
+            # 周期（ADMIN_RENEWAL_SWEEP_SECONDS）该扫了，且确实有号的窗口
+            # 快见底/解析不出，就把 run_task 立刻跑一遍 —— 而不是等 22:00。
+            #
+            # 没有紧急号时一行都不打上游（`_renewal_urgent_ids` 只读凭证、
+            # 不打网络），所以这个检查本身是零成本的。
+            if _renewal_sweep_due(db, now):
+                try:
+                    urgent = _renewal_urgent_ids(db)
+                except Exception:      # noqa: BLE001 - 扫描失败不影响正常排期
+                    urgent = []
+                _mark_renewal_sweep(db, now)
+                if urgent:
+                    result = run_task(s.task, db, s)
+                    payload = dict(result)
+                    payload["summary"] = (
+                        "续期窗口兜底：" + str(result.get("summary") or "")
+                        + f"（触发账号 {'、'.join('#' + str(i) for i in urgent[:5])}"
+                        + (" 等" if len(urgent) > 5 else "") + "）")
+                    s.last_result = _dump_result(payload)
+                    s.last_run_at = now
+                    s.next_run_at = _next_keepalive_at(now)
+                    db.commit()
+                    return
             s.next_run_at = _next_keepalive_at(now)
             db.commit()
             return
@@ -1544,6 +1572,79 @@ def _is_keepalive_hour(now: datetime) -> bool:
     """
     hours = set(settings.KEEPALIVE_HOURS)
     return _local_now().hour in hours
+
+
+# ---------------------------------------------------------------------------
+# 续期窗口兜底（renewal sweep）
+# ---------------------------------------------------------------------------
+
+def _renewal_urgent_ids(db) -> list[int]:
+    """找出「续期窗口快要/已经见底」的账号。
+
+    判据来自各平台的 `Gateway.credential_expiry()`：续期窗口的剩余天数
+    低于该平台的告急阈值，或干脆解析不出来。
+
+    为什么这件事不能只交给每日保活：保活是**预设整点**触发，错过就是一整天
+    （历史上积压过 18 天）。而续期窗口是账号唯一的死亡线 —— 短期令牌过期
+    刷新就回来，窗口过期则真的只能重新授权登录。兜底扫描把它变成
+    「最多晚 N 秒」。
+
+    只回 idle 名单，不在这里打上游：真正的刷新由保活那把全局锁串行执行，
+    并发刷新是明显的机器特征，也可能触发上游风控。
+    """
+    from admin.credential_expiry import STATE_UNKNOWN, credential_expiry, renews_guard_days
+    from admin.models import Account
+
+    guard = renews_guard_days()
+    urgent: list[int] = []
+    # 老数据的 platform 可能是空串（历史行），`Account.platform == "workbuddy"`
+    # 会把它们漏掉。这里不再按平台过滤 —— 有没有续期窗口由各平台自己回答，
+    # 不支持的平台会返回 supported=False，直接跳过即可。
+    rows = (db.query(Account)
+            .filter(Account.status == "active")
+            .order_by(Account.id.asc()).all())
+    for acc in rows:
+        info = credential_expiry(acc)
+        if not info.get("supported"):
+            continue
+        if not info.get("has_refresh"):
+            # 没有续期令牌的号根本救不回来，别浪费一次上游请求。
+            continue
+        days = info.get("refresh_days_left")
+        if info.get("refresh_state") == STATE_UNKNOWN:
+            # 解析不出到期时间（凭证格式异常）→ 值得试一次刷新，
+            # 刷新成功会把两条时间线都写正。
+            urgent.append(acc.id)
+        elif days is not None and days < guard:
+            urgent.append(acc.id)
+    return urgent
+
+
+def _renewal_sweep_due(db, now: datetime) -> bool:
+    """兜底扫描现在该不该跑（按 SystemSetting 记录的上一轮时间）。"""
+    from admin.models import SystemSetting
+
+    interval = int(getattr(settings, "RENEWAL_SWEEP_SECONDS", 0) or 0)
+    if interval <= 0:
+        return False
+    row = db.get(SystemSetting, "keepalive:renewal_sweep_at")
+    try:
+        last = float(row.value) if row else 0
+    except (TypeError, ValueError):
+        last = 0
+    return (now.timestamp() - last) >= interval
+
+
+def _mark_renewal_sweep(db, now: datetime) -> None:
+    from admin.models import SystemSetting
+
+    row = db.get(SystemSetting, "keepalive:renewal_sweep_at")
+    if row is None:
+        db.add(SystemSetting(key="keepalive:renewal_sweep_at",
+                             value=str(now.timestamp())))
+    else:
+        row.value = str(now.timestamp())
+    db.commit()
 
 
 _scheduler_lock = threading.Lock()

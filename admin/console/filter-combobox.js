@@ -133,13 +133,18 @@ window.WBFilterCombobox = (() => {
   }
   function open(state) {
     if (opened && opened !== state) close();
+    // 下拉展开瞬间先收掉悬停提示：否则鼠标还停在下拉框上，
+    // 那个 200ms 后才出现的 tooltip 正好浮在选项列表上把第一项盖住。
+    try { window.hideActionTooltip && window.hideActionTooltip(); } catch (e) {}
     opened = state; state.panel.hidden = false;
+    document.documentElement.classList.add('is-combobox-open');
     state.input.setAttribute('aria-expanded', 'true'); render(state);
   }
   function close() {
     if (!opened) return;
     opened.panel.hidden = true; opened.input.setAttribute('aria-expanded', 'false');
     opened.input.removeAttribute('aria-activedescendant'); opened = null;
+    document.documentElement.classList.remove('is-combobox-open');
   }
   document.addEventListener('pointerdown', event => {
     if (opened && !opened.wrap.contains(event.target) && !opened.panel.contains(event.target)) close();

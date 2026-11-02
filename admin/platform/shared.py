@@ -453,10 +453,30 @@ def record_usage(db: Session, *, key_id: int, account_id: int, model: str,
     prompt = _int(usage.get("prompt_tokens") or usage.get("input_tokens"))
     completion = _int(usage.get("completion_tokens") or usage.get("output_tokens"))
     total = _int(usage.get("total_tokens")) or (prompt + completion)
-    cached = 0
-    details = usage.get("prompt_tokens_details")
-    if isinstance(details, dict):
-        cached = _int(details.get("cached_tokens"))
+    # **缓存命中：上游没给就存 NULL，不要存 0**。
+    #
+    # 这一条是「Trae 命中率显示 0」的根因：原来默认 `cached = 0`，
+    # 即使上游压根没回任何缓存字段，也会写一个 0 进库。前端拿到的就是
+    # 「命中率 0.00%」，用户以为缓存失效 —— 实际是**上游不统计缓存**。
+    #
+    # 现在区分「真的 0」（上游明确回了 0）和「未知」（一个字段都没有）：
+    #   · 上游给了 → 用真实值（包括 0）
+    #   · 上游什么都没给 → NULL，前端渲染成 “—”
+    cached = None
+    try:
+        from upstream_compat import cached_token_count
+
+        cached = cached_token_count(usage)
+    except Exception:  # noqa: BLE001 - 探测失败退回手工解析
+        cached = None
+    if cached is None:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and "cached_tokens" in details:
+            cached = _int(details.get("cached_tokens"))
+        elif "cached_tokens" in usage:
+            cached = _int(usage.get("cached_tokens"))
+        elif "cache_read_input_tokens" in usage:
+            cached = _int(usage.get("cache_read_input_tokens"))
     # 上游明确给了积分就用它（Qoder 的 `x_qoder_credits` 在模型目录里
     # 不代表真实计费，只有响应 usage 才是权威值）；没给才按倍率估算。
     reported = usage.get("credits")

@@ -217,6 +217,25 @@ class WorkBuddyGateway:
     def client_probe(self) -> ClientProbe:
         return WorkBuddyClientProbe()
 
+    # ---- 凭证有效期 ----
+    def credential_expiry(self, auth_json) -> dict:
+        """解析本平台凭证的两条时间线（access / refresh）。
+
+        admin 侧只消费结果，不关心 .info 的内部结构 —— 这正是
+        `test_gateway_contract` 的「admin 平台无关性」要求的东西。
+        """
+        # 别名导入：模块名与方法名撞车时，同名局部变量会让本方法与模块
+        # 变成两个不同的对象，后面再想按名字取模块就取不到了。
+        from admin.platform.workbuddy.core import credential_expiry as expiry
+
+        return expiry.token_expiry(auth_json)
+
+    def renewal_guard_days(self) -> int:
+        """续期窗口「告急」阈值（天），供 admin 的兜底调度使用。"""
+        from admin.platform.workbuddy.core import credential_expiry as expiry
+
+        return int(expiry.RENEWAL_GUARD_DAYS)
+
     # ---- 概览卡片 ----
     def overview_cards(self, db) -> list[dict]:
         """WorkBuddy 的统计卡片。

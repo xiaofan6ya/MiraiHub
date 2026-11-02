@@ -160,6 +160,17 @@ from admin.request_metrics import TimingMiddleware
 app.add_middleware(TimingMiddleware, persist=True)
 app.add_middleware(IPBlockMiddleware)
 
+# 异常行为守卫必须注册在**最后**（= 最外层）。
+#
+# 原因：`add_middleware` 是前插，越晚注册越靠外。守卫要在所有业务逻辑之前
+# 完成「是否已被封」的判定，否则被封的 IP 仍会打穿到应用层再被拒。
+#
+# 为什么已有的 `IPBlockMiddleware` 不够：它内部用 `_is_public_gateway_path()`
+# 过滤，只保护 `/v1/*`；而事故中攻击者扫的是 `/api/accounts`，两者路径体系
+# 完全不同，等于完全没有风控。本中间件不区分路径，全站生效。
+from admin.abuse_guard import AbuseGuardMiddleware
+app.add_middleware(AbuseGuardMiddleware)
+
 
 @app.on_event("shutdown")
 async def _flush_ip_activity():

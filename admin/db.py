@@ -117,6 +117,13 @@ def init_db() -> bool:
         _ensure_column("request_audits", "client_ip", "VARCHAR(64)", "DEFAULT ''")
         _ensure_column("request_audits", "user_agent", "VARCHAR(512)", "DEFAULT ''")
 
+        # 迁移：封禁表的自动过期时间（NULL = 永久封禁）。
+        #
+        # 老库没有这一列，而 `is_blocked_ip()` 会按模型读全部列 —— 缺列会让
+        # 封禁查询直接抛异常，被 `except` 吞掉后退化成「谁都没被封」，
+        # 也就是**风控静默失效**。这种失效比报错更危险，所以迁移必须补齐。
+        _ensure_column("blocked_ips", "expires_at", "DATETIME", "NULL")
+
         # 迁移：给 api_keys 表加 key_full 列（若不存在）
         _ensure_column("api_keys", "key_full", "VARCHAR(2048)", "DEFAULT ''")
 

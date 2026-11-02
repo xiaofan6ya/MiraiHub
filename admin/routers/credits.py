@@ -339,7 +339,27 @@ def credit_usage_stats(
     这边是**积分视角**（只看 credits，且默认把「余额 × 到期」串起来看），
     供积分统计页展示「谁在烧、烧了多少、还剩多少、还剩多久」。
     """
-    since = datetime.utcnow() - timedelta(days=max(1, days))
+    days = max(1, days)
+    # 这个接口原来**完全没有缓存**：每次刷新都在 22 万行上跑两条 GROUP BY
+    # （按账号 + 按模型），线上实测 566ms、本地 551ms，是积分页最大的延迟来源。
+    # 而「最近 N 天的消耗排行」在一分钟内几乎不会变 —— 直接复用日志模块那套
+    # 带 single-flight 的统计缓存（同一进程、同一份内存，不额外引入依赖）。
+    from admin.routers import logs as _logs_mod
+
+    cache_key = _logs_mod._stats_cache_key(
+        'credits_usage',
+        (days, account_id, top, platform_scope.from_request(request)))
+
+    def compute():
+        return _credit_usage_payload(db, days, account_id, top, request)
+
+    return _logs_mod._cached_stats(
+        cache_key, compute, ttl=_logs_mod._ttl_for_days(days))
+
+
+def _credit_usage_payload(db: Session, days: int, account_id, top, request):
+    """积分消耗构成（真正的计算部分，供缓存包装调用）。"""
+    since = datetime.utcnow() - timedelta(days=days)
     ok_filter = UsageLog.error_kind.in_(("", "success"))
 
     # **按平台收窄**：这个面板回答的是「当前平台的号谁在烧积分」。

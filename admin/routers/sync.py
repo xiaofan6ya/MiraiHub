@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from admin import client_profile as cprofile
 from admin.db import get_db
 from admin.models import Account, ModelConfig, SystemSetting
-from admin.security import require_admin
+from admin.security import clean_display_name, require_admin
 
 _logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ async def receive(request: Request, db: Session = Depends(get_db)):
         existing = q.first()
         if existing:
             existing.auth_json = a["auth_json"]
-            existing.name = a.get("name") or existing.name
+            existing.name = clean_display_name(a.get("name")) or existing.name
             existing.enterprise_id = a.get("enterprise_id") or ""
             existing.domain = a.get("domain") or ""
             existing.status = a.get("status") or "active"
@@ -285,7 +285,7 @@ async def receive(request: Request, db: Session = Depends(get_db)):
         else:
             db.add(Account(
                 platform=plat or "workbuddy",
-                name=a.get("name") or "",
+                name=clean_display_name(a.get("name")),
                 uid=uid,
                 enterprise_id=a.get("enterprise_id") or "",
                 domain=a.get("domain") or "",

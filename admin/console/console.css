@@ -4097,58 +4097,675 @@ tbody tr:hover > th { background:transparent!important; }
 }
 
 /* ============================================================================
-   深色模式「暗夜蓝」配色（用户反馈：深色下别再用亮雾蓝）
+   主题色与深色主题
    ----------------------------------------------------------------------------
-   问题：深色主题把 --brand 提到 #6E9BC9（亮雾蓝），于是开关、状态徽标、
-   告警条全是**亮蓝色块**，压在近黑背景上刺眼，也不像深色主题。
-   做法：把「面」压成深藏青（深色底 + 冷灰蓝描边），只让文字/数字保留亮蓝
-   作为强调 —— 深色主题的层次感要靠明度，不靠饱和度。
-   ========================================================================== */
+   浅色：用户指定的三档蓝
+        #4176e6  主色（按钮/高亮）
+        #5686fe  hover
+        #c4d3f0  轻底色（tag / 徽标底）
+
+   深色：**不挂主题色**。参考站（workbuddy.cn/app）的深色界面是纯中性灰
+        #141414 / #1f1f1f / #242424 / #313131 + 白色 10% 描边，
+        文字 #d2d3e0，蓝色只出现在极少数图标上。
+        所以深色下 brand 系列取「亮灰白」，强调靠明度对比而不是色相。
+    ========================================================================== */
+:root {
+  --blue-main: #4176e6;      /* 按钮 / 高亮 */
+  --blue-hover: #5686fe;     /* hover 提亮 */
+  --blue-tint: #c4d3f0;      /* 轻底色：tag / 徽标 */
+}
+
+/* ---- 深色主题：中性灰，不用主题色 ---------------------------------------- */
 :root[data-theme="dark"] {
-  --brand-soft: rgba(74, 110, 147, .28);
-  --info: #9FBBDA;
-  --info-soft: rgba(38, 60, 88, .55);
-  --info-border: rgba(96, 138, 184, .32);
-  --ok-soft: rgba(52, 199, 123, .16);
-  --warn-soft: rgba(249, 146, 60, .16);
-  --danger-soft: rgba(255, 100, 103, .16);
+  --brand: #d2d3e0;
+  --brand-strong: #e6e7ef;
+  --brand-ink: #d2d3e0;
+  --brand-soft: rgba(255, 255, 255, .10);
+  --info: #d2d3e0;
+  --info-soft: rgba(255, 255, 255, .08);
+  --info-border: rgba(255, 255, 255, .12);
+  --ok-soft: rgba(34, 197, 94, .16);
+  --warn-soft: rgba(249, 115, 22, .16);
+  --danger-soft: rgba(248, 113, 113, .16);
 }
 
-/* 开关：整块发光 -> 深藏青 + 描边，靠滑块位置表达「已开」 */
-:root[data-theme="dark"] .model-switch span { background: #3a3a3a; }
-:root[data-theme="dark"] .model-switch input:checked + span {
-  background: #2E4E75;
-  box-shadow: inset 0 0 0 1px rgba(120, 160, 200, .45);
+/* 平台卡：深色下纯中性面，靠描边区分选中（参考站就是这样） */
+:root[data-theme="dark"] .platform-card {
+  background: rgba(255, 255, 255, .022);
+  border-color: rgba(255, 255, 255, .07);
+}
+:root[data-theme="dark"] .platform-card.active,
+:root[data-theme="dark"] .platform-card:hover {
+  background: rgba(255, 255, 255, .06);
+  border-color: rgba(255, 255, 255, .22);
+}
+:root[data-theme="dark"] .platform-card-logo {
+  background: rgba(255, 255, 255, .08);
+  color: #e6e7ef;
 }
 
-/* 状态徽标：绿色回绿、蓝色走深藏青，不再让「正常/启用」显示成蓝色 */
+/* 统计卡里的品牌位：深色下用亮灰白，不用蓝 */
+:root[data-theme="dark"] .stat.is-brand .stat-value { color: #e6e7ef; }
+:root[data-theme="dark"] .stat.is-brand { border-color: rgba(255, 255, 255, .14); }
+
+/* 徽标：绿/琥珀/红保留语义色，蓝系一律转为中性灰 */
 :root[data-theme="dark"] :is(.bg-emerald-50, .bg-emerald-100, .bg-green-50, .bg-green-100) {
   background: var(--ok-soft) !important;
   color: #5BD98F !important;
 }
 :root[data-theme="dark"] :is(.bg-sky-50, .bg-sky-100, .bg-blue-50, .bg-blue-100) {
-  background: var(--info-soft) !important;
-  color: var(--info) !important;
+  background: rgba(255, 255, 255, .08) !important;
+  color: #d2d3e0 !important;
 }
-:root[data-theme="dark"] :is(.bg-indigo-50, .bg-indigo-100, .bg-purple-50, .bg-purple-100,
-  .bg-violet-50, .bg-violet-100) {
-  background: rgba(120, 100, 165, .20) !important;
-  color: #C7B6EC !important;
+:root[data-theme="dark"] :is(.bg-indigo-50, .bg-indigo-100, .bg-purple-50, .bg-purple-100) {
+  background: rgba(255, 255, 255, .08) !important;
+  color: #d2d3e0 !important;
 }
 
-/* 告警横幅：暗红/暗琥珀，不用亮色块铺满 */
+/* 开关：开 = 亮灰白（不发光），关 = 深灰 */
+:root[data-theme="dark"] .model-switch span { background: rgba(255, 255, 255, .16); }
+:root[data-theme="dark"] .model-switch input:checked + span {
+  background: rgba(255, 255, 255, .42);
+  box-shadow: none;
+}
+
+/* 主按钮：深色下用亮灰白面 + 深色文字（对比明确，不引入色相） */
+:root[data-theme="dark"] .btn-primary,
+:root[data-theme="dark"] .console-btn.primary {
+  background: #d2d3e0;
+  border-color: transparent;
+  color: #141414;
+}
+:root[data-theme="dark"] .btn-primary:hover,
+:root[data-theme="dark"] .console-btn.primary:hover { background: #e6e7ef; }
+
+/* 进度条/迷你条：中性亮灰 */
+:root[data-theme="dark"] .pkg-track > i,
+:root[data-theme="dark"] .ov-progress-bar,
+:root[data-theme="dark"] .ov-bar-fill.ok { background: rgba(255, 255, 255, .55); }
+
+/* 告警横幅：暗红，不用亮块 */
 :root[data-theme="dark"] .ov-alert {
-  background: #2A1D1E;
-  border-color: rgba(255, 100, 103, .35);
+  background: rgba(42, 22, 24, .55);
+  border-color: rgba(248, 113, 113, .32);
 }
 :root[data-theme="dark"] .ov-alert.warn {
-  background: #2B2418;
-  border-color: rgba(251, 146, 60, .35);
+  background: rgba(42, 34, 20, .55);
+  border-color: rgba(251, 146, 60, .32);
 }
-:root[data-theme="dark"] .ov-alert-left strong { color: #FF8A8C; }
-:root[data-theme="dark"] .ov-alert.warn .ov-alert-left strong { color: #FBBF70; }
 
-/* 顶栏「服务已连接」/概览「服务运行中」这类小徽标 */
-:root[data-theme="dark"] .topbar-status,
-:root[data-theme="dark"] .ov-badge-ok { background: rgba(74, 110, 147, .24) !important; }
-:root[data-theme="dark"] .topbar-status { color: var(--info) !important; }
+/* ---- 浅色主题：三档蓝落到具体组件 ---------------------------------------- */
+:root:not([data-theme="dark"]) .btn-primary,
+:root:not([data-theme="dark"]) .console-btn.primary {
+  background: var(--blue-main);
+  border-color: transparent;
+  color: #fff;
+}
+:root:not([data-theme="dark"]) .btn-primary:hover,
+:root:not([data-theme="dark"]) .console-btn.primary:hover {
+  background: var(--blue-hover);
+}
+/* tag / 徽标轻底色 */
+:root:not([data-theme="dark"]) :is(.bg-sky-50, .bg-sky-100, .bg-blue-50, .bg-blue-100) {
+  background: var(--blue-tint) !important;
+  color: #2f5cbf !important;
+}
+:root:not([data-theme="dark"]) .platform-card.active,
+:root:not([data-theme="dark"]) .platform-card:hover {
+  border-color: rgba(65, 118, 230, .45);
+  background: rgba(196, 211, 240, .38);
+}
+
+/* ---- 右下角 Toast ------------------------------------------------------- */
+:root[data-theme="dark"] #toasts > div {
+  border: 1px solid transparent;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+}
+:root[data-theme="dark"] #toasts > div.bg-emerald-600 {
+  background: rgba(20, 34, 27, .97) !important;
+  border-color: rgba(74, 222, 128, .26);
+  color: #a9e6c2 !important;
+}
+:root[data-theme="dark"] #toasts > div.bg-red-600 {
+  background: rgba(40, 22, 24, .97) !important;
+  border-color: rgba(248, 113, 113, .28);
+  color: #f0b4b4 !important;
+}
+
+/* ---- 浅色主题：蓝要「干净」，不要灰 --------------------------------------
+   浅色下把淡蓝底提纯（原来 #E4EDF6 偏灰），蓝字用深一点的保证对比度。 */
+:root:not([data-theme="dark"]) .platform-card.active,
+:root:not([data-theme="dark"]) .platform-card:hover {
+  border-color: rgba(63, 99, 232, .45);
+  background: var(--blue-tint);
+}
+
+/* ============================================================================
+   Toast：复刻 workbuddy.cn 的规格（居中偏上 + 图标 + 33ms 滑入）
+   ----------------------------------------------------------------------------
+   参考站实测：
+     position:fixed; left:50%; translate(-50%); min-height:48px
+     padding:13px 16px; border-radius:12px; 图标 18px 按状态着色
+     成功 #40C8AE / 失败 #FF5263 / 信息 #3B82F6 / 警告 #F59E0B
+     进场 translateY(-10px) → 0，.3s；离开 opacity .3s ease-in
+   原来我们放在右下角、无图标、纯色块 —— 提示不明显也不够专业。
+   ========================================================================== */
+#toasts.toast {
+  position: fixed;
+  top: 18px;                     /* 居中偏上：不挡内容，又在视线落点 */
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translateX(-50%);
+  z-index: 100010;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;          /* 空容器不吃点击 */
+  max-width: min(640px, calc(100vw - 32px));
+}
+#toasts.toast.has-toast { pointer-events: auto; }
+
+.wb-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 32px));
+  min-height: 48px;
+  padding: 13px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .35);
+  animation: wb-toast-in .3s cubic-bezier(.22, .61, .36, 1);
+  pointer-events: auto;
+}
+.wb-toast.is-leaving {
+  opacity: 0;
+  transition: opacity .3s ease-in;
+}
+@keyframes wb-toast-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.wb-toast-icon {
+  flex: 0 0 18px;
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.wb-toast-icon svg {
+  width: 18px; height: 18px;
+  stroke: currentColor; stroke-width: 2;
+  fill: none; stroke-linecap: round; stroke-linejoin: round;
+}
+.wb-toast-msg {
+  margin-left: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.wb-toast-close {
+  margin-left: 12px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color .15s ease, background .15s ease;
+}
+.wb-toast-close svg {
+  width: 14px; height: 14px;
+  stroke: currentColor; stroke-width: 2.2; fill: none; stroke-linecap: round;
+}
+.wb-toast-close:hover { color: var(--fg); background: var(--surface-2); }
+
+/* 状态色：图标取参考站的色值，底/边用同色系的极淡染，不做整块彩色 */
+.wb-toast--ok .wb-toast-icon { color: #40C8AE; }
+.wb-toast--ok {
+  border-color: color-mix(in srgb, #40C8AE 32%, var(--border));
+}
+.wb-toast--err .wb-toast-icon { color: #FF5263; }
+.wb-toast--err {
+  border-color: color-mix(in srgb, #FF5263 36%, var(--border));
+}
+.wb-toast--warn .wb-toast-icon { color: #F59E0B; }
+.wb-toast--warn {
+  border-color: color-mix(in srgb, #F59E0B 34%, var(--border));
+}
+.wb-toast--info .wb-toast-icon { color: #3B82F6; }
+.wb-toast--info {
+  border-color: color-mix(in srgb, #3B82F6 32%, var(--border));
+}
+
+/* 深色：底用参考站的 #313131 档，不用纯黑，也不发光 */
+:root[data-theme="dark"] .wb-toast {
+  background: #313131;
+  border-color: rgba(255, 255, 255, .10);
+  color: #D2D3E0;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
+}
+:root[data-theme="dark"] .wb-toast--ok { border-color: color-mix(in srgb, #40C8AE 34%, #313131); }
+:root[data-theme="dark"] .wb-toast--err { border-color: color-mix(in srgb, #FF5263 38%, #313131); }
+
+/* ============================================================================
+   按钮防呆转圈
+   ========================================================================== */
+.wb-busy-spin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  flex: 0 0 auto;
+}
+.wb-busy-spin svg {
+  width: 14px; height: 14px;
+  animation: wb-spin .9s linear infinite;
+}
+@keyframes wb-spin { to { transform: rotate(360deg); } }
+
+button.is-busy {
+  cursor: progress;
+  opacity: .85;
+}
+button.is-busy:disabled {
+  /* 忙碌中不要变成灰白（会被误读成「不可用」），保持可读并给转圈 */
+  opacity: 1;
+  filter: none;
+}
+
+/* 通用 spinner（配合 wb-loading 的既有类） */
+.wb-loading-dot {
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--brand);
+  animation: wb-spin .8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-toast { animation: none; }
+  .wb-busy-spin svg, .wb-loading-dot { animation-duration: 3s; }
+}
+
+/* ============================================================================
+   遮罩层：参考站 rgba(0,0,0,.6)，深色下 .8 —— 比原来的 .35 明显更聚焦
+   ========================================================================== */
+#modal { background: rgba(0, 0, 0, .60); }
+:root[data-theme="dark"] #modal { background: rgba(0, 0, 0, .72); }
+
+/* ============================================================================
+   顶部子标签栏（侧栏 8 组 + 组内页面用 tab 切换）
+   ----------------------------------------------------------------------------
+   参考 issue #4：21 个侧栏入口在 900px 高的屏幕上装不下一半，必须滚动。
+   收成 8 组后，组内页面靠这条子标签切换 —— 一屏装得下，且当前页一眼可见。
+
+   这一行同时承担「页面名」：顶栏 h2 只留给读屏软件（.sr-only），
+   页面里不再重复写一次大标题 —— 同一个名字出现在顶栏、标签、正文三处，
+   第一屏就被白白吃掉一截高度。
+   ========================================================================== */
+/* 面板工具条左侧的说明文字：替代原来那句「页面名」大标题。
+   限制行宽（中文 60 字上下），右边按钮不会被长句挤成一列。 */
+.panel-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  max-width: min(92ch, 76%);
+}
+@media (max-width: 900px) {
+  .panel-subtitle { max-width: none; }
+}
+.topbar-subnav {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 0 22px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--sh-1);
+  min-height: 44px;
+}
+/* 单页组也保留这一行（里面只有一个静态标签），
+   否则「智能体」页会比别的页高出一截，切换时内容整体跳动。 */
+.topbar-subnav.is-single { display: flex; }
+.topbar-subnav:empty { display: none; }
+
+.subnav-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  /* 所有标签同字号同字重，只靠颜色区分选中态：
+     选中时改字重会让整排标签横向位移，鼠标连点时看着像是在「跳」。 */
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .15s ease, background .15s ease;
+}
+.subnav-item:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.subnav-item.active {
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+/* 选中态用底部指示条，不用整块变色（更干净，也不抢内容的注意力） */
+.subnav-item.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--brand);
+}
+/* 单页组：同一个位置放一个不可点的静态标签，
+   保证所有页面的顶部节奏一致（内容不会因为少一行而整体上跳）。 */
+.subnav-item.is-static { cursor: default; color: var(--fg); }
+.subnav-item.is-static:hover { background: transparent; color: var(--fg); }
+.subnav-item:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -3px;
+  border-radius: 6px;
+}
+
+/* 侧栏：8 组时不需要滚动，组标题已并入按钮，去掉分组小标题 */
+#sideNav { padding-top: 6px; }
+#sideNav .side-item[data-group-tabs] {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* 深色主题：子标签指示条用中性亮灰（与深色整体一致，不引入色相） */
+:root[data-theme="dark"] .subnav-item.active { color: #eef2f6; }
+:root[data-theme="dark"] .subnav-item.active::after {
+  background: rgba(255, 255, 255, .72);
+}
+
+/* 窄屏：子标签横向可滚，不换行挤压 */
+@media (max-width: 720px) {
+  .topbar-subnav {
+    padding: 0 12px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    min-height: 42px;
+  }
+  .topbar-subnav::-webkit-scrollbar { display: none; }
+  .subnav-item { padding: 0 9px; font-size: 13px; }
+}
+
+/* ============================================================================
+   账号行「更多」菜单（12 个图标 → 3 个常用 + 菜单）
+   ----------------------------------------------------------------------------
+   issue #4：一行 12 个图标，不悬停分不清。菜单里带文字标签，一眼能读；
+   用 fixed 定位避免被表格的 `overflow:auto` 裁掉。
+   ========================================================================== */
+.acc-more { position: relative; display: inline-flex; }
+.acc-more-btn {
+  padding: 3px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-muted);
+  transition: background .12s ease, color .12s ease;
+}
+.acc-more-btn:hover { background: var(--surface-2); color: var(--fg); }
+.acc-more.open .acc-more-btn { background: var(--surface-2); color: var(--fg); }
+
+.acc-menu {
+  position: fixed;
+  z-index: 60;
+  display: none;
+  min-width: 176px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--sh-pop, 0 10px 30px rgba(0, 0, 0, .18));
+}
+.acc-more.open .acc-menu { display: block; }
+
+.acc-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease;
+}
+.acc-menu-item:hover,
+.acc-menu-item:focus-visible { background: var(--surface-2); outline: none; }
+.acc-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex: 0 0 16px;
+}
+.acc-menu-icon .wb-ic,
+.acc-menu-icon svg { width: 14px; height: 14px; }
+.acc-menu-text { min-width: 0; }
+
+/* 深色主题：菜单用中性面，不引入色相 */
+:root[data-theme="dark"] .acc-menu {
+  background: #242424;
+  border-color: rgba(255, 255, 255, .12);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .55);
+}
+:root[data-theme="dark"] .acc-menu-item:hover { background: rgba(255, 255, 255, .08); }
+
+/* ============================================================================
+   页头紧凑模式（issue #4：页面名重复出现三次）
+   ----------------------------------------------------------------------------
+   顶栏已经有页面名（topbarTitle），面包屑还有组名，页内再放一个大标题
+   就是第三次重复，白占第一屏。这里只保留「一行说明 + 操作按钮」。
+   ========================================================================== */
+.page-head--compact {
+  align-items: center;
+  margin-bottom: 10px;
+  min-height: 32px;
+}
+.page-head--compact > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+/* 说明文字压成一行，超长省略（完整内容仍在 title 里） */
+.page-head--compact p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+
+/* ============================================================================
+   API Keys 页：对接说明可折叠（默认收起，把 Key 列表顶到第一屏）
+   ----------------------------------------------------------------------------
+   issue #4：Key 页先是一大块对接说明，列表要往下滚才看到。
+   ========================================================================== */
+.api-share-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-ink);
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.api-share-toggle:hover { background: var(--surface-2); }
+.api-share-caret {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--fg-subtle);
+  transition: transform .15s ease;
+}
+.api-share-toggle[aria-expanded="true"] .api-share-caret { transform: rotate(180deg); }
+
+.api-share-grid.is-collapsed { display: none; }
+
+/* 深色主题：折叠标题用中性亮灰 */
+:root[data-theme="dark"] .api-share-toggle { color: #e6e7ef; }
+
+/* ============================================================================
+   细节打磨（对齐 issue #4 的第 5 点 + 本轮自查）
+   ========================================================================== */
+
+/* 下拉展开时不显示悬停提示：它固定在锚点上方/下方，正好压住选项列表头几行。 */
+html.is-combobox-open #actionTooltip { display: none !important; }
+
+/* 长路径 / 长 ID：断词换行，不再把整块内容顶出容器产生横向滚动。
+   客户端参数页的扫描目录、账号 UID、模型名都会命中这条。 */
+.wrap-anywhere { overflow-wrap: anywhere; word-break: break-word; }
+
+/* 键盘走到哪里都要看得见：按钮/链接统一 focus ring（鼠标点击不触发）。 */
+.console-btn:focus-visible,
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[role="menuitem"]:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* 扫描目录：一行一条，长路径折行（1602 字符的路径会把卡片撑破） */
+.scan-dir-list { margin: 0; padding-left: 16px; display: grid; gap: 2px; }
+.scan-dir-list li { min-width: 0; }
+.scan-dir-list code { font-size: 11.5px; color: var(--fg-muted); }
+
+/* 平台切换：4 列时 6 张卡片是 4+2，不会出现 5+1 那种「最后一行只有一个」的
+   孤行；footer 只在有区域子标签时才占位（:has 不可用时退化为空行，不破版）。 */
+.platform-cards { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.platform-switch-foot:has(> .platform-realms[hidden]) { display: none; }
+.platform-actions { flex-wrap: wrap; gap: 8px; display: flex; justify-content: flex-end; }
+
+/* 请求动态：没有正在进行的请求时，卡片不要留一块空白 ——
+   补一句说明，比空着更像「确实没有」而不是「加载失败」。 */
+#logLiveRecent:empty::after {
+  content: "最近没有正在进行的请求，有调用时会在这里实时滚动。";
+  display: block;
+  padding: 2px 16px 16px;
+  font-size: 12px;
+  color: var(--fg-subtle);
+}
+
+/* 「更多操作」菜单：最多 9 项，超出时内部滚动，别让最后一项掉出视口 */
+.acc-menu { max-height: min(340px, 60vh); overflow-y: auto; }
+
+/* ============================================================================
+   窄屏（≤900px）：顶栏只留操作，不占一整块空白
+   ----------------------------------------------------------------------------
+   面包屑在窄屏被隐藏后，顶栏左半边是空的 —— 一块 74px 高的白条，
+   第一屏白丢 60px。这里压扁到 52px，并把「复制 API 地址」收成图标。
+   ========================================================================== */
+@media (max-width: 900px) {
+  .desktop-topbar { min-height: 52px; padding: 8px 14px; }
+  .topbar-endpoint { width: 36px; padding: 0 !important; }
+  .topbar-endpoint span { display: none; }
+}
+/* 运行配置：窄屏仍然一行（标签 + 输入），不要叠成两行 —— 8 个字段叠起来
+   就是 900px 的空白，表单变成长条滚动。 */
+@media (max-width: 767px) {
+  .rt-field { flex-direction: row; align-items: center; gap: 10px; padding: 9px 12px; }
+  .rt-control { flex: 0 0 auto; gap: 6px; }
+  .rt-control input { width: 84px; }
+  .rt-label span { font-size: 12.5px; }
+}
+
+/* 逆向产物状态：内嵌绝对路径没有断点，窄屏会把卡片顶宽 30px（整页横向滚动）。
+   允许在任意字符处折行，容器也允许收缩。 */
+#appSourceStatus { overflow-wrap: anywhere; }
+#appSourceStatus > div { min-width: 0; }
+#appSourceStatus .text-slate-600 { overflow-wrap: anywhere; }
+
+/* 输入框默认带有 ~20 字符的固有宽度（size 属性），放进 flex 后不会自动收缩，
+   窄屏就会把整行顶出容器。显式的 min-width:0 让它跟着布局缩。 */
+input.flex-1, select.flex-1, textarea.flex-1, input.w-full, select.w-full {
+  min-width: 0;
+}
+
+/* 窄屏：顶栏整块收起。
+   ----------------------------------------------------------------------------
+   顶栏在窄屏只剩两个按钮（复制地址 / 版本），左半边永远是空白，
+   却占掉 52~74px —— 相当于半张卡片。这两个入口在手机上都有替代：
+   概览页的「服务运行中」卡片里能复制地址，抽屉底部有版本与检查更新。
+   收掉之后页面直接从子标签行开始，第一屏多出一整行可用高度。 */
+@media (max-width: 720px) {
+  .desktop-topbar { display: none !important; }
+}
+@media (max-width: 720px) {
+  /* 顶栏收掉后，子标签就是唯一的「我在哪」提示，滚动时要一直贴顶。 */
+  .topbar-subnav { position: sticky; top: 0; z-index: 20; }
+}
+
+/* ============================================================================
+   可折叠的诊断卡（客户端参数页：扫描位置 / 运行时诊断 / 取值来源）
+   ----------------------------------------------------------------------------
+   这些是排障信息，日常几乎不看，却原来把「真正要改的参数表」顶到 1000px 以下。
+   用原生 <details>：无 JS、键盘可操作、展开状态由浏览器维护。
+   ========================================================================== */
+.diag-card { padding: 0 !important; }
+.diag-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 12px;
+}
+.diag-summary::-webkit-details-marker { display: none; }
+.diag-summary:hover { background: var(--surface-2); }
+.diag-summary h3 { margin: 0; }
+.diag-tip {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diag-caret {
+  margin-left: auto;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--fg-subtle);
+  transition: transform .16s ease;
+}
+.diag-card[open] .diag-caret { transform: rotate(180deg); }
+.diag-body { padding: 0 18px 16px; }
+.diag-card[open] .diag-summary { border-bottom: 1px solid var(--border); border-radius: 12px 12px 0 0; }

@@ -74,6 +74,12 @@ window.WBAgent = (() => {
   // ------------------------------------------------------------------ 工具
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  // 嵌进内联 onclick 的 JS 参数位时**不能**直接用 esc：属性值是先 HTML 解码、
+  // 再当 JS 解析的，`&#39;` 解码回 `'` 一样能闭合字符串（stored XSS 的老坑）。
+  // 这里用 JSON.stringify + esc：产出 `&quot;…&quot;`，解码后是合法的双引号
+  // JS 字符串字面量，反斜杠/引号/换行都由 JSON.stringify 负责转义。
+  const jsv = value => esc(JSON.stringify(value == null ? '' : String(value))
+    .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
   const fmtCredits = value => {
     const n = Number(value);
     if (!Number.isFinite(n)) return '—';
@@ -540,7 +546,7 @@ window.WBAgent = (() => {
     ];
     $('agentStarters').innerHTML = starters.map(item => `
       <button type="button" class="agent-starter"
-              onclick="WBAgent.quickStart('${item.mode}','${esc(item.text)}')">${esc(item.text)}</button>`).join('');
+              onclick="WBAgent.quickStart(${jsv(item.mode)},${jsv(item.text)})">${esc(item.text)}</button>`).join('');
   }
 
   function quickStart(mode, text) {

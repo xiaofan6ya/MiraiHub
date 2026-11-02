@@ -615,9 +615,24 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                     if isinstance(event.get("tool_calls"), list) and event["tool_calls"]:
                         saw_tool = True
                     if "prompt_tokens" in event:
-                        usage = {"prompt_tokens": int(event.get("prompt_tokens") or 0),
-                                 "completion_tokens": int(event.get("completion_tokens") or 0),
-                                 "total_tokens": int(event.get("total_tokens") or 0)}
+                        # 保留上游给的缓存命中等字段（只抄三个键会把它们丢掉）
+                        usage = {k: v for k, v in event.items()
+                                 if k.endswith("_tokens") or k in (
+                                     "cached_tokens", "prompt_tokens_details",
+                                     "completion_tokens_details",
+                                     "cache_read_input_tokens",
+                                     "cache_creation_input_tokens",
+                                     "prompt_cache_hit_tokens",
+                                     "credit", "credits", "cost")}
+                        usage["prompt_tokens"] = int(event.get("prompt_tokens") or 0)
+                        usage["completion_tokens"] = int(event.get("completion_tokens") or 0)
+                        usage["total_tokens"] = int(event.get("total_tokens") or 0)
+                        try:
+                            from upstream_compat import normalize_usage_cache
+
+                            normalize_usage_cache(usage)
+                        except Exception:  # noqa: BLE001
+                            pass
                     # 有实质输出就重置看门狗（正文/思考/工具都算进展）
                     if (event.get("response") or event.get("reasoning_content")
                             or event.get("tool_calls")):

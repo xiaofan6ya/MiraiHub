@@ -44,8 +44,20 @@ def usage_to_openai(raw) -> dict:
     prompt = _i(u.get("prompt_tokens"))
     completion = _i(u.get("completion_tokens"))
     total = _i(u.get("total_tokens")) or (prompt + completion)
-    cache_read = _i(u.get("cache_read_input_tokens"))
+    # **缓存命中的字段名各家不同**，只认 `cache_read_input_tokens` 会让
+    # 上游给 `cached_tokens` / `prompt_tokens_details.cached_tokens` 时
+    # 全部记成 0（线上 Trae 命中率恒为 0 就是这条）。
+    # 用统一的探测函数把四套写法都认一遍。
     reasoning = _i(u.get("reasoning_tokens"))
+    cache_read = 0
+    try:
+        from upstream_compat import cached_token_count
+
+        _hit = cached_token_count(u)
+        if _hit is not None:
+            cache_read = int(_hit)
+    except Exception:  # noqa: BLE001 - 探测失败退回原逻辑
+        cache_read = _i(u.get("cache_read_input_tokens"))
     out = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -57,6 +69,13 @@ def usage_to_openai(raw) -> dict:
     }
     for key, value in u.items():
         out.setdefault(key, value)
+    # 补齐四套同义写法（幂等）：客户端读哪一套都能显示命中
+    try:
+        from upstream_compat import normalize_usage_cache
+
+        normalize_usage_cache(out)
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

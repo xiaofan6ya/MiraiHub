@@ -150,7 +150,60 @@ def resolve(model: str) -> tuple[str, str, bool]:
         if not clean:
             continue
         return pid, clean, True
+
+    # **按 storage 简称兜底**：多区平台的 id 是 `trae-cn` / `trae-intl`，
+    # 用户按直觉写成 `xxx-trae` 时上面的精确匹配落空，于是报
+    # `模型 'xxx-trae' 不存在`（线上实测就有这种调用）。
+    # 这里允许用 storage 名（trae / qoder）代替，落到该 storage 的**默认区**。
+    for storage, default_pid in _storage_default_ids():
+        suffix = SEP + storage.lower()
+        if not lowered.endswith(suffix):
+            continue
+        clean = text[: -len(suffix)].rstrip()
+        if not clean:
+            continue
+        # 只有当这个 storage 确实存在（有默认区）时才认
+        if default_pid:
+            return default_pid, clean, True
     return "", text, False
+
+
+def _storage_default_ids() -> list[tuple[str, str]]:
+    """storage 名 -> 该 storage 的默认平台 id（`trae` -> `trae-cn`）。
+
+    多区时优先取 `cn`（与 registry.DEFAULT 的口径一致），否则取第一个。
+    结果缓存 30 秒，避免每次解析都遍历注册表。
+    """
+    import time
+
+    now = time.time()
+    cached = _cache.get("storage") or {}
+    if cached.get("at") and now - cached["at"] < _CACHE_TTL:
+        return list(cached.get("items") or [])
+    items: list[tuple[str, str]] = []
+    try:
+        from admin.platform import registry
+        from admin.platform.loader import load_platforms
+
+        load_platforms()
+        by_storage: dict[str, list[str]] = {}
+        for pid in registry.ids():
+            spec = registry.get(pid)
+            if spec is None or not spec.enabled:
+                continue
+            by_storage.setdefault(str(spec.storage()).lower(), []).append(str(pid))
+        for storage, pids in by_storage.items():
+            # storage 本身就是平台 id（workbuddy / loomy）：不需要别名
+            if any(storage == str(p).lower() for p in pids):
+                continue
+            pids.sort(key=lambda x: 0 if x.endswith("-cn") else 1)
+            items.append((storage, pids[0]))
+        # 长的优先，避免 `qoder` 抢在 `qoder-intl` 前面
+        items.sort(key=lambda kv: -len(kv[0]))
+    except Exception:  # noqa: BLE001
+        logger.debug("读取 storage 默认区失败", exc_info=True)
+    _cache["storage"] = {"items": items, "at": now}
+    return items
 
 
 def apply(platform: str, model: str) -> str:

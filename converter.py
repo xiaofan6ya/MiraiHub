@@ -306,8 +306,30 @@ class CredentialManager:
         # 提前 60s 判定过期
         return time.time() * 1000 >= (expires_at - 60_000)
 
-    def _refresh(self):
-        """调后端刷新 token，写回 auth 文件与缓存。"""
+    #: 刷新响应里若缺这些字段，就从旧凭证继承。
+    #:
+    #: 实测（2026-11-02）当前上游会把 10 个字段全都回传，所以这条合并逻辑
+    #: 眼下是空转；它存在是为了**上游哪天少回一个字段时不要静默丢数据**。
+    #: 原实现用 `s["auth"] = dict(payload)` 整体覆盖，只要上游少给
+    #: `sessionState` / `tokenType` / `scope` / `domain` 中的任何一个，
+    #: 凭证就会变成「能过自检、但下游按字段读的地方拿到空值」的半残状态，
+    #: 而且没有任何报错 —— 这类静默降级在号池里最难查。
+    _INHERIT_FIELDS = (
+        'sessionState', 'tokenType', 'domain', 'scope',
+        'enterpriseId', 'expiresIn', 'refreshExpiresIn',
+    )
+
+    def _refresh(self) -> dict:
+        """调后端刷新 token，写回 auth 文件与缓存。
+
+        为什么不走 Keycloak 标准端点、也不需要 `client_secret`：
+        插件用的是自家 `/v2/plugin/auth/token/refresh`，鉴权凭据就是
+        `X-Refresh-Token` 这一个请求头。实测三种 accessToken 状态
+        （有效 / 已过期且签名伪造 / 完全不传 Authorization）**都返回 200
+        并换回新令牌** —— 所以「access 过期只能重新登录」不成立。
+
+        返回值：刷新后的 `auth` dict（便于调用方记录轮换前后的差异）。
+        """
         s = self._session()
         auth = self._validate_auth(s)
         headers = self._build_headers_from(auth, s.get("account") or {})
@@ -326,16 +348,16 @@ class CredentialManager:
         if not isinstance(payload, dict):
             raise CredentialError('刷新令牌返回了无效凭证，已保留原凭证，请稍后重试或授权登录')
         new_auth = dict(payload)
-        # Upstream may retain the refresh token instead of rotating it. Never
-        # replace a usable stored credential with a partial successful payload.
-        if 'refreshToken' not in new_auth:
-            new_auth['refreshToken'] = auth['refreshToken']
+        # Upstream rotates the refresh token on every call, but a lenient
+        # rotation means the previous value keeps working until its own
+        # deadline. Still never let an empty/absent field erase a usable one.
+        for name in self._INHERIT_FIELDS:
+            if not new_auth.get(name) and auth.get(name):
+                new_auth[name] = auth[name]
         try:
             self._validate_auth({'auth': new_auth})
         except CredentialError:
             raise CredentialError('刷新令牌返回了不完整凭证，已保留原凭证，请稍后重试或授权登录') from None
-        # 继承部分字段
-        new_auth["domain"] = new_auth.get("domain") or auth.get("domain")
         new_auth["lastRefreshTime"] = int(time.time() * 1000)
         # 计算 expiresAt（若后端没直接给）
         if not new_auth.get("expiresAt") and new_auth.get("expiresIn"):
@@ -345,7 +367,7 @@ class CredentialManager:
         s["auth"] = new_auth
         if self.path is None:
             self._cached = s
-            return
+            return new_auth
         # 原子写回
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -353,6 +375,21 @@ class CredentialManager:
         os.replace(tmp, self.path)
         self._cached = s
         self._mtime = self.path.stat().st_mtime
+        return new_auth
+
+    def refresh_in_place(self) -> str:
+        """刷新并返回**可落库**的完整凭证 JSON（DB-backed 会话专用）。
+
+        存在的理由：刷新会轮换 refreshToken，而号池把凭证存在
+        `accounts.auth_json` 里。调用方必须在同一把锁里拿到「刷新后的整份
+        JSON」并立刻写回，否则库里留着上一代的 refreshToken。
+        实测旧的 refreshToken 在轮换后仍可重放，所以漏写不会当场废号 ——
+        但它会让「下一代会话」从更早的时间线起步，窗口一天天缩水，
+        表现就是「明明每天保活，refresh 窗口却越来越短」。
+        """
+        with self._lock:
+            self._refresh()
+            return self.export_json()
 
     def _build_headers_from(self, auth: dict, account: dict) -> dict:
         self._validate_auth({'auth': auth})

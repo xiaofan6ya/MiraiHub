@@ -1,6 +1,8 @@
 """Gateway observations, independent of official daily quota accounting."""
 from collections import Counter
 from datetime import datetime, timedelta
+import threading
+import time
 import math
 
 from sqlalchemy import case, func
@@ -34,7 +36,32 @@ def _percentiles(values):
             for p in (50, 95)}
 
 
+#: model_health 结果的进程内缓存。
+#:
+#: 这个接口对**每个模型**各跑一条 `ORDER BY created_at DESC LIMIT 2000`
+#: （65 个模型 = 65 条查询，线上 218ms），而它回答的是「最近 24 小时的
+#: 健康状况」—— 30 秒内不可能变到需要重新逐模型扫 2000 行。
+#: 缓存后模型页刷新从 200ms+ 降到 ~1ms，同时省掉 64 条本可以避免的查询。
+_MODEL_HEALTH_CACHE = {"at": 0.0, "hours": None, "value": None}
+_MODEL_HEALTH_TTL = 30.0
+_MODEL_HEALTH_LOCK = threading.Lock()
+
+
 def model_health(db, hours=24):
+    """最近 N 小时的模型健康（带 30 秒进程内缓存，见上方说明）。"""
+    now_ts = time.time()
+    with _MODEL_HEALTH_LOCK:
+        if (_MODEL_HEALTH_CACHE["value"] is not None
+                and _MODEL_HEALTH_CACHE["hours"] == hours
+                and now_ts - _MODEL_HEALTH_CACHE["at"] < _MODEL_HEALTH_TTL):
+            return _MODEL_HEALTH_CACHE["value"]
+    value = _model_health_uncached(db, hours)
+    with _MODEL_HEALTH_LOCK:
+        _MODEL_HEALTH_CACHE.update({"at": now_ts, "hours": hours, "value": value})
+    return value
+
+
+def _model_health_uncached(db, hours=24):
     from admin.routers.proxy import _looks_login_dead
 
     now = datetime.utcnow()

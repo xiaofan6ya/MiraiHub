@@ -218,6 +218,10 @@ class AccountSession:
 
     def __init__(self, auth_json: str):
         self._http = None
+        #: 本次会话是否发生过 token 刷新（意味着库里那份凭证已经旧了）。
+        #: 调用方据此决定要不要 `updated_json()` 回写 —— 只读场景（列表、
+        #: 健康检查的失败分支）不该为了一个没变的凭证白跑一次 commit。
+        self._token_rotated = False
         self.cm = CredentialManager.from_json(auth_json)
 
     @contextmanager
@@ -228,8 +232,17 @@ class AccountSession:
         self._http.timeout = httpx.Timeout(timeout)
         yield self._http
 
+    @property
+    def token_rotated(self) -> bool:
+        """本会话是否刷新过令牌（凭证需要回写）。"""
+        return bool(self._token_rotated)
+
     def get_headers(self, extra: dict | None = None) -> dict:
-        return self.cm.get_headers(extra=extra)
+        before = (self.cm._session().get("auth") or {}).get("accessToken")
+        headers = self.cm.get_headers(extra=extra)
+        if (self.cm._session().get("auth") or {}).get("accessToken") != before:
+            self._token_rotated = True
+        return headers
 
     @staticmethod
     def identity_headers(purpose: str = "conversation",
@@ -806,6 +819,30 @@ class AccountSession:
     def _sess_auth(self) -> dict:
         return (self.cm._session() or {}).get("auth") or {}
 
+    def _bearer(self) -> str:
+        """取当前 accessToken；**本地判定已过期就先刷新一次**。
+
+        为什么需要这个而不是直接读 `_sess_auth()["accessToken"]`：
+        本文件有 5 处手动拼头（billing / web / chat / desktop / connector），
+        它们都绕过了 `cm.get_headers()` 里的过期检查与 401 重试。于是 access
+        token 一到期，这些路径（签到、成长任务、积分明细、遥测上报）就集体
+        401，而号池只看到「这个号今天失败了几次」—— 最后被当成坏号降权/禁用，
+        真正的原因（只是没刷新）反而看不见。
+
+        刷新失败不抛异常：调用方拿到旧 token 去打上游，401 会按既有逻辑
+        分类，比在这里把整条业务打挂更可控。
+        """
+        try:
+            if self.cm._is_expired():
+                self.cm.force_refresh()
+                # 刷新轮换了 refreshToken，调用方必须把新凭证写回库；
+                # 忘了写回不是立刻废号（旧值仍可重放），但会让库里的
+                # 60 天窗口停在原地不动 —— 记一笔便于排查。
+                self._token_rotated = True
+        except Exception:
+            pass
+        return self._sess_auth().get("accessToken") or ""
+
     def _sess_acct(self) -> dict:
         return (self.cm._session() or {}).get("account") or {}
 
@@ -821,7 +858,7 @@ class AccountSession:
     def _billing_headers(self) -> dict:
         """billing 域头：CLI 形状。"""
         return {
-            "Authorization": "Bearer " + (self._sess_auth().get("accessToken") or ""),
+            "Authorization": "Bearer " + self._bearer(),
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": _desktop_ua(),
@@ -838,7 +875,7 @@ class AccountSession:
         copilot.tencent.com，发往 www.workbuddy.cn 会造成跨域不一致。
         """
         return {
-            "Authorization": "Bearer " + (self._sess_auth().get("accessToken") or ""),
+            "Authorization": "Bearer " + self._bearer(),
             "Accept": "application/json",
             "Content-Type": "application/json",
             "x-client-platform": "web",
@@ -922,7 +959,7 @@ class AccountSession:
     def _chat_headers(self) -> dict:
         """chat 域头：市场/场景等接口用（CLI 形状，X-Domain 走账号自己的域）。"""
         return {
-            "Authorization": "Bearer " + (self._sess_auth().get("accessToken") or ""),
+            "Authorization": "Bearer " + self._bearer(),
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": _desktop_ua(),
@@ -1174,7 +1211,7 @@ class AccountSession:
             # 长度不定）与官方任何一处 id 都对不上。
             "X-Request-ID": identity.new_id(),
             "X-User-Id": self._uid(),
-            "Authorization": "Bearer " + (self._sess_auth().get("accessToken") or ""),
+            "Authorization": "Bearer " + self._bearer(),
         }
 
     def _desktop_fingerprint(self) -> dict:
@@ -1537,7 +1574,7 @@ class AccountSession:
     def _ardot_connector_headers(self) -> dict:
         """调 connector/oauth 接口所需的头（账号自身凭据 + 业务域）。"""
         return {
-            "Authorization": "Bearer " + (self._sess_auth().get("accessToken") or ""),
+            "Authorization": "Bearer " + self._bearer(),
             "Accept": "application/json",
             "Content-Type": "application/json",
             "X-Domain": self._domain() or "www.workbuddy.cn",

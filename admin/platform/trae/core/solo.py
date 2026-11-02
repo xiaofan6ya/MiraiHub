@@ -362,9 +362,23 @@ def collect(response) -> dict:
         if event.get("finish_reason"):
             finish_reason = str(event["finish_reason"])
         if "prompt_tokens" in event:
-            usage = {"prompt_tokens": int(event.get("prompt_tokens") or 0),
-                     "completion_tokens": int(event.get("completion_tokens") or 0),
-                     "total_tokens": int(event.get("total_tokens") or 0)}
+            # **保留整个 event 里的 usage 字段**：只抄三个键会把
+            # cached_tokens / prompt_tokens_details 丢掉（Trae 缓存恒为 0 的根因）。
+            usage = {k: v for k, v in event.items()
+                     if k.endswith("_tokens") or k in (
+                         "cached_tokens", "prompt_tokens_details",
+                         "completion_tokens_details", "cache_read_input_tokens",
+                         "cache_creation_input_tokens", "prompt_cache_hit_tokens",
+                         "credit", "credits", "cost")}
+            usage["prompt_tokens"] = int(event.get("prompt_tokens") or 0)
+            usage["completion_tokens"] = int(event.get("completion_tokens") or 0)
+            usage["total_tokens"] = int(event.get("total_tokens") or 0)
+            try:
+                from upstream_compat import normalize_usage_cache
+
+                normalize_usage_cache(usage)
+            except Exception:  # noqa: BLE001
+                pass
     return {"content": "".join(text_parts),
             "reasoning": "".join(reasoning_parts),
             "finish_reason": finish_reason, "usage": usage,

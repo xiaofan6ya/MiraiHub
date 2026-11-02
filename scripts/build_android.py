@@ -62,8 +62,28 @@ def _sub_once(html: str, pattern: str, repl, label: str, flags=re.S) -> str:
 
 def mobile_html(html: str) -> str:
     # --- 移除桌面专属面板 -------------------------------------------------
-    html = _sub_once(html, r'<button\b[^>]*data-tab="client".*?</button>',
-                     '', '移除「客户端参数」导航项')
+    #
+    # 导航已经改成「分组按钮」：`接入` 这个按钮同时承载 client / sync / alerts
+    # 三个面板，而移动端只保留 sync（作为「设置」）、要砍掉 client 与 settings。
+    # 所以这里不能直接删掉整个 `接入` 按钮（那会把设置入口一起删掉，手机上将
+    # 完全没有设置页），而是先把它**改写成独立的「设置」项**，再交给后面的
+    # 「移除 client 导航项」逻辑处理真正的桌面专属项。
+    has_grouped_nav = 'data-group-tabs="client,sync' in html
+    if has_grouped_nav:
+        html = _sub_once(
+            html, r'<button\b[^>]*data-tab="client"[^>]*data-group-tabs="[^"]*"[^>]*>',
+            '<button class="side-item" data-tab="sync">',
+            '「接入」分组 → 移动端「设置」项')
+        # 文案：把按钮上的「接入」换成「设置」，与移动端设置页一致。
+        html = _sub_once(
+            html, r'(data-tab="sync">.*?)</button>',
+            lambda m: re.sub(r'(</svg>)\s*接入\s*$', r'\1 设置', m.group(1)) + '</button>',
+            '「接入」文案 → 「设置」')
+    else:
+        html = _sub_once(html, r'<button\b[^>]*data-tab="client".*?</button>',
+                         '', '移除「客户端参数」导航项')
+        html = _replace_once(html, '</svg> 同步设置</button>', '</svg> 设置</button>',
+                             '同步设置 → 设置（导航文案）')
     html = _sub_once(html, r'<section id="panel-client".*?</section>',
                      '', '移除「客户端参数」面板')
     html = _sub_once(html, r'<section id="panel-settings".*?</section>',
@@ -71,8 +91,6 @@ def mobile_html(html: str) -> str:
     settings = (ROOT / "android/web/settings.html").read_text(encoding="utf-8")
     html = _sub_once(html, r'<section id="panel-sync".*?</section>',
                      lambda _: settings, '用移动端设置页替换「同步设置」')
-    html = _replace_once(html, '</svg> 同步设置</button>', '</svg> 设置</button>',
-                         '同步设置 → 设置（导航文案）')
 
     # --- 移除桌面专属脚本 -------------------------------------------------
     html = _sub_once(html, r'/\* ==================== 线上同步设置.*?'

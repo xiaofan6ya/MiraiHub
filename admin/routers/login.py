@@ -39,7 +39,7 @@ from admin import wb_login
 from admin.db import get_db
 from admin.models import Account
 from admin.ratelimit import client_ip_from_request
-from admin.security import require_admin
+from admin.security import clean_display_name, require_admin
 
 _logger = logging.getLogger("admin.wb_login_router")
 
@@ -145,9 +145,12 @@ def _clean_nick(v) -> str:
     为什么需要：腾讯侧账号没有昵称时，凭证里存的**不是空串**而是字面量
     `"null"`（本机真实凭证就是这样）。若直接拿去当号池显示名，
     后台会满屏都是叫「null」的账号 —— 既难看又分不清谁是谁。
+
+    另外这里还负责**去毒**：昵称是提交者自己可控的（改个 WorkBuddy 昵称就行），
+    而它会进后台账号行。历史上原样入库导致 stored XSS（偷 wb_admin_token）。
+    现在统一走 clean_display_name，HTML/JS 元字符一律剔除。
     """
-    s = (v if isinstance(v, str) else "").strip()
-    return "" if s.lower() in ("null", "none", "undefined") else s
+    return clean_display_name(v)
 
 
 def _verify_and_store(sess, code: str, db: Session, account_id: Optional[int] = None) -> dict:
@@ -287,7 +290,7 @@ def _store_locked(credential: str, meta: dict, balance: dict, uid: str,
         if nick:
             existing.name = nick
         elif not existing.name:
-            existing.name = uid or "未命名"
+            existing.name = clean_display_name(uid) or "未命名"
         # 重新登录成功 = 人工恢复口径：清掉旧的禁用/失败计数
         existing.status = "active"
         existing.err_count = 0
@@ -321,7 +324,7 @@ def _store_locked(credential: str, meta: dict, balance: dict, uid: str,
     acc.domain = meta.get("domain") or ""
     # 命名优先级：上游昵称 → 手机号 → uid（都用 _clean_nick 归一化，滤掉 "null"）
     acc.name = (_clean_nick(meta.get("nickname")) or _clean_nick(meta.get("phone"))
-                or uid or "未命名")
+                or clean_display_name(uid) or "未命名")
     acc.status = "active"
     _apply_balance(acc)
     db.add(acc)

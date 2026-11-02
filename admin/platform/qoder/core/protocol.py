@@ -252,15 +252,23 @@ def openai_usage_frame(*, chunk_id: str, model_name: str, usage: dict,
     「消耗 N 积分」读的是它们（不同客户端读不同键）。不给的话
     Qoder / Trae 的对话永远显示不出消耗。
     """
-    out = {
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
-        "total_tokens": int(usage.get("total_tokens") or 0),
-    }
+    # **以原始 usage 为底**：只挑三个键会把缓存命中整段丢掉
+    # （Qoder 客户端缓存恒为 0 的根因）。
+    src = usage if isinstance(usage, dict) else {}
+    out = dict(src)
+    out["prompt_tokens"] = int(src.get("prompt_tokens") or 0)
+    out["completion_tokens"] = int(src.get("completion_tokens") or 0)
+    out["total_tokens"] = int(src.get("total_tokens") or 0)
     if credit is not None:
         out["credit"] = credit
         out["credits"] = credit
         out["cost"] = credit
+    try:
+        from upstream_compat import normalize_usage_cache
+
+        normalize_usage_cache(out)
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "id": chunk_id,
         "object": "chat.completion.chunk",

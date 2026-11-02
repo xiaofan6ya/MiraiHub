@@ -163,19 +163,34 @@ def normalize_messages(raw) -> list[dict]:
             content = "".join(parts)
         if content is None:
             continue
-        # assistant 发起的工具调用：上游不认 `tool_calls` 字段，
-        # 转成可读文本，让模型在下一轮知道自己刚才调了什么。
+        # assistant 发起的工具调用：上游只认纯文本消息，但我们**不能把结构化
+        # 调用压成一句 `name(args); name(args)`** —— 那样模型在下一轮看到的
+        # 是「一段描述」而不是「一次真实调用」，于是它要么重复调同一个工具，
+        # 要么把参数写成散文（实测：跑任务时参数经常缺引号/少括号，客户端
+        # 解析失败直接中断）。
+        #
+        # 改成严格的 JSON 代码块 + 一行说明：模型能明确看出「我上一轮调了
+        # 什么、参数是什么」，工具名与参数都保持原样转义，不会串行化丢失。
         if role == "assistant" and isinstance(item.get("tool_calls"), list):
             _calls = []
             for _c in item["tool_calls"]:
                 if not isinstance(_c, dict):
                     continue
                 _fn = _c.get("function") if isinstance(_c.get("function"), dict) else {}
-                _calls.append("%s(%s)" % (_fn.get("name") or "?",
-                                          _fn.get("arguments") or ""))
+                _args = _fn.get("arguments")
+                if isinstance(_args, str):
+                    try:
+                        _args = json.loads(_args)
+                    except Exception:  # noqa: BLE001 - 保留原串，别丢信息
+                        pass
+                _calls.append({"name": _fn.get("name") or "unknown",
+                               "arguments": _args if _args is not None else {}})
             if _calls:
                 _prev = content if isinstance(content, str) else ""
-                content = ("%s\n[tool calls] %s" % (_prev, "; ".join(_calls))).strip()
+                _block = json.dumps(_calls, ensure_ascii=False)
+                content = ("%s\n\n[上一轮你调用过的工具]\n```json\n%s\n```\n"
+                           "这些调用已经执行完毕，结果在下面以 [tool result] 开头给出。"
+                           % (_prev, _block)).strip()
         if role == "system":
             systems.append({"role": "system", "content": content})
         else:
@@ -522,6 +537,22 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
         return ("data: %s\n\n" % json.dumps(payload, ensure_ascii=False)).encode()
 
     usage_acc: dict = {}
+    # **工具调用的协议完整性**（客户端跑任务时中断就出在这里）：
+    #   1. `tool_calls[].index` 必须存在且连续 —— 上游偶尔省略 index，
+    #      客户端按 index 拼 arguments 会错位，拼出来的 JSON 是坏的；
+    #   2. `finish_reason` 必须与**最后一个 tool_calls 分片同一帧**发出。
+    #      原来先发一个空 delta 帧、再单独发 finish_reason，严格解析的客户端
+    #      （DSH / Codex / VS Code 系）会认为工具调用不完整 → 直接中断任务；
+    #   3. `arguments` 必须是能 json.loads 的完整串。上游截断时给半截
+    #      `{"path": "/tm`，客户端一解析就抛错 —— 这里补成 `{}` 并记日志，
+    #      让流程能继续（宁可少一个参数，也不要整个任务崩掉）。
+    #
+    # 合并所有 tool_calls 分片，等流结束再一次性发出：工具调用本来就不是
+    # 增量消费的，客户端要的是「完整调用 + finish_reason」，不是逐字流。
+    pending_calls: dict[int, dict] = {}
+    saw_tool_call = False
+    finish_out = None
+
     for chunk in chunks:
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
             usage_acc.update(chunk["usage"])
@@ -535,12 +566,52 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
                 saw_reasoning = True
             if delta.get("content"):
                 out["content"] = delta["content"]
-            if delta.get("tool_calls"):
-                out["tool_calls"] = delta["tool_calls"]
+            for tc in (delta.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                saw_tool_call = True
+                idx = tc.get("index")
+                if not isinstance(idx, int):
+                    idx = len(pending_calls)
+                slot = pending_calls.setdefault(
+                    idx, {"id": None, "name": None, "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                if fn.get("name"):
+                    slot["name"] = (slot["name"] or "") + str(fn["name"])
+                if fn.get("arguments"):
+                    slot["arguments"] += str(fn["arguments"])
+            if choice.get("finish_reason"):
+                finish_out = str(choice["finish_reason"])
+            # 有正文/思考就逐帧发；工具调用留到最后合并发（见上）
             if out:
                 yield frame(out)
-            if choice.get("finish_reason"):
-                yield frame({}, str(choice["finish_reason"]))
+
+    if saw_tool_call:
+        # index 归一成 0..n-1，保证连续（客户端按它顺序建数组）
+        merged = []
+        for new_idx, idx in enumerate(sorted(pending_calls)):
+            slot = pending_calls[idx]
+            args = slot["arguments"] or "{}"
+            try:
+                json.loads(args)
+            except Exception:  # noqa: BLE001 - 上游截断/拼错，兜成空对象
+                import logging
+                logging.getLogger("loomy").warning(
+                    "tool_call arguments 不是合法 JSON，已兜底: %r", args[:200])
+                args = "{}"
+            merged.append({
+                "index": new_idx,
+                "id": slot["id"] or ("call_%d_%s" % (new_idx, int(time.time() * 1000))),
+                "type": "function",
+                "function": {"name": slot["name"] or "unknown", "arguments": args},
+            })
+        # **finish_reason 与 tool_calls 同一帧**（关键修复）
+        yield frame({"tool_calls": merged}, "tool_calls")
+        finish_out = "tool_calls"
+    elif finish_out:
+        yield frame({}, finish_out)
 
     # 收尾：带上整合好的 usage + 积分（客户端底部显示消耗要用）
     final_usage = _usage_with_credit(usage_acc, model)
@@ -550,12 +621,25 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
 
 
 def _usage_with_credit(usage: dict, model: str) -> dict:
-    """usage 里补齐 `credit` / `credits` / `cost` 三个同义键。"""
-    out = {
-        "prompt_tokens": int((usage or {}).get("prompt_tokens") or 0),
-        "completion_tokens": int((usage or {}).get("completion_tokens") or 0),
-        "total_tokens": int((usage or {}).get("total_tokens") or 0),
-    }
+    """usage 里补齐 `credit` / `credits` / `cost` 三个同义键。
+
+    ⚠️ **必须以原始 usage 为底**，不能只挑 prompt/completion/total 重造：
+    那样 `cached_tokens` / `prompt_tokens_details` / `cache_read_input_tokens`
+    会被整段丢掉，客户端与面板的「缓存命中」恒为 0（这就是 Loomy 命中率为 0
+    的真正原因，与有没有账号无关）。
+    """
+    src = usage if isinstance(usage, dict) else {}
+    out = dict(src)                      # 原样保留所有字段（含缓存）
+    out["prompt_tokens"] = int(src.get("prompt_tokens") or 0)
+    out["completion_tokens"] = int(src.get("completion_tokens") or 0)
+    out["total_tokens"] = int(src.get("total_tokens") or 0)
+    # 缓存命中补齐成各家客户端认的写法（幂等；源里没有就一个都不加）
+    try:
+        from upstream_compat import normalize_usage_cache
+
+        normalize_usage_cache(out)
+    except Exception:  # noqa: BLE001 - 补齐失败不影响主流程
+        pass
     credit = 0.0
     try:
         raw = (usage or {}).get("credit")
@@ -614,26 +698,70 @@ def _sse_from_chat(result: dict):
             "choices": [{"index": 0, "delta": delta,
                          "finish_reason": finish}]}
         if with_usage:
-            payload["usage"] = {
-                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                "completion_tokens": int(usage.get("completion_tokens") or 0),
-                "total_tokens": int(usage.get("total_tokens") or 0),
-                "credit": credit, "credits": credit, "cost": credit,
-            }
+            # 同样保留上游原始字段（缓存命中在这条路径上也不能丢）
+            _u = dict(usage) if isinstance(usage, dict) else {}
+            _u["prompt_tokens"] = int(_u.get("prompt_tokens") or 0)
+            _u["completion_tokens"] = int(_u.get("completion_tokens") or 0)
+            _u["total_tokens"] = int(_u.get("total_tokens") or 0)
+            _u["credit"] = _u["credits"] = _u["cost"] = credit
+            try:
+                from upstream_compat import normalize_usage_cache
+
+                normalize_usage_cache(_u)
+            except Exception:  # noqa: BLE001
+                pass
+            payload["usage"] = _u
         return ("data: %s\n\n" % json.dumps(payload, ensure_ascii=False)).encode()
 
     yield frame({"role": "assistant"})
     if reasoning:
         yield frame({"reasoning_content": reasoning})
-    # **tool_calls 必须转发**：harness 客户端靠它决定下一步做什么。
-    # 原来完全不处理，客户端只收到 `finish_reason=tool_calls`，
-    # 于是「思考完就结束、任务没开始跑」。
-    tool_calls = message.get("tool_calls")
-    if isinstance(tool_calls, list) and tool_calls:
-        yield frame({"tool_calls": tool_calls})
+
+    # **tool_calls 必须转发且协议完整**：harness 客户端靠它决定下一步做什么。
+    #
+    # 这条是 Loomy 的**真实路径**（上游只有非流式，网关自己合成 SSE），
+    # 所以这里的坑最要命。原来有三个问题：
+    #   1. `tool_calls` 与 `finish_reason` **分成两帧**发 —— 严格客户端
+    #      （DSH / Codex / VS Code 系）要求两者同帧，否则判定调用不完整，
+    #      直接中断任务（这正是「跑任务经常报错中断」的主因）；
+    #   2. 原样透传上游的 `tool_calls`，**补 `index`** 缺失时客户端按 index
+    #      拼参数会错位，拼出来的 JSON 是坏的；
+    #   3. 不校验 `arguments` 是否合法 JSON —— 上游给半截串就直接抛错。
+    #
+    # 现在：归一 index、校验参数（坏则兜成 {}）、与 finish_reason 同帧。
+    raw_calls = message.get("tool_calls")
+    merged_calls = []
+    if isinstance(raw_calls, list):
+        for i, tc in enumerate(raw_calls):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            args = fn.get("arguments")
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            if not isinstance(args, str) or not args.strip():
+                args = "{}"
+            try:
+                json.loads(args)
+            except Exception:  # noqa: BLE001 - 上游截断/拼错
+                import logging
+                logging.getLogger("loomy").warning(
+                    "upstream tool_call arguments 非法，已兜底: %r", args[:200])
+                args = "{}"
+            merged_calls.append({
+                "index": i,
+                "id": tc.get("id") or ("call_%d_%s" % (i, int(time.time() * 1000))),
+                "type": "function",
+                "function": {"name": (fn.get("name") or "unknown"), "arguments": args},
+            })
+
     if text:
         yield frame({"content": text})
-    yield frame({}, str(choice.get("finish_reason") or "stop"))
+    if merged_calls:
+        # **finish_reason 与 tool_calls 同一帧**
+        yield frame({"tool_calls": merged_calls}, "tool_calls")
+    else:
+        yield frame({}, str(choice.get("finish_reason") or "stop"))
     # **始终补一个 usage 终点帧**（带积分），客户端据此显示「消耗 N 积分」。
     # 原来只在 `result["usage"]` 非空时发，且原样透传 —— Loomy 的 usage 里
     # 没有 credit，客户端就永远显示不出消耗。

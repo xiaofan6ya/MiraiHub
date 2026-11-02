@@ -1683,6 +1683,31 @@ def _trusted_auth_probe(acc: Account) -> tuple[str, str]:
                 pass
 
 
+def _refresh_if_suspect(acc: Account, sess) -> None:
+    """access token 已过期/即将过期时，在发请求**之前**先续一次命。
+
+    为什么放在这里而不是等 401：`get_headers()` 只在本地 `expiresAt` 临近
+    （60 秒）时才刷，而 `expiresAt` 是**落库那一刻**算出来的绝对值 ——
+    一个号在池子里躺了 31 天没人用，expiresAt 早就过了，第一次命中它必然
+    401，然后靠 `_request_with_refresh` 补救。那条补救路径本身是对的，
+    但它每次都白烧一次上游请求，而且在 401 与「session 真的死了」之间，
+    号池要先用一轮计数才敢下结论 —— 表现就是「到期后第一次请求总是慢/失败」。
+
+    提前刷一次把这条弯路绕掉：刷新只需要一个 `X-Refresh-Token` 头，
+    实测 access 过期与否都能换回新令牌（见 `admin/token_expiry.py` 实测记录）。
+
+    失败一律吞掉：刷新失败不代表请求不能发（也许上游还认旧 token），
+    真正的判据是上游的响应，不是本地的猜测。
+    """
+    try:
+        if sess.cm._is_expired():
+            sess.cm.force_refresh()
+            # 刷新会换 token，重建的头才带新的 Authorization。
+            sess._gateway_headers = sess.get_headers()
+    except Exception:      # noqa: BLE001 - 刷新失败交给上游响应裁决
+        pass
+
+
 def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession | None:
     """创建 AccountSession 并调用 get_headers()（可能触发 token 刷新）。
 
@@ -1708,6 +1733,7 @@ def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession |
                     original = row[0]
                     sess = backend.AccountSession(original)
                     sess._gateway_headers = sess.get_headers()
+                    _refresh_if_suspect(acc, sess)
                     updated = sess.updated_json()
                     if json.loads(updated) != json.loads(original):
                         changed = auth_db.query(Account).filter(
@@ -2212,9 +2238,25 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     # Explicit user order outranks stickiness, expiry and free-model balancing.
     # Health/model limits, ownership and capacity were already checked above.
     from admin.selection_order import manual_priority
-    priority = min(manual_priority(a) for a in rows)
-    if priority != float('inf'):
-        rows = [a for a in rows if manual_priority(a) == priority]
+    _priority = min(manual_priority(a) for a in rows)
+    if _priority != float('inf'):
+        # 默认**只取最小优先级那一档**：用户把某个号拖到第 1 位，意思就是
+        # 「先烧它」，不该自作主张把第 2、3 名也掺进来轮转。
+        #
+        # 可选的放宽（ADMIN_SELECTION_ROTATE_N）：保留前 N 档做组内轮转。
+        # 只在多号手动排序且想让它们平摊时才有意义；默认关闭，
+        # 因为「按我排的顺序走」是这一屏最核心的承诺，静默改变它比轮转不均更糟。
+        try:
+            _prio_n = max(1, int(os.getenv("ADMIN_SELECTION_ROTATE_N", "1")))
+        except (TypeError, ValueError):
+            _prio_n = 1
+        if _prio_n == 1:
+            rows = [a for a in rows if manual_priority(a) == _priority]
+        else:
+            _allow = set(sorted({manual_priority(a) for a in rows})[:_prio_n])
+            _filtered = [a for a in rows if manual_priority(a) in _allow]
+            if _filtered:
+                rows = _filtered
 
     strategy = routing_policy.selection_mode(db)
     if strategy == 'throughput':
@@ -2237,14 +2279,47 @@ def _select_account(db: Session, exclude_ids: set | None = None,
 
     candidates = rows
     if not free_model and strategy == 'expiring':
-        best = min(pool.expiry_key(a, now) for a in candidates)
-        candidates = [a for a in candidates if pool.expiry_key(a, now) == best]
+        # **前 N 名轮转，而不是死盯第 1 名**。
+        #
+        # 原实现取 `expiry_key == best` 的**并列档**：只要有一个号的到期时间
+        # 最早，它就是唯一候选 —— 实测 300 次选号全落在同一个号上
+        # （用户反馈：「一直逮着一个号薅，第一名天天在跑，二三名挂着不动」）。
+        # 而积分到期优先的本意是「先烧快作废的」，不是「只烧一个号」，
+        # 二三名同样会到期，一直不动照样浪费。
+        #
+        # 现在取**到期最紧迫的前 N 个**做短名单（N 默认 3，可用
+        # ADMIN_EXPIRY_ROTATE_N 调整），再在名单内按「在途数 → 最近使用时间」
+        # 轮转。既保证「快过期的先走」，又让前几名都能被消耗到。
+        try:
+            rotate_n = max(1, int(os.getenv("ADMIN_EXPIRY_ROTATE_N", "3")))
+        except (TypeError, ValueError):
+            rotate_n = 3
+        ranked = sorted(candidates,
+                        key=lambda a: (pool.expiry_key(a, now),
+                                       -int(getattr(a, "balance_remain", 0) or 0),
+                                       a.id))
+        candidates = ranked[:rotate_n]
     # Apply the short collision window inside a strict expiry tier only.
     fresh = [a for a in candidates if POOL.recent.fresh(a.uid or '')]
     candidates = fresh or candidates
     POOL.recent.prune()
+    # 轮转用的排序键，按优先级从强到弱：
+    #   1. 在途请求数（并发必须摊平，否则单号过载 → 成片 429）
+    #   2. `last_picked_at` —— **本次进程内最近一次被选中**的时刻
+    #   3. `last_used_at` —— 真实用过的时间（落库，跨重启）
+    #   4. id（最后的确定性兜底，避免排序不稳定）
+    #
+    # 为什么必须看 `last_picked_at`：`last_used_at` 是落库字段，
+    # 同一秒内连续几百次选号它的值相同，排序会退化成「永远选 id 最小的」，
+    # 于是短名单里有 3 个号、流量仍然全压在第 1 个（实测 296/300）。
+    # `last_picked_at` 在选中时立刻写内存，能真正把「刚用过的」排到后面。
+    def _picked_at(a):
+        return getattr(a, "last_picked_at", None) or datetime.min
+
     load_key = lambda a: (POOL.inflight.count(a.uid or ''),
-                          a.last_used_at or datetime.min, a.id)
+                          _picked_at(a),
+                          a.last_used_at or datetime.min,
+                          a.id)
     if strategy == 'throughput':
         acc = min(candidates, key=load_key) if free_model else min(
             candidates, key=lambda a: (pool.expiry_key(a, now), *load_key(a)))

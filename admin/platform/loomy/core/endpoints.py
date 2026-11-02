@@ -84,5 +84,25 @@ def points_headers(token: str) -> dict:
 
 
 def base_of(realm: str) -> str:
+    """上游 base_url。
+
+    允许用环境变量覆盖：`ADMIN_LOOMY_BASE_URL`（或按区分
+    `ADMIN_LOOMY_BASE_URL_CN`）。
+
+    为什么要这个口子：联调/回归时需要一个**可控的上游**来复现
+    「工具调用参数被截断」「finish_reason 分帧」这类故障 —— 真上游
+    不会按你的节奏出错。把它指向本地 mock 就能稳定复现与验证。
+    生产环境不设这个变量，行为与原来完全一致。
+    """
+    import os
+
     conf = REGIONS.get(realm or "cn") or REGIONS["cn"]
+    keys = []
+    if realm:
+        keys.append("ADMIN_LOOMY_BASE_URL_" + str(realm).upper())
+    keys.append("ADMIN_LOOMY_BASE_URL")
+    for key in keys:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value.rstrip("/")
     return str(conf["base_url"]).rstrip("/")
