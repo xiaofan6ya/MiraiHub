@@ -28,6 +28,14 @@ from typing import Any, Callable
 #: 已完成任务在内存里保留多久（秒），供前端取最终结果
 _KEEP_DONE_SECONDS = 1800
 
+#: 进度里最多保留多少条账号明细。
+#:
+#: 账号池是几千~几万级：如果 `items` 无上限增长，每次轮询（1.5s）都要把
+#: 几万条结果序列化一遍传给前端 —— 网络和后端 CPU 都被这条进度接口吃掉，
+#: 界面看起来就是「卡死 + 不刷新」。这里只留最近 N 条用于滚动展示，
+#: 完成数由 `done` 单独计数，进度百分比依旧准确。
+_MAX_ITEMS = 500
+
 
 class Job:
     """一次后台批量执行的进度与结果。"""
@@ -56,10 +64,16 @@ class Job:
         self._lock = threading.Lock()
 
     def add_item(self, item: dict) -> None:
-        """记录一个账号的结果（线程安全）。"""
+        """记录一个账号的结果（线程安全）。
+
+        完成数以 `done` 为准（单调递增），`items` 只保留最近 `_MAX_ITEMS` 条，
+        避免几万账号的明细把内存和进度接口撑爆。
+        """
         with self._lock:
             self.items.append(item)
-            self.done = len(self.items)
+            if len(self.items) > _MAX_ITEMS:
+                del self.items[:len(self.items) - _MAX_ITEMS]
+            self.done += 1
             self.current = ""
             # 换账号了：任务级计数归零，重新数
             self.task_done = 0
@@ -104,6 +118,19 @@ class Job:
     def set_phase(self, phase: str) -> None:
         self.phase = phase
 
+    def set_done(self, done: int, note: str | None = None) -> None:
+        """轻量进度更新：只改完成数（可选附带一行状态文字），不往 items 塞数据。
+
+        导出 / 导入这类「逐条处理但不需要逐条结果」的场景必须用这个，
+        否则把十万级结果全塞进 job.items 会把内存撑爆，而且前端也渲染不过来。
+        snapshot() 的 percent 直接读 self.done，所以进度条照常工作。
+        """
+        with self._lock:
+            self.done = done
+            if note is not None:
+                self.current = note
+            self.beat_at = datetime.utcnow()
+
     def snapshot(self) -> dict:
         """给前端的进度快照（不含内部字段）。"""
         elapsed = ((self.finished_at or datetime.utcnow())
@@ -122,6 +149,9 @@ class Job:
             "task_done": self.task_done,
             "task_current": self.task_current,
             "items": list(self.items),
+            # 明细被截断时前端需要知道：items 只是「最近 N 条」，不是全部
+            "items_total": self.done,
+            "items_truncated": self.done > len(self.items),
             "result": self.result,
             "error": self.error,
         }

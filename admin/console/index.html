@@ -7503,7 +7503,7 @@ function jobProgressRows(d, opts) {
       <span class="text-slate-500 text-xs truncate maxw-45">${esc(detail)}</span>
       ${amount}
     </div>`;
-  }).join("") || `<div class="text-slate-400 text-xs py-2">等待第一个账号完成...</div>`;
+  }).join("") || `<div class="text-slate-400 text-xs py-2">${esc(opts.emptyText || "等待第一个账号完成...")}</div>`;
 }
 
 /**
@@ -7570,7 +7570,7 @@ async function runJob(opts) {
     if (polling) return;
     polling = true;
     try {
-      const r = await api(`/api/growth/job/${d.job_id}`);
+      const r = await api(`${opts.pollUrl || '/api/growth/job/'}${d.job_id}`);
       const j = await safeJson(r);
       if (!r.ok || !j.data) return;
       const cur = j.data;
@@ -7902,14 +7902,14 @@ async function growthDoClaim(id, taskCode, btn){
 
 /* 批量做任务：所有 active 账号，逐个执行 + 领奖 */
 async function growthRunBatch(){
-  const r0 = await api("/api/accounts");
-  if (!r0.ok) { toast("获取账号列表失败", "err"); return; }
-  const d0 = await r0.json();
-  const list = (d0.accounts || d0.items || []).filter(a => a.status === "active");
-  if (!list.length) { toast("没有可用账号", "err"); return; }
+  // 仅拿计数，不把几万账号全拉下来 —— 那才是批量任务「卡死」的主因之一
+  const r0 = await api("/api/accounts/count", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+  const d0 = await safeJson(r0);
+  const active = (d0.data && d0.data.active) || 0;
+  if (!active) { toast("没有可用账号", "err"); return; }
 
   if (!await uiConfirm({kind:"warn", danger:true, title:"批量做成长任务",
-      message:`确认对 ${list.length} 个账号批量执行？\n流程：自动参与 → 触发完成 → 自动领取。\n仅处理已实测可自动化的任务，其余跳过。`,
+      message:`确认对 ${active} 个账号批量执行？\n流程：自动参与 → 触发完成 → 自动领取。\n仅处理已实测可自动化的任务，其余跳过。`,
       okText:"开始执行"})) return;
 
   // 交给后台线程串行跑，前端只轮询进度：
@@ -7946,18 +7946,20 @@ async function growthRunBatch(){
       if (r.energy) parts.push(`+${r.energy} 能量`);
       // 全部无可做时要说清原因，否则只有一句「完成 0 个」看着像执行失败
       if (noopN) {
-        parts.push(noopN === d.total
+        parts.push((noopN === d.total && !d.items_truncated)
           ? `<span class="text-slate-600">${noopN} 个账号的任务已全部领完，本次无新任务</span>`
           : `${noopN} 个账号无可做任务`);
       }
       if (r.failed && r.failed.length) parts.push(`<span class="text-red-600">失败 ${r.failed.length} 个账号</span>`);
+      // 账号多时明细只保留最近 N 条（避免进度接口回传几万条拖死界面）
+      if (d.items_truncated) parts.push(`<span class="text-slate-500">明细仅显示最近 ${items.length} 条</span>`);
       return parts.join(" · ");
     },
     doneToast: d => {
       const r = d.result || {};
       const noopN = (d.items || []).filter(x => x.noop).length;
       if (r.credit > 0) return `批量完成，共获得 ${r.credit} 积分`;
-      if (noopN && noopN === d.total) return `批量完成：${noopN} 个账号的任务均已领完，无新任务`;
+      if (noopN && noopN === d.total && !d.items_truncated) return `批量完成：${noopN} 个账号的任务均已领完，无新任务`;
       return "批量完成，无新增积分";
     },
     onFinish: () => loadAccounts(),
@@ -9008,9 +9010,11 @@ async function submitUpload(){
   }
 
   let allItems = [];
+  let rawTexts = [];   // 非 WB 平台导入需要的原始备份文本（逐个文件累积）
 
   // 1) 解析文本域：支持 JSON 数组 / 单个 JSON 对象 / JSONL 每行一个对象
   if(text){
+    rawTexts.push(text);   // 非 WB 平台需要原文交给平台自己的 import_batch
     const j = tryParse(text);
     if(j){ allItems = Array.isArray(j) ? j : [j]; }
     else {
@@ -9039,79 +9043,85 @@ async function submitUpload(){
     }
   }
 
-  // 非 WorkBuddy 平台：走各自网关的 import-batch（认平台的备份形态，
-  // 例如 Loomy 的 {realm,token,uid,phone}，而非 auth/account 客户端凭证）。
-  // 这是 issue #8「手机版导出的账号无法导入」的根因修复：之前全走
-  // /api/accounts/batch，被 WorkBuddy 的 validate_credential 全部拒收。
+  // 统一走异步导入（后台线程 + 进度条）。
+  //
+  // 关键点（issue #8）：非 WorkBuddy 平台**不能**用 /api/accounts/batch ——
+  // 那条路要求 WorkBuddy 的 auth/account 客户端凭证，会把 Loomy 的
+  // {realm,token,uid,phone} 备份整批拒收。这里按当前平台分流：
+  //   WB/codebuddy → items（沿用原 /batch 的凭据结构）
+  //   其他平台     → text（JSON 数组或 JSONL 原文，交平台自己的 import_batch）
   const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
-  const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
-  if (storage && storage !== "workbuddy" && storage !== "codebuddy") {
+  const storage = String(spec.storage_platform || spec.id || "workbuddy").toLowerCase();
+  const isWb = !storage || storage === "workbuddy" || storage === "codebuddy";
+
+  let payload;
+  if (isWb) {
+    if (!allItems.length) { toast("未解析出任何账号凭证", "err"); return; }
+    payload = {
+      storage: storage || "workbuddy",
+      verify: true,
+      items: allItems.map(x => ({
+        name: [x.account?.nickname, x.name].find(v => typeof v === "string" && v.trim()) || "",
+        auth_json: JSON.stringify(x),
+      })),
+    };
+  } else {
     const combined = rawTexts.join("\n");
     if (!combined.trim()) { toast("未解析出任何账号凭证", "err"); return; }
-    const result = $("#upResult");
-    const showResult = message => { result.textContent = message; result.classList.remove("hidden"); };
-    const previous = submit.innerHTML;
-    submit.disabled = true; submit.setAttribute("aria-busy","true");
-    submit.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span><span>正在导入…</span>';
-    showResult(`正在导入 ${rawTexts.length} 份备份到 ${spec.label || storage}…`);
-    try {
-      const r = await api(`/api/${storage}/import-batch`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text: combined})});
-      const d = await r.json().catch(()=>({}));
-      if (r.ok) {
-        const parts = [`已添加 ${d.added||0} 个`];
-        if (d.updated) parts.push(`更新 ${d.updated} 个`);
-        if (d.failed) parts.push(`${d.failed} 个失败`);
-        const message = parts.join("，");
-        showResult(message + (d.errors?.length ? "\n"+d.errors.join("\n") : ""));
-        toast(message, d.failed ? "err" : "ok");
-        loadAccounts();
-      } else {
-        const detail = d.detail;
-        const message = typeof detail === "string" ? detail : (detail?.message || "导入失败，请检查备份格式");
-        showResult(message); toast(message, "err");
-      }
-    } catch(e) {
-      showResult("导入请求失败，请检查服务连接后重试。"); toast("导入请求失败", "err");
-    } finally {
-      submit.disabled = false; submit.removeAttribute("aria-busy"); submit.innerHTML = previous;
-    }
-    return;
+    payload = { storage, text: combined };
   }
 
-  if(!allItems.length){ toast("未解析出任何账号凭证","err"); return; }
-  const body = { items: allItems.map(x => ({ name: [x.account?.nickname, x.name].find(v => typeof v === "string" && v.trim()) || "", auth_json: JSON.stringify(x) })) };
   const result = $("#upResult");
   const showResult = message => { result.textContent = message; result.classList.remove("hidden"); };
   const previous = submit.innerHTML;
   submit.disabled = true;
   submit.setAttribute("aria-busy", "true");
   submit.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span><span>正在导入…</span>';
-  showResult(`正在验证并导入 ${allItems.length} 份凭证，请稍候…`);
-  try {
-    const r = await api("/api/accounts/batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const d = await r.json().catch(()=>({}));
-    if(r.ok){
-      const parts = [`已添加 ${d.added||0} 个账号`];
-      if(d.skipped) parts.push(`更新 ${d.skipped} 个已有账号`);
-      if(d.errors && d.errors.length) parts.push(`${d.errors.length} 个失败`);
-      const message = parts.join("，");
-      showResult(message + (d.errors?.length ? "\n" + d.errors.join("\n") : ""));
-      toast(message, d.errors?.length ? "err" : "ok");
-      loadAccounts();
-    } else {
-      const detail = d.detail;
-      const message = typeof detail === "string" ? detail : (detail?.message || "导入失败，请检查凭证格式");
-      showResult(message);
-      toast(message, "err");
+  const count = isWb ? payload.items.length : payload.text.split("\n").filter(l => l.trim()).length;
+  showResult(`正在导入 ${count} 条到 ${spec.label || storage || "WorkBuddy"}…`);
+
+  const summarize = d => {
+    const r = (d && d.result) || {};
+    if (d && d.status === "failed") return `导入失败：${d.error || "未知错误"}`;
+    if (isWb) {
+      const parts = [`已添加 ${r.added || 0} 个账号`];
+      if (r.skipped) parts.push(`更新 ${r.skipped} 个已有账号`);
+      if (r.errors && r.errors.length) parts.push(`${r.errors.length} 个失败`);
+      return parts.join("，") + (r.errors?.length ? "\n" + r.errors.join("\n") : "");
     }
-  } catch(e) {
+    const parts = [`已添加 ${r.added || 0} 个`];
+    if (r.updated) parts.push(`更新 ${r.updated} 个`);
+    if (r.failed) parts.push(`${r.failed} 个失败`);
+    return parts.join("，") + (r.errors?.length ? "\n" + r.errors.join("\n") : "");
+  };
+
+  await runJob({
+    title: `批量导入账号 · ${spec.label || storage || "WorkBuddy"}`,
+    submitUrl: "/api/accounts/import-async",
+    pollUrl: "/api/accounts/job/",
+    body: payload,
+    label: () => "", detail: () => "", amount: () => "", icon: () => "",
+    emptyText: "正在逐条校验并写入账号，进度见上方进度条…",
+    doneText: summarize,
+    doneToast: d => {
+      const r = (d && d.result) || {};
+      return `导入完成：新增 ${r.added || 0} 个${r.failed || r.errors?.length ? "，有失败项" : ""}`;
+    },
+    onFinish: d => {
+      const message = summarize(d);
+      showResult(message);
+      toast(message.split("\n")[0],
+            (d.status === "failed" || (d.result && (d.result.failed || d.result.errors?.length))) ? "err" : "ok");
+      loadAccounts();
+    },
+  }).catch(e => {
     showResult("导入请求失败，请检查服务连接后重试。");
-    toast("导入请求失败", "err");
-  } finally {
+    console.warn("导入失败", e);
+  }).finally(() => {
     submit.disabled = false;
     submit.removeAttribute("aria-busy");
     submit.innerHTML = previous;
-  }
+  });
 }
 /* ==========================================================================
    账号导出
@@ -9144,9 +9154,17 @@ function exportStamp() {
   return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
-function openExport() {
-  const list = _accData || [];
-  const act = list.filter(a => a.status === "active").length;
+async function openExport() {
+  // 账号数量走轻量 /count（只聚合 id），绝不为了显示个数字去拉全量账号 ——
+  // 几万级账号时那一下就是几秒白屏。
+  let total = (_accData || []).length;
+  let active = (_accData || []).filter(a => a.status === "active").length;
+  try {
+    const r = await api("/api/accounts/count", { method: "POST" });
+    const j = await safeJson(r);
+    if (r.ok && j.data) { total = j.data.total || 0; active = j.data.active || 0; }
+  } catch (e) { /* 计数失败不阻塞导出，退回已加载数量 */ }
+  const disabled = Math.max(0, total - active);
   openModal(`
     <h3 class="font-bold mb-3"><span class="wb-icon mr-1 text-sky-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.226 20.925A2 2 0 0 0 6 22h12a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v3.127"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="m5 11-3 3"/><path d="m5 17-3-3h10"/></svg></span> 批量导出账号</h3>
     <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 mb-3">
@@ -9159,28 +9177,94 @@ function openExport() {
         <option value="backup">系统明文备份（.jsonl）</option>
       </select>
     </label>
-    <label class="flex items-center gap-2 text-sm mb-3">
-      <input id="expIncludeDisabled" type="checkbox" class="rounded" />
-      包含已禁用的账号
+    <label class="block text-sm mb-3">导出范围
+      <select id="expScope" class="w-full border rounded-lg px-3 py-2 mt-2">
+        <option value="all">全部（可用 ${active} + 禁用 ${disabled}）</option>
+        <option value="active">仅可用账号（${active}）</option>
+        <option value="disabled">仅禁用账号（${disabled}）</option>
+      </select>
+    </label>
+    <label class="block text-sm mb-3">筛选账号（可留空）
+      <input id="expKeyword" type="text" placeholder="按名称 / uid 关键字筛选" class="w-full border rounded-lg px-3 py-2 mt-2" />
+    </label>
+    <label class="block text-sm mb-3">分批条数（0 = 全部）
+      <input id="expLimit" type="number" min="0" step="100" value="0" class="w-full border rounded-lg px-3 py-2 mt-2" />
+      <span class="text-xs text-slate-400">设成正数可只导前 N 个，处理完再导下一批</span>
     </label>
     <div class="text-sm text-slate-600 mb-3">
-      当前账号 <b>${list.length}</b> 个，其中可用 <b>${act}</b> 个
+      当前平台账号 <b>${total}</b> 个，其中可用 <b>${active}</b> 个
+      <span class="text-xs text-slate-400">（分批写出，带进度条，不会卡住界面）</span>
     </div>
     <div class="flex justify-between gap-2 mt-4">
       <button onclick="copyExport()" class="px-3 py-1.5 rounded-lg border text-sm"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></span>复制到剪贴板</button>
       <div class="flex gap-2">
         <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
-        <button onclick="doExport()" class="px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></span>下载文件</button>
+        <button onclick="exportAsync()" class="px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></span>开始导出（后台）</button>
       </div>
     </div>`);
 }
 
+/** 异步导出：后台线程逐条写出文件并上报进度，前端有进度条，完成后可下载。 */
+async function exportAsync() {
+  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  const format = (document.getElementById('expFormat') || {}).value || 'backup';
+  const keyword = ((document.getElementById('expKeyword') || {}).value || '').trim();
+  const limit = parseInt((document.getElementById('expLimit') || {}).value || '0', 10) || 0;
+  const body = { format, ids: [], keyword, limit };
+  if (scope === 'active') body.status = 'active';
+  else if (scope === 'disabled') body.status = 'disabled';
+  else body.include_disabled = true;   // 「当前平台全部」= 可用 + 禁用
+  await runJob({
+    title: "批量导出账号",
+    submitUrl: "/api/accounts/export-async",
+    pollUrl: "/api/accounts/job/",
+    body,
+    label: () => "", detail: () => "", amount: () => "", icon: () => "",
+    emptyText: "正在分批读取并写出账号，进度见上方进度条…",
+    doneText: d => `导出完成，共 ${d.result ? d.result.count : 0} 个账号`
+      + (d.result && d.result.skipped ? `（跳过 ${d.result.skipped} 个无效凭据）` : ""),
+    summaryHtml: d => {
+      const r = d.result || {};
+      const tok = r.file_token;
+      if (tok) return `已生成文件（${r.count} 个账号）。`
+        + `<a href="/api/accounts/export-download?token=${encodeURIComponent(tok)}" `
+        + `class="underline text-sky-600" download>点击下载</a>`;
+      return `导出完成：${r.count || 0} 个账号`;
+    },
+    doneToast: d => `已导出 ${d.result ? d.result.count : 0} 个账号`,
+    onFinish: d => {
+      loadAccounts();
+      // 成功就把文件直接推给浏览器/手机保存，省一次「再去点一下链接」。
+      const tok = d.result && d.result.file_token;
+      if (tok && d.status === "finished") {
+        try { downloadExportToken(tok); } catch (e) { console.warn("自动下载失败", e); }
+      }
+    },
+  });
+}
+
+/** 凭 token 触发浏览器下载导出文件（供 onFinish 自动下载等场景）。 */
+function downloadExportToken(token) {
+  const a = document.createElement('a');
+  a.href = `/api/accounts/export-download?token=${encodeURIComponent(token)}`;
+  a.download = "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 async function _fetchExport() {
-  const inc = $("#expIncludeDisabled")?.checked;
+  const scope = $('#expScope')?.value || 'all';
+  const body = { ids: [], format: $('#expFormat')?.value || 'client' };
+  const kw = ($('#expKeyword')?.value || '').trim();
+  const lim = parseInt($('#expLimit')?.value || '0', 10) || 0;
+  if (kw) body.keyword = kw;
+  if (lim > 0) body.limit = lim;
+  if (scope === 'active') body.status = 'active';
+  else if (scope === 'disabled') body.status = 'disabled';
+  else body.include_disabled = true;
   const r = await api("/api/accounts/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids: [], include_disabled: !!inc, format: $('#expFormat')?.value || 'client' })
+    body: JSON.stringify(body)
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return null; }
@@ -9201,6 +9285,23 @@ async function doExport() {
 }
 
 async function copyExport() {
+  // 剪贴板是把全部内容塞进一个字符串再交给系统，几万账号时浏览器会直接卡死。
+  // 超过阈值就明确引导走文件导出（后台写文件 + 进度条 + 下载）。
+  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  let n = (_accData || []).length;
+  try {
+    const rc = await api("/api/accounts/count", { method: "POST" });
+    const jc = await safeJson(rc);
+    if (rc.ok && jc.data) {
+      n = scope === 'active' ? (jc.data.active || 0)
+        : scope === 'disabled' ? (jc.data.disabled || 0)
+        : (jc.data.total || 0);
+    }
+  } catch (e) { /* 估算失败就按已加载数量判断 */ }
+  if (n > 2000) {
+    toast(`账号较多（约 ${n} 个），请用「开始导出（后台）」生成文件，剪贴板会卡死`, "err");
+    return;
+  }
   const d = await _fetchExport();
   if (!d) return;
   const text = d.items.map(x => JSON.stringify(JSON.parse(x))).join("\n");

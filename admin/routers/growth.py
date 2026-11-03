@@ -681,10 +681,12 @@ def _resolve_ids(payload_ids: list[int] | None) -> list[int]:
     try:
         if payload_ids:
             return _ordered_ids(list(payload_ids), db)
-        rows = (db.query(Account)
+        # 只取 id 列：几万账号时 `query(Account).all()` 会把每行的
+        # auth_json 大字段一起反序列化出来，光「取个 id 列表」就要几百 MB。
+        rows = (db.query(Account.id)
                 .filter(Account.status == "active")
                 .order_by(Account.created_at.desc(), Account.id.desc()).all())
-        return [a.id for a in rows]
+        return [r[0] for r in rows]
     finally:
         db.close()
 

@@ -3,11 +3,15 @@ import glob
 import json
 import os
 import shutil
-from datetime import datetime, timezone, timedelta
+import tempfile
+import threading
 import time
-from typing import Literal, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, validator
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
@@ -21,6 +25,96 @@ from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, Usa
 from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+
+
+# ---------------------------------------------------------------------------
+# 导出文件暂存：异步导出在后台线程把 JSONL 写进临时文件，前端凭 token 下载一次
+# 后删除。注册表常驻内存，配合 TTL 兜底清理，避免临时文件越积越多。
+# ---------------------------------------------------------------------------
+_export_registry: dict[str, dict] = {}
+_export_registry_lock = threading.Lock()
+_EXPORT_TTL_S = 1800
+
+
+def _export_register(path: str, filename: str) -> str:
+    token = uuid.uuid4().hex
+    with _export_registry_lock:
+        _purge_exports_locked()
+        _export_registry[token] = {
+            "path": path, "filename": filename,
+            "exp": time.time() + _EXPORT_TTL_S,
+        }
+    return token
+
+
+def _purge_exports_locked() -> None:
+    """清掉 TTL 过期的导出文件（调用方需持有锁）。"""
+    now = time.time()
+    for tok in [t for t, e in _export_registry.items() if now > e["exp"]]:
+        entry = _export_registry.pop(tok, None)
+        if not entry:
+            continue
+        try:
+            os.remove(entry["path"])
+        except OSError:
+            pass
+
+
+def _export_lookup(token: str) -> dict | None:
+    """按 token 取导出条目（**不删除**，TTL 内可重复下载）。"""
+    with _export_registry_lock:
+        _purge_exports_locked()
+        entry = _export_registry.get(token)
+    if not entry:
+        return None
+    if time.time() > entry["exp"]:
+        return None
+    return entry
+
+
+def _parse_backup_records(text: str) -> list[dict]:
+    """把手机版备份原文解析成记录列表（JSON 数组 或 JSONL）。
+
+    导出/导入都要用：导出按记录分块写文件，导入按记录分块喂平台网关。
+    整体是 JSON 数组时优先整体解析（单行几十 MB 的数组也能正确切开）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        return [r for r in parsed if isinstance(r, dict)]
+    if isinstance(parsed, dict):
+        return [parsed]
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def _platform_import_module(storage: str):
+    """懒加载非 WorkBuddy 平台的 import_batch 函数（避免顶层循环依赖）。"""
+    mapping = {
+        "trae": "admin.platform.trae.services.accounts",
+        "qoder": "admin.platform.qoder.services.accounts",
+        "loomy": "admin.platform.loomy.services.accounts",
+    }
+    modname = mapping.get((storage or "").lower())
+    if not modname:
+        raise HTTPException(status_code=400, detail=f"不支持的导入平台：{storage}")
+    import importlib
+    return importlib.import_module(modname)
 
 
 class AccountIn(BaseModel):
@@ -60,6 +154,33 @@ class ExportIn(BaseModel):
     #: 凭证一起落盘）；显式 true 时导出**所有平台**的账号 ——
     #: 多平台部署下做整机迁移/全量备份时会用到。
     all_platforms: bool = False
+
+
+class ExportAsyncIn(BaseModel):
+    """异步导出请求（替代同步 /export，避免几万账号一次性卡死）。
+
+    - ids 非空：只导出选中的账号（前端「导出选中」）
+    - ids 为空 + status 指定：按状态导出（active / disabled）
+    - ids 为空 + status 空：导出当前平台全部（include_disabled 控制是否含禁用）
+    """
+    ids: list[int] = []
+    include_disabled: bool = False
+    format: Literal['backup', 'client'] = 'backup'
+    all_platforms: bool = False
+    status: Optional[str] = None   # 'active' | 'disabled' | None=按 include_disabled
+    #: 关键字筛选（名称 / uid 子串），用于「只导某一批号」。
+    keyword: str = ""
+    #: 条数上限（0 = 不限）。配合 keyword / status 做分批导出：
+    #: 例如先导 500 个，处理完再导下一批。
+    limit: int = 0
+
+
+class ImportAsyncIn(BaseModel):
+    """异步导入请求（替代同步 /batch 与平台 import-batch，带进度条）。"""
+    storage: str = "workbuddy"     # workbuddy / codebuddy / trae / qoder / loomy
+    text: str = ""                 # 非 WB 平台：JSONL / JSON 数组原文
+    items: list[dict] = []         # WB 平台：与 /batch 同结构的凭据列表
+    verify: bool = True
 
 
 class HealthCheckBatchIn(BaseModel):
@@ -257,6 +378,226 @@ def export_accounts(
             for a in rows
         ],
     }
+
+
+@router.post("/export-async")
+def export_accounts_async(body: ExportAsyncIn, request: Request = None,
+                          _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """异步导出：后台线程逐条写出 JSONL，前端轮询进度，完成后凭 token 下载。
+
+    解决「导出几万账号直接卡死、没有进度条」：
+      * 不再一次性 query.all() 全量 + 整包返回（原来响应能到几百 MB，浏览器直接卡死）；
+      * 只先取 id 列表（轻量），再分窗口读行、逐条还原/加密、增量写文件；
+      * 进度通过 jobrunner 上报，前端有进度条；
+      * 支持导出范围：选中(ids) / 当前平台全部 / 仅可用 / 仅禁用。
+    """
+    from admin.platform import scope as platform_scope
+
+    platform, realm = platform_scope.from_request(request)
+    q = db.query(Account.id)
+    if not body.all_platforms:
+        q = platform_scope.filter_accounts(q, db, platform, realm)
+    if body.ids:
+        q = q.filter(Account.id.in_(body.ids))
+    elif body.status:
+        q = q.filter(Account.status == body.status)
+    elif not body.include_disabled:
+        q = q.filter(Account.status == "active")
+    kw = (body.keyword or "").strip()
+    if kw:
+        like = f"%{kw}%"
+        q = q.filter(func.coalesce(Account.name, "").like(like)
+                     | func.coalesce(Account.uid, "").like(like))
+    q = q.order_by(Account.id.asc())
+    if body.limit and body.limit > 0:
+        q = q.limit(int(body.limit))
+    ids = [r[0] for r in q.all()]
+    db.close()
+    if not ids:
+        raise HTTPException(status_code=400, detail="当前范围没有可导出的账号")
+
+    key = "account-export:" + (platform or "all")
+    running = jobrunner.RUNNER.get(key)
+    if running and running.status == "running":
+        return {"reused": True, **running.snapshot()}
+
+    total = len(ids)
+    fd, path = tempfile.mkstemp(prefix="miraihub-export-", suffix=".jsonl")
+    os.close(fd)
+    stamp = time.strftime("%Y%m%d-%H%M")
+    filename = f"miraihub-accounts-{body.format}-{platform or 'all'}-{stamp}.jsonl"
+
+    def worker(job: jobrunner.Job) -> dict:
+        db2 = SessionLocal()
+        written = 0
+        skipped = 0
+        try:
+            job.set_phase("导出中")
+            with open(path, "w", encoding="utf-8") as fh:
+                # 分窗口读，避免一次把全量 Account 行（含 auth_json 大字段）加载进内存
+                for start in range(0, total, 500):
+                    chunk = ids[start:start + 500]
+                    rows = db2.query(Account).filter(Account.id.in_(chunk)).all()
+                    for a in rows:
+                        raw = (a.auth_json or "").strip()
+                        if not raw:
+                            skipped += 1
+                            continue
+                        try:
+                            json.loads(raw)
+                        except Exception:
+                            skipped += 1
+                            continue
+                        line = raw
+                        if body.format == "client":
+                            try:
+                                line = encrypt_credential(raw)
+                            except CredentialDecodeError:
+                                skipped += 1
+                                continue
+                        fh.write(line + "\n")
+                        written += 1
+                    db2.commit()
+                    job.set_done(min(start + 500, total),
+                                 f"已导出 {written} 条（跳过 {skipped}）")
+            token = _export_register(path, filename)
+            return {"file_token": token, "count": written,
+                    "skipped": skipped, "total": total, "format": body.format}
+        except Exception:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
+        finally:
+            db2.close()
+
+    job = jobrunner.RUNNER.start(key, total, worker, title="批量导出账号")
+    return job.snapshot()
+
+
+@router.get("/export-download")
+def export_download(token: str, _: bool = Depends(require_admin)):
+    """凭导出任务返回的 token 下载 JSONL 文件。
+
+    文件在 TTL（默认 30 分钟）内可**重复下载**，便于「自动下载被浏览器拦了
+    再手动点一次」；过期后由注册表清理或下次注册时统一删除。
+    """
+    entry = _export_lookup(token)
+    if not entry:
+        raise HTTPException(status_code=404, detail="导出文件不存在或已过期")
+    p = entry["path"]
+    if not os.path.exists(p):
+        raise HTTPException(status_code=404, detail="导出文件已不存在")
+    return FileResponse(
+        p, filename=entry["filename"], media_type="application/x-ndjson",
+    )
+
+
+@router.get("/job/{job_id}")
+def account_job(job_id: str):
+    """查询账号相关后台任务进度（导出 / 导入）。"""
+    job = jobrunner.RUNNER.by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return job.snapshot()
+
+
+@router.post("/count")
+def count_accounts(request: Request = None, _: bool = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    """当前平台作用域内的账号计数（轻量，只聚合 id，不加载全量行）。
+
+    供批量操作前的确认弹窗使用，避免前端为了拿个数量去 GET /api/accounts
+    把几万条账号全拉下来（那是批量任务卡死的主因之一）。
+    """
+    from admin.platform import scope as platform_scope
+
+    platform, realm = platform_scope.from_request(request)
+    base = db.query(Account)
+    if platform:
+        base = platform_scope.filter_accounts(base, db, platform, realm)
+    total = base.with_entities(func.count(Account.id)).scalar() or 0
+    active = base.filter(Account.status == "active").with_entities(
+        func.count(Account.id)).scalar() or 0
+    return {"total": total, "active": active, "disabled": total - active,
+            "scope": platform or "all"}
+
+
+@router.post("/import-async")
+def import_accounts_async(body: ImportAsyncIn, request: Request = None,
+                          _: bool = Depends(require_admin)):
+    """异步导入：后台线程跑导入逻辑，前端轮询进度，完成后返回汇总。
+
+    解决「批量导入几万账号直接卡死、没有进度条」：
+      * WorkBuddy 走 _batch_add_core（含结构校验 + 可选上游验证），逐条上报进度；
+      * 非 WB 平台走各自 import_batch（认平台的备份形态），后台跑不阻塞 UI；
+      * 与导出共用 jobrunner 与 /api/accounts/job/{id} 进度查询。
+    """
+    storage = (body.storage or "workbuddy").lower()
+    if storage in ("workbuddy", "codebuddy"):
+        if not body.items:
+            raise HTTPException(status_code=400, detail="没有提供任何账号凭证")
+        total = len(body.items)
+        key = "account-import:workbuddy"
+    else:
+        if not body.text or not body.text.strip():
+            raise HTTPException(status_code=400, detail="没有提供任何账号凭证")
+        # 用记录数而不是行数：单行 JSON 数组如果按行计数会得到 1，
+        # 进度条就会「1/1 秒完成」却还在跑。
+        total = max(1, len(_parse_backup_records(body.text)))
+        key = "account-import:" + storage
+
+    running = jobrunner.RUNNER.get(key)
+    if running and running.status == "running":
+        return {"reused": True, **running.snapshot()}
+
+    def worker(job: jobrunner.Job) -> dict:
+        db = SessionLocal()
+        try:
+            job.set_phase("导入中")
+            if storage in ("workbuddy", "codebuddy"):
+                items = [AccountIn(name=it.get("name"), auth_json=it["auth_json"])
+                         for it in body.items
+                         if isinstance(it, dict) and it.get("auth_json")]
+                b = AccountBatchIn(items=items, verify=body.verify)
+                res = _batch_add_core(
+                    b, db,
+                    on_progress=lambda d, t: job.set_done(d, f"已导入 {d}/{t}"))
+            else:
+                mod = _platform_import_module(storage)
+                # 按**记录**分块（不是按行）：备份可能是「单行 JSON 数组」，
+                # 按行切会把 JSON 切碎导致解析失败。先解析成记录再序列化成
+                # JSONL 分块喂给平台 import_batch —— 它本身按 (platform, uid)
+                # 幂等，分块结果与整包等价，但能一边导一边报进度。
+                records = _parse_backup_records(body.text)
+                if not records:
+                    return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                            "total": 0,
+                            "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}
+                chunk_size = 200
+                agg = {"ok": True, "added": 0, "updated": 0, "failed": 0,
+                       "total": 0, "errors": []}
+                for start in range(0, len(records), chunk_size):
+                    chunk = "\n".join(
+                        json.dumps(r, ensure_ascii=False)
+                        for r in records[start:start + chunk_size])
+                    part = mod.import_batch(db, chunk) or {}
+                    for k in ("added", "updated", "failed", "total"):
+                        agg[k] += int(part.get(k) or 0)
+                    for e in (part.get("errors") or [])[:20]:
+                        if len(agg["errors"]) < 200:
+                            agg["errors"].append(e)
+                    agg["ok"] = agg["ok"] and (part.get("ok", True) is not False)
+                    job.set_done(min(start + chunk_size, len(records)),
+                                 f"已导入 {agg['added']} 条（更新 {agg['updated']}，失败 {agg['failed']}）")
+                res = agg
+            return res
+        finally:
+            db.close()
+
+    job = jobrunner.RUNNER.start(key, total, worker, title="批量导入账号")
+    return job.snapshot()
 
 
 def _client_auth_dir() -> str:
@@ -903,63 +1244,75 @@ def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Sessio
     调用方若明确只想快速导入（例如刚从本机导出、已知有效），可显式传
     `verify=False` 跳过上游验证，但**结构校验永远执行**。
     """
+    return _batch_add_core(body, db)
+
+
+def _batch_add_core(body: AccountBatchIn, db: Session,
+                    on_progress: "Callable[[int, int], None] | None" = None) -> dict:
     added = 0
     skipped = 0
     errors = []
     # 一次性取出已有 uid，避免每条都查库；
     # 同时把自己刚加进去的 uid 也塞进去，这样同一批里的重复项也能拦住
     seen = _existing_uid_index(db)
-    for it in body.items:
-        if not it.auth_json or not it.auth_json.strip():
-            continue
+    total = len(body.items)
+    for i, it in enumerate(body.items):
+        # 每一条（无论成功/跳过/异常）都要推进进度，否则进度条会卡在
+        # 「校验失败率高的批次」上不动 —— 用户会以为任务死了。
         try:
-            it.auth_json = normalize_credential(it.auth_json)
-        except CredentialDecodeError as exc:
-            errors.append(f"跳过一条：{exc}")
-            continue
-        # 第一道：非凭证拒收（与单条上传、与手机号登录共用同一校验器）
-        chk = wb_login.validate_credential(it.auth_json)
-        if not chk.ok:
-            errors.append(f"跳过一条：不是有效的客户端凭证（{chk.reason}）")
-            continue
-
-        # 第二道：真调上游确认可用、非伪造（可显式关闭）
-        profile: dict = {}
-        balance: dict = {}
-        if body.verify:
-            probe = wb_login.probe_credential_live(it.auth_json)
-            if not probe.ok:
-                errors.append(f"跳过一条：未通过上游验证（{probe.message}）")
+            if not it.auth_json or not it.auth_json.strip():
                 continue
-            profile = probe.profile or {}
-            balance = probe.balance or {}
+            try:
+                it.auth_json = normalize_credential(it.auth_json)
+            except CredentialDecodeError as exc:
+                errors.append(f"跳过一条：{exc}")
+                continue
+            # 第一道：非凭证拒收（与单条上传、与手机号登录共用同一校验器）
+            chk = wb_login.validate_credential(it.auth_json)
+            if not chk.ok:
+                errors.append(f"跳过一条：不是有效的客户端凭证（{chk.reason}）")
+                continue
 
-        # uid 以上游返回的真实值为准（挡「真令牌 + 假 uid」）
-        uid = str(profile.get("uid") or _uid_of(it.auth_json) or "")
-        if uid and uid in seen:
-            # 已存在 -> 覆盖新凭证并刷新余额（与单条上传同口径）
-            old = seen[uid]
-            _apply_meta(old, it.auth_json, profile=profile if body.verify else None,
-                        balance=balance if body.verify else None)
+            # 第二道：真调上游确认可用、非伪造（可显式关闭）
+            profile: dict = {}
+            balance: dict = {}
+            if body.verify:
+                probe = wb_login.probe_credential_live(it.auth_json)
+                if not probe.ok:
+                    errors.append(f"跳过一条：未通过上游验证（{probe.message}）")
+                    continue
+                profile = probe.profile or {}
+                balance = probe.balance or {}
+
+            # uid 以上游返回的真实值为准（挡「真令牌 + 假 uid」）
+            uid = str(profile.get("uid") or _uid_of(it.auth_json) or "")
+            if uid and uid in seen:
+                # 已存在 -> 覆盖新凭证并刷新余额（与单条上传同口径）
+                old = seen[uid]
+                _apply_meta(old, it.auth_json, profile=profile if body.verify else None,
+                            balance=balance if body.verify else None)
+                db.commit()
+                _post_login_automation(old.id, old.name or old.uid)
+                skipped += 1
+                continue
+            acc = Account(name=clean_display_name(it.name)) if it.name else Account()
+            _apply_meta(acc, it.auth_json, profile=profile, balance=balance)
+            db.add(acc)
             db.commit()
-            _post_login_automation(old.id, old.name or old.uid)
-            skipped += 1
-            continue
-        acc = Account(name=clean_display_name(it.name)) if it.name else Account()
-        _apply_meta(acc, it.auth_json, profile=profile, balance=balance)
-        db.add(acc)
-        db.commit()
-        db.refresh(acc)
-        if uid:
-            seen[uid] = acc
-        _post_login_automation(acc.id, acc.name or acc.uid)
-        if _refresh_balance(acc, with_expiry=True):
-            added += 1
-        else:
-            # 走到这里说明上游验证已过（或未开启），余额刷新失败通常是
-            # 瞬时网络问题 —— 记为警告而不是拒绝，凭证本身是可信的。
-            errors.append(f"账号 {acc.id} 余额刷新失败（凭据可能失效，请稍后刷新）")
-        db.commit()
+            db.refresh(acc)
+            if uid:
+                seen[uid] = acc
+            _post_login_automation(acc.id, acc.name or acc.uid)
+            if _refresh_balance(acc, with_expiry=True):
+                added += 1
+            else:
+                # 走到这里说明上游验证已过（或未开启），余额刷新失败通常是
+                # 瞬时网络问题 —— 记为警告而不是拒绝，凭证本身是可信的。
+                errors.append(f"账号 {acc.id} 余额刷新失败（凭据可能失效，请稍后刷新）")
+            db.commit()
+        finally:
+            if on_progress:
+                on_progress(i + 1, total)
     return {"added": added, "skipped": skipped, "errors": errors}
 
 

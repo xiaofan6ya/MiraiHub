@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from admin import routing_policy
 from typing import Literal
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from admin import credits as credit_rules
 from admin.db import get_db
@@ -130,6 +130,10 @@ def _load_rows(db: Session, include_disabled: bool = False,
     # 平台作用域：积分到期是「哪个平台的钱快过期了」,
     # 全平台混在一起排紧迫度对新平台毫无意义（它根本没有积分到期概念）。
     q = platform_scope.filter_accounts(q, db, platform, realm)
+    # `auth_json` 是整条 .info 原文（每行几百字节~几 KB），积分统计一个字段
+    # 都用不到它。十万级账号时，光是把它一起反序列化出来就是几百 MB ——
+    # 这是「积分统计」页最容易被忽略的卡点。defer 掉，按需才加载。
+    q = q.options(defer(Account.auth_json))
     return q.order_by(Account.id.asc()).all()
 
 
@@ -168,17 +172,15 @@ def credit_expiry_stats(
     now = credit_rules.now_ms()
     scope_platform, scope_realm = platform_scope.from_request(request)
     accounts = _load_rows(db, include_disabled, scope_platform, scope_realm)
+    # 在「作用域内的账号」上直接按调度口径排序，再生成行 —— 避免再
+    # `query(Account).all()` 拉全量（含全平台/全状态）账号只为排个序。
+    # 账号数到十万级时，那次全量全字段加载（含 auth_json 大字段）是积分统计
+    # 接口的主要卡点之一：既慢又吃内存。复用的还是同一份 ordered_accounts，
+    # 所以界面排行与调度选取口径不会漂移。
+    accounts = ordered_accounts(accounts)
     # 列表接口每个账号只带 4 个「最近到期」包（表格每行只用 2 个），
     # 完整明细走 /api/accounts/{id}/credit-details —— 这是响应体积的关键。
     rows = [_account_row(a, _snapshot_of(a), next_n=4) for a in accounts]
-
-    # 按紧迫度排序：**直接复用调度用的那一份分级函数**
-    # （`admin.credits.urgency_rank`）。这里刻意不自己再写一遍排序规则 ——
-    # 两处口径一旦漂移，用户会看到「界面排第一的号」并不是「下一个被选中的号」，
-    # 从而认为调度坏了。
-    selection_accounts = ordered_accounts(db.query(Account).all())
-    positions = {a.id: i for i, a in enumerate(selection_accounts)}
-    rows.sort(key=lambda row: positions[row['account_id']])
 
     total_remaining = sum(r["total_remaining"] for r in rows)
     expiring_soon = sum(r["expiring_soon_remaining"] for r in rows)
@@ -200,7 +202,15 @@ def credit_expiry_stats(
     # 所以：**概览卡片用余额口径**（与账号面板一致），
     # 到期分档条继续用快照口径（它本来就只描述有到期数据的那部分），
     # 并把快照覆盖数一并给出，便于界面如实标注。
-    available_remaining = sum(float(a.balance_remain or 0) for a in accounts)
+    # 「可用积分」用余额口径，直接 SQL 聚合，避免把十万级账号全量加载到
+    # Python 再循环求和（积分值到万亿级时，Python 循环既慢又吃内存）。
+    avail_q = db.query(Account)
+    if not include_disabled:
+        avail_q = avail_q.filter(Account.status == "active")
+    avail_q = platform_scope.filter_accounts(avail_q, db, scope_platform, scope_realm)
+    available_remaining = float(
+        avail_q.with_entities(
+            func.coalesce(func.sum(Account.balance_remain), 0.0)).scalar() or 0.0)
     snapshot_accounts = sum(1 for a in accounts if a.credits_synced_at)
 
     # 逐包平铺与分档：**直接读各自账号的快照**（而不是 accounts[] 里那 4 条），
@@ -263,8 +273,10 @@ def credit_expiry_stats(
         },
         "windows": windows,
         "accounts": rows,
-        "selection_mode": 'manual' if any(a.selection_priority is not None for a in selection_accounts) else 'automatic',
-        "selection_order": [a.id for a in selection_accounts],
+        # 排序口径就是本作用域内的 accounts（已按 ordered_accounts 排过），
+        # 与调度选取完全一致；不再为它单独拉一次全库账号。
+        "selection_mode": 'manual' if any(a.selection_priority is not None for a in accounts) else 'automatic',
+        "selection_order": [a.id for a in accounts],
         "routing_policy": routing_policy.selection_policy(db),
         # 分页的逐包列表；packages_total 在 summary 里
         "packages": page,
