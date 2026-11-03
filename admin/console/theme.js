@@ -47,7 +47,12 @@ window.WBTheme = (() => {
     style.textContent =
       '::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}' +
       '::view-transition-old(root){z-index:1}' +
-      '::view-transition-new(root){z-index:2147483646}';
+      '::view-transition-new(root){z-index:2147483646}' +
+      // 变浅色：动画作用于**旧主题（暗色）收拢**，必须把 old 提到 new 之上，
+      // 否则浅色 new 层全程盖住 old —— 收拢波纹完全看不见（用户实测：
+      // 暗色→浅色"动画没了"就是这个原因）。照抄 mirai-mifan 的层级反转。
+      '.wb-theme-to-light::view-transition-old(root){z-index:2147483646}' +
+      '.wb-theme-to-light::view-transition-new(root){z-index:1}';
     document.head.appendChild(style);
     vtStyleReady = true;
   }
@@ -127,8 +132,14 @@ window.WBTheme = (() => {
     const clip = goingDark
       ? [circleAt(p, 0), circleAt(p, endRadius)]
       : [circleAt(p, endRadius), circleAt(p, 0)];
+    const transitionClass = goingDark
+      ? 'wb-theme-to-dark' : 'wb-theme-to-light';
     try {
+      document.documentElement.classList.add(transitionClass);
       const transition = document.startViewTransition(() => apply(next));
+      transition.finished.finally(() => {
+        document.documentElement.classList.remove(transitionClass);
+      });
       transition.ready.then(() => {
         try {
           document.documentElement.animate(

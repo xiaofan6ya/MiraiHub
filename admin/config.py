@@ -234,7 +234,9 @@ class Settings:
     #: Trae 的 `_timeout()` 直接读这个值去连上游，之前 180 < 300，
     #: 推理型模型思考到 200 秒就被上游读超时打断，而网关还以为是正常结束。
     #: 现在统一到 300，两边口径一致。
-    STREAM_IDLE_TIMEOUT = float(os.getenv("ADMIN_STREAM_IDLE_TIMEOUT", "300"))
+    # 600s：这是**帧间隔/静默**上限，不是请求总时长。深度思考模型静默
+    # 3~4 分钟属正常工作状态，不能被网关掐断（用户实测反馈）。
+    STREAM_IDLE_TIMEOUT = float(os.getenv("ADMIN_STREAM_IDLE_TIMEOUT", "600"))
     #: 写入（上传 prompt）超时（秒）。
     STREAM_WRITE_TIMEOUT = float(os.getenv("ADMIN_STREAM_WRITE_TIMEOUT", "60"))
     #: 连接池等待超时（秒）：池子饱和就快速失败，交给上层退避，而不是无限排队。

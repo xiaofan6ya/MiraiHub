@@ -4695,7 +4695,10 @@ input:focus-visible,
 }
 
 /* 「更多操作」菜单：最多 9 项，超出时内部滚动，别让最后一项掉出视口 */
-.acc-menu { max-height: min(340px, 60vh); overflow-y: auto; }
+/* 菜单**不截断不滚动**：条目总共十来个，能显示全就显示全
+   （用户点名：不要滚动条）。fixed 定位由 toggleAccMenu 计算位置，
+   不需要 max-height 防溢出。 */
+.acc-menu { overflow: visible; }
 
 /* ============================================================================
    窄屏（≤900px）：顶栏只留操作，不占一整块空白
@@ -4824,6 +4827,8 @@ input.flex-1, select.flex-1, textarea.flex-1, input.w-full, select.w-full {
   letter-spacing: .04em;
   color: var(--fg-subtle);
   user-select: none;
+  text-align: left;   /* 分组标题放**左侧**（用户点名，原来右对齐像悬浮标签） */
+  margin-left: 2px;
 }
 .acc-menu-group:not(:first-child) {
   margin-top: 3px;
@@ -4850,6 +4855,11 @@ input.flex-1, select.flex-1, textarea.flex-1, input.w-full, select.w-full {
 #overview { align-items: stretch; }
 #overview .stat { display: flex; flex-direction: column; }
 #overview .stat-sub { margin-top: auto; padding-top: 8px; }
+
+/* 弹窗内的数字输入与系统控件等高（导出分片/分批条数） */
+#expLimit,
+#expSliceIndex,
+#expSliceSize { height: 32px; box-sizing: border-box; font-size: 13px; }
 
 /* 通用按压反馈：所有可点小件都要「跟手」 */
 .pg-btn:active,

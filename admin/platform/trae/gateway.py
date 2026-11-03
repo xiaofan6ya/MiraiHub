@@ -236,10 +236,13 @@ _SOLO_CONTENT_GAP_S = 60.0
 
 def _timeout() -> float:
     from admin.config import settings
+    # 静默空闲上限：**不是总时长**。上游深度思考（静默 3~4 分钟）期间
+    # 只要还没有实质输出，也不允许在这里被掐断 —— 看门狗只在
+    # 「首包之后长时间无任何实质输出」时介入，且思考链也算进展。
     try:
-        return float(getattr(settings, "STREAM_IDLE_TIMEOUT", 180) or 180)
+        return float(getattr(settings, "STREAM_IDLE_TIMEOUT", 600) or 600)
     except Exception:  # noqa: BLE001
-        return 180.0
+        return 600.0
 
 
 def _tool_names(tools) -> set[str] | None:

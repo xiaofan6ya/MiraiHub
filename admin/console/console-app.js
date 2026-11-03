@@ -7103,21 +7103,29 @@ async function openExport() {
       <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
       导出内容包含登录 token，等同账号凭据，请勿外传或提交到代码仓库。
     </div>
-    <label class="block text-sm mb-3">导出格式
-      <select id="expFormat" class="w-full border rounded-lg px-3 py-2 mt-2">
-        ${window.WBMobile ? '' : '<option value="client">官方新版加密凭证集（.jsonl）</option>'}
-        <option value="backup">系统明文备份（.jsonl）</option>
-      </select>
-    </label>
-    <label class="block text-sm mb-3">导出范围
-      <select id="expScope" class="w-full border rounded-lg px-3 py-2 mt-2" onchange="expScopeChanged()">
-        <option value="all">全部（可用 ${active} + 禁用 ${disabled}）</option>
-        <option value="active">仅可用账号（${active}）</option>
-        <option value="disabled">仅禁用账号（${disabled}）</option>
-        <option value="selected">勾选的账号（在账号列表里勾选）</option>
-        <option value="slice">分片导出（第 X 片 × 每片 N 条）</option>
-      </select>
-    </label>
+    <div class="block text-sm mb-3">导出格式
+      <!-- 用系统下拉组件（uiSelectHTML），原生 select 与系统样式断层（用户点名） -->
+      ${uiSelectHTML("expFormatSel", {
+        options: [
+          ...(window.WBMobile ? [] : [{ value: "client", label: "官方新版加密凭证集（.jsonl）" }]),
+          { value: "backup", label: "系统明文备份（.jsonl）" },
+        ],
+        value: "backup", class: "w-full border rounded-lg px-3 py-2 mt-2 text-sm",
+      })}
+    </div>
+    <div class="block text-sm mb-3">导出范围
+      ${uiSelectHTML("expScopeSel", {
+        options: [
+          { value: "all", label: `全部（可用 ${active} + 禁用 ${disabled}）` },
+          { value: "active", label: `仅可用账号（${active}）` },
+          { value: "disabled", label: `仅禁用账号（${disabled}）` },
+          { value: "selected", label: "勾选的账号（在账号列表里勾选）" },
+          { value: "slice", label: "分片导出（第 X 片 × 每片 N 条）" },
+        ],
+        value: "all", class: "w-full border rounded-lg px-3 py-2 mt-2 text-sm",
+        onChange: expScopeChanged,
+      })}
+    </div>
     <div id="expSliceBox" class="hidden text-sm mb-3" style="color:var(--fg-muted)">
       第 <input id="expSliceIndex" type="number" min="1" value="1" class="border rounded-lg px-2 py-1 w-16" /> 片 ·
       每片 <input id="expSliceSize" type="number" min="1" value="500" class="border rounded-lg px-2 py-1 w-24" /> 条
@@ -7145,14 +7153,14 @@ async function openExport() {
 
 /** 异步导出：后台线程逐条写出文件并上报进度，前端有进度条，完成后可下载。 */
 function expScopeChanged() {
-  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  const scope = uiSelectValue('expScopeSel') || 'all';
   const box = document.getElementById('expSliceBox');
   if (box) box.classList.toggle('hidden', scope !== 'slice');
 }
 
 async function exportAsync() {
-  const scope = (document.getElementById('expScope') || {}).value || 'all';
-  const format = (document.getElementById('expFormat') || {}).value || 'backup';
+  const scope = uiSelectValue('expScopeSel') || 'all';
+  const format = uiSelectValue('expFormatSel') || 'backup';
   const keyword = ((document.getElementById('expKeyword') || {}).value || '').trim();
   const limit = parseInt((document.getElementById('expLimit') || {}).value || '0', 10) || 0;
   const body = { format, ids: [], keyword, limit };
@@ -7213,8 +7221,8 @@ function downloadExportToken(token) {
 }
 
 async function _fetchExport() {
-  const scope = $('#expScope')?.value || 'all';
-  const body = { ids: [], format: $('#expFormat')?.value || 'client' };
+  const scope = uiSelectValue('expScopeSel') || 'all';
+  const body = { ids: [], format: uiSelectValue('expFormatSel') || 'client' };
   const kw = ($('#expKeyword')?.value || '').trim();
   const lim = parseInt($('#expLimit')?.value || '0', 10) || 0;
   if (kw) body.keyword = kw;

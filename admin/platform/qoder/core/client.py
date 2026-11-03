@@ -297,7 +297,7 @@ def fetch_model_catalog(token: str, realm: str, *, uid: str, name: str = "",
 
 def iter_chat_stream(token: str, realm: str, *, uid: str, body: dict,
                      name: str = "", email: str = "",
-                     machine_id: str = "", timeout: float = 300.0,
+                     machine_id: str = "", timeout: float = 600.0,  # 帧间隔上限（思考静默不掐）
                      account_id: int = 0):
     """对话流（需要 COSY 签名 + 请求体编码）。
 

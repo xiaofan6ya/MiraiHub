@@ -53,7 +53,8 @@ PATH_ENT_USAGE = "/trae/api/v1/pay/ide_user_ent_usage"
 PATH_ENT_USAGE_V2 = "/trae/api/v2/pay/ide_user_ent_usage"
 PATH_PAY_STATUS = "/trae/api/v1/pay/ide_user_pay_status"
 
-DEFAULT_TIMEOUT = 300.0
+# 600s：帧间隔上限而非总时长；上游思考静默期（3~4 分钟）不能被掐
+DEFAULT_TIMEOUT = 600.0
 
 #: 双区常量。改动任何一项都属于协议变更，必须先用真实账号回归。
 REALMS = {

@@ -31,7 +31,9 @@ from admin.platform.raccoon.core import endpoints
 
 logger = logging.getLogger("admin.platform.raccoon.client")
 
-TIMEOUT = httpx.Timeout(connect=15.0, read=180.0, write=60.0, pool=15.0)
+# read=600s：帧间隔上限而非总时长 —— 上游思考静默期（3~4 分钟）不能被掐
+# （见 admin/platform/loomy/core/client.py 同款注释）
+TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
 
 #: 业务码 → 错误类别
 _AUTH_CODES = {401, 403, 40101, 40102, 40103, 100002}

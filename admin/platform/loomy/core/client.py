@@ -30,7 +30,11 @@ import urllib.request
 from . import endpoints
 
 logger = logging.getLogger("admin.platform.loomy.client")
-DEFAULT_TIMEOUT = 120.0
+# 600s 是**帧间隔**上限（socket read timeout），不是总时长：
+# 深度思考模型会在静默期"想 3~4 分钟"才吐第一帧（或 reasoning 帧间静默），
+# 按 120s 掐就会把"上游正在正常工作"误判为网关超时（用户实测反馈）。
+# 流式下只要上游还在出帧，这条就不会触发。
+DEFAULT_TIMEOUT = 600.0
 
 #: 哪些 kind 上报哨兵
 SENTINEL_KINDS = frozenset({"auth", "quota_exceeded", "network",
