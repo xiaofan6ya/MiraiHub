@@ -1,10 +1,9 @@
 // aliyun 镜像为国内本地构建提速；GitHub Actions 等海外 CI 访问 aliyun 常年 502，
 // 会直接打断依赖解析，因此 CI 环境（CI=true）跳过镜像、直连官方源。
-def useAliyunMirror = System.getenv('CI') != 'true'
-
+// 注意：pluginManagement {} 必须是本文件第一条语句，CI 判断只能写进块内。
 pluginManagement {
     repositories {
-        if (useAliyunMirror) {
+        if (System.getenv('CI') != 'true') {
             maven { url 'https://maven.aliyun.com/repository/google' }
             maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         }
@@ -16,7 +15,7 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        if (useAliyunMirror) {
+        if (System.getenv('CI') != 'true') {
             maven { url 'https://maven.aliyun.com/repository/google' }
             maven { url 'https://maven.aliyun.com/repository/public' }
         }
