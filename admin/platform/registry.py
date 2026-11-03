@@ -78,8 +78,46 @@ class PlatformSpec:
     #: **固定区域**：该平台在存储层对应的 `domain` 值。
     #: 非空时选号/统计自动按它过滤，调用方不必再传区域。
     realm: str = ""
+    #: **凭证获取方式**：控制台据此决定「加号」入口给哪套流程。
+    #:
+    #: 取值：
+    #:   ""（默认）   按 `supports_local_scan` 自动推断（兼容既有平台）
+    #:   "local-scan" 只能从本机客户端登录态导入 → 给「扫描 / 导入本机」
+    #:   "device-auth" 只能走设备授权（PKCE）→ 给「授权登录」
+    #:   "import-only" 凭证只能粘贴/导入，**既无本机扫描也无授权接口**
+    #:                → 给「导入凭证」，且**不要**注入 `begin-auth`
+    #:
+    #: ## 为什么必须有这一项
+    #:
+    #: 改造前前端只有一条推断：`supports_local_scan === false` ⇒
+    #: 一定有设备授权，于是强制剔除 `scan`/`import` 并注入 `begin-auth`。
+    #: 这在「无本机明文凭证、也没有授权接口」这类平台上是死路：
+    #: 点「授权登录」→ 404，而真正能用的 import 接口没有前端入口，
+    #: 账号**永远加不进来**。
+    #:
+    #: 按 `gateway.py` 的边界要求，这种情况应当**扩展契约**，
+    #: 而不是在 `platform-actions.js` 里再加一个 `if (storage === "xxx")`。
+    #:
+    #: ## ⚠️ 与各平台 `/meta` 里的 `auth_mode` 同名不同义
+    #:
+    #: 这里是**控制台动作推断**用的三值词表（决定给哪些按钮）；
+    #: 各平台 `/api/<平台>/meta` 里还有一个 `auth_mode`，那是**该平台
+    #: 自己的授权流程说明**（`callback` / `device-poll` /
+    #: `local-session-only` / `import-only` 等），供面板展示文案。
+    #: 两套词表含义与取值都不同，**不要互相赋值**。
+    #: 控制台里 `index.html` 的某些分支读的是后者（如判断
+    #: `auth_mode !== "local-session-only"`），若把本字段的值塞过去
+    #: 会得到「支持授权」的错误结论。
+    auth_mode: str = ""
     #: 额外元数据，供前端自由使用（不参与后端逻辑）。
     extra: dict = field(default_factory=dict)
+
+    def effective_auth_mode(self) -> str:
+        """归一后的凭证获取方式（空值按旧规则推断）。"""
+        mode = (self.auth_mode or "").strip().lower()
+        if mode in ("local-scan", "device-auth", "import-only"):
+            return mode
+        return "local-scan" if self.supports_local_scan else "device-auth"
 
     def storage(self) -> str:
         """落库用的平台 id。"""

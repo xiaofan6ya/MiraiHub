@@ -73,6 +73,8 @@ _TASK_FALLBACK_LABEL = {
     "trae_keepalive": "会话保活",
     "qoder_keepalive": "会话保活",
     "loomy_keepalive": "会话保活",
+    "raccoon_keepalive": "会话保活（续期临期 JWT）",
+    "raccoon_expiry_sweep": "过期清扫（标记失效账号）",
 }
 TASK_LABELS = {
     "refresh_balances": "刷新平台总积分",
