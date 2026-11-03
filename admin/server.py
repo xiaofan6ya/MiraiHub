@@ -286,6 +286,11 @@ try:
     app.include_router(loomy_accounts_router.router)
 except Exception:  # noqa: BLE001 - loomy 目录被裁剪时降级为不挂载
     logger.exception("Loomy 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.raccoon.routers import accounts as raccoon_accounts_router
+    app.include_router(raccoon_accounts_router.router)
+except Exception:  # noqa: BLE001 - raccoon 目录被裁剪时降级为不挂载
+    logger.exception("小浣熊管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1":
     from admin.routers import app_source
     app.include_router(app_source.router)

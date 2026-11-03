@@ -5987,6 +5987,11 @@ document.addEventListener("wb-platform-action", async event => {
   }
   if (action === "import") {
     if (storage === "trae") return traeImportLocal();
+    // import-only 平台没有本机凭证可扫，`{all:true}` 对它没有意义，
+    // 直接给粘贴弹窗（凭证只能来自用户手里的 JSON / token）
+    if (spec && spec.auth_mode === "import-only") {
+      return platformImportPaste(spec, storage);
+    }
     return platformImportLocal(spec, storage);
   }
   if (action === "refresh-quota") {
@@ -6721,6 +6726,77 @@ async function platformScanLocal(spec, storage) {
  * Loomy 的凭证是明文 JSON，可以直接导入（用户零操作）；
  * Qoder 的凭证加密在原生层，导入会返回需要 PAT/设备流的提示。
  */
+/**
+ * 「导入凭证」弹窗：用于 `auth_mode=import-only` 的平台。
+ *
+ * 这类平台既没有本机明文凭证可扫（supports_local_scan=false），
+ * 也没有授权接口（不像 Qoder 能走设备流），凭证只能由用户粘贴。
+ *
+ * 所以这里给一个 textarea，直接把整段内容丢给平台自己的 /import：
+ * 后端 `_parse_text` 会依次尝试 JSON 数组 / JSONL / 裸 JWT，
+ * 前端不需要知道具体格式 —— 那是平台知识，不该在控制台里分叉。
+ */
+async function platformImportPaste(spec, storage) {
+  const base = platformApiPrefix(spec, storage);
+  const label = esc((spec && spec.label) || storage);
+  openModal(`<h3 class="font-semibold text-lg mb-1">导入凭证 · ${label}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      该平台没有本机扫描，也没有授权登录接口，凭证请在这里粘贴。
+      支持 JSON 数组、每行一个 JSON（JSONL），或直接一行一个 token。
+    </p>
+    <textarea id="impPasteBox" rows="10" spellcheck="false"
+      style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-input);color:var(--fg)"
+      placeholder='{"accessToken":"eyJ...","uid":"pu-..."}&#10;或每行一条'></textarea>
+    <div id="impPasteMsg" class="text-xs mt-2" style="color:var(--fg-muted)"></div>
+    <div class="flex gap-2 justify-end mt-3">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm hover:bg-slate-50">取消</button>
+      <button id="impPasteGo" onclick="platformImportPasteSubmit(${jsv(base)})"
+        class="px-3 py-1.5 rounded-lg btn-primary">导入</button>
+    </div>`, "max-w-2xl");
+}
+
+async function platformImportPasteSubmit(base) {
+  const box = $("#impPasteBox");
+  const msg = $("#impPasteMsg");
+  const btn = $("#impPasteGo");
+  const text = (box && box.value || "").trim();
+  if (!text) {
+    if (msg) { msg.textContent = "请先粘贴凭证"; msg.style.color = "var(--danger)"; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = "导入中…"; }
+  if (msg) { msg.textContent = "正在导入并探测上游，请稍候…"; msg.style.color = "var(--fg-muted)"; }
+  try {
+    const r = await api(base + "/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) {
+      const detail = (data && (data.detail || data.message)) || r.status;
+      if (msg) { msg.textContent = `导入失败：${detail}`; msg.style.color = "var(--danger)"; }
+      return;
+    }
+    const parts = [`新增 ${data.added || 0}`];
+    if (data.skipped) parts.push(`更新 ${data.skipped}`);
+    if (data.errors && data.errors.length) parts.push(`失败 ${data.errors.length}`);
+    const summary = parts.join("，");
+    toast(summary, data.errors && data.errors.length ? "err" : "ok");
+    if (msg) {
+      msg.style.color = data.errors && data.errors.length ? "var(--danger)" : "var(--success)";
+      msg.textContent = summary + (data.errors && data.errors.length
+        ? "\n" + data.errors.slice(0, 5).join("\n") : "");
+      msg.style.whiteSpace = "pre-wrap";
+    }
+    loadAccounts();
+  } catch (e) {
+    if (msg) { msg.textContent = "导入请求失败：" + (e && e.message ? e.message : e); msg.style.color = "var(--danger)"; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "导入"; }
+  }
+}
+
 async function platformImportLocal(spec, storage) {
   const path = platformImportPath(spec, storage);
   const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();

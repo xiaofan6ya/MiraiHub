@@ -85,8 +85,22 @@
 
     // 「支持扫描」由后端 `supports_local_scan` 决定：不支持就别把按钮摆出来，
     // 点了必然空结果。但**账号总得有办法加进来** —— 这时至少要有授权登录。
+    //
+    // `auth_mode` 是后端显式声明的凭证获取方式（见 PlatformSpec.auth_mode）。
+    // 早期只有「支持扫描 ⇒ 扫描/导入，不支持 ⇒ 设备授权」一条推断，于是
+    // 「无本机明文凭证、也没有授权接口」的平台会走进死路：
+    // begin-auth 404，而真正能用的 import 没有入口，账号永远加不进来。
+    var authMode = spec.auth_mode || "";
     var supportsScan = spec.supports_local_scan !== false;
-    if (!supportsScan) {
+    if (authMode === "import-only") {
+      // 只能粘贴/导入凭证：保留 import，去掉 scan 与 begin-auth
+      declared = declared.filter(function (name) {
+        return name !== "scan" && name !== "begin-auth";
+      });
+      if (declared.indexOf("import") < 0) {
+        declared = ["import"].concat(declared);
+      }
+    } else if (!supportsScan) {
       declared = declared.filter(function (name) {
         return name !== "scan" && name !== "import";
       });

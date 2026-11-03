@@ -36,6 +36,10 @@ def _serialize(spec) -> dict:
         "label": spec.label,
         "enabled": spec.enabled,
         "supports_local_scan": spec.supports_local_scan,
+        # 凭证获取方式：控制台据此决定「加号」入口。
+        # `import-only` 表示既不能扫本机也没有授权接口，只能粘贴导入 ——
+        # 前端必须保留 `import`、且**不要**注入 `begin-auth`（否则点了 404）。
+        "auth_mode": spec.effective_auth_mode(),
         "default_realm": spec.default_realm(),
         "notes": spec.notes,
         # 图标 key：前端据此在 platform-icons.js 里取 logo。
