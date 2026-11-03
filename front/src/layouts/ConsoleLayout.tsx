@@ -199,7 +199,7 @@ export default function ConsoleLayout() {
         placement="left"
         open={isMobile && mobileOpen}
         onClose={() => setMobileOpen(false)}
-        width={240}
+        size={240}
         styles={{ body: { padding: '8px 0' } }}
       >
         <Menu

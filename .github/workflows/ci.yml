@@ -1,7 +1,7 @@
 name: CI
 
-# PR 提交时触发：Python lint/build + 前端（antd/React）lint/build。
-# 保留 workflow_dispatch 以便手动重跑。
+# PR 提交时触发：Python lint/build + 前端（antd/React）lint/build
+# + Windows / Android 端构建测试。保留 workflow_dispatch 以便手动重跑。
 on:
   pull_request:
   workflow_dispatch:
@@ -60,5 +60,96 @@ jobs:
       - name: Lint (oxlint)
         run: npm run lint
 
+      # antd 官方用法 lint：废弃 API / a11y / 性能 / 上下文用法
+      - name: Lint antd usage (@ant-design/cli)
+        run: npx -y @ant-design/cli@6.6.8 lint src
+
       - name: Build (tsc + vite)
         run: npm run build
+
+  windows:
+    name: Windows build test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 对齐 desktop-release.yml：桌面构建锚定 Python 3.10 x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-desktop-lock.txt
+
+      # PyInstaller 打包需要先有 front/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: front
+
+      - name: Install desktop dependencies
+        run: python -m pip install -r requirements-desktop-lock.txt
+
+      - run: python scripts/check_runtime.py
+      - name: Build EXE (PyInstaller)
+        run: python scripts/build_desktop.py
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-windows-x64-pr
+          path: |
+            dist/*.exe
+            dist/*.sha256
+          retention-days: 7
+
+  android:
+    name: Android build test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # build_android.py 要求 Gradle 8.11.1 + JDK 17（AGP 8.9.2 / Chaquopy 17）
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: android/requirements.txt
+
+      # APK 打包需要先有 front/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: front
+
+      # 签名密钥在 runner 上临时生成（build/android-signing，不入库不发布）
+      - name: Build APK (gradle assembleRelease + lintRelease)
+        run: python scripts/build_android.py
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-android-arm64-pr
+          path: |
+            dist/android/*.apk
+            dist/android/*.sha256
+          retention-days: 7

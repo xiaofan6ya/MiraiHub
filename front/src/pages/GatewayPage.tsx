@@ -1,4 +1,4 @@
-import { App as AntdApp, Button, Card, Col, message as antdMessage, Row, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { App as AntdApp, Button, Card, Col, Row, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { platformSpeed, type PlatformSpeedRow } from '../api/platforms'
@@ -90,10 +90,10 @@ export default function GatewayPage() {
     })
     try {
       await api('/api/gateway/config', { method: 'PUT', body: { priority } })
-      antdMessage.success('优先级已更新')
+      message.success('优先级已更新')
       void load()
     } catch (e) {
-      antdMessage.error((e as Error).message)
+      message.error((e as Error).message)
     }
   }
 

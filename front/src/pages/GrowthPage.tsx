@@ -573,7 +573,7 @@ function OfficialRecordsModal({ aid, open, onClose }: { aid: number | null; open
 
   return (
     <Modal title="官方领取记录" open={open} onCancel={onClose} footer={null} width={780}>
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      <Space vertical size={8} style={{ width: '100%' }}>
         <Tabs
           activeKey={kind}
           onChange={(k) => {
