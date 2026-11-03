@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -620,14 +621,43 @@ def _console_shell(path) -> str:
     cached = _CONSOLE_SHELL_CACHE.get(key)
     if cached is not None:
         return cached
-    html = path.read_text(encoding="utf-8")
+    html = _read_console_html(path)
     marker = 'lang="zh-CN"'
     if marker in html:
         html = html.replace(marker, marker + ' class="console-authed"', 1)
     elif "<html" in html:
         html = html.replace("<html", '<html class="console-authed"', 1)
-    _CONSOLE_SHELL_CACHE.clear()
-    _CONSOLE_SHELL_CACHE[key] = html
+    # 只缓存完整的页面：半截 HTML 一旦进缓存，就会被反复下发给浏览器。
+    if _console_html_complete(html):
+        _CONSOLE_SHELL_CACHE.clear()
+        _CONSOLE_SHELL_CACHE[key] = html
+    return html
+
+
+def _console_html_complete(html: str) -> bool:
+    return html.rstrip().endswith("</html>")
+
+
+def _read_console_html(path) -> str:
+    """读控制台 HTML，保证读到的是**完整**文件。
+
+    为什么需要：`index.html` 有 800KB、近 1.5 万行，编辑/升级的瞬间文件会先被
+    截断再写入。恰好在这个窗口里刷新页面，读到的就是半截 HTML —— 浏览器会把
+    最后一个 `<script>` 一直解析到文件结尾，报
+    `Uncaught SyntaxError: Unexpected end of input`，于是所有 `onclick` 都绑不上，
+    界面上表现为「扫描/导入/导出/账号池的按钮点了全都没反应」，而控制台里那条
+    报错完全看不出跟「文件没写完」有关。这里读到不完整就稍等重读，宁可慢一点
+    也不能把半截页面发出去。
+    """
+    html = ""
+    for _ in range(4):
+        before = path.stat()
+        html = path.read_text(encoding="utf-8")
+        after = path.stat()
+        stable = (before.st_mtime_ns == after.st_mtime_ns and before.st_size == after.st_size)
+        if stable and _console_html_complete(html):
+            return html
+        time.sleep(0.05)
     return html
 
 

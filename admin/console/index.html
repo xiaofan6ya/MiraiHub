@@ -14936,5 +14936,38 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 </script>
+<script>
+/* 加载完整性自检。
+   页面近 800KB，如果内联脚本被截断（正在编辑/升级时刷新、或传输中途断开），
+   浏览器只会在控制台丢一条 "Unexpected end of input"，界面上却是
+   「扫描/导入/导出/账号池的按钮点了全都没反应」—— 用户完全没法判断发生了什么。
+   这里把那种状态变成一句人话 + 一个按钮。 */
+(function () {
+  function check() {
+    var need = ["openPhoneLogin", "openUpload", "openExport", "scanLocal", "loadAccounts"];
+    var miss = need.filter(function (n) { return typeof window[n] !== "function"; });
+    if (!miss.length) return;
+    var bar = document.createElement("div");
+    bar.setAttribute("role", "alert");
+    bar.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:99999;padding:12px 16px;"
+      + "background:#7f1d1d;color:#fff;font-size:13px;line-height:1.6;"
+      + "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+    var text = document.createElement("span");
+    text.textContent = "页面脚本没有完整加载（缺少 " + miss.join("、") + "），所以按钮点了没反应。"
+      + "强制刷新一次即可恢复。";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "强制刷新";
+    btn.style.cssText = "padding:6px 14px;border-radius:8px;background:#fff;color:#7f1d1d;"
+      + "font-weight:600;border:0;cursor:pointer";
+    btn.onclick = function () { location.reload(); };
+    bar.appendChild(text);
+    bar.appendChild(btn);
+    document.body.appendChild(bar);
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", check);
+  else check();
+})();
+</script>
 </body>
 </html>
