@@ -4782,3 +4782,79 @@ input.flex-1, select.flex-1, textarea.flex-1, input.w-full, select.w-full {
 .diag-card[open] .diag-caret { transform: rotate(180deg); }
 .diag-body { padding: 0 18px 16px; }
 .diag-card[open] .diag-summary { border-bottom: 1px solid var(--border); border-radius: 12px 12px 0 0; }
+
+/* ==========================================================================
+   操作栏统一体系（2026-11-04 UI 精细化）
+   --------------------------------------------------------------------------
+   用户反馈：行内操作按钮红蓝绿紫粉像调色盘、没分组没层次。
+   现在：颜色由**语义层**统一 —— 中性色为默认，危险组才红；
+   每个按钮统一 28px 命中区、按压缩放反馈（跟手）。
+   ========================================================================== */
+.acc-op-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, transform .1s ease;
+}
+.acc-op-btn:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+.acc-op-btn:active { transform: scale(.92); }
+.acc-op-btn.is-danger:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.acc-table .c-ops .ui-icon,
+.acc-op-btn .ui-icon { width: 15px; height: 15px; }
+
+/* 「更多操作」菜单：分组标题 + 中性图标（危险组红） */
+.acc-menu-group {
+  padding: 7px 10px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--fg-subtle);
+  user-select: none;
+}
+.acc-menu-group:not(:first-child) {
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+}
+.acc-menu-item.is-danger { color: var(--danger); }
+.acc-menu-item.is-danger .acc-menu-icon { color: var(--danger); }
+.acc-menu-item.is-danger:hover { background: var(--danger-soft); }
+
+/* 工具栏控件统一高度（搜索框 / 积分区间 / 排序 / 每页条数） */
+.account-tools .account-search input,
+#accSort,
+#accPageSize { height: 32px; box-sizing: border-box; }
+#accSort,
+#accPageSize {
+  font-size: 12px;
+  border-color: var(--border);
+}
+.account-tools { align-items: center; }
+
+/* 概览统计条：等高对齐（长副标题不再把某一格撑高一截）。
+   #overview 里是连续的 .stat 格子（.stat-grid 包裹），保持原盒模型，
+   只让副标题沉底、格子拉伸等高。 */
+#overview { align-items: stretch; }
+#overview .stat { display: flex; flex-direction: column; }
+#overview .stat-sub { margin-top: auto; padding-top: 8px; }
+
+/* 通用按压反馈：所有可点小件都要「跟手」 */
+.pg-btn:active,
+.console-btn:active,
+.btn-primary:active { transform: scale(.97); }
+.pg-btn,
+.console-btn,
+.btn-primary { transition: transform .1s ease, background .15s ease, color .15s ease, border-color .15s ease; }

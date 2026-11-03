@@ -2534,6 +2534,11 @@ function consoleIcon(name) {
   /** 补充图标：paths 之外用到的（漏一个就是一个空按钮 —— 账号行的
    *  「账号并发上限」「更多操作」以前就是这个原因什么都没有画出来）。 */
   const extraPaths = {
+    "fa-coins": "<circle cx=\"8\" cy=\"8\" r=\"6\"/><path d=\"M18.09 10.37a6 6 0 1 1-7.72 7.72\"/><path d=\"M7 6h6M7 9h4\"/>",
+    "fa-cube": "<path d=\"M21 8 12 3 3 8v8l9 5 9-5Zm-9 5-9-5m9 5v10m0-10 9-5\"/>",
+    "fa-paper-plane": "<path d=\"m3 9 18-6-6 18-4-8-8-4Zm8 4 10-10\"/>",
+    "fa-stopwatch": "<circle cx=\"12\" cy=\"13\" r=\"8\"/><path d=\"M12 9v4l2.5 2.5M9 2h6\"/>",
+    "fa-file-import": "<path d=\"M12 3H4v18h12v-5M9 14h12m-4-4 4 4-4 4\"/>",
     "fa-heart-pulse": "<path d=\"M3 12h4l2-6 4 12 2-6h6\"/>",
     "fa-sliders": "<path d=\"M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0\"/><circle cx=\"16\" cy=\"6\" r=\"2\"/><circle cx=\"10\" cy=\"12\" r=\"2\"/><circle cx=\"18\" cy=\"18\" r=\"2\"/>",
     "fa-ellipsis": "<circle cx=\"5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"19\" cy=\"12\" r=\"1.6\"/>",
@@ -2873,28 +2878,49 @@ async function clearAccountCooldown(accountId) {
  */
 const ACC_PRIMARY_OPS = ["重新登录", "三项健康检查：积分、模型列表、真实对话", "刷新余额与到期快照"];
 
+const ACC_GROUP_LABELS = {
+  view: "查看明细", grow: "成长与活动", maintain: "维护",
+  data: "数据", danger: "危险操作",
+};
+
 function accOpsHtml(a, ops) {
+  // 条目形状：[onclick, icon, tooltip, group]
   const primary = [];
   const rest = [];
   for (const item of ops) {
-    (ACC_PRIMARY_OPS.includes(item[3]) ? primary : rest).push(item);
+    (ACC_PRIMARY_OPS.includes(item[2]) ? primary : rest).push(item);
   }
-  const btn = ([fn, ic, col, ttl]) =>
-    `<button onclick="${fn}" class="${col}" data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}" aria-label="${ttl}">${consoleIcon(ic)}</button>`;
-  const menuItems = rest.map(([fn, ic, col, ttl]) => `
-    <div class="acc-menu-item" role="menuitem" tabindex="0"
+  const btn = ([fn, ic, ttl, group]) => {
+    const danger = group === "danger";
+    return `<button onclick="${fn}" class="acc-op-btn${danger ? " is-danger" : ""}"
+      data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}"
+      aria-label="${ttl}">${consoleIcon(ic)}</button>`;
+  };
+  // 「更多操作」菜单：按 group 分节，节间插标题（层次感）；
+  // 图标统一中性色，只有危险组红 —— 告别红蓝绿紫调色盘。
+  const menuItems = [];
+  let lastGroup = "";
+  for (const [fn, ic, ttl, group] of rest) {
+    if (group !== lastGroup) {
+      menuItems.push(`<div class="acc-menu-group">${esc(ACC_GROUP_LABELS[group] || "")}</div>`);
+      lastGroup = group;
+    }
+    const danger = group === "danger";
+    menuItems.push(`
+    <div class="acc-menu-item${danger ? " is-danger" : ""}" role="menuitem" tabindex="0"
          onclick="event.stopPropagation();this.parentElement.classList.remove('open');${fn}">
-      <span class="acc-menu-icon ${col}">${consoleIcon(ic)}</span>
+      <span class="acc-menu-icon">${consoleIcon(ic)}</span>
       <span class="acc-menu-text">${esc(ttl.replace('（逐包到期日）', ''))}</span>
-    </div>`).join("");
+    </div>`);
+  }
   return `${primary.map(btn).join("")}
     <div class="acc-more">
-      <button class="acc-more-btn" data-tooltip="更多操作"
+      <button class="acc-op-btn acc-more-btn" data-tooltip="更多操作"
               aria-haspopup="true" aria-label="更多操作"
               onclick="event.stopPropagation();toggleAccMenu(this)">
         ${consoleIcon("fa-ellipsis")}
       </button>
-      <div class="acc-menu" role="menu">${menuItems}</div>
+      <div class="acc-menu" role="menu">${menuItems.join("")}</div>
     </div>`;
 }
 
@@ -2994,19 +3020,23 @@ function tokenBadge(a) {
 
 function accRow(a) {
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
+  // 条目形状：[onclick, icon, tooltip, group]
+  // 配色不再逐个手涂（原来红蓝绿紫粉像调色盘，用户点名批评）——
+  // accOpsHtml 按 group 统一上色：view/grow/maintain/data 中性色，danger 红。
+  // 分组顺序 = 「更多操作」菜单的分组顺序，带分组标题，有层次。
   const ops = [
-    [`WBReview.accountLimit(${a.id})`, "fa-sliders", "text-indigo-600", "账号并发上限"],
-    [`openReauthAccount(${a.id})`, "fa-key", "text-emerald-600", "重新登录"],
-    [`growthTasks(${a.id},${jsv(a.name||'')})`, "fa-seedling", "text-emerald-600", "成长任务"],
-    [`catTravel(${a.id})`, "fa-cat", "text-pink-600", "猫猫旅行"],
-    [`viewCreditDetails(${a.id},${jsv(a.name||'')})`, "fa-list-ul", "text-amber-600", "积分明细（逐包到期日）"],
-    [`viewRequestUsage(${a.id},${jsv(a.name||'')})`, "fa-chart-line", "text-blue-600", "请求用量"],
-    [`healthCheckAcc(${a.id})`, "fa-heart-pulse", "text-emerald-600", "三项健康检查：积分、模型列表、真实对话"],
-    [`injectAcc(${a.id})`, "fa-right-to-bracket", "text-violet-600", "注入本机客户端"],
-    [`refreshAcc(${a.id})`, "fa-rotate", "text-indigo-600", "刷新余额与到期快照"],
-    [`exportAcc(${a.id},${jsv(a.name||'')})`, "fa-file-export", "text-sky-600", "导出登录态"],
-    [`toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
-    [`delAcc(${a.id})`, "fa-trash", "text-red-500", "删除"],
+    [`viewCreditDetails(${a.id},${jsv(a.name||'')})`, "fa-list-ul", "积分明细（逐包到期日）", "view"],
+    [`viewRequestUsage(${a.id},${jsv(a.name||'')})`, "fa-chart-line", "请求用量", "view"],
+    [`growthTasks(${a.id},${jsv(a.name||'')})`, "fa-seedling", "成长任务", "grow"],
+    [`catTravel(${a.id})`, "fa-cat", "猫猫旅行", "grow"],
+    [`refreshAcc(${a.id})`, "fa-rotate", "刷新余额与到期快照", "maintain"],
+    [`healthCheckAcc(${a.id})`, "fa-heart-pulse", "三项健康检查：积分、模型列表、真实对话", "maintain"],
+    [`openReauthAccount(${a.id})`, "fa-key", "重新登录", "maintain"],
+    [`injectAcc(${a.id})`, "fa-right-to-bracket", "注入本机客户端", "maintain"],
+    [`WBReview.accountLimit(${a.id})`, "fa-sliders", "账号并发上限", "maintain"],
+    [`exportAcc(${a.id},${jsv(a.name||'')})`, "fa-file-export", "导出登录态", "data"],
+    [`toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')`, "fa-power-off", "启用/禁用", "danger"],
+    [`delAcc(${a.id})`, "fa-trash", "删除", "danger"],
   ];
   // data-label 是给**窄屏卡片形态**用的字段名（见 CSS 里的移动端段落）：
   // 窄屏下表格变成卡片，靠 `td::before { content: attr(data-label) }`
@@ -3279,7 +3309,7 @@ function traeRow(a) {
       [`traeToggle(${a.id},'${a.status === "active" ? "disabled" : "active"}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
       [`traeDelete(${a.id})`, "fa-trash", "text-red-500", "删除"],
     ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`).join("")}</td>
+      `<button onclick="${fn}" class="acc-op-btn${(title === "删除" || title === "启用/禁用") ? " is-danger" : ""}" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`).join("")}</td>
   </tr>`;
 }
 
@@ -3454,7 +3484,7 @@ function qoderRow(a) {
       [`qoderRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "刷新额度"],
       [`qoderTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
     ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}"><i class="fa ${icon}"></i></button>`
+      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
     ).join("")}</td>
   </tr>`;
 }
@@ -3552,7 +3582,7 @@ function loomyRow(a) {
       [`loomyRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "探活并刷新"],
       [`loomyTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
     ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}"><i class="fa ${icon}"></i></button>`
+      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
     ).join("")}</td>
   </tr>`;
 }
@@ -7068,7 +7098,7 @@ async function openExport() {
   } catch (e) { /* 计数失败不阻塞导出，退回已加载数量 */ }
   const disabled = Math.max(0, total - active);
   openModal(`
-    <h3 class="font-bold mb-3"><span class="wb-icon mr-1 text-sky-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.226 20.925A2 2 0 0 0 6 22h12a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v3.127"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="m5 11-3 3"/><path d="m5 17-3-3h10"/></svg></span> 批量导出账号</h3>
+    <h3 class="font-bold mb-3"><span class="wb-icon mr-1 text-sky-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v13m-4-5 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span> 批量导出账号</h3>
     <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 mb-3">
       <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
       导出内容包含登录 token，等同账号凭据，请勿外传或提交到代码仓库。
