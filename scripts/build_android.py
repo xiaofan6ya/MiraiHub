@@ -30,9 +30,12 @@ def check_runtime() -> None:
     python = environment / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
     if not python.is_file():
         venv.EnvBuilder(with_pip=True).create(environment)
-    subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
-                    '-r', str(ROOT / 'android/requirements.txt'), '--index-url',
-                    'https://pypi.tuna.tsinghua.edu.cn/simple'], check=True)
+    pip_cmd = [str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
+               '-r', str(ROOT / 'android/requirements.txt')]
+    # 海外 CI 访问清华镜像会被 403（同 settings.gradle 跳过 aliyun 的道理），CI 直连官方 pypi
+    if os.environ.get('CI') != 'true':
+        pip_cmd += ['--index-url', 'https://pypi.tuna.tsinghua.edu.cn/simple']
+    subprocess.run(pip_cmd, check=True)
     subprocess.run([str(python), str(ROOT / 'scripts/check_runtime.py'), '--android',
                     '--source-dir', str(STAGING)], cwd=ROOT, check=True)
 

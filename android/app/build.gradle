@@ -46,7 +46,10 @@ chaquopy {
         if (System.getenv('WB_ANDROID_BUILD_PYTHON')) buildPython System.getenv('WB_ANDROID_BUILD_PYTHON')
         pip {
             install '-r', rootProject.file('requirements.txt').absolutePath
-            options '--index-url', 'https://pypi.tuna.tsinghua.edu.cn/simple'
+            // 海外 CI 访问清华镜像会被 403，CI（CI=true）直连官方 pypi；本地国内网络走镜像提速
+            if (System.getenv('CI') != 'true') {
+                options '--index-url', 'https://pypi.tuna.tsinghua.edu.cn/simple'
+            }
             options '--extra-index-url', 'https://chaquo.com/pypi-13.1'
         }
     }
