@@ -20,7 +20,7 @@
     host.setAttribute("role", "alert");
     host.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:99999;padding:12px 16px;"
       + "background:" + color + ";color:#fff;font-size:13px;line-height:1.6;"
-      + "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+      + "display:flex;gap:12px;align-items:center;flex-wrap:wrap;pointer-events:none";
 
     var text = document.createElement("span");
     text.textContent = message;
@@ -36,7 +36,7 @@
     btn.type = "button";
     btn.textContent = "强制刷新";
     btn.style.cssText = "padding:6px 14px;border-radius:8px;background:#fff;color:#1f2937;"
-      + "font-weight:600;border:0;cursor:pointer;flex:0 0 auto";
+      + "font-weight:600;border:0;cursor:pointer;flex:0 0 auto;pointer-events:auto";
     btn.onclick = function () { location.reload(); };
 
     host.appendChild(text);

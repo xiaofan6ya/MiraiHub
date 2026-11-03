@@ -65,7 +65,17 @@
       tag: tag,
       src: (t.src || t.href || "").slice(0, 400),
       stack: ((e.error && e.error.stack) || "").slice(0, 900),
-      at: Math.round(performance.now())
+      at: Math.round(performance.now()),
+      // 关键：在**报错当刻**记一次脚本清单。如果那段脚本事后被注入方删掉，
+      // 等到 collect() 再看就什么都没有了（用户这次就是这样：inline=[] 但
+      // 确实有一段内联脚本报了 EOF）。
+      scriptsAtError: safe(function () {
+        return {
+          n: document.scripts.length,
+          inline: Array.prototype.filter.call(document.scripts, function (s) { return !s.src; })
+            .map(function (s) { return (s.textContent || "").slice(0, 300); })
+        };
+      })
     };
     pushErr(o);
     if (!resourceFail && isFatalSyntax(o)) showFatal(o);
@@ -101,12 +111,24 @@
         // 只记「没有 src」或「跨源」的 —— 那才是外部注入的特征。
         var src = n.src || "";
         if (src && src.indexOf(location.origin) === 0) continue;
+        // 就地摘掉：chrome-extension:// 这类外源脚本在 fetch 完成前被移出文档
+        // 就不会执行，等于在 CSP 之外再加一道保险（CSP 也可能被扩展绕过）。
+        var killed = false;
+        if (how === "added") {
+          try {
+            if (n.parentNode) { n.parentNode.removeChild(n); killed = true; }
+          } catch (e) { /* ignore */ }
+          try {
+            console.warn("[WB] 已移除外部注入的脚本：", src || ("内联 " + (n.textContent || "").slice(0, 80)));
+          } catch (e) { /* ignore */ }
+        }
         if (rec.injected.length < 20) {
           rec.injected.push({
             how: how,
             src: src.slice(0, 300),
             len: (n.textContent || "").length,
             head: (n.textContent || "").replace(/\s+/g, " ").slice(0, 200),
+            removedByUs: killed,
             at: Math.round(performance.now())
           });
         }
@@ -219,6 +241,29 @@
     _t = setTimeout(function () { _t = null; send(); }, 1200);
   }
 
+  // ---- 4.5) 抓一份「浏览器实际收到的 HTML」--------------------------------
+  // 报错坐标是「文档末行+1、第 20 列」，说明出错的是**文档里的一段内联脚本**
+  // （跑到 EOF 才停）。但 DOM 里数出来的内联脚本是 0 —— 所以要看浏览器收到的
+  // 响应体本身末尾到底多出了什么：重新拉一次同 URL，把长度/行数/末尾原样带回。
+  function probeDoc() {
+    try {
+      fetch(location.href, { cache: "no-store", credentials: "same-origin" })
+        .then(function (r) { return r.text(); })
+        .then(function (t) {
+          rec.served = {
+            chars: t.length,
+            lines: t.split("\n").length,
+            head: t.slice(0, 80),
+            tail: t.slice(-200)
+          };
+          send();
+        })
+        .catch(function (err) {
+          rec.served = { error: String(err).slice(0, 160) };
+        });
+    } catch (e) { /* ignore */ }
+  }
+
   // ---- 5) 只有 SyntaxError 才打扰用户 -----------------------------------
   function showFatal(o) {
     if (_warned) return;
@@ -230,7 +275,10 @@
       host.setAttribute("role", "alert");
       host.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;"
         + "padding:12px 16px;background:#7f1d1d;color:#fff;font:13px/1.6 system-ui,sans-serif;"
-        + "display:flex;gap:12px;align-items:center;flex-wrap:wrap;box-shadow:0 -6px 20px rgba(0,0,0,.25)";
+        + "display:flex;gap:12px;align-items:center;flex-wrap:wrap;box-shadow:0 -6px 20px rgba(0,0,0,.25);"
+        // 红条本身不接收点击：否则它会挡住底下侧边栏底部的按钮（"退出登录"等），
+        // 变成"点了没反应"的一部分。按钮再单独打开 pointer-events。
+        + "pointer-events:none";
       var span = document.createElement("span");
       span.style.cssText = "flex:1 1 420px;min-width:0";
       var b = document.createElement("b");
@@ -247,7 +295,7 @@
       copy.type = "button";
       copy.textContent = "复制诊断信息";
       copy.style.cssText = "padding:6px 12px;border-radius:8px;border:0;background:#fff;"
-        + "color:#7f1d1d;font-weight:600;cursor:pointer";
+        + "color:#7f1d1d;font-weight:600;cursor:pointer;pointer-events:auto";
       copy.onclick = function () {
         collect();
         var txt = JSON.stringify(rec, null, 1);
@@ -261,7 +309,7 @@
       rel.type = "button";
       rel.textContent = "强制刷新";
       rel.style.cssText = "padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.6);"
-        + "background:transparent;color:#fff;font-weight:600;cursor:pointer";
+        + "background:transparent;color:#fff;font-weight:600;cursor:pointer;pointer-events:auto";
       rel.onclick = function () { location.reload(); };
 
       host.appendChild(span);
@@ -274,6 +322,7 @@
 
   // ---- 6) 两个时间点上报：load 后（早期注入）与 8s 后（延迟注入）---------
   window.addEventListener("load", function () {
+    probeDoc();
     setTimeout(send, 1000);
     setTimeout(function () { if (!rec.errors.length && !rec.injected.length) send(); }, 8000);
   });

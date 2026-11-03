@@ -148,6 +148,25 @@ async def _security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     if request.url.path.startswith(("/api", "/admin")):
         response.headers.setdefault("Cache-Control", "no-store")
+    # 控制台页面加 CSP：**只允许同源脚本**。
+    #
+    # 要挡的是「浏览器扩展往页面里塞 <script src="chrome-extension://...">」这类
+    # 注入：实测本机 Edge 上装了 Vue Devtools（olofadcdnkkjdfgjcmjaadnlehnnihnl），
+    # 它的 detector.js 在 document_idle 时就会往页面 append 一个
+    # chrome-extension://.../build/detector-exec.js，55ms 后再删掉。
+    # 这类脚本在页面里报的错会被算到**文档自己**头上（file=文档 URL、行列是注入
+    # 代码自己的行列），于是控制台里只看到一条 `Unexpected end of input`，
+    # 完全指不出是谁干的。CSP 的 script-src 对这类页面级注入同样生效。
+    #
+    # 保留 'unsafe-inline' 的原因：index.html 里有 119 个内联 onclick/onchange
+    # （历史包袱），一次性改成 addEventListener 风险太大；而 'unsafe-inline'
+    # 只放行内联代码，**不会**放行 chrome-extension:// 这类跨源 src。
+    # 我们自己没有任何 eval / new Function（已逐文件核查），故不需要 'unsafe-eval'。
+    if request.url.path.startswith("/admin") and not request.url.path.startswith("/admin/assets"):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'",
+        )
     return response
 
 
