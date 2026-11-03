@@ -3,10 +3,9 @@
    背景：控制台在开发机上用真实浏览器反复验证都正常（0 个 pageerror、26 个脚本
    全部加载、函数齐全），但使用者那边持续出现
        Uncaught SyntaxError: Unexpected end of input (at /admin?tab=xxx:1:19)
-   并且按钮整片失灵。这个位置（第 1 行第 19 列）只有一种来源：一段**没有 src 的
-   脚本**在解析到 EOF 时失败 —— 而控制台自身 0 个内联脚本，所以它来自页面之外
-   （浏览器扩展 / 安全软件网页防护 / 加速器 / 桌面壳注入的 native bridge）。
-   这类注入大多走 MAIN world，不在 DOM 里留 <script> 节点，页面内看不见。
+   并且按钮整片失灵。相同报错也可能来自动态生成的 onclick 属性被引号截断，
+   即使页面没有内联 <script>、核心函数全部存在也不能排除业务代码错误。
+   必须保留报错位置、点击处理器与资源状态，不能仅凭脚本已加载就归因于外部注入。
 
    本文件因此负责"取证"而不是"修复"：
      1) 抢在最早注册 window error 捕获，拿到真实的 filename/lineno/colno/stack
@@ -18,7 +17,7 @@
 (function () {
   "use strict";
 
-  var BUILD = "20261103-diag2";
+  var BUILD = "20261103-actions1";
   var ENDPOINT = "/api/client-diag/report";
   var rec = {
     build: BUILD,
@@ -284,12 +283,12 @@
       var span = document.createElement("span");
       span.style.cssText = "flex:1 1 420px;min-width:0";
       var b = document.createElement("b");
-      b.textContent = "页面里有外部脚本报错（不是控制台自己的代码）";
+      b.textContent = "页面脚本执行出错，部分按钮可能无法使用";
       span.appendChild(b);
       var code = document.createElement("code");
       code.style.cssText = "display:block;margin-top:4px;font-size:11px;opacity:.9;"
         + "white-space:pre-wrap;word-break:break-all";
-      code.textContent = (o.file || "(无来源，说明是页面外注入的脚本)")
+      code.textContent = (o.file || "(浏览器未提供脚本来源)")
         + ":" + o.line + ":" + o.col + "  " + o.msg;
       span.appendChild(code);
 
@@ -334,11 +333,11 @@
       var el = e.target;
       if (!el || el.nodeType !== 1) return;
       if (rec.clicks.length < 12) {
-        var host = el.closest ? el.closest("[onclick]") : null;
+        var host = el.closest ? el.closest("[onclick],[data-platform-action]") : null;
         rec.clicks.push({
           sel: String(el.tagName || "").toLowerCase() + (el.id ? "#" + el.id : ""),
           hit: !!host,
-          act: host ? String(host.getAttribute("onclick") || "").slice(0, 60) : "",
+          act: host ? String(host.getAttribute("onclick") || host.getAttribute("data-platform-action") || "").slice(0, 60) : "",
           at: Math.round(performance.now())
         });
       }

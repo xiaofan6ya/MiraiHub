@@ -3574,46 +3574,53 @@ async function traeDelete(id) {
  * 现在按 `storage_platform` 分派到各平台自己的接口。
  * 新增平台时只要实现 /api/<storage>/scan-local，这里不用改。
  */
-document.addEventListener("wb-platform-action", async event => {
-  const { action, platform, spec } = event.detail || {};
-  const storage = ((spec && spec.storage_platform) || platform || "").toLowerCase();
+document.addEventListener("wb-platform-action", event => {
+  const run = async () => {
+    const { action, platform, realm, spec: selectedSpec } = event.detail || {};
+    const spec = selectedSpec ? { ...selectedSpec, realm: realm || selectedSpec.realm || "" } : null;
+    const storage = ((spec && spec.storage_platform) || platform || "").toLowerCase();
 
-  // 各平台通用动作：扫描 / 导入 / 刷新额度
-  if (action === "scan") {
-    if (storage === "trae") return traeScanLocal();
-    return platformScanLocal(spec, storage);
-  }
-  if (action === "import") {
-    if (storage === "trae") return traeImportLocal();
-    return platformImportLocal(spec, storage);
-  }
-  if (action === "refresh-quota") {
-    if (storage === "trae") return traeRefreshAll();
-    return platformRefreshAll(spec, storage);
-  }
+    // 各平台通用动作：扫描 / 导入 / 刷新额度
+    if (action === "scan") {
+      if (storage === "trae") return traeScanLocal(spec);
+      return platformScanLocal(spec, storage);
+    }
+    if (action === "import") {
+      if (storage === "trae") return traeImportLocal(spec);
+      return platformImportLocal(spec, storage);
+    }
+    if (action === "refresh-quota") {
+      if (storage === "trae") return traeRefreshAll(spec);
+      return platformRefreshAll(spec, storage);
+    }
 
-  // 签到：各平台自己的接口。
-  // Trae 也没有独立的签到函数（它的签到走定时任务），
-  // 所以统一走 platformCheckin —— 按 storage_platform 推接口前缀。
-  if (action === "checkin") {
-    return platformCheckin(spec, storage);
-  }
+    // 签到：各平台自己的接口。
+    // Trae 也没有独立的签到函数（它的签到走定时任务），
+    // 所以统一走 platformCheckin —— 按 storage_platform 推接口前缀。
+    if (action === "checkin") {
+      return platformCheckin(spec, storage);
+    }
 
-  // 授权登录（设备流）：Qoder 的登录态加密在原生层，读不出文件，
-  // 只能走设备授权 —— 用户点一次链接就自动拿到可续期的 token。
-  if (action === "begin-auth") {
-    return platformBeginAuth(spec, storage);
-  }
+    // 授权登录（设备流）：Qoder 的登录态加密在原生层，读不出文件，
+    // 只能走设备授权 —— 用户点一次链接就自动拿到可续期的 token。
+    if (action === "begin-auth") {
+      return platformBeginAuth(spec, storage);
+    }
 
-  // 「用量明细」：Trae 有网页 cookie 专用实现，其它平台走通用账号用量表
-  if (action === "usage") {
-    if (storage === "trae") return traeUsageDetail(spec);
-    return platformUsageDetail(spec, storage);
-  }
+    // 「用量明细」：Trae 有网页 cookie 专用实现，其它平台走通用账号用量表
+    if (action === "usage") {
+      if (storage === "trae") return traeUsageDetail(spec);
+      return platformUsageDetail(spec, storage);
+    }
 
-  // Trae 专属动作
-  if (storage !== "trae") return;
-  if (action === "web-cookie") return traeWebCookie(spec);
+    // Trae 专属动作
+    if (storage !== "trae") return;
+    if (action === "web-cookie") return traeWebCookie(spec);
+  };
+  run().catch(error => {
+    console.error("平台动作执行失败", error);
+    toast("操作失败：" + (error && error.message ? error.message : error), "err");
+  });
 });
 
 /**
@@ -3644,7 +3651,7 @@ function renderIntakePlatformLogin() {
   host.innerHTML =
     `<span class="intake-login-hint">当前平台：${esc(spec.label || storage)}</span>` +
     actions.map(a => `<button type="button" class="console-btn ${a.primary ? "primary" : "quiet"}" ` +
-      `onclick="WBPlatform.action(${JSON.stringify(a.name)})">${icons[a.icon] || ""}${esc(a.label)}</button>`).join("");
+      `data-platform-action="${esc(a.name)}">${icons[a.icon] || ""}${esc(a.label)}</button>`).join("");
 }
 
 // 切平台就重渲染账号池顶部的「添加与迁移账号」动作区
@@ -3771,7 +3778,7 @@ async function traeWebCookie(spec) {
       只保存在本地数据库，仅用于读取用量，不会用于其他请求。
     </p>
     <div class="flex gap-2 mt-3">
-      <button type="button" class="console-btn primary" onclick="saveTraeWebCookie(${JSON.stringify(realm)})">保存</button>
+      <button type="button" class="console-btn primary" onclick="saveTraeWebCookie(${jsv(realm)})">保存</button>
       <button type="button" class="console-btn quiet" onclick="closeModal()">取消</button>
     </div>`, "max-w-2xl");
 }
@@ -4340,7 +4347,7 @@ async function platformScanLocal(spec, storage) {
   const realm = (spec && spec.realm) || "";
   const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
   const prefix = platformApiPrefix(spec, storage);
-  const r = await api(prefix + "/scan-local" + qs);
+  const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
   const { ok, data } = await safeJson(r);
   if (!ok) {
     toast(`扫描失败：${(data && data.detail) || r.status}`, "err");
@@ -4361,11 +4368,11 @@ async function platformImportLocal(spec, storage) {
   // 必须带 JSON body：ImportLocalIn 是必填模型，空 body 会 422
   // （WorkBuddy 的「导入本机」就是这么失效的）。all=true = 导入目录下全部账号。
   const payload = id === "qoder" ? { all: true } : { all: true };
-  const r = await api(path, {
+  const r = await api(path, platformActionOptions(spec, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }));
   const { ok, data } = await safeJson(r);
   if (!ok) {
     toast(`导入失败：${(data && data.detail) || r.status}`, "err");
@@ -4695,17 +4702,34 @@ async function showScanResult(data, spec, storage) {
     ${authExplain ? `<p class="text-xs mt-2" style="color:var(--fg-muted);padding:8px 10px;border-radius:8px;background:var(--surface-2)">
       ${esc(authExplain)}</p>` : ""}
     <div class="flex justify-end gap-2 mt-4">
-      ${(needAuth && supportsAuth) ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),${jsv(storage)})"
+      ${(needAuth && supportsAuth) ? `<button id="scanBeginAuth"
           class="console-btn primary">立即授权登录</button>` : ""}
-      ${canImport ? `<button onclick="closeModal();platformImportLocal(window.WBPlatform.spec(),${jsv(storage)})"
+      ${canImport ? `<button id="scanImportLocal"
           class="console-btn primary">导入这些凭证</button>` : ""}
       <button onclick="closeModal()" class="console-btn quiet">关闭</button>
     </div>`;
   openModal(body);
+  $("#scanBeginAuth")?.addEventListener("click", () => {
+    closeModal();
+    platformBeginAuth(spec, storage).catch(error => toast("授权失败：" + error.message, "err"));
+  });
+  $("#scanImportLocal")?.addEventListener("click", () => {
+    closeModal();
+    platformImportLocal(spec, storage).catch(error => toast("导入失败：" + error.message, "err"));
+  });
 }
 
-async function traeScanLocal() {
-  const r = await api("/api/trae/scan-local");
+// Pin requests to the platform that started the action, even if the user
+// changes the global selection while an asynchronous action is in flight.
+function platformActionOptions(spec, opts = {}) {
+  if (!spec || !spec.id) return opts;
+  return { ...opts, headers: { ...(opts.headers || {}), "X-Platform": spec.id } };
+}
+
+async function traeScanLocal(spec) {
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/trae/scan-local" + qs, platformActionOptions(spec));
   const { ok, data } = await safeJson(r);
   if (!ok) { toast((data.detail && data.detail.message) || "扫描失败", "err"); return; }
   const items = data.items || [];
@@ -4754,17 +4778,23 @@ async function traeScanLocal() {
         ${errors.map(e => `<div>${esc(e.error || JSON.stringify(e))}</div>`).join("")}
       </div>` : ""}
       ${items.length ? `<div class="trae-modal-actions">
-        <button type="button" class="console-btn primary" onclick="closeModal(); traeImportLocal()">
+        <button type="button" class="console-btn primary" id="traeScanImport">
           导入这 ${items.length} 个账号
         </button>
         <button type="button" class="console-btn quiet" onclick="closeModal()">关闭</button>
       </div>` : ""}
     </div>`, "max-w-3xl");
+  $("#traeScanImport")?.addEventListener("click", () => {
+    closeModal();
+    traeImportLocal(spec).catch(error => toast("导入失败：" + error.message, "err"));
+  });
 }
 
-async function traeImportLocal() {
+async function traeImportLocal(spec) {
   toast("正在导入本机 Trae 账号…");
-  const r = await api("/api/trae/import-local", { method: "POST" });
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/trae/import-local" + qs, platformActionOptions(spec, { method: "POST" }));
   const { ok, data } = await safeJson(r);
   if (!ok) {
     toast((data.detail && data.detail.message) || "导入失败", "err");
@@ -4829,9 +4859,11 @@ async function traeImportLocal() {
   if (typeof _activeTab !== "undefined" && _activeTab === "platforms") loadPlatformOverview();
 }
 
-async function traeRefreshAll() {
+async function traeRefreshAll(spec) {
   toast("正在刷新所有 Trae 账号额度…");
-  const r = await api("/api/trae/refresh-all", { method: "POST" });
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/trae/refresh-all" + qs, platformActionOptions(spec, { method: "POST" }));
   const { ok, data } = await safeJson(r);
   if (!ok) { toast("刷新失败", "err"); return; }
   toast(`刷新完成：成功 ${data.ok}，失败 ${data.failed}`);
@@ -5696,6 +5728,14 @@ async function doLoadRequestUsage(page){
 
 /* 扫描本机账号（已按 UID 去重 + 标记号池已有；解释「磁盘无文件但号池已有」的情况） */
 async function scanLocal(btn){
+  // A stale/cached WorkBuddy toolbar must never scan WorkBuddy credentials
+  // while another platform is selected.
+  await ensurePlatforms();
+  const spec = window.WBPlatform?.spec();
+  const storage = String(spec?.storage_platform || spec?.id || "workbuddy").toLowerCase();
+  if (storage !== "workbuddy" && storage !== "codebuddy") {
+    return platformScanLocal(spec, storage);
+  }
   // 立刻进入忙碌态：按钮转圈 + 全局进度条（>120ms 才亮）。
   // 早先前端拿不到按钮、又没有 try/catch —— 请求一慢或一抛异常，
   // 界面上什么都不会发生，用户看到的就是「点了没反应」。
@@ -5704,7 +5744,7 @@ async function scanLocal(btn){
   const doScan = async () => {
     let r, d;
     try {
-      r = await api("/api/accounts/scan-local");
+      r = await api("/api/accounts/scan-local", platformActionOptions(spec));
       d = await r.json().catch(()=>({}));
     } catch (e) {
       toast("扫描失败：" + (e && e.message ? e.message : e), "err");

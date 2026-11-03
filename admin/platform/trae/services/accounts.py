@@ -338,9 +338,12 @@ def upsert(db: Session, record: dict) -> tuple[Account, bool]:
     return account, created
 
 
-def import_local(db: Session) -> dict:
-    """扫描本机并导入号池；返回 added / updated / errors。"""
+def import_local(db: Session, realm: str = "") -> dict:
+    """扫描本机并导入号池；可按区域收窄，返回 added / updated / errors。"""
     records = collect_accounts()
+    if realm:
+        records = [record for record in records
+                   if client.normalize_realm(record.get("realm")) == realm]
     if not records:
         return {"added": 0, "updated": 0, "errors": [
             {"error": "未在本机找到 Trae 登录态（%s）"

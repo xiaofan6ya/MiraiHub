@@ -146,9 +146,13 @@ def _quota_view(row: Account) -> dict:
 
 
 @router.get("/scan-local")
-def scan_local(_: bool = Depends(require_admin)):
-    """扫描本机 Trae 客户端登录态（国内版 + 国际版）。"""
+def scan_local(realm: str = "", _: bool = Depends(require_admin)):
+    """扫描本机 Trae 客户端登录态，可按当前平台区域收窄结果。"""
+    realm = _realm_or_400(realm) if realm else ""
     result = trae_accounts.discover()
+    if realm:
+        result["items"] = [item for item in (result.get("items") or [])
+                           if str(item.get("realm") or "").lower() == realm]
     result["storage"] = trae_accounts.appdata_hint()
     return result
 
@@ -906,9 +910,10 @@ def _finish_trae_account(db: Session, session, token_data: dict,
 
 
 @router.post("/import-local")
-def import_local(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """把本机扫描到的凭证导入统一号池。"""
-    return trae_accounts.import_local(db)
+def import_local(realm: str = "", _: bool = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """把本机扫描到的凭证导入统一号池，可按当前平台区域收窄。"""
+    return trae_accounts.import_local(db, _realm_or_400(realm) if realm else "")
 
 
 class ImportIn(BaseModel):

@@ -271,15 +271,28 @@ function actionsFor(spec) {
 
   function bind() {
     var panel = $("#platformSwitch");
-    if (!panel || panel.dataset.bound === "1") return;
-    panel.dataset.bound = "1";
-    panel.addEventListener("click", function (event) {
-      var card = event.target.closest("[data-platform]");
-      if (card) { select(card.dataset.platform); return; }
-      var realm = event.target.closest("[data-realm]");
-      if (realm) { select(state.platform, realm.dataset.realm); return; }
-      var action = event.target.closest("[data-platform-action]");
-      if (action) { window.WBPlatform.action(action.dataset.platformAction); }
+
+    // The action toolbar lives in the panel header, outside #platformSwitch.
+    // Keep the two delegated listeners independent: returning early because
+    // the card switcher is already bound must not leave the toolbar inert.
+    if (panel && panel.dataset.bound !== "1") {
+      panel.dataset.bound = "1";
+      panel.addEventListener("click", function (event) {
+        var card = event.target.closest("[data-platform]");
+        if (card) { select(card.dataset.platform); return; }
+        var realm = event.target.closest("[data-realm]");
+        if (realm) { select(state.platform, realm.dataset.realm); return; }
+      });
+    }
+    [$("#platformActions"), $("#intakePlatformLogin")].forEach(function (actionHost) {
+      if (!actionHost || actionHost.dataset.bound === "1") return;
+      actionHost.dataset.bound = "1";
+      actionHost.addEventListener("click", function (event) {
+        var action = event.target.closest("[data-platform-action]");
+        if (!action) return;
+        event.preventDefault();
+        window.WBPlatform.action(action.dataset.platformAction);
+      });
     });
   }
 

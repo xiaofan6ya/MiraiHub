@@ -17,7 +17,7 @@
   <!-- 浏览器端自检上报：**必须是第一个 <script>**，才能在其他脚本执行/出错之前
        注册 window error 捕获，拿到真实的 filename:line:col。它会把自己看到的
        错误来源、脚本资源状态、注入痕迹 POST 回 /api/client-diag/report。 -->
-  <script src="/admin/assets/boot-diag.js?v=20261103-diag2"></script>
+  <script src="/admin/assets/boot-diag.js?v=20261103-actions1"></script>
   <script src="/admin/assets/theme.js?v=20261031-r2"></script>
   <script src="/admin/assets/filter-combobox.js?v=20261102-ui1"></script>
   <!--
@@ -897,7 +897,7 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261103-scan1"></script>
+<script defer src="/admin/assets/console-app.js?v=20261103-actions1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -913,12 +913,12 @@
      必须在 platform-switch.js **之前**加载 —— 后者要用 actionsFor()。 -->
 <script defer src="/admin/assets/traffic.js?v=20261029-r2"></script>
 <script defer src="/admin/assets/platform-actions.js?v=20261028-r10"></script>
-<script defer src="/admin/assets/platform-switch.js?v=20261028-r10"></script>
+<script defer src="/admin/assets/platform-switch.js?v=20261103-actions1"></script>
 <script defer src="/admin/assets/agent.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/model-pool.js?v=20261103-noinline1"></script>
 </head>
 <body>
-<script src="/admin/assets/boot-guard.js?v=20261103-noinline1"></script>
+<script src="/admin/assets/boot-guard.js?v=20261103-actions1"></script>
 
 <!-- 全局加载条：任何面板的数据请求在 120ms 内没回来就亮起来。
      概览原来有骨架屏，其它面板（账号池/日志/模型/分组/Key…）拉数据时

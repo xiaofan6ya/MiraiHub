@@ -11,7 +11,7 @@
    全部输出到页面上（红/黄条）和 console，便于一眼定位到底是谁的问题。
    放在 <body> 之后尽早执行，load 完成后再判定，避免慢机器误报。 */
 (function () {
-  var BUILD = "20261103-noinline1";
+  var BUILD = "20261103-actions1";
 
   function bar(color, message, detail) {
     if (document.getElementById("wbBootWarn")) return;
@@ -109,7 +109,7 @@
         "控制台脚本没有加载完整（缺少 " + miss.join("、") + "），所以按钮点了没反应。"
         + "点「强制刷新」重试；若反复出现，说明有脚本文件请求失败。", null);
     } else {
-      console.info("[WB] 控制台构建 " + BUILD + " 加载正常（若同时还有 SyntaxError，那是页面外注入的脚本，点红条上的「复制诊断信息」可查来源）");
+      console.info("[WB] 控制台构建 " + BUILD + " 核心脚本已加载；按钮运行时错误请查看具体报错或复制诊断信息");
     }
   }
 
