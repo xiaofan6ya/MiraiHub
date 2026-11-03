@@ -80,6 +80,17 @@ def import_account(body: ImportIn, _: bool = Depends(require_admin),
     raise HTTPException(400, detail="需要 pat 或 credential")
 
 
+class ImportBatchIn(BaseModel):
+    text: str = ""
+
+
+@router.post("/import-batch")
+def import_batch(body: ImportBatchIn, _: bool = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """从手机版备份批量导入 Qoder 账号（issue #8：除 workbuddy 外都能导入）。"""
+    return qoder_accounts.import_batch(db, body.text)
+
+
 @router.get("/accounts")
 def list_accounts(realm: str = "", _: bool = Depends(require_admin),
                   db: Session = Depends(get_db)):

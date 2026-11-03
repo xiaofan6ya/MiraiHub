@@ -879,7 +879,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261102-ui1" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261103-issue7-8" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -1352,7 +1352,7 @@
           <h2>添加与迁移账号</h2>
           <p>登录新账号，或从本机与备份中恢复已有账号。</p>
         </div>
-        <div class="intake-actions">
+        <div id="intakeWbActions" class="intake-actions">
           <button type="button" onclick="openPhoneLogin()" class="console-btn primary"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>手机号登录</button>
           <button type="button" onclick="openUpload()" class="console-btn "><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 16v4h16v-4"/></svg>导入账号</button>
           <span class="intake-divider" aria-hidden="true"></span>
@@ -1360,6 +1360,12 @@
           <button type="button" onclick="openExport()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg>导出</button>
           <button type="button" onclick="openAddAccount()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>手动添加</button>
         </div>
+        <!-- 非 WorkBuddy 平台（Trae / Qoder / Loomy）的「添加与迁移账号」入口。
+             之前这些平台的登录入口只藏在「平台」tab 里、还要先点平台卡片才出现，
+             手机版用户根本找不到（issue #7）。这里按当前平台直接渲染它的
+             授权登录 / 扫描本机 / 导入本机 / 签到等动作，和「平台」tab 同一套
+             spec.actions，点哪个都走 WBPlatform.action()，行为完全一致。 -->
+        <div id="intakePlatformLogin" class="intake-actions" hidden></div>
       </div>
       <div class="account-toolbar">
         <div class="account-filters" role="group" aria-label="按账号状态筛选">
@@ -2540,6 +2546,7 @@ const TOKEN_KEY = "wb_admin_token";
  */
 let _modelBusyTimer = null;
 let _modelBusy = {};
+let _modelBusyLoading = false;
 let _modelHealthLoading = null;
 let _modelBatchBusy = false;
 let _sentinelTimer = null;
@@ -6019,6 +6026,42 @@ document.addEventListener("wb-platform-action", async event => {
 });
 
 /**
+ * 账号池「添加与迁移账号」区随当前平台切换可点的动作。
+ *
+ * 之前这里只有 WorkBuddy 的「手机号登录 / 导入 / 扫描本机」，切到 Trae /
+ * Qoder / Loomy 后整个账号池页面**没有任何登录入口** —— 用户只能去「平台」tab
+ * 点平台卡片才看得到「授权登录」，手机版尤其容易找不到（issue #7）。
+ *
+ * 现在：WorkBuddy 显示原 5 个按钮；其它平台在这里直接渲染该平台的
+ * 授权登录 / 扫描本机 / 导入本机 / 签到等动作（同一套 `spec.actions`），
+ * 点哪一个都走 `WBPlatform.action()`，与「平台」tab 完全一致。
+ */
+function renderIntakePlatformLogin() {
+  const wb = document.getElementById("intakeWbActions");
+  const host = document.getElementById("intakePlatformLogin");
+  if (!host) return;
+  const spec = (window.WBPlatform && window.WBPlatform.spec) ? window.WBPlatform.spec() : null;
+  const storage = ((spec && spec.storage_platform) || "").toLowerCase();
+  const isWb = !storage || storage === "workbuddy";
+  if (wb) wb.hidden = !isWb;
+  if (isWb) { host.hidden = true; host.innerHTML = ""; return; }
+  const actions = (window.WBPlatformActions && window.WBPlatformActions.actionsFor)
+    ? window.WBPlatformActions.actionsFor(spec) : [];
+  if (!actions.length) { host.hidden = true; host.innerHTML = ""; return; }
+  const icons = (window.WBPlatformActions && window.WBPlatformActions.icons) || {};
+  host.hidden = false;
+  host.innerHTML =
+    `<span class="intake-login-hint">当前平台：${esc(spec.label || storage)}</span>` +
+    actions.map(a => `<button type="button" class="console-btn ${a.primary ? "primary" : "quiet"}" ` +
+      `onclick="WBPlatform.action(${JSON.stringify(a.name)})">${icons[a.icon] || ""}${esc(a.label)}</button>`).join("");
+}
+
+// 切平台就重渲染账号池顶部的「添加与迁移账号」动作区
+document.addEventListener("wb-platform-change", function () {
+  try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake] 渲染平台登录入口失败", e); }
+});
+
+/**
  * 用量明细。
  *
  * ⚠️ 上游接口只认**网页会话 cookie**：用 IDE token 调恒返回 total=0
@@ -8926,11 +8969,21 @@ async function plVerify(){
 
 /* 批量上传 */
 function openUpload(){
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  const isWb = !storage || storage === "workbuddy" || storage === "codebuddy";
+  const platLabel = spec.label || (storage || "WorkBuddy");
+  const intro = isWb
+    ? `<p class="text-xs text-slate-500 mb-2">粘贴 WorkBuddy 登录态，支持单个 JSON、JSON 数组或每行一个 JSON。也可选择多个凭证文件：新版加密、旧版明文及 .info.bak-时间戳备份均支持，按文件内容验证。</p>`
+    : `<p class="text-xs text-slate-500 mb-2">当前目标平台：<b>${esc(platLabel)}</b>。请粘贴该平台的备份（JSONL 或 JSON 数组，形如 <code>{"realm":"cn","token":"…","uid":"…","phone":"…"}</code>）。手机版导出的账号直接贴进来即可，<b>不需要</b> WorkBuddy 的 auth/account 客户端凭证结构（issue #8）。</p>`;
+  const placeholder = isWb
+    ? '{"auth":{...},"account":{...}}'
+    : '{"realm":"cn","token":"...","uid":"...","phone":"..."}';
   openModal(`
     <h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4"/></svg></span> 批量上传账号</h3>
-    <p class="text-xs text-slate-500 mb-2">粘贴 WorkBuddy 登录态，支持单个 JSON、JSON 数组或每行一个 JSON。也可选择多个凭证文件：新版加密、旧版明文及 .info.bak-时间戳备份均支持，按文件内容验证。</p>
+    ${intro}
     <p class="text-xs text-amber-600 mb-2"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 22V2"/></svg></span>每条都会调真实上游接口验证是否可用，<b>伪造的凭证会被拒收</b>（因此上传略慢，属正常）。</p>
-    <textarea id="upText" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder='{"auth":{...},"account":{...}}'></textarea>
+    <textarea id="upText" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder='${placeholder}'></textarea>
     <input id="upFile" type="file" multiple class="upload-file-input" aria-label="选择账号凭证或备份文件" />
     <div id="upResult" class="upload-result hidden" role="status" aria-live="polite"></div>
     <div class="upload-footer">
@@ -8972,6 +9025,7 @@ async function submitUpload(){
   for(const f of files){
     try {
       const s = await f.text();
+      if (s && s.trim()) rawTexts.push(s);
       const j = tryParse(s);
       if(j){ allItems = allItems.concat(Array.isArray(j) ? j : [j]); }
       else {
@@ -8983,6 +9037,45 @@ async function submitUpload(){
     } catch(e) {
       console.warn("文件读取失败:", f.name, e);
     }
+  }
+
+  // 非 WorkBuddy 平台：走各自网关的 import-batch（认平台的备份形态，
+  // 例如 Loomy 的 {realm,token,uid,phone}，而非 auth/account 客户端凭证）。
+  // 这是 issue #8「手机版导出的账号无法导入」的根因修复：之前全走
+  // /api/accounts/batch，被 WorkBuddy 的 validate_credential 全部拒收。
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  if (storage && storage !== "workbuddy" && storage !== "codebuddy") {
+    const combined = rawTexts.join("\n");
+    if (!combined.trim()) { toast("未解析出任何账号凭证", "err"); return; }
+    const result = $("#upResult");
+    const showResult = message => { result.textContent = message; result.classList.remove("hidden"); };
+    const previous = submit.innerHTML;
+    submit.disabled = true; submit.setAttribute("aria-busy","true");
+    submit.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span><span>正在导入…</span>';
+    showResult(`正在导入 ${rawTexts.length} 份备份到 ${spec.label || storage}…`);
+    try {
+      const r = await api(`/api/${storage}/import-batch`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text: combined})});
+      const d = await r.json().catch(()=>({}));
+      if (r.ok) {
+        const parts = [`已添加 ${d.added||0} 个`];
+        if (d.updated) parts.push(`更新 ${d.updated} 个`);
+        if (d.failed) parts.push(`${d.failed} 个失败`);
+        const message = parts.join("，");
+        showResult(message + (d.errors?.length ? "\n"+d.errors.join("\n") : ""));
+        toast(message, d.failed ? "err" : "ok");
+        loadAccounts();
+      } else {
+        const detail = d.detail;
+        const message = typeof detail === "string" ? detail : (detail?.message || "导入失败，请检查备份格式");
+        showResult(message); toast(message, "err");
+      }
+    } catch(e) {
+      showResult("导入请求失败，请检查服务连接后重试。"); toast("导入请求失败", "err");
+    } finally {
+      submit.disabled = false; submit.removeAttribute("aria-busy"); submit.innerHTML = previous;
+    }
+    return;
   }
 
   if(!allItems.length){ toast("未解析出任何账号凭证","err"); return; }

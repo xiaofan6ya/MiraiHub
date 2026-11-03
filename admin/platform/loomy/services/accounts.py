@@ -233,6 +233,7 @@ def import_record(db: Session, record: dict) -> dict:
     if uid:
         existing = db.query(Account).filter(Account.platform == PLATFORM,
                                             Account.uid == uid).first()
+    created = existing is None
     if existing is None:
         existing = Account(platform=PLATFORM,
                            name=clean_display_name(str(record.get("name") or uid or "Loomy")),
@@ -249,7 +250,13 @@ def import_record(db: Session, record: dict) -> dict:
         "phone": str(record.get("phone") or ""),
         "expires_at": int(record.get("expires_at") or 0),
     }, ensure_ascii=False)
+    # 导入的 token 一律标「未验证」：probe 会把它刷成 active/disabled。
     existing.status = "active"
+    existing.session_dead_fails = 0
+    existing.consecutive_fails = 0
+    existing.cool_until = None
+    existing.cool_kind = ""
+    existing.last_err_msg = ""
     existing.last_sync_at = datetime.utcnow()
     db.commit()
     db.refresh(existing)
@@ -257,5 +264,71 @@ def import_record(db: Session, record: dict) -> dict:
     # 立刻探一次，确认凭证可用
     probe = sync_quota(db, existing)
     return {"ok": bool(probe.get("ok")) or True,
-            "account_id": existing.id, "uid": uid,
+            "account_id": existing.id, "uid": uid, "created": created,
             "probe": probe}
+
+
+def import_batch(db: Session, text: str) -> dict:
+    """从手机版备份（JSONL / JSON 数组）批量导入 Loomy 账号。
+
+    ## 为什么要这个函数
+
+    手机版导出的账号是 `{"realm","token","uid","phone","expires_at"}` 形态，
+    **不是** WorkBuddy 的 `auth/account` 客户端凭证 —— 走通用
+    `/api/accounts/batch` 会被 `validate_credential` 全部拒收
+    （issue #8：「手机版导出的账号信息无法导入，除了 workbuddy 其它都失败」）。
+
+    这里直接复用 `import_record`，只认 Loomy 的 session/token 形态，
+    逐条幂等入库，不要求 WorkBuddy 那种客户端凭证结构。
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0, "errors": ["没有提供任何凭证"]}
+
+    # 先试整体 JSON 数组；失败再按行解析（JSONL）。
+    records: list[dict] = []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        records = [r for r in parsed if isinstance(r, dict)]
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+
+    if not records:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0, "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}
+
+    added = updated = failed = 0
+    errors: list[str] = []
+    seen_uid: set[str] = set()
+    for rec in records:
+        token = token_of(rec)
+        if not token:
+            failed += 1
+            errors.append("跳过一条：缺少 token/session")
+            continue
+        try:
+            result = import_record(db, rec)
+            if result.get("created") and result.get("uid") not in seen_uid:
+                added += 1
+            else:
+                updated += 1
+            if result.get("uid"):
+                seen_uid.add(result.get("uid"))
+        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断其余
+            failed += 1
+            errors.append("跳过一条：%s" % str(exc)[:120])
+    return {"ok": failed == 0, "added": added, "updated": updated,
+            "failed": failed, "total": len(records), "errors": errors[:20]}

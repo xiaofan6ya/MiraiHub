@@ -136,7 +136,8 @@ def _request(url: str, *, method: str = "GET", body: dict | None = None,
     start_at = time.perf_counter()
     first_byte_at = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        from admin.upstream_http import urllib_opener
+        with urllib_opener().open(req, timeout=timeout) as resp:
             # `urlopen` 返回时**响应头已经到了**，这一步的时间就是可测的
             # 首字节时间（TTFT 的近似值）。之后 `read()` 才是真正的等待
             # 传输/生成，两者相减就是**纯解码耗时** —— 有它才能算出
@@ -371,7 +372,8 @@ def chat_stream(token: str, realm: str, body: dict, *,
     start_at = time.perf_counter()
     first_byte_at = None
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
+        from admin.upstream_http import urllib_opener
+        resp = urllib_opener().open(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         payload = ""
         try:

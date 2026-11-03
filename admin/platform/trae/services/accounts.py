@@ -366,6 +366,65 @@ def import_record(db: Session, record: dict) -> tuple[Account, bool]:
     return upsert(db, record)
 
 
+def import_batch(db: Session, text: str) -> dict:
+    """从手机版备份（JSONL / JSON 数组）批量导入 Trae 账号。
+
+    手机版导出的账号是 `{"realm","token","uid",...}` 形态，不是 WorkBuddy 的
+    `auth/account` 客户端凭证；走通用 `/api/accounts/batch` 会被全部拒收
+    （issue #8：除了 workbuddy 其它都导入失败）。这里直接复用 `import_record`，
+    逐条幂等入库（upsert 已按 (platform, uid) 去重，重复导入只更新凭证）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0, "errors": ["没有提供任何凭证"]}
+    records: list[dict] = []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        records = [r for r in parsed if isinstance(r, dict)]
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+    if not records:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0,
+                "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}
+    added = updated = failed = 0
+    errors: list[str] = []
+    for rec in records:
+        token = str(rec.get("token") or rec.get("refresh_token")
+                    or rec.get("refreshToken") or "")
+        if not token:
+            failed += 1
+            errors.append("跳过一条：缺少 token/refresh_token")
+            continue
+        uid = str(rec.get("uid") or rec.get("userid") or "")
+        existed = bool(uid) and db.query(Account).filter(
+            Account.platform == PLATFORM, Account.uid == uid).first() is not None
+        try:
+            import_record(db, rec)
+            if existed:
+                updated += 1
+            else:
+                added += 1
+        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断其余
+            failed += 1
+            errors.append("跳过一条：%s" % str(exc)[:120])
+    return {"ok": failed == 0, "added": added, "updated": updated,
+            "failed": failed, "total": len(records), "errors": errors[:20]}
+
+
 # ---------------------------------------------------------------------------
 # 刷新 / 额度
 # ---------------------------------------------------------------------------

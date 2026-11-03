@@ -227,8 +227,11 @@ class AccountSession:
     @contextmanager
     def http_client(self, timeout=15):
         """Reuse TLS connections throughout one account's task run."""
+        from admin.upstream_http import ssl_context, upstream_trust_env
         if self._http is None:
-            self._http = httpx.Client(timeout=timeout, limits=HTTP_LIMITS)
+            self._http = httpx.Client(timeout=timeout, limits=HTTP_LIMITS,
+                                     verify=ssl_context(),
+                                     trust_env=upstream_trust_env())
         self._http.timeout = httpx.Timeout(timeout)
         yield self._http
 
@@ -273,7 +276,9 @@ class AccountSession:
         # The gateway cannot prove that the desktop-only profile headers belong
         # to this server process, so leave this optional header set empty.
         extra = {}
-        with httpx.Client(timeout=5) as client:
+        from admin.upstream_http import ssl_context, upstream_trust_env
+        with httpx.Client(timeout=5, verify=ssl_context(),
+                         trust_env=upstream_trust_env()) as client:
             headers = self.get_headers(extra)
             response = self.cm._request_with_refresh(
                 client, "POST", f"{BACKEND}/v2/chat/busy", headers,

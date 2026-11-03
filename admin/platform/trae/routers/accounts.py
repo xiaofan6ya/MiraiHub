@@ -943,6 +943,17 @@ def import_credential(body: ImportIn, _: bool = Depends(require_admin),
     return {"added": added, "updated": updated, "errors": errors}
 
 
+class ImportBatchIn(BaseModel):
+    text: str = ""
+
+
+@router.post("/import-batch")
+def import_batch(body: ImportBatchIn, _: bool = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """从手机版备份批量导入 Trae 账号（issue #8：除 workbuddy 外都能导入）。"""
+    return trae_accounts.import_batch(db, body.text)
+
+
 class PatchIn(BaseModel):
     name: str | None = None
     status: str | None = None

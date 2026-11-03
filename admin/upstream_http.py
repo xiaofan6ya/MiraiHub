@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 import asyncio
 import hashlib
 import logging
-import httpcore
+import os
 import ssl
+import sys
 import threading
 from datetime import datetime, timezone
 
@@ -16,6 +17,49 @@ _ssl_context = None
 _ssl_lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 UPLOAD_CHUNK_BYTES = 64 * 1024
+
+
+def upstream_trust_env() -> bool:
+    """上游请求是否继承系统代理/环境变量（HTTP_PROXY 等）。
+
+    默认 **False**：上游请求直连，不读 Windows 注册表里的系统代理
+    （Steam++、各类加速器会把 `127.0.0.1:10793` 之类塞进注册表做 TLS 中间人，
+    于是每个上游请求都证书验证失败 —— 见 issue #5）。
+
+    需要走代理才能出网的环境显式置
+    `ADMIN_UPSTREAM_TRUST_ENV=1` 开启。
+    """
+    return os.environ.get("ADMIN_UPSTREAM_TRUST_ENV", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+import urllib.request  # noqa: E402  (延迟导入，仅给 urllib 系平台复用)
+
+
+def build_opener(trust_env: bool | None = None):
+    """构造带「系统+ certifi 信任库」且默认**不走系统代理**的 urllib opener。
+
+    Loomy / Trae 等平台的上游调用走 `urllib.request` 而非 httpx，
+    同样要躲开加速器做的 TLS 中间人（issue #5）。
+
+    `trust_env=None` 时按 `upstream_trust_env()` 决定要不要读系统代理。
+    """
+    if trust_env is None:
+        trust_env = upstream_trust_env()
+    handlers = [urllib.request.HTTPSHandler(context=ssl_context())]
+    if not trust_env:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
+
+
+_opener = None
+
+
+def urllib_opener():
+    global _opener
+    if _opener is None:
+        _opener = build_opener()
+    return _opener
 
 
 class _UploadStream(httpx.AsyncByteStream):
@@ -48,10 +92,28 @@ _ssl_lock = threading.Lock()
 
 
 def ssl_context():
+    """上游 TLS 信任库 = **系统证书库 + certifi**。
+
+    只信任 certifi 会在「系统代理自动装入根证书」的机器（企业/加速器）
+    上把本来能连通的请求判成证书失败；只信任系统库又会把连通性押在
+    操作系统证书集合上（容器/精简系统常缺失）。两者叠加最稳。
+
+    Windows 上额外把系统 ROOT 存储并入（CPython 私有 API，失败不影响主流程）。
+    """
     global _ssl_context
     with _ssl_lock:
         if _ssl_context is None:
-            _ssl_context = ssl.create_default_context(cafile=certifi.where())
+            ctx = ssl.create_default_context()
+            try:
+                ctx.load_verify_locations(cafile=certifi.where())
+            except Exception:  # noqa: BLE001 - certifi 缺失时退回系统库
+                pass
+            if sys.platform == "win32":
+                try:
+                    ssl._load_windows_store_certs(ctx, "ROOT")  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 - 私有 API，环境差异大
+                    pass
+            _ssl_context = ctx
         return _ssl_context
 
 
@@ -92,7 +154,8 @@ class _BorrowedTransport(httpx.AsyncBaseTransport):
                 self.budget.consume()
             request_metrics.mark_connection_recovery()
             await asyncio.sleep(.2)
-            fresh = httpx.AsyncHTTPTransport(limits=self.limits, verify=ssl_context())
+            fresh = httpx.AsyncHTTPTransport(limits=self.limits, verify=ssl_context(),
+                                             trust_env=upstream_trust_env())
             self.private.append(fresh)
             # A new pool guarantees the retry cannot reuse the broken socket.
             try:
@@ -180,7 +243,8 @@ async def start(app, limits):
     # mobile call. Recovery below is limited to one pre-header disconnect.
     mobile_limits = httpx.Limits(max_connections=limits.max_connections,
                                max_keepalive_connections=4, keepalive_expiry=30)
-    app.state.upstream_transport = httpx.AsyncHTTPTransport(limits=mobile_limits, verify=ssl_context())
+    app.state.upstream_transport = httpx.AsyncHTTPTransport(
+        limits=mobile_limits, verify=ssl_context(), trust_env=upstream_trust_env())
 
 
 async def stop(app):
@@ -200,7 +264,8 @@ async def client(request, timeout, limits, *, retry_budget=None):
     recovery = scope.setdefault('_upstream_recovery', {'used': False})
     owned = transport is None
     if owned:
-        transport = httpx.AsyncHTTPTransport(limits=limits, verify=ssl_context())
+        transport = httpx.AsyncHTTPTransport(limits=limits, verify=ssl_context(),
+                                             trust_env=upstream_trust_env())
     kwargs['transport'] = _BorrowedTransport(transport, recovery=recovery,
                                              budget=retry_budget, limits=limits, scope=scope)
     try:
