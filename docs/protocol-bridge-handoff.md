@@ -19,3 +19,13 @@ metadata:
 - 测试入口：`python -I tests/test_protocol_bridge.py`（桥 6 用例）、`python -I tests/test_loomy_endtoend.py`（mock 上游端到端，用 ADMIN_LOOMY_BASE_URL 注入 mock）。Loomy 客户端逆向语料在 `_scratch/loomy_client/`（1145 文件，协议要点见[[wb2api-branch-policy]]同期的对话）。
 - **全仓 pytest 有 ~114 失败 + 9 错误的历史存量**（wb_login/console 移动端/upstream_upload/perf_guardrails/trae sqlalchemy 等），与网关无关；评估改动用 `git checkout <基线> && pytest tests/ --ignore=tests/test_gateway_hardening.py -rf` 对比失败集合（tests/ 大多未入 git，worktree 里没有）。
 - tests/ 目录在 .gitignore 里，新测试文件要 `git add -f`。
+
+
+## 2026-11-04 增补（大池列表/导出/导入/UI）
+
+- **服务端分页已全面接入**：`admin/platform/shared.py` 的 `list_page_params / apply_account_filters / account_order / summarize_accounts_sql` 是四平台统一的分页基建；无 `page` 参数=旧全量行为（Key 表单等旧调用方兼容）。summary 走 SQL 聚合，**tab 计数不含 status 筛选**（显示全池分布）。验证入口：`python -m pytest tests/test_list_pagination.py`（8 用例，内存 SQLite + TestClient）。
+- 前端统一状态 `window._accListState` + `accListQS/accSearchInput/accListReload/accPageTo/accSelectedIds/withPick`（console-app.js）；行勾选列用 `withPick(rowHtml,id)` 注入，不动各平台行构造器。
+- 导出分片：`/api/accounts/export-async` 新增 `offset`（与 limit 组合成第 N 片）；前端导出弹窗 scope=selected（读勾选）/slice。
+- **trae SOLO 工具槽字段必须一次给全**（`{"_n":n}` 惰性初始化曾致 100% KeyError 断流，f324a5e 修复）；`_solo_open_tool` 开块后不得立即 stop/done（参数多帧增量），统一 finish 段关闭。冒烟套件：`python -I tests/test_platform_smoke.py`（9 用例）。
+- **真实链路冒烟**：`_scratch/real_smoke.py`（不入 git）——真实 DB 凭证→真实上游，loomy 工具调用/协议完整性、trae/qoder 流式全过。注意：trae token 在 auth_json 加密层，必须走 `trae_pool.credentials()` 解密，直接 `client.token_of(account)` 拿到的是空。
+- UI：确认框图标 key 无 `fa-` 前缀；遮罩统一 rgba(0,0,0,.45~.55)（用户否决 slate 蓝灰）；docs/protocol-bridge-handoff.md 与 docs/branch-policy.md 已落项目（docs/ 在 gitignore，提交要 -f）。
