@@ -503,6 +503,17 @@ def account_job(job_id: str):
     return job.snapshot()
 
 
+@router.get("/probe")
+def probe(_: bool = Depends(require_admin)):
+    """启动探针：只验凭据，**不碰账号表**。
+
+    控制台首屏原来用 `GET /api/accounts` 判断"是否已登录"，账号池上万条时
+    这一步会把整张表拖下来，期间应用一直藏着不显示，用户看到的就是
+    "页面出来了但按钮全都点不了"。这里换成一个 O(1) 的鉴权探针。
+    """
+    return {"ok": True}
+
+
 @router.post("/count")
 def count_accounts(request: Request = None, _: bool = Depends(require_admin),
                    db: Session = Depends(get_db)):
@@ -1376,11 +1387,19 @@ def _dt(v) -> str:
 
 
 @router.get("/scan-local")
-def scan_local(_: bool = Depends(require_admin)):
-    """扫描本机 WorkBuddy/CodeBuddy 登录态目录，列出发现的账号（不读 token 内容到前端）。"""
+def scan_local(request: Request = None, _: bool = Depends(require_admin),
+               db: Session = Depends(get_db)):
+    """扫描本机 WorkBuddy/CodeBuddy 登录态目录，列出发现的账号（不读 token 内容到前端）。
+
+    **号池交叉对比放在服务端做**：早先前端为了建一个 uid 集合去 `GET /api/accounts`，
+    而那个接口是全量返回（且逐行解析 auth_json 算令牌徽标）。账号池到几千几万条时，
+    点「扫描本机」会像死了一样没有任何反应 —— 用户看到的就是"按钮点不了"。
+    这里改成只按扫描到的几十个 uid 做一次 IN 查询 + 两次 count，与池子大小无关。
+    """
     d = _client_auth_dir()
     if not os.path.isdir(d):
-        return {"dir": d, "exists": False, "active_uid": None, "items": []}
+        return {"dir": d, "exists": False, "active_uid": None, "items": [],
+                "pool_total": 0, "pool_only": 0, "pool_only_sample": []}
     active_uid = None
     active_file = os.path.join(d, "workbuddy-desktop.info")
     if os.path.exists(active_file):
@@ -1433,7 +1452,32 @@ def scan_local(_: bool = Depends(require_admin)):
             "expires_ts": expires_at,
             "credential_error": credential_error,
         })
-    return {"dir": d, "exists": True, "active_uid": active_uid, "items": items}
+
+    # ---- 号池交叉对比（服务端做，不把全量账号发给前端）----
+    from admin.platform import scope as platform_scope
+    platform, realm = platform_scope.from_request(request)
+    pool = db.query(Account)
+    if platform:
+        pool = platform_scope.filter_accounts(pool, db, platform, realm)
+
+    scan_uids = [it["uid"] for it in items if it.get("uid")]
+    existing: set[str] = set()
+    if scan_uids:
+        existing = {u for (u,) in pool.with_entities(Account.uid)
+                    .filter(Account.uid.in_(scan_uids)).all() if u}
+    for it in items:
+        it["in_pool"] = it.get("uid") in existing
+
+    pool_total = pool.with_entities(func.count(Account.id)).scalar() or 0
+    only_q = pool.filter(Account.uid.isnot(None))
+    if scan_uids:
+        only_q = only_q.filter(~Account.uid.in_(scan_uids))
+    pool_only = only_q.with_entities(func.count(Account.id)).scalar() or 0
+    pool_only_sample = [u for (u,) in only_q.with_entities(Account.uid).limit(3).all() if u]
+
+    return {"dir": d, "exists": True, "active_uid": active_uid, "items": items,
+            "pool_total": pool_total, "pool_only": pool_only,
+            "pool_only_sample": pool_only_sample}
 
 
 @router.post("/import-local")

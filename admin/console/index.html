@@ -17,7 +17,7 @@
   <!-- 浏览器端自检上报：**必须是第一个 <script>**，才能在其他脚本执行/出错之前
        注册 window error 捕获，拿到真实的 filename:line:col。它会把自己看到的
        错误来源、脚本资源状态、注入痕迹 POST 回 /api/client-diag/report。 -->
-  <script src="/admin/assets/boot-diag.js?v=20261103-diag1"></script>
+  <script src="/admin/assets/boot-diag.js?v=20261103-diag2"></script>
   <script src="/admin/assets/theme.js?v=20261031-r2"></script>
   <script src="/admin/assets/filter-combobox.js?v=20261102-ui1"></script>
   <!--
@@ -897,7 +897,7 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261103-split1"></script>
+<script defer src="/admin/assets/console-app.js?v=20261103-scan1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -1388,7 +1388,7 @@
           <button type="button" onclick="openPhoneLogin()" class="console-btn primary"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>手机号登录</button>
           <button type="button" onclick="openUpload()" class="console-btn "><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg>导入账号</button>
           <span class="intake-divider" aria-hidden="true"></span>
-          <button type="button" onclick="scanLocal()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg>扫描本机</button>
+          <button type="button" onclick="scanLocal(this)" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg>扫描本机</button>
           <button type="button" onclick="openExport()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 16v4h16v-4"/></svg>导出</button>
           <button type="button" onclick="openAddAccount()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>手动添加</button>
         </div>

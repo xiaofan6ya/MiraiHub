@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var BUILD = "20261103-diag1";
+  var BUILD = "20261103-diag2";
   var ENDPOINT = "/api/client-diag/report";
   var rec = {
     build: BUILD,
@@ -31,6 +31,8 @@
     globals: [],
     assets: [],
     blocked: [],
+    clicks: [],     // 点击是否真的到达页面（区分「被盖住」和「处理器没跑」）
+    stalls: [],     // 主线程停摆 / 调试器暂停（Pause on exceptions 会让整页冻结）
     doc: {},
     fns: {},
     sent: false
@@ -319,6 +321,42 @@
     }
     if (document.body) render(); else document.addEventListener("DOMContentLoaded", render);
   }
+
+  // ---- 5.5) 点击追踪：确认点击事件真的到达了页面 -------------------------
+  //
+  // 「按钮点了没反应」有三种完全不同的原因，必须能区分开：
+  //   a) 点击被别的层挡住  → elementFromPoint 命中测试能看出（blocked）
+  //   b) 点击到了，但内联处理器没跑 / 跑挂了 → 这里记录 act（onclick 原文）
+  //   c) 整页被冻结（DevTools 的 Pause on exceptions、断点、主线程长任务）
+  //      → 下面的 stall 检测：定时器间隔突然拉大就是被暂停过
+  document.addEventListener("click", function (e) {
+    try {
+      var el = e.target;
+      if (!el || el.nodeType !== 1) return;
+      if (rec.clicks.length < 12) {
+        var host = el.closest ? el.closest("[onclick]") : null;
+        rec.clicks.push({
+          sel: String(el.tagName || "").toLowerCase() + (el.id ? "#" + el.id : ""),
+          hit: !!host,
+          act: host ? String(host.getAttribute("onclick") || "").slice(0, 60) : "",
+          at: Math.round(performance.now())
+        });
+      }
+      schedule();
+    } catch (err) { /* 追踪本身不能影响页面 */ }
+  }, true);
+
+  (function watchStall() {
+    var last = performance.now();
+    setInterval(function () {
+      var now = performance.now();
+      var gap = now - last;
+      last = now;
+      if (gap > 2500 && rec.stalls.length < 8) {
+        rec.stalls.push({ gap: Math.round(gap), at: Math.round(now) });
+      }
+    }, 250);
+  })();
 
   // ---- 6) 两个时间点上报：load 后（早期注入）与 8s 后（延迟注入）---------
   window.addEventListener("load", function () {

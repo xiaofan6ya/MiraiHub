@@ -5695,25 +5695,49 @@ async function doLoadRequestUsage(page){
 }
 
 /* 扫描本机账号（已按 UID 去重 + 标记号池已有；解释「磁盘无文件但号池已有」的情况） */
-async function scanLocal(){
-  const r = await api("/api/accounts/scan-local"); const d = await r.json().catch(()=>({}));
-  if(!r.ok){ toast("扫描失败","err"); return; }
-  if(!d.exists){ openModal(`<h3 class="font-bold mb-3">扫描本机账号</h3><p class="text-sm text-slate-500">未找到登录目录：<br><code class="text-xs">${esc(d.dir||"")}</code></p><div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`); return; }
-  // 交叉对比号池，标出「已在号池但本机无登录文件」的账号（如多设备导入的情况）
-  let poolUids = new Set();
-  try { const ar = await api("/api/accounts"); const ad = await ar.json(); poolUids = new Set((ad.items||[]).map(a=>a.uid)); } catch(e){}
+async function scanLocal(btn){
+  // 立刻进入忙碌态：按钮转圈 + 全局进度条（>120ms 才亮）。
+  // 早先前端拿不到按钮、又没有 try/catch —— 请求一慢或一抛异常，
+  // 界面上什么都不会发生，用户看到的就是「点了没反应」。
+  const target = (btn && btn.nodeType === 1) ? btn
+    : document.querySelector('[onclick^="scanLocal("]');
+  const doScan = async () => {
+    let r, d;
+    try {
+      r = await api("/api/accounts/scan-local");
+      d = await r.json().catch(()=>({}));
+    } catch (e) {
+      toast("扫描失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    if (!r.ok) {
+      toast("扫描失败（HTTP " + r.status + "）" + (d && d.detail ? "：" + d.detail : ""), "err");
+      return;
+    }
+    if (!d.exists) { openModal(`<h3 class="font-bold mb-3">扫描本机账号</h3><p class="text-sm text-slate-500">未找到登录目录：<br><code class="text-xs">${esc(d.dir||"")}</code></p><div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`); return; }
+    openScanModal(d);
+  };
+  if (target && wbBusyStart(target)) {
+    try { await doScan(); } finally { wbBusyDone(target); }
+  } else {
+    await doScan();
+  }
+}
+
+/** 渲染扫描结果弹窗（号池交叉对比已由服务端算好，这里不再拉全量账号）。 */
+function openScanModal(d){
   // 过滤国际版账号（www.workbuddy.ai）：本网关只对接国内版
   // （workbuddy.cn / copilot.tencent.com）。国际版的登录态拿到国内站
   // 也用不了，列出来只会让人误以为「能扫码但不能导入」。
   const isIntl = (it) => /(^|\.)workbuddy\.ai$/i.test(String(it && it.domain || ""));
   d.items = (d.items || []).filter(it => !isIntl(it));
 
-  const scanUids = new Set((d.items||[]).map(it=>it.uid));
-  const onlyInPool = [...poolUids].filter(u => u && !scanUids.has(u));
-  const notePool = onlyInPool.length ? `<div class="mt-3 text-[11px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2 border border-amber-100">提示：号池中还有 ${onlyInPool.length} 个账号（如 ${esc(onlyInPool.slice(0,3).join("、"))}${onlyInPool.length>3?' 等':''}）本机登录目录里找不到对应 .info 文件——它们通常是其它设备导入或登录态已清理，不会出现在下方扫描列表，属于正常情况。</div>` : "";
+  const onlyInPool = (d.pool_only || 0);
+  const onlySample = (d.pool_only_sample || []);
+  const notePool = onlyInPool > 0 ? `<div class="mt-3 text-[11px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2 border border-amber-100">提示：号池中还有 ${onlyInPool} 个账号（如 ${esc(onlySample.join("、"))}${onlyInPool>onlySample.length?' 等':''}）本机登录目录里找不到对应 .info 文件——它们通常是其它设备导入或登录态已清理，不会出现在下方扫描列表，属于正常情况。</div>` : "";
   const scanTotal = (d.items||[]).length;
   const currentCount = (d.items||[]).filter(it=>it.is_active).length;
-  const poolExisting = (d.items||[]).filter(it=>poolUids.has(it.uid)).length;
+  const poolExisting = (d.items||[]).filter(it=>it.in_pool).length;
 
   const makeExpLabel = (it) => {
     const expired = it.expires_ts && it.expires_ts < Date.now();
@@ -5726,7 +5750,7 @@ async function scanLocal(){
   };
 
   const desktopRows = (d.items||[]).map(it => {
-    const inPool = poolUids.has(it.uid);
+    const inPool = !!it.in_pool;
     const shortUid = (it.uid||"").length > 12 ? it.uid.slice(0,8)+"..."+it.uid.slice(-4) : (it.uid||"-");
     const fileName = it.file ? it.file.replace(/^.*[\\\\/]/,'') : "-";
     const { expired, label } = makeExpLabel(it);
@@ -5754,7 +5778,7 @@ async function scanLocal(){
   }).join("") || `<tr><td colspan="3" class="px-3 py-8 text-center text-slate-400 text-sm">未发现 .info 登录文件</td></tr>`;
 
   const mobileCards = (d.items||[]).map(it => {
-    const inPool = poolUids.has(it.uid);
+    const inPool = !!it.in_pool;
     const shortUid = (it.uid||"").length > 12 ? it.uid.slice(0,8)+"..."+it.uid.slice(-4) : (it.uid||"-");
     const fileName = it.file ? it.file.replace(/^.*[\\\\/]/,'') : "-";
     const { expired, label } = makeExpLabel(it);
@@ -12389,7 +12413,19 @@ const _localConsoleShell = Boolean(window.pywebview?.api || window.WBAndroid?.se
   || new URLSearchParams(location.search).has("desktop"));
 if (!_localConsoleShell) {
   const _booted = () => !document.getElementById("app").classList.contains("hidden");
-  api("/api/accounts").then(r => {
+  // 看门狗：无论探针成功/失败/卡住，最多 8 秒后必须把界面放出来。
+  // 之前这里若被一个慢请求（老实现是 `GET /api/accounts` 全量拉取）拖住，
+  // 应用会一直藏着，用户看到的就是「页面出来了但按钮全都点不了」。
+  setTimeout(() => {
+    try {
+      if (!_booted()) {
+        enterApp();
+        console.warn("[WB] 启动探针超时，已强制进入控制台");
+      }
+    } catch (e) { /* 忽略 */ }
+  }, 8000);
+  // 只验凭据，不碰账号表：O(1)，与号池大小无关。
+  api("/api/accounts/probe").then(r => {
     if (r.ok) { if (!_booted()) enterApp(); return; }
     if (r.status === 401 || r.status === 403) {
       // token 和 Cookie **都**失效才会走到这里（`require_admin` 两个都认）。
