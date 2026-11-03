@@ -1,0 +1,12409 @@
+let _confirmResolve = null;
+
+function uiConfirm(opts) {
+  opts = opts || {};
+  const mask = $("#confirmMask");
+  if (!mask) return Promise.resolve(window.confirm(opts.message || "确认？")); // 兜底
+
+  const danger = opts.danger !== false; // 默认按危险操作处理（多为删除/覆盖）
+  const kind = opts.kind || (danger ? "danger" : "info");
+  const icons = { danger: "fa-triangle-exclamation", warn: "fa-circle-exclamation", info: "fa-circle-question" };
+  const tones = { danger: "danger", warn: "warn", info: "info" };
+
+  $("#confirmIco").className = "confirm-ico " + (tones[kind] || "danger");
+  $("#confirmIco").innerHTML = ic(icons[kind] || icons.danger, "confirm-glyph");
+  $("#confirmTitle").textContent = opts.title || "确认操作";
+  $("#confirmMsg").textContent = opts.message || "";   // textContent：不解析 HTML，防注入
+  const okBtn = $("#confirmOk");
+  okBtn.textContent = opts.okText || "确认";
+  okBtn.className = "px-3.5 py-1.5 rounded-lg text-sm " +
+    (kind === "danger" ? "bg-red-600 hover:bg-red-700 text-white" : "btn-primary");
+
+  mask.classList.add("show");
+  setTimeout(() => okBtn.focus(), 30);
+
+  return new Promise(resolve => { _confirmResolve = resolve; });
+}
+
+function _confirmClose(val) {
+  const mask = $("#confirmMask");
+  if (mask) mask.classList.remove("show");
+  if (_confirmResolve) { const r = _confirmResolve; _confirmResolve = null; r(val); }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const ok = $("#confirmOk"), cancel = $("#confirmCancel"), mask = $("#confirmMask");
+  if (ok) ok.onclick = () => _confirmClose(true);
+  if (cancel) cancel.onclick = () => _confirmClose(false);
+  // 点击遮罩空白处 = 取消（点 .confirm-box 内部不关闭）
+  if (mask) mask.addEventListener("click", e => {
+    if (e.target === mask) _confirmClose(false);
+  });
+  document.addEventListener("keydown", e => {
+    if (!mask || !mask.classList.contains("show")) return;
+    if (e.key === "Escape") { e.stopPropagation(); _confirmClose(false); }
+    if (e.key === "Enter") { e.stopPropagation(); _confirmClose(true); }
+  }, true); // capture：抢在全局 Esc 关 modal 之前处理
+});
+
+/* ==================== 自研下拉组件（替换原生 select）====================
+ * 原生 select 的弹出层由操作系统绘制，无法套用主题样式，因此自研。
+ * 用法：
+ *   <div class="ui-select" id="mySel"></div>
+ *   uiSelect('#mySel', { value, options:[{value,label}], onChange(v), placeholder })
+ * 也提供 uiSelectHTML(id, opts) 直接生成 HTML 字符串（用于弹窗内嵌）。
+ */
+const _uiSelectMap = new Map();  // id -> {options, value, onChange}
+
+function uiSelectHTML(id, opts) {
+  opts = opts || {};
+  const options = opts.options || [];
+  const val = opts.value != null ? String(opts.value) : (options[0] ? String(options[0].value) : "");
+  _uiSelectMap.set(id, { options, value: val, onChange: opts.onChange || null });
+
+  const cur = options.find(o => String(o.value) === val);
+  const label = cur ? cur.label : (opts.placeholder || "请选择");
+  const cls = opts.class || "border rounded-lg px-3 py-2 text-sm";
+
+  return `<div class="ui-select" id="${id}">
+    <div class="ui-select-btn ${cls}" onclick="uiSelectToggle(${jsv(id)}, event)">
+      <span class="ui-select-label truncate">${esc(label)}</span>
+      <span class="wb-icon ui-select-arrow"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+    </div>
+    <div class="ui-select-panel">
+      ${options.map(o => `
+        <div class="ui-select-opt ${String(o.value) === val ? "sel" : ""}"
+             data-value="${esc(String(o.value))}" onclick="uiSelectPick(${jsv(id)},this.dataset.value,event)">
+          <span class="truncate">${esc(o.label)}</span>
+          ${String(o.value) === val ? '<span class="wb-icon ui-select-check"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>' : ""}
+        </div>`).join("") || '<div class="ui-select-opt text-slate-400">无可选项</div>'}
+    </div>
+  </div>`;
+}
+
+function uiSelectClose(el) {
+  if (!el || !el.classList.contains("open") || el.classList.contains("closing")) return;
+  el.classList.add("closing");
+  // 面板上收动画播完再摘掉 open（约 135ms），避免闪变
+  setTimeout(() => el.classList.remove("open", "closing"), 135);
+}
+function uiSelectToggle(id, ev) {
+  if (ev) ev.stopPropagation();
+  const el = $("#" + id);
+  if (!el) return;
+  const wasOpen = el.classList.contains("open");
+  // 同时只开一个，避免面板互相重叠
+  document.querySelectorAll(".ui-select.open").forEach(x => { if (x.id !== id) uiSelectClose(x); });
+  if (wasOpen) uiSelectClose(el); else el.classList.add("open");
+}
+
+function uiSelectPick(id, value, ev, notify = true) {
+  if (ev) ev.stopPropagation();
+  const st = _uiSelectMap.get(id);
+  const el = $("#" + id);
+  if (!st || !el) return;
+  st.value = value;
+  const o = st.options.find(x => String(x.value) === value);
+  const lab = el.querySelector(".ui-select-label");
+  if (lab && o) lab.textContent = o.label;
+  el.querySelectorAll(".ui-select-opt").forEach(opt => {
+    const on = opt.dataset.value === value;
+    opt.classList.toggle("sel", on);
+    // 重建勾选图标
+    const old = opt.querySelector(".ui-select-check");
+    if (on && !old) opt.insertAdjacentHTML("beforeend", '<span class="wb-icon ui-select-check"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>');
+    if (!on && old) old.remove();
+  });
+  uiSelectClose(el);
+  if (notify && st.onChange) st.onChange(value, o);
+}
+
+function uiSelectValue(id) {
+  const st = _uiSelectMap.get(id);
+  return st ? st.value : "";
+}
+function uiSelectSet(id, value, notify = true) {
+  uiSelectPick(id, String(value), null, notify);
+}
+const $ = (s) => document.querySelector(s);
+const TOKEN_KEY = "wb_admin_token";
+/* 用量日志 SSE 句柄。
+ *
+ * **必须在这里声明**：`activateTab()` 在模块顶层（首屏）就会调用，
+ * 而它会经 stopLogActivity → stopLogUsageStream 访问这两个变量。
+ * 之前把它们声明在 12000 行之后，导致首屏执行到那时抛
+ * 「Cannot access '_logUsageReconnect' before initialization」，
+ * 整个控制台主脚本从那一行起全部失效（页面看起来"点了没反应"）。
+ */
+let _modelBusyTimer = null;
+let _modelBusy = {};
+let _modelBusyLoading = false;
+let _modelHealthLoading = null;
+let _modelBatchBusy = false;
+let _sentinelTimer = null;
+let _actionTipTimer = null;
+let _actionTipHideTimer = null;
+let _accountResourceTimer = null;
+let _jobTimer = null;
+let _unpackTimer = null;
+let _appSource = null;
+let _schedulePollTimer = null;
+let _chartTipTimer = null;
+let _modalCloseTimer = null;
+let _logUsageSource = null;
+let _logUsageReconnect = null;
+let _logUsagePollTimer = null;
+let _logLiveSource = null;
+let _logLiveRows = new Map();
+
+
+
+
+
+
+let TOKEN = localStorage.getItem(TOKEN_KEY) || "";
+// 桌面托盘的「在浏览器中打开」会带一次性 JWT（?token=）：普通浏览器没有 pywebview 桥，
+// ?desktop=1 的免密通道走不通。取到即存 localStorage 并清掉参数，避免 token 留在地址栏/历史里。
+(() => {
+  try {
+    const t = new URLSearchParams(location.search).get("token");
+    if (t) {
+      TOKEN = t; localStorage.setItem(TOKEN_KEY, t);
+      const u = new URL(location.href);
+      u.searchParams.delete("token");
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    }
+  } catch (e) { /* 老浏览器兜底：忽略，走登录表单 */ }
+})();
+
+/* 时间格式化：数据库存的是 UTC，统一 +8 展示为北京时间（与服务器时区无关） */
+function fmtTime(s, withSec = true) {
+  if (!s) return FMT_EMPTY;
+  const m = String(s).replace("T", " ").match(/(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return String(s).replace("T", " ");
+  const Y = +m[1], Mo = +m[2], D = +m[3], H = +m[4], Mi = +m[5], S = +m[6];
+  const total = Date.UTC(Y, Mo - 1, D, H, Mi, S) + 8 * 3600 * 1000;
+  const d = new Date(total);
+  const p = (n) => String(n).padStart(2, "0");
+  const out = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  return withSec ? out + ":" + p(d.getUTCSeconds()) : out;
+}
+/* ---- 表格展示格式的统一出口（见 docs/table-format-audit.md） ----
+ * 空值一律 emdash：`-` 会和负号/分隔符混淆，且在数字列里会被读成「零」。
+ * 以前同一个控制台里同时有 `-` / `—` / `未知` / `未观测到限制` 四种写法。 */
+const FMT_EMPTY = "—";
+function fmtEmpty(v) {
+  if (v === null || v === undefined || v === "") return FMT_EMPTY;
+  if (typeof v === "number" && !Number.isFinite(v)) return FMT_EMPTY;
+  return String(v);
+}
+/* 比率：统一一位小数百分比；无样本给 emdash 而不是 0.0%（0.0% 会被当成"测过且为零"） */
+function fmtPct(v, digits = 1) {
+  if (v === null || v === undefined || v === "") return FMT_EMPTY;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return FMT_EMPTY;
+  return (n * 100).toFixed(digits) + "%";
+}
+/* 耗时：毫秒进、自动选单位出。
+ *
+ * 为什么必须做：之前全控制台写死 `ms`，几万毫秒也照写 `31245 ms` ——
+ * 数字长得读不出量级，用户还得自己数位数。统一走这里：
+ *
+ *     < 1000ms      ->  "845 ms"
+ *     < 60s         ->  "3.2s"
+ *     < 60min       ->  "2分15秒"
+ *     >= 60min      ->  "1小时02分"
+ *
+ * 入参单位固定是**毫秒**（后端 elapsed_ms / total_ms / ttfb_ms 都是毫秒）。
+ * 空值/非数一律 emdash，不显示 0 ms（0 会被读成「瞬间」而实际是没测到）。 */
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined || ms === "") return FMT_EMPTY;
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return FMT_EMPTY;
+  if (n < 1000) return Math.round(n) + " ms";
+  const totalSec = n / 1000;
+  if (totalSec < 60) return totalSec.toFixed(1) + "s";
+  const totalMin = Math.floor(totalSec / 60);
+  const sec = Math.round(totalSec - totalMin * 60);
+  if (totalMin < 60) {
+    // 59.6s 四舍五入成 60 → 进位成 1 分钟，避免出现「0分60秒」
+    return sec === 60 ? (totalMin + 1) + "分" : totalMin + "分" + String(sec).padStart(2, "0") + "秒";
+  }
+  const hour = Math.floor(totalMin / 60);
+  const min = totalMin - hour * 60;
+  return hour + "小时" + String(min).padStart(2, "0") + "分";
+}
+function fmtK(n) {
+  n = Number(n) || 0;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
+
+let _localSessionPromise = null, _localSessionReady = false;
+async function ensureLocalSession(force = false) {
+  if (_localSessionReady && !force) return;
+  if (!_localSessionPromise) _localSessionPromise = (async () => {
+    const token = window.pywebview?.api ? (await pywebview.api.desktop_login()).token : await WBAndroid.sessionToken();
+    if (!token) throw new Error('本地连接凭据未准备好');
+    TOKEN = token; localStorage.setItem(TOKEN_KEY, token); _localSessionReady = true;
+  })().finally(() => { _localSessionPromise = null; });
+  return _localSessionPromise;
+}
+async function api(path, opts = {}) {
+  _loadStart();
+  try {
+    return await _apiRaw(path, opts);
+  } finally {
+    _loadEnd();
+  }
+}
+
+/* 全局加载态：所有面板的请求都从这里过，只有「慢请求」才亮条。
+ *
+ * 为什么用计数 + 120ms 延迟，而不是每个面板自己 setLoading：
+ *   · 一个面板往往并发发 2~4 个请求（列表 + 统计 + 平台卡），
+ *     各自开关会让加载条疯狂闪；
+ *   · 120ms 内返回的请求用户根本感知不到，亮一下反而像闪烁。
+ * 计数归零才收起，慢请求才会被看见 —— 用户看到的「页面在动」，不是卡死。 */
+let _apiPending = 0, _apiBarTimer = null;
+function _loadStart() {
+  _apiPending += 1;
+  if (_apiPending !== 1) return;
+  _apiBarTimer = setTimeout(() => {
+    const bar = document.getElementById("globalLoadBar");
+    if (bar) bar.classList.add("on");
+  }, 120);
+}
+function _loadEnd() {
+  _apiPending = Math.max(0, _apiPending - 1);
+  if (_apiPending > 0) return;
+  if (_apiBarTimer) { clearTimeout(_apiBarTimer); _apiBarTimer = null; }
+  const bar = document.getElementById("globalLoadBar");
+  if (bar) bar.classList.remove("on");
+  // 这一屏的数据都回来了：把面板骨架屏收掉（内容早就在它下面布局好了，
+  // 淡出时不会位移，所以不会有「抽搐」）。
+  try { _panelSkeletonFlush(); } catch (e) { /* 骨架只是装饰，不能影响请求 */ }
+}
+
+async function _apiRaw(path, opts = {}) {
+  const localShell = window.pywebview?.api || window.WBAndroid?.sessionToken;
+  // Prepare the non-expiring shell credential before the first request;
+  // concurrent panel loads share one bridge call and never need a login form.
+  if (localShell) await ensureLocalSession();
+  opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
+  // 平台作用域：**每个**后台请求都带上当前平台，后端据此收窄统计口径。
+  // 只给账号池加平台筛选是不够的 —— 使用记录/日志/积分到期那些面板
+  // 拿到的数据必须跟着平台走，否则平台一多就全是混算的数字。
+  // 调用方显式给了 X-Platform 时以调用方为准（导出、对照查询等场景）。
+  if (window.WBPlatform && !opts.headers["X-Platform"]) {
+    Object.assign(opts.headers, window.WBPlatform.header());
+  } else if (!opts.headers["X-Platform"]) {
+    // `platform-switch.js` 在控制台主脚本**之后**加载 —— 首次渲染时
+    // `window.WBPlatform` 还不存在。此时若不补 header，后端会按「全部平台」
+    // 统计，表现是「切到 WorkBuddy，底部却显示 5 个账号」。
+    // 直接读 localStorage 的落库值（`workbuddy` / `trae-cn` / `trae-intl`），
+    // 与 WBPlatform.header() 同源，不引入第二套真相。
+    try {
+      const saved = JSON.parse(localStorage.getItem("wb_platform_current") || "null");
+      const value = (saved && saved.platform) || "";
+      if (value) opts.headers["X-Platform"] = value;
+    } catch (_) { /* 存储损坏时按「全部平台」处理 */ }
+  }
+  let response = await fetch(path, opts);
+  if (response.status === 401 && localShell) {
+    try {
+      await ensureLocalSession(true);
+      opts.headers['X-Admin-Token'] = TOKEN;
+      response = await fetch(path, opts);
+    } catch (_) {}
+  }
+  return response;
+}
+
+/* ==================== 运行配置（.env 常用项动态改） ==================== */
+let _runtimeFields = [];
+let _runtimeDirty = new Set();
+let _runtimeGroup = "";
+
+async function loadRuntimeConfig() {
+  const host = document.getElementById("runtimeConfigHost");
+  if (!host) return;
+  try {
+    const { ok, data } = await safeJson(await api("/api/runtime-config"));
+    if (!ok) throw new Error(data.detail || "加载失败");
+    _runtimeFields = data.fields || [];
+    _runtimeDirty = new Set();
+    const groups = [...new Set(_runtimeFields.map(f => f.group))];
+    if (!groups.includes(_runtimeGroup)) _runtimeGroup = groups[0] || "";
+    renderRuntimeConfig(groups);
+  } catch (e) {
+    host.innerHTML = `<p class="fs-12" style="color:var(--danger)">运行配置加载失败：${esc(e.message)}</p>`;
+  }
+}
+function renderRuntimeConfig(groups) {
+  const host = document.getElementById("runtimeConfigHost");
+  const overridden = _runtimeFields.filter(f => f.overridden).length;
+  const dirtyCount = _runtimeDirty.size;
+  host.innerHTML = `
+    <div class="rt-toolbar">
+      <div class="rt-group-sel" id="runtimeGroupHost"></div>
+      <span class="rt-summary">${overridden ? `<span class="rt-override">已覆盖 ${overridden} 项</span>` : "全部为 .env 默认值"}${dirtyCount ? ` · <span style="color:var(--warn)">待保存 ${dirtyCount} 项</span>` : ""}</span>
+    </div>
+    <div class="rt-table">${_runtimeFields.filter(f => f.group === _runtimeGroup).map(runtimeFieldHtml).join("")}</div>`;
+  const selHost = document.getElementById("runtimeGroupHost");
+  if (selHost) {
+    selHost.innerHTML = uiSelectHTML("runtimeGroupSel", {
+      value: _runtimeGroup,
+      options: groups.map(g => {
+        const n = _runtimeFields.filter(f => f.group === g && f.overridden).length;
+        return { value: g, label: g + (n ? ` · 已改 ${n}` : "") };
+      }),
+      onChange: value => { _runtimeGroup = value; renderRuntimeConfig(groups); },
+    });
+    initUISelects([["runtimeGroupSel", "配置分组"]]);
+  }
+  bindRuntimeControls(groups);
+}
+function runtimeFieldHtml(f) {
+  const id = "rt-" + f.attr;
+  const tips = [f.desc];
+  if (f.kind === "int" || f.kind === "float") tips.push((f.max != null ? "范围 " + f.min + "~" + f.max : "最小 " + f.min) + " · 默认 " + f.default);
+  if (f.kind === "str") tips.push("默认 " + (f.default ?? "空"));
+  tips.push("保存后即时生效");
+  const info = `<span class="wb-icon rt-info"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></span>`;
+  const badge = f.overridden ? `<span class="rt-override" tabindex="0" data-tooltip="已覆盖默认值" data-tooltip-description="当前值偏离 .env 默认；点右侧「恢复默认」回落">已改</span>` : "";
+  const restart = "";
+  let control;
+  if (f.kind === "bool") {
+    control = `<label class="model-switch rt-switch"><input type="checkbox" id="${id}" ${f.value ? "checked" : ""} data-attr="${f.attr}" /><span></span></label>`;
+  } else if (f.kind === "str") {
+    control = `<input id="${id}" data-attr="${f.attr}" value="${esc(String(f.value ?? ""))}" placeholder="${esc(f.default ?? "")}" data-tooltip="默认：${esc(String(f.default ??""))}" />`;
+  } else {
+    control = `<input id="${id}" type="number" data-attr="${f.attr}" value="${f.value ?? ""}" min="${f.min ?? ""}"${f.max != null ? ` max="${f.max}"` : ""} step="${f.step ?? 1}" data-tooltip="${f.max != null ?"范围 " + f.min + "~" + f.max : "最小 " + f.min} · 默认 ${f.default}" />`;
+  }
+  return `<div class="rt-field${f.overridden ? " is-overridden" : ""}" id="wrap-${id}">
+    <div class="rt-label"><span>${esc(f.label)}${info}${badge}${restart}</span></div>
+    <div class="rt-control">${control}
+      <button type="button" class="rt-reset" data-attr="${f.attr}" data-tooltip="恢复默认" data-tooltip-description="清除覆盖，回落 .env 默认值：${esc(String(f.default ?? ""))}" ${f.overridden || _runtimeDirty.has(f.attr) ? "" : "hidden"}>恢复默认</button>
+    </div>
+  </div>`;
+}
+function bindRuntimeControls(groups) {
+  document.querySelectorAll("#runtimeConfigHost .rt-field [data-attr]").forEach(el => {
+    el.addEventListener("change", () => {
+      _runtimeDirty.add(el.dataset.attr);
+      const wrap = document.getElementById("wrap-rt-" + el.dataset.attr);
+      if (wrap) wrap.classList.add("is-dirty");
+      const resetBtn = wrap && wrap.querySelector(".rt-reset");
+      if (resetBtn) resetBtn.hidden = false;
+    });
+  });
+  document.querySelectorAll("#runtimeConfigHost .rt-reset").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const f = _runtimeFields.find(x => x.attr === btn.dataset.attr);
+      if (!f) return;
+      const el = document.getElementById("rt-" + f.attr);
+      if (f.kind === "bool") el.checked = !!f.default;
+      else el.value = f.kind === "str" ? (f.default ?? "") : (f.default ?? "");
+      el.dataset.reset = "1";
+      _runtimeDirty.add(f.attr);
+      const wrap = document.getElementById("wrap-rt-" + f.attr);
+      if (wrap) wrap.classList.add("is-dirty");
+    });
+  });
+}
+
+function askRestartAfterSave() {
+  openModal('<h3><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>配置已保存并即时生效</h3>' +
+    '<p class="my-3">一般无需重启。若想彻底刷新进程状态（例如刚恢复过备份），可立即重启：监督器会自动拉起新实例，约 10 秒恢复。</p>' +
+    '<div class="flex gap-2 justify-end mt-4"><button class="console-btn" onclick="closeModal()">暂不</button>' +
+    '<button class="console-btn rt-restart-btn" id="restartSvcBtn" onclick="WBReview.doRestartService()"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg></span>立即重启</button></div>', 'max-w-lg');
+}
+
+async function saveRuntimeConfig() {
+  const updates = {};
+  for (const attr of _runtimeDirty) {
+    const el = document.getElementById("rt-" + attr);
+    if (!el) continue;
+    if (el.dataset.reset === "1") { updates[attr] = null; continue; }
+    updates[attr] = el.type === "checkbox" ? (el.checked ? 1 : 0) : el.value;
+  }
+  if (!Object.keys(updates).length) { toast("没有更改需要保存"); return; }
+  const status = document.getElementById("runtimeConfigStatus");
+  if (status) status.textContent = "保存中…";
+  try {
+    const { ok, data } = await safeJson(await api("/api/runtime-config", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ updates }),
+    }));
+    if (!ok) throw new Error(data.detail || "保存失败");
+    const errs = data.errors || {};
+    const errKeys = Object.keys(errs);
+    _runtimeFields = data.fields || _runtimeFields;
+    _runtimeDirty = new Set();
+    renderRuntimeConfig([...new Set(_runtimeFields.map(f => f.group))]);
+    if (errKeys.length) toast(`已保存，${errKeys.length} 项未通过校验：${errKeys.map(k => k + " " + errs[k]).join("；").slice(0, 120)}`, "err");
+    else {
+      const changed = (data.changed || []).length, reverted = (data.reverted || []).length;
+      toast(`已保存并生效：${changed} 项更新${reverted ? ` · ${reverted} 项恢复默认` : ""}`, "ok");
+      askRestartAfterSave();
+    }
+  } catch (e) {
+    toast("保存失败：" + e.message, "err");
+  } finally {
+    if (status) status.textContent = "";
+  }
+}
+
+async function loadInvitation() {
+  try {
+    const {ok, data} = await safeJson(await api('/api/settings/invitation'));
+    if (!ok) throw new Error(data.detail || '读取邀请设置失败');
+    $('#invitationInput').value = data.invite_code || '';
+    $('#invitationStatus').textContent = data.enabled ? '已启用' : '未启用';
+  } catch (e) { $('#invitationStatus').textContent = e.message; }
+}
+async function saveInvitation() {
+  const btn = $('#invitationSave');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const {ok, data} = await safeJson(await api('/api/settings/invitation', {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({value:$('#invitationInput').value})
+    }));
+    if (!ok) throw new Error(typeof data.detail === 'string' ? data.detail : '保存失败');
+    $('#invitationInput').value = data.invite_code || '';
+    $('#invitationStatus').textContent = data.enabled ? '已启用' : '未启用';
+    toast(data.enabled ? '邀请绑定已保存' : '邀请绑定已停用');
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; }
+}
+async function clearInvitation() {
+  if ($('#invitationSave').disabled) return;
+  $('#invitationInput').value = '';
+  await saveInvitation();
+}
+async function safeJson(r) {
+  /* 容错解析：后端偶发返回非 JSON（如 500 明文）时，避免报 "Unexpected token" 崩溃 */
+  const t = await r.text();
+  try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
+  catch (e) { return { ok: false, status: r.status, data: { detail: t || ("HTTP " + r.status), _parse_error: true } }; }
+}
+/* ============================================================================
+   按钮防呆：点下去立刻转圈 + 禁用，防重复提交
+   ----------------------------------------------------------------------------
+   参考站（workbuddy.cn）每个交互按钮都有这层：点下去图标立刻变成转圈，
+   按钮同时 disabled —— 用户马上知道「收到了」，也不会连点造成重复请求。
+
+   为什么不能只靠 `btn.disabled = true`：禁用态只是变灰，看不出在干什么；
+   而「保存/导入/同步」这类操作常常要等 1~3 秒，没有转圈就会以为按钮没反应，
+   于是再点一次 —— 那才是真正制造重复数据的来源。
+
+   用法：
+       await wbBusy(btn, () => api(...))          // 自动转圈 / 恢复
+       wbBusyStart(btn); ...; wbBusyDone(btn)     // 手动控制
+   ========================================================================== */
+const _WB_BUSY_SPIN = '<span class="wb-busy-spin"><svg viewBox="0 0 24 24" aria-hidden="true">'
+  + '<circle cx="12" cy="12" r="9" stroke-width="2.4" stroke-linecap="round" '
+  + 'fill="none" stroke="currentColor" stroke-dasharray="42 14"/></svg></span>';
+
+function wbBusyStart(btn) {
+  if (!btn || btn.dataset.wbBusy === "1") return false;
+  btn.dataset.wbBusy = "1";
+  btn.dataset.wbPrevHtml = btn.innerHTML;
+  btn.dataset.wbPrevDisabled = btn.disabled ? "1" : "0";
+  btn.disabled = true;
+  btn.classList.add("is-busy");
+  // 文本前插一个转圈；原本的图标保留，视觉上是「图标 + 转圈 + 文字」
+  btn.insertAdjacentHTML("afterbegin", _WB_BUSY_SPIN);
+  return true;
+}
+
+function wbBusyDone(btn, html) {
+  if (!btn || btn.dataset.wbBusy !== "1") return;
+  btn.dataset.wbBusy = "0";
+  btn.classList.remove("is-busy");
+  const prev = html != null ? html : (btn.dataset.wbPrevHtml || "");
+  btn.innerHTML = prev;
+  btn.disabled = btn.dataset.wbPrevDisabled === "1";
+  delete btn.dataset.wbPrevHtml;
+  delete btn.dataset.wbPrevDisabled;
+}
+
+/** 包一层异步任务：自动转圈/恢复，异常时恢复原样并把错误抛出去。 */
+async function wbBusy(btn, task) {
+  if (!wbBusyStart(btn)) return undefined;   // 已在忙碌中，忽略重复点击
+  try {
+    return await task();
+  } finally {
+    wbBusyDone(btn);
+  }
+}
+
+/* 兜底：任何带 `data-busy` 的按钮在表单提交时自动转圈（不改业务代码）。 */
+document.addEventListener("click", event => {
+  const btn = event.target.closest && event.target.closest("button[data-busy]");
+  if (!btn || btn.disabled) return;
+  // 200ms 没结束就点亮，避免瞬时操作闪一下
+  setTimeout(() => {
+    if (document.body.contains(btn) && btn.dataset.wbBusy !== "1") {
+      wbBusyStart(btn);
+      setTimeout(() => wbBusyDone(btn), 6000);  // 安全阀，防卡死
+    }
+  }, 200);
+}, true);
+
+/* 右下角提示（复刻 workbuddy.cn 的 toast 规格）
+ *
+ * 参考站实测规则：
+ *   position:fixed; left:50%; translate(-50%)   → 居中偏上，不是右下角
+ *   min-height:48px; padding:13px 16px; radius:12px
+ *   图标 18×18，按状态着色：成功 #40C8AE / 失败 #FF5263 / 信息 #3B82F6
+ *   进场 _slideIn .3s（translateY(-10px) 渐入），离开 opacity .3s ease-in
+ *
+ * 为什么要图标：纯文字条在扫视时很难一眼区分成功/失败，图标是状态的第一
+ * 视觉锚点；参考站连「关闭按钮」都给了，说明它把 toast 当正经消息而非闪现。
+ * 位置从右下角改到顶部居中，是因为右下角长期被浏览器/系统通知占用，
+ * 而且我们的操作按钮多在右上，提示在顶部跟视线落点更近。
+ */
+const TOAST_ICONS = {
+  ok: '<path d="M20 6 9 17l-5-5"/>',
+  err: '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+  warn: '<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+};
+
+function toast(msg, type = "ok") {
+  const kind = type === "err" || type === "error" ? "err"
+             : type === "warn" ? "warn"
+             : type === "info" ? "info" : "ok";
+  const host = $("#toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = `wb-toast wb-toast--${kind}`;
+  el.setAttribute("role", kind === "err" ? "alert" : "status");
+  el.innerHTML = `<span class="wb-toast-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${
+    TOAST_ICONS[kind] || TOAST_ICONS.ok}</svg></span>
+    <span class="wb-toast-msg"></span>
+    <button type="button" class="wb-toast-close" aria-label="关闭">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>`;
+  el.querySelector(".wb-toast-msg").textContent = msg;
+  const dismiss = () => {
+    if (el.dataset.leaving) return;
+    el.dataset.leaving = "1";
+    el.classList.add("is-leaving");
+    setTimeout(() => el.remove(), 300);   // 与 .3s 淡出对齐
+  };
+  el.querySelector(".wb-toast-close").addEventListener("click", dismiss);
+  host.appendChild(el);
+  // 首次出现才挂上间距（避免空容器撑高度）
+  host.classList.add("has-toast");
+  setTimeout(dismiss, kind === "err" ? 4200 : 3000);
+}
+
+function openModal(html, widthClass) {
+  if (_modalCloseTimer) { clearTimeout(_modalCloseTimer); _modalCloseTimer = null; }
+  $("#modal").classList.remove("closing");
+  $('#modal').dataset.closeOnly = '';
+  const box = $("#modalBox");
+  window.WBDateTimePicker?.destroyWithin(box);
+  // Reset every previous size, including the phone-login max-w-md class.
+  [...box.classList].filter(name => /^max-w-/.test(name)).forEach(name => box.classList.remove(name));
+  box.classList.add(widthClass || "max-w-6xl");
+  const sizes = {"max-w-sm":400,"max-w-md":480,"max-w-lg":640,"max-w-xl":720,
+    "max-w-2xl":800,"max-w-3xl":900,"max-w-4xl":1000,"max-w-6xl":1120};
+  box.style.setProperty("--modal-width", (sizes[widthClass] || 1120) + "px");
+  box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+  box.innerHTML = '<button type="button" class="modal-close-button" onclick="closeModal()" aria-label="关闭弹窗">×</button>' + html;
+  box.scrollTop = 0;
+  // CSS starts the entrance animation when the hidden dialog becomes visible.
+  // Updating an already open dialog must not force layout or replay its animation.
+  $("#modal").classList.remove("hidden");
+  $("#modal").classList.add("flex");
+}
+function closeModal() {
+  window.WBUsage?.closeDetail(); window.WBPhone?.closeRegion(); window.WBDateTimePicker?.close();
+  const m = $("#modal");
+  if (!m || m.classList.contains("hidden") || m.classList.contains("closing")) return;
+  m.classList.add("closing");
+  // 关闭动画播完再真正隐藏（约 175ms）
+  _modalCloseTimer = setTimeout(() => {
+    _modalCloseTimer = null;
+    m.classList.remove("closing", "flex"); m.classList.add("hidden");
+    if ($('#usageDiagnosticText') || $('#usageDetailLoading')) $('#modalBox').replaceChildren();
+  }, 175);
+}
+/**
+ * 直接复制一段文本（不依赖 DOM 选择器）。
+ *
+ * `copyText(sel)` 是「按选择器取内容」，传纯文本会静默失败；
+ * 需要复制变量内容时用这个。
+ */
+async function copyRawText(text) {
+  const value = String(text ?? "");
+  if (!value) return false;
+  const ok = await writeClipboard(value);
+  toast(ok ? ("已复制 " + value) : "复制失败，请手动选中", ok ? "ok" : "err");
+  return ok;
+}
+
+/**
+ * 写剪贴板：先走 Clipboard API，失败立刻回落 execCommand。
+ *
+ * 为什么必须双路径：`navigator.clipboard` 只在**安全上下文**可用
+ * （https 或 localhost）。桌面壳 / 安卓 WebView / 反代到内网 IP 时，
+ * `writeText` 会直接 reject（`Write permission denied` / `NotAllowedError`）
+ * 或者根本不存在 —— 只调一次而不兜底，用户看到「已复制」的提示，
+ * 剪贴板里却什么都没有，还会以为是自己粘贴姿势不对。
+ *
+ * 不弹 toast：这一层只负责「成功没有」，提示文案由调用方决定
+ * （有的要显示具体值，有的只要一句「已复制 API 地址」）。
+ */
+async function writeClipboard(value) {
+  const text = String(value ?? "");
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* 落到 execCommand */ }
+  const previous = document.activeElement;
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.readOnly = true;
+  // 1px + opacity:0 而不是 display:none —— 后者无法获得选区。
+  field.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+  document.body.append(field);
+  field.select();
+  field.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+  field.remove();
+  previous?.focus?.({ preventScroll: true });
+  return ok;
+}
+
+/**
+ * 复制「当前 API 地址」—— 顶栏与概览卡两处共用。
+ *
+ * 原来这两处都写成内联 `navigator.clipboard.writeText(...).then(...)`：
+ * 没有 catch，非安全上下文下连 .then 都不会执行，按钮文字永远不变，
+ * 用户只会觉得「点了没反应」。
+ */
+async function copyApiBase() {
+  const ok = await writeClipboard(location.origin + "/v1");
+  toast(ok ? "已复制 API 地址" : "复制失败，请手动选中地址", ok ? "ok" : "err");
+  return ok;
+}
+
+async function copyText(sel){
+  const source = $(sel); if(!source) return;
+  const text = source.value ?? source.textContent ?? '';
+  const ok = await writeClipboard(text);
+  toast(ok ? '已复制' : '复制失败，请选中文字复制', ok ? 'ok' : 'err');
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("#modal")?.addEventListener("click", (e) => { if (e.target === $("#modal") && !$('#modal').dataset.closeOnly) closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$('#modal').dataset.closeOnly) closeModal(); });
+
+  // 登录页回车提交（用户名 / 密码框内按 Enter）
+  ["username", "password"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); doLogin(); }
+    });
+  });
+});
+
+function browserFingerprint() {
+  try {
+    const bits = [navigator.userAgent, navigator.language, (navigator.languages || []).join(","),
+      screen.width + "x" + screen.height + "x" + (screen.colorDepth || 0),
+      (Intl.DateTimeFormat().resolvedOptions().timeZone || ""),
+      String(navigator.hardwareConcurrency || ""), String(navigator.deviceMemory || "")];
+    const s = bits.join("|");
+    let a = 0x811c9dc5, b = 0x9e3779b9;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      a = (Math.imul(a ^ c, 0x01000193)) >>> 0;
+      b = (Math.imul(b ^ ((c + i) & 0xffff), 0x85ebca6b)) >>> 0;
+    }
+    return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+  } catch (e) { return ""; }
+}
+
+async function doLogin() {
+  const fp = browserFingerprint();
+  const fd = new URLSearchParams({ username: $("#username").value, password: $("#password").value });
+  const btn = $("#loginBtn");
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="wb-icon mr-1 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span> 登录中...'; }
+  const showErr = (m) => {
+    const el = $("#loginErr");
+    if (el) { el.textContent = m; el.classList.remove("hidden"); }
+  };
+  try {
+    const r = await fetch("/api/login", { method: "POST", body: fd, headers: fp ? { "X-Browser-Fingerprint": fp } : {} });
+    if (!r.ok) {
+      // 尽量给出真实原因，而不是笼统的"登录失败"
+      let msg = "登录失败";
+      try {
+        const j = await r.json();
+        if (j && j.detail) {
+          msg = typeof j.detail === "string" ? j.detail
+              : (Array.isArray(j.detail) ? (j.detail[0] && j.detail[0].msg) || "参数错误" : JSON.stringify(j.detail));
+        }
+      } catch (e) { /* 非 JSON 响应，沿用默认文案 */ }
+      if (r.status === 401) msg = "用户名或密码错误";
+      showErr(msg);
+      return;
+    }
+    const d = await r.json();
+    TOKEN = d.token; localStorage.setItem(TOKEN_KEY, TOKEN);
+    enterApp();
+  } catch (e) {
+    showErr("网络异常：" + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "登录"; }
+  }
+}
+async function logout() {
+  try { await fetch("/api/login/logout", { method: "POST" }); } catch (e) {}
+  localStorage.removeItem(TOKEN_KEY); location.reload();
+}
+/**
+ * 显示登录卡片。
+ *
+ * 服务端在确认有会话 Cookie 时会把 `<html>` 标成 `console-authed`，样式据此
+ * 在第一帧就不画 `#login`（消除刷新时的登录页闪烁）。真正需要登录时
+ * ——凭据两边都失效、或用户主动退出——必须把这个标记去掉，否则登录卡片
+ * 会被那条 `display:none!important` 一直压住，页面看起来像卡死在空白。
+ */
+function showLoginCard() {
+  document.documentElement.classList.remove("console-authed");
+  const login = $("#login"), app = $("#app");
+  if (app) app.classList.add("hidden");
+  if (login) login.classList.remove("hidden");
+}
+function enterApp() {
+  document.documentElement.classList.remove("console-authed");
+  $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+  $("#proxyUrl").textContent = location.origin + "/v1";
+  // 首屏只拉「概览 + 账号池 + 侧栏角标」需要的数据。
+  // 日志（loadLogs）**有意不在这里调**：它要额外打 3 个请求（选项/汇总/列表），
+  // 而用户可能根本不打开日志面板 —— 让首屏为它付代价是纯浪费，
+  // 改成切到该面板时由 openLogsPanel() 按需加载。
+  loadAccounts(); loadKeys(); loadModels(); loadSchedules(); loadSyncConfig(); loadShareInfo();
+  // 还原地址栏里的面板（刷新后停在原页面，而不是跳回「账号」首页）。
+  // updateUrl:false —— 地址栏本来就是这个值，不必再写一次。
+  //
+  // **必须延后一拍**：本函数在脚本顶层就被调用，而 activateTab 会触发
+  // 各面板的初始化（openLogsPanel / scheduleModelBusy / stopLogLive …），
+  // 它们要读大量声明在文件后半段的模块级状态（`_logFolded` / `_logPage` /
+  // `_modelBusyTimer` …）。脚本还没执行到那些 `let` 时就读，会抛
+  // 「Cannot access before initialization」——**整个控制台脚本从那一处起失效**，
+  // 表现为「页面出来了但点什么都没反应」。
+  //
+  // 用 setTimeout(0) 把激活推迟到当前脚本执行完之后，那时所有 let 都已就位。
+  // 不改成 DOMContentLoaded 是因为 enterApp 也可能在登录后异步调用，
+  // 那时 DOM 早就 ready 了，再等事件会永远不触发。
+  setTimeout(() => {
+    try {
+      activateTab(_tabFromUrl(), { updateUrl: false });
+    } catch (e) {
+      console.error("首屏面板激活失败", e);
+    }
+  }, 0);
+}
+
+// Tabs
+// 面板清单与默认面板：默认面板不写进 URL（保持地址栏干净）。
+const TABS = ["overview","sentinel","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
+const TAB_DEFAULT = "overview";
+
+/** 从地址栏读当前应显示的面板；非法/缺失一律回落到默认面板。 */
+function _tabFromUrl() {
+  let t = null;
+  try { t = new URLSearchParams(location.search).get("tab"); } catch (e) { /* 老浏览器兜底 */ }
+  return TABS.includes(t) ? t : TAB_DEFAULT;
+}
+
+/**
+ * 等待平台切换脚本就绪并完成一次加载。
+ *
+ * 为什么需要它：`platform-switch.js` 在控制台主脚本**之后**才加载，
+ * 而首屏的 `activateTab()` 在 DOMContentLoaded 里就跑了 —— 那时
+ * `window.WBPlatform` 还不存在。直接 `if (window.WBPlatform)` 会静默
+ * 跳过，表现为「面板出来了但内容空白」。
+ *
+ * 这里轮询等待（最多 5 秒），拿到后只初始化一次。
+ */
+let _platformReady = null;
+function ensurePlatforms() {
+  if (_platformReady) return _platformReady;
+  _platformReady = new Promise((resolve) => {
+    let tries = 0;
+    const tick = () => {
+      if (window.WBPlatform) {
+        resolve(window.WBPlatform.enter());
+        return;
+      }
+      if (++tries > 100) {  // ~5s
+        console.warn("[platform] 平台切换脚本未就绪，跳过");
+        resolve(null);
+        return;
+      }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+  return _platformReady;
+}
+
+/**
+ * 当前**真正显示**的面板名。
+ *
+ * 为什么不直接读 URL：`activateTab` 用 `history.replaceState` 更新地址栏，
+ * 而平台切换事件是在面板渲染之后才派发的 —— 那时 URL 可能还未更新
+ * （首屏更是空）。任何「面板变了就刷新」的逻辑读 URL 都会拿到旧值，
+ * 典型症状是「切完平台当前面板不刷新，切走再回来才对」。
+ */
+let _activeTab = TAB_DEFAULT;
+
+/**
+ * 激活某个面板：切 class、按需拉数据，并把面板写进 `?tab=`。
+ *
+ * 为什么要写 URL：面板状态原先只活在内存里，刷新/被踢回登录后再进来、
+ * 或把地址发给别人，都会一律跳回「平台管理」首页 —— 在「客户端参数」「日志」
+ * 这种深层面板上反复操作时尤其烦。
+ *
+ * 用 `replaceState` 而不是 `pushState`：切面板不该在历史栈里堆一长串，
+ * 浏览器「后退」应当离开本页，而不是在面板之间来回跳。
+ */
+/* ============================================================================
+   侧栏 8 组 + 顶部子标签
+   ----------------------------------------------------------------------------
+   问题（issue #4）：6 个分组下 21 个入口，900px 高屏幕只显示一半，要滚动；
+   而且每页还有自己的大标题，页面名重复出现三次，第一屏被吃掉一截。
+
+   做法：侧栏只留 8 个组入口，组内页面用**顶部子标签**切换 —— 不用滚动，
+   一屏装得下。`data-tab` / `activateTab()` 语义完全不变，深链照旧可用。
+   ========================================================================== */
+/** 从侧栏 DOM 读出分组结构：[{title, tabs[], firstTab}] */
+function _navGroups() {
+  const out = [];
+  document.querySelectorAll('#sideNav .side-item[data-group-tabs]').forEach(el => {
+    const tabs = String(el.dataset.groupTabs || '').split(',').map(t => t.trim())
+      .filter(Boolean);
+    out.push({ title: el.dataset.groupTitle || '', tabs,
+               firstTab: el.dataset.tab || tabs[0] || '' });
+  });
+  return out;
+}
+
+/** 当前 tab 属于哪个组 */
+function _groupOfTab(name) {
+  const groups = _navGroups();
+  for (const g of groups) {
+    if (g.tabs.includes(name)) return g;
+  }
+  return groups[0] || { title: '', tabs: [name], firstTab: name };
+}
+
+/** tab -> 中文名（从页面标题取，避免再维护一份映射） */
+function _tabLabel(name) {
+  const side = document.querySelector(`#sideNav .side-item[data-tab="${name}"]`);
+  if (side) return (side.textContent || '').trim();
+  // 组内非首项：从子标签按钮自身取（渲染时带 data-label）
+  const btn = document.querySelector(`#topbarSubnav [data-subtab="${name}"]`);
+  if (btn) return (btn.textContent || '').trim();
+  return name;
+}
+
+const _SUB_TAB_LABELS = {
+  overview: '概览', sentinel: '风控哨兵',
+  platforms: '平台管理', gateway: '平台网关',
+  accounts: '账号池', credits: '积分到期', journal: '积分流水', growth: '成长计划',
+  usage: '使用记录', logs: '用量日志', keys: 'API Keys', ip: 'IP 管理',
+  models: '模型配置', groups: '分组管理', schedules: '定时任务',
+  client: '客户端参数', sync: '同步设置', alerts: '预警管理',
+  agent: '智能体',
+  settings: '设置', maintenance: '更新与备份',
+};
+
+/** 渲染顶部子标签 + 面包屑 + 侧栏高亮 */
+function _renderNavForTab(name) {
+  const group = _groupOfTab(name);
+  // 侧栏：整组高亮（点组内任一页，该组都算当前）
+  document.querySelectorAll('#sideNav .side-item').forEach(el => {
+    const tabs = String(el.dataset.groupTabs || '').split(',').map(t => t.trim());
+    el.classList.toggle('active', tabs.includes(name));
+  });
+  // 面包屑：组名 / 页面名
+  const bg = document.getElementById('topbarGroup');
+  if (bg) bg.textContent = group.title || '';
+  // 子标签
+  // 子标签：这一行就是「当前页面名」的唯一表达（顶栏 h2 只留给读屏软件）。
+  // 单页组也渲染成静态标签，而不是整行隐藏 —— 否则「智能体」页会比其他页
+  // 高出一行，来回切换时正文整体上下跳。
+  const bar = document.getElementById('topbarSubnav');
+  if (bar) {
+    const single = group.tabs.length <= 1;
+    bar.classList.toggle('is-single', single);
+    bar.innerHTML = group.tabs.map(tab => {
+      const label = _SUB_TAB_LABELS[tab] || tab;
+      const on = tab === name;
+      if (single) {
+        return `<span class="subnav-item is-static" role="tab" aria-selected="true"
+          data-subtab="${tab}">${label}</span>`;
+      }
+      return `<button type="button" role="tab" data-subtab="${tab}"
+        aria-selected="${on ? 'true' : 'false'}"
+        class="subnav-item${on ? ' active' : ''}">${label}</button>`;
+    }).join('');
+    bar.querySelectorAll('button[data-subtab]').forEach(btn => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.subtab));
+    });
+  }
+  // 手机抽屉里"当前页"文字
+  const cur = document.getElementById('sideCurrent');
+  if (cur) cur.textContent = _SUB_TAB_LABELS[name] || name;
+}
+
+function activateTab(name, opts) {
+  if (!TABS.includes(name)) name = TAB_DEFAULT;
+  _activeTab = name;
+  if (name !== 'logs') stopLogActivity();
+  document.documentElement.dataset.activeTab = name;
+  window.WBDateTimePicker?.close();
+  window.WBFilterCombobox?.close();
+  // 侧栏导航：active 由 .side-item.active 表达
+  document.querySelectorAll(".side-item").forEach(x => {
+    x.classList.toggle("active", x.dataset.tab === name);
+  });
+  TABS.forEach(t => { const el = $(`#panel-${t}`); if (el) el.classList.toggle("hidden", t !== name); });
+
+  // 先铺骨架屏，再触发这一屏的请求（请求在下面按面板分发）。
+  // 顺序很重要：骨架必须在 `loadXxx()` **之前**进 DOM，否则第一帧还是空白。
+  if (!opts || opts.skeleton !== false) panelSkeletonShow(name);
+
+  // 移动端顶栏的「当前面板名」：抽屉收起时用户也得知道自己停在哪。
+  // 用 data-label / 首个文本节点，而**不是** textContent —— 后者会把
+  // 「积分到期」旁边的角标数字一起读进去（实测变成 "积分到期 3"）。
+  // 侧栏组高亮 / 子标签 / 面包屑由统一函数处理（见 _renderNavForTab）
+  try { _renderNavForTab(name); } catch (e) { /* 导航渲染失败不影响页面 */ }
+  const cur = $("#sideCurrent");
+  if (cur) cur.textContent = _sideTabLabel(name);
+  const topTitle = $("#topbarTitle");
+  // 页面标题用**页面名**，不是侧栏组名。
+  // 侧栏改成 8 组之后 `_sideTabLabel()` 读到的是「账号」这种组名，
+  // 直接用它会让顶栏标题变成组名（切到积分流水也显示「账号」）。
+  if (topTitle) topTitle.textContent = _SUB_TAB_LABELS[name] || _sideTabLabel(name);
+
+  if (!opts || opts.updateUrl !== false) {
+    try {
+      const u = new URL(location.href);
+      if (name === TAB_DEFAULT) u.searchParams.delete("tab");
+      else u.searchParams.set("tab", name);
+      history.replaceState(null, "", u);
+    } catch (e) { /* 非 http 环境（file://）下忽略即可 */ }
+  }
+
+  // 切到这几个面板时按需拉数据（图表/分组列表/客户端参数不必在首屏就请求）
+  //
+  // ⚠️ 平台切换脚本（platform-switch.js）在**控制台主脚本之后**加载，
+  // 而首屏的 activateTab 是在 DOMContentLoaded 里跑的 —— 那一刻
+  // `window.WBPlatform` 还不存在。原来写成 `if (window.WBPlatform) ...`
+  // 会静默跳过，结果「平台管理」成为默认面板后**一片空白**
+  // （面板显示了、卡片区是空的）。这里改成延迟到脚本就绪再补一次。
+  // 概览：每次进入面板都强制重跑计数动效（force=true），
+  // 让「切 tab / 点刷新」都能看到数字从 0 滚到目标值。
+  if (name === "overview") loadOverview(true);
+  if (name === "sentinel") {
+    if (typeof loadSentinel === "function") loadSentinel();
+    setTimeout(() => {
+      if (typeof sentinelInitTraffic === "function") sentinelInitTraffic(true);
+    }, 240);
+  }
+  if (name === "platforms") ensurePlatforms().then(() => {
+    loadPlatformOverview();
+    loadPlatformBench();
+  });
+  if (name === "gateway") { loadGateway(); loadGatewaySpeed(); }
+  if (name === "accounts") ensurePlatforms().then(() => loadAccounts());
+  if (name === "journal") window.WBReview?.loadJournal(1);
+  if (name === "maintenance") window.WBReview?.loadUpdate();
+  if (name === "groups") loadGroups();
+  if (name === "usage") loadUsageStats();
+  if (name === "keys") { loadKeys(); loadShareInfo(); }
+  if (name === "ip") window.WBIP?.load();
+  if (name === "credits") loadCreditStats();
+  if (name === "logs") openLogsPanel();
+  if (name === "client") initClientPanel();
+  if (name === "alerts") loadAlerts();
+  if (name === "settings") { loadAppSource(); loadInvitation(); loadRuntimeConfig(); }
+  // 模型面板：进入时按当前平台重置过滤（见 loadModels 的说明）。
+  if (name === "models") { _modelPlatformFilter = ""; loadModels(); }
+  // 定时任务：必须等平台解析完再加载 —— `loadSchedules` 要按平台过滤
+  // （WorkBuddy 的签到任务不该出现在 Trae 平台下）。直接调会在
+  // `WBPlatform` 尚未就绪时拿到空 storage，从而**跳过过滤**显示全量。
+  if (name === "schedules") ensurePlatforms().then(() => loadSchedules());
+  // 智能体面板的内容由它自己的脚本渲染。`agent.js` 在控制台主脚本**之后**
+  // 加载，所以这里必须既处理「已经加载好」（直接 enter），也要在它还没就绪时
+  // 挂一个一次性回调 —— 否则用 ?tab=agent 直接打开时，activateTab 先跑，
+  // 那次调用会被 `?.` 静默吞掉，页面就停在空面板。
+  if (name === "agent") window.WBAgent
+    ? window.WBAgent.enter()
+    : window.dispatchEvent(new Event('wb-agent-needed'));
+  if (name === "growth") window.WBGrowthCenter?.enter();
+  scheduleModelBusy();
+}
+
+/* ==========================================================================
+   平台管理面板：当前平台的概览
+   --------------------------------------------------------------------------
+   切到某个平台后，第一眼就能看到「这个平台有几个号、多少额度、用在哪些模型上」，
+   不必再跑去账号池确认。数据来自该平台自己的接口（trae 走 /api/trae/overview，
+   其它平台走通用的 /api/accounts + /api/stats/usage）。
+   ========================================================================== */
+/* ==========================================================================
+   总览面板（布局参照 keybuddy.html 的概览页）
+   --------------------------------------------------------------------------
+   信息密度是这里的关键：用户打开首页想看的是「还剩多少钱、今天用了多少、
+   哪个号出问题」，而不是几个要点进去才看到数字的小卡片。
+
+   一张 /api/overview 请求拿到全部聚合（服务端一次算完，避免 5 次串行
+   请求 + 5 份口径不一致的统计）。所有数字都在服务端算好，前端只负责排版。
+
+   区间切换（今日 / 7 天 / 30 天）只改 `_ovDays` 再重取，不重新加载整页。
+
+   **默认口径是「今日」**：概览要聚合今天 / 窗口 / 30 天三段 `usage_logs`，
+   窗口越长扫的行越多。线上 7 万+ 请求时默认查 7 天要 1.6 秒起步，
+   首屏体感就是「卡」。今日窗口只碰当天分区，快得多；想看长的再点切换。
+   ========================================================================== */
+let _ovDays = 1;
+
+/** 数字千分位；亿/万级自动缩写（与 keybuddy 的 1.00B 风格一致）。 */
+function ovNum(value) {
+  const n = Number(value) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + "K";
+  return n.toLocaleString("zh-CN");
+}
+
+/** 精确千分位（金额/积分这类不能缩写的数字）。 */
+function ovInt(value) {
+  return (Number(value) || 0).toLocaleString("zh-CN");
+}
+
+/**
+ * 积分类数值：整数部分千分位 + **固定两位小数**。
+ *
+ * 为什么固定两位而不是「最多两位」：积分是钱，`189.2` 和 `189.20` 在
+ * 对账时表达的意思不同 —— 前者看起来像精度丢失。设计要求保留两位。
+ * 同时也避免 `toLocaleString` 默认 3 位小数把 47.4675 渲染成 "47.467"。
+ */
+function ovCredit(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+/* ==========================================================================
+   数字计数器（count-up 动效）
+   --------------------------------------------------------------------------
+   为什么需要：概览页的数字是**结论**（还剩多少钱、今天用了多少）。
+   直接跳变会让人怀疑「是不是没刷新」；从 0 滚到目标值能明确传达
+   「这是刚取回来的新数据」。
+
+   实现要点：
+     · 用 `requestAnimationFrame` + easeOutCubic，300ms 左右 —— 再长就是拖沓；
+     · 尊重 `prefers-reduced-motion`：开启时直接落到终值（无障碍要求）；
+     · 同一元素上重复调用会**取消上一轮动画**，否则快速切换区间会看到
+       「两个数字在抢同一个 DOM」的抖动；
+     · 终值格式交给调用方传入的 formatter，计数器只管插值 ——
+       这样「千分位 / 两位小数 / K-M-B 缩写」三种口径可以共用一个组件。
+   ========================================================================== */
+const _counterFrames = new WeakMap();
+
+function animateNumber(el, target, opts) {
+  if (!el) return;
+  const options = opts || {};
+  const formatter = options.format || ((n) => Math.round(n).toLocaleString("zh-CN"));
+  // 默认 620ms：420ms 在实际使用中太快，用户几乎看不见（实测 300ms 时
+  // 采样就已经是终值了）。计数动效的意义是「让用户注意到数字变了」，
+  // 所以宁可稍慢一点，也不能快到无感。
+  const duration = Math.max(0, Number(options.duration ?? 620));
+  const to = Number(target) || 0;
+
+  // 取消同一元素上尚未结束的动画
+  const prev = _counterFrames.get(el);
+  if (prev) cancelAnimationFrame(prev);
+
+  const reduce = window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce || duration === 0) {
+    el.textContent = formatter(to);
+    el.classList.remove("counting");
+    el.dataset.countValue = String(to);
+    _counterFrames.delete(el);
+    return;
+  }
+
+  // 起点：优先用上一次的目标值（连续切换时从当前显示值继续，不跳回 0）
+  const from = Number(el.dataset.countValue);
+  const start = Number.isFinite(from) ? from : 0;
+  el.dataset.countValue = String(to);
+  const begin = performance.now();
+  // 计数期间给个色偏提示（CSS 里有 .counting），让「正在更新」一眼可见
+  el.classList.add("counting");
+
+  const step = (now) => {
+    const t = Math.min(1, (now - begin) / duration);
+    // easeOutCubic：前段快、末段缓，读数字时不会有「最后几帧还在跳」的焦虑
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = formatter(start + (to - start) * eased);
+    if (t < 1) {
+      _counterFrames.set(el, requestAnimationFrame(step));
+    } else {
+      el.textContent = formatter(to);
+      el.classList.remove("counting");
+      _counterFrames.delete(el);
+    }
+  };
+  _counterFrames.set(el, requestAnimationFrame(step));
+}
+
+/** 便捷封装：按选择器取元素并做计数动画。 */
+function countTo(selector, value, formatter, duration) {
+  animateNumber(document.querySelector(selector), value,
+                { format: formatter, duration });
+}
+
+function ovPct(value, digits = 1) {
+  if (value === null || value === undefined) return "—";
+  return (Number(value) * 100).toFixed(digits) + "%";
+}
+
+async function loadOverview(force) {
+  // 区间按钮的选中态
+  document.querySelectorAll("[data-ov-days]").forEach(btn => {
+    btn.classList.toggle("active", Number(btn.dataset.ovDays) === _ovDays);
+  });
+  // 手动刷新 / 切回面板时**重置计数起点**，让数字从 0 滚到目标值。
+  //
+  // 为什么必须重置：`animateNumber` 会从 `dataset.countValue`（上次的终值）
+  // 接着滚。数据没变时 from == to，视觉上完全静止 —— 用户点了「刷新」
+  // 或重新进入面板，会觉得「没反应 / 有缓存」。重置后每次都是 0 -> N，
+  // 一眼就能确认「确实是重新取过了」。
+  if (force) {
+    document.querySelectorAll(
+      "#ovBalance, #ovReq, #ovTokIn, #ovTokOut, #ovTokAll, " +
+      "#ovCacheHit, #ovCachePrompt, #ovCacheSamples"
+    ).forEach(el => { delete el.dataset.countValue; });
+  }
+
+  // ---- 加载态 ----
+  //
+  // 首次进入 / 切换统计区间时要打三个接口（overview + platforms + sentinel）。
+  // 线上数据量大时首个请求要几百毫秒到 1 秒，**这段时间原来界面上毫无变化**，
+  // 用户看到的是「点了没反应，过几秒数字突然跳出来」，主观上就是「卡」。
+  //
+  // 这里加一层：立刻显示转圈 + 骨架屏（卡片保持占位、数字位置显示骨架条），
+  // 数据回来再替换。即使真的慢，用户也知道「在加载」而不是「坏了」。
+  _ovSetLoading(true);
+  try {
+    const [data, platforms, sentinel] = await Promise.all([
+      api(`/api/overview?days=${_ovDays}`).then(r => r.ok ? r.json() : null),
+      api("/api/platforms").then(r => r.ok ? r.json() : null).catch(() => null),
+      api("/api/sentinel/status?window=300").then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    if (!data) return;
+    renderOverview(data, platforms, sentinel);
+  } catch (e) {
+    const host = $("#ovStatus");
+    if (host) host.innerHTML = `<span style="color:var(--danger)">概览加载失败：${esc(e.message)}</span>`;
+  } finally {
+    _ovSetLoading(false);
+  }
+}
+
+/** 概览加载态开关：状态条转圈 + 数字位骨架屏。 */
+function _ovSetLoading(on) {
+  const bar = document.getElementById("ovStatus");
+  if (bar) {
+    bar.classList.toggle("ov-loading", !!on);
+    // 只在还没有真实内容时插入占位文案，避免覆盖已有数据
+    if (on && !bar.dataset.filled) {
+      bar.innerHTML = `<div class="ov-status-left">
+        <span class="ov-loading-dot"></span>
+        <span class="ov-muted">正在加载概览…</span>
+      </div>`;
+    }
+    if (!on) bar.dataset.filled = "1";
+  }
+  // 数字位骨架：给每个大数字套一个 shimmer 占位
+  const ids = ["#ovBalance", "#ovReq", "#ovTokIn", "#ovTokOut", "#ovTokAll",
+               "#ovCacheHit"];
+  ids.forEach(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.classList.toggle("ov-skeleton", !!on);
+  });
+  // 账号监测 / 平台卡也标一下，避免半截数据看起来像最终结果
+  document.querySelectorAll(".ov-card").forEach(card => {
+    card.classList.toggle("ov-dim", !!on);
+  });
+}
+
+/* ============================================================================
+   面板骨架屏（从真实 DOM 克隆）
+   ----------------------------------------------------------------------------
+   第一版是「一套手写模板贴到所有面板」，问题是**结构对不上**：
+   账号池是「工具条 + 4 张统计卡 + 一张大表」，日志是「筛选条 + 实时卡片 +
+   汇总表 + 明细表」，模型页是网格卡片……用同一套 4 卡 + 6 行去凑，
+   有的面板骨架比真实内容矮、有的高，数据灌进来时照样撑开 —— 抽的根源没解决。
+
+   现在是**预渲染**：把面板现有的静态外壳（卡片、工具条、表头、列宽）
+   整棵克隆一份，再把每个文字节点按它自己的实测尺寸替换成灰条。
+   因为克隆体用的是同一批 class，在同一个父容器里布局，所以
+   列宽、卡片宽度、行高、内边距全部与真实页面**逐像素一致**。
+
+   为什么这条能消掉「被数字撑开」：
+   真实数字（如 1,159,592）比占位符「—」宽得多，直接渲染会把卡片撑开
+   1~2px、整行重排。骨架用的是**实测宽度**的灰条，且数据到达前下层内容
+   是 visibility:hidden（仍占位），所以从骨架切到真实内容时盒子尺寸不变。
+   ========================================================================== */
+const _panelSkelTimers = new Map();
+//: 已进入过的面板。二次进入不再铺骨架 —— 那时用户已经看过内容，
+//: 再盖一层等于「每次切 tab 都闪一下」，比没有更烦。
+const _panelSeen = new Set();
+//: 每个面板骨架屏「亮起来的时刻」，用来保证最短显示时长。
+const _panelSkelAt = new Map();
+//: 骨架屏最短显示 240ms。
+//:
+//: 本地/局域网请求常常 30~60ms 就回来，骨架刚贴上去就被收 —— 视觉上是
+//: **一道白闪**，比不做骨架还难受。宁可让它多待 200ms（用户看到的是
+//: 「稳定地加载了一下」），也不要闪一下消失。
+const PANEL_SKELETON_MIN_MS = 240;
+
+/** 造一根灰条。尺寸来自真实元素的实测值，所以不会把盒子撑变形。 */
+function _psBar(width, height) {
+  const bar = document.createElement("span");
+  bar.className = "ps-bar";
+  bar.style.width = Math.max(8, Math.round(width)) + "px";
+  bar.style.height = Math.max(7, Math.round(height)) + "px";
+  return bar;
+}
+
+/** 把克隆体里的文字换成灰条（宽度按元素自身实测）。 */
+function _psBlankTextNodes(root) {
+  const nodes = root.querySelectorAll("*");
+  for (const el of nodes) {
+    if (el.classList.contains("ps-bar")) continue;
+    if (el.closest(".panel-skeleton") !== root && el !== root) continue;
+    // 只处理「叶子」：没有元素子节点、但有文字
+    if (el.children.length) continue;
+    const text = (el.textContent || "").trim();
+    if (!text) continue;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;      // 隐藏元素不处理
+    // 大数字（KPI）保留更高的灰条，视觉上才像「数字位」
+    const isBig = /stat-value|ov-big|kpi-value|num/.test(el.className || "");
+    const h = isBig ? Math.min(Math.max(rect.height * 0.62, 14), 34)
+                    : Math.min(Math.max(rect.height * 0.55, 8), 15);
+    el.textContent = "";
+    el.appendChild(_psBar(Math.min(rect.width, isBig ? rect.width * 0.86 : rect.width), h));
+  }
+}
+
+/** 表格体是空的（首开时还没数据）：按表头列宽合成几行占位。 */
+function _psFillEmptyTables(root) {
+  const tables = root.querySelectorAll("table");
+  for (const table of tables) {
+    const head = table.querySelector("thead");
+    const body = table.querySelector("tbody");
+    if (!head || !body) continue;
+    if (body.querySelector("tr")) continue;          // 已有行就不动
+    const heads = [...head.querySelectorAll("th")];
+    if (!heads.length) continue;
+    const widths = heads.map(th => {
+      const r = th.getBoundingClientRect();
+      return r.width || 0;
+    });
+    const rows = Math.min(8, Math.max(4, Math.round(340 / 44)));
+    for (let i = 0; i < rows; i++) {
+      const tr = document.createElement("tr");
+      tr.className = "ps-ph-row";
+      heads.forEach((th, idx) => {
+        const td = document.createElement("td");
+        // 继承表头的对齐方式，右对齐的数字列灰条也靠右，看起来才像真表
+        if ((th.className || "").includes("text-right")) td.className = "text-right";
+        const w = (widths[idx] || 80) * (0.42 + (i % 3) * 0.08);
+        td.appendChild(_psBar(w, 10));
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    }
+  }
+}
+
+/** 表格列宽锁死：`table-layout:fixed` 下百分比会按父容器重新计算，
+ * 而骨架层和真实表格的父容器不同（账号表外面裹着可滚动卡片），
+ * 算出来的列宽能差几十像素 —— 切过去时列边界会跳。这里把每个 th 的
+ * **实测宽度**写成固定像素，克隆体就与真实表格逐列对齐了。 */
+/** 表格列宽锁死。
+ *
+ * 为什么需要：多数表格是 `table-layout:auto` —— 列宽由**内容**决定。
+ * 骨架里的内容换成了灰条，内容宽度变了，列宽自然跟着变；等真实数据回来，
+ * 列边界会横着跳一下（高度能对上、宽度对不上，肉眼就是「抖」）。
+ *
+ * 做法：把真实表头的实测宽度写成 `<colgroup><col style="width:Npx">`。
+ * `table-layout:fixed` 下 colgroup 是**权威值**，内容再怎么变列宽都不动。
+ * 配对按「列数 + 文档顺序」：面板里常有多张表（汇总表 + 明细表），
+ * 按列数分组后再按下标配，比按表头文本稳（文本此时已被灰条替换）。
+ */
+function _psLockTableColumns(realRoot, cloneRoot) {
+  const group = root => {
+    const map = new Map();
+    for (const t of root.querySelectorAll("table")) {
+      const n = t.querySelectorAll("thead th").length;
+      if (!n) continue;
+      if (!map.has(n)) map.set(n, []);
+      map.get(n).push(t);
+    }
+    return map;
+  };
+  const realMap = group(realRoot);
+  for (const [n, cloneTables] of group(cloneRoot)) {
+    const realTables = realMap.get(n) || [];
+    cloneTables.forEach((cloneTable, i) => {
+      const realTable = realTables[i];
+      if (!realTable) return;
+      const widths = [...realTable.querySelectorAll("thead th")]
+        .map(th => Math.round(th.getBoundingClientRect().width));
+      if (!widths.length || widths.some(w => w <= 0)) return;
+      cloneTable.querySelectorAll("colgroup").forEach(c => c.remove());
+      const cg = document.createElement("colgroup");
+      // **必须显式标 pixel，并且带 !important 级别的来源**：
+      // 账号表自己写了 `th:nth-child(n){width:34%/22%/…}`，选择器权重比
+      // `colgroup>col` 高，单靠 style.width 会被它压过去（实测剩下 10~14px
+      // 的偏差就是这么来的）。这里直接写行内 `width: Npx` 到 **th 本身**，
+      // 行内样式权重最高，才能压住那条 nth-child 规则。
+      for (const w of widths) {
+        const col = document.createElement("col");
+        col.style.width = w + "px";
+        cg.appendChild(col);
+      }
+      cloneTable.insertBefore(cg, cloneTable.firstChild);
+      cloneTable.style.tableLayout = "fixed";
+      cloneTable.style.width = Math.round(realTable.getBoundingClientRect().width) + "px";
+      // 再把每列宽度写到 th 上（行内样式，压住 .acc-table nth-child 的百分比）
+      [...cloneTable.querySelectorAll("thead th")].forEach((th, i) => {
+        if (widths[i]) {
+          th.style.setProperty("width", widths[i] + "px", "important");
+          th.style.setProperty("min-width", widths[i] + "px", "important");
+        }
+      });
+    });
+  }
+}
+
+/** 用真实结构预渲染一层骨架，返回要插进面板的元素。 */
+function _panelSkeletonFromDom(panel) {
+  const sk = document.createElement("div");
+  sk.className = "panel-skeleton";
+  sk.setAttribute("aria-hidden", "true");
+  // 克隆现有外壳：卡片 / 工具条 / 表头 / 列宽都跟着走过来
+  const clone = document.createElement("div");
+  clone.className = "ps-clone";
+  for (const child of [...panel.children]) {
+    if (child.classList && child.classList.contains("panel-skeleton")) continue;
+    clone.appendChild(child.cloneNode(true));
+  }
+  // id 必须去掉：同一份 DOM 出现两次，任何 getElementById 都会拿错节点
+  clone.querySelectorAll("[id]").forEach(n => n.removeAttribute("id"));
+  sk.appendChild(clone);
+  panel.insertBefore(sk, panel.firstChild);
+
+  // **宽度上下文必须对齐**。
+  // 账号表用 `table-layout:fixed` + 百分比列宽（名称 34% / 到期 22%），
+  // 百分比是相对**最近的定宽祖先**算的：真实表格外面裹着
+  // `#accountTableWrap`（带 padding 的卡片），骨架层里没有这层，
+  // 于是算出来的列宽和真实表格差几十像素 —— 切过去时列会跳一下。
+  // 这里把每个顶层子节点的**实测宽度**写到克隆副本上，让它按真实宽度排版。
+  const kids = [...clone.children];
+  const reals = [...panel.children].filter(
+    n => !(n.classList && n.classList.contains("panel-skeleton")));
+  kids.forEach((node, i) => {
+    const real = reals[i];
+    if (!real) return;
+    const box = real.getBoundingClientRect();
+    if (box.width > 0) node.style.width = Math.round(box.width) + "px";
+  });
+
+  // 插进 DOM 后才有真实布局，这时再量尺寸、换灰条。
+  // **顺序关键**：先锁列宽（此时测到的仍是真实表头宽度）→ 再补占位行
+  // （列宽已固定，占位行按列排，不会反过来影响列宽）→ 最后清文字换灰条。
+  // 反了就会用「占位行决定的列宽」去锁，等于白锁。
+  _psLockTableColumns(panel, clone);
+  _psFillEmptyTables(clone);
+  _psBlankTextNodes(clone);
+  return sk;
+}
+
+/** 铺骨架屏。`force` 用于「面板本来就是空的」这种必须铺的情况。
+ *
+ * 判断依据是「这个面板有没有被用户看过」（`_panelSeen`），**不是**「里面有没有
+ * `.card`」—— 每个面板的卡片外壳本来就是静态 HTML，用 `.card` 判断会把首开
+ * 也一起跳过，等于永远不铺骨架（实测踩过）。
+ */
+function panelSkeletonShow(name, force) {
+  if (!name || name === "overview") return;      // 概览有自己的加载态
+  const panel = document.getElementById("panel-" + name);
+  if (!panel) return;
+  const first = !_panelSeen.has(name);
+  _panelSeen.add(name);
+  if (!first && !force) return;                  // 二次进入：不闪
+  let sk = panel.querySelector(":scope > .panel-skeleton");
+  if (sk) sk.remove();                           // 结构变了（如切换平台）就重建
+  sk = _panelSkeletonFromDom(panel);
+  sk.classList.add("is-on");
+  // 盖住时把下层内容藏起来 —— 否则「骨架 + 已渲染内容」会叠成双重影像。
+  // 用 visibility（不是 display）保证内容仍在原地布局，淡出后原位露出。
+  panel.classList.add("is-skel");
+  _panelSkelAt.set(name, Date.now());
+  // 兜底：少数面板不经过 `api()`（纯本地渲染/脚本自己接管），1.8s 后自动收，
+  // 宁可少显示一会儿，也不要让骨架屏盖住真实内容。
+  clearTimeout(_panelSkelTimers.get(name));
+  _panelSkelTimers.set(name, setTimeout(() => panelSkeletonHide(name), 1800));
+}
+
+function panelSkeletonHide(name) {
+  const panel = document.getElementById("panel-" + name);
+  const sk = panel && panel.querySelector(":scope > .panel-skeleton");
+  if (!sk) return;
+  // 最短显示时长：还没亮够 240ms 就延后收，否则就是「白闪」
+  const shownAt = _panelSkelAt.get(name) || 0;
+  const age = Date.now() - shownAt;
+  if (age < PANEL_SKELETON_MIN_MS) {
+    clearTimeout(_panelSkelTimers.get(name));
+    _panelSkelTimers.set(name, setTimeout(
+      () => panelSkeletonHide(name), PANEL_SKELETON_MIN_MS - age + 10));
+    return;
+  }
+  _panelSkelAt.delete(name);
+  clearTimeout(_panelSkelTimers.get(name));
+  _panelSkelTimers.delete(name);
+  // **同一帧内「摘掉骨架 + 放出内容」**，中间不留过渡。
+  //
+  // 为什么不做淡出：骨架是一整层不透明底色，任何 >0 的透明度都会让它
+  // 与下层真实内容重叠一段（灰条 + 真实文字错开半行 = 用户说的重影）。
+  // 0.2s / 0.12s / 0.08s 三档都试过，仍有可见的重叠窗口。
+  //
+  // 之所以敢直接切：骨架的卡片位置、列宽、行高与真实内容逐像素一致
+  // （cloned DOM + colgroup 锁宽 + 实测宽度灰条），所以这一下是
+  // 「同形状替换」，看不出跳变，也不会闪。
+  sk.remove();
+  panel.classList.remove("is-skel");
+}
+
+/** 这一批请求全部结束：把所有还在闪的骨架屏收掉。 */
+function _panelSkeletonFlush() {
+  document.querySelectorAll(".panel-skeleton.is-on").forEach(sk => {
+    const panel = sk.parentElement;
+    if (!panel || !panel.id) return;
+    panelSkeletonHide(panel.id.replace(/^panel-/, ""));
+  });
+}
+
+function renderOverview(data, platforms, sentinel) {
+  const acc = data.accounts || {};
+  const today = data.today || {};
+  const win = data.window || {};
+  const cache = data.cache || {};
+  const monitor = data.monitor || {};
+
+  // ---- 运行状态条 ----
+  const platformLabel = data.platform_label || "全部平台";
+  $("#ovStatus").innerHTML = `
+    <div class="ov-status-left">
+      <span class="ov-badge-ok"><span class="ov-dot-pulse"></span> 服务运行中</span>
+      <span class="ov-muted">当前统计：${esc(platformLabel)}</span>
+      <span class="ov-muted">${esc((platforms && platforms.items || []).length)} 个平台</span>
+      <span class="ov-code">${esc(location.origin)}/v1</span>
+      <button type="button" class="ov-mini-btn" onclick="copyApiBase()">复制</button>
+    </div>
+    <div class="ov-status-right">
+      <span class="ov-muted">更新于 ${fmtTime(new Date().toISOString().slice(0,19), false)}</span>
+    </div>`;
+
+  // ---- 告警横幅：有封控信号才出现 ----
+  const alertHost = $("#ovAlert");
+  const affected = (sentinel && sentinel.accounts_affected) || 0;
+  if (alertHost) {
+    if (affected > 0) {
+      alertHost.hidden = false;
+      alertHost.className = "ov-alert danger";
+      alertHost.innerHTML = `
+        <div class="ov-alert-left">
+          <strong>${affected} 个账号被上游拒绝过 (403 / 11140 / 4015)</strong>
+          <span class="ov-muted">最近 5 分钟${sentinel.tripped ? " · 已达批次封控阈值" : ""}</span>
+        </div>
+        <button type="button" class="ov-link" onclick="activateTab('sentinel')">浏览详情 →</button>`;
+    } else if (sentinel && Object.keys(sentinel.pause || {}).length) {
+      alertHost.hidden = false;
+      alertHost.className = "ov-alert warn";
+      alertHost.innerHTML = `
+        <div class="ov-alert-left">
+          <strong>有平台处于暂停状态</strong>
+          <span class="ov-muted">暂停期间请求会直接返回 503，不打上游</span>
+        </div>
+        <button type="button" class="ov-link" onclick="activateTab('sentinel')">查看 →</button>`;
+    } else {
+      alertHost.hidden = true;
+      alertHost.innerHTML = "";
+    }
+  }
+
+  // ---- 剩余额度 ----
+  $("#ovModelBadge").textContent = `${data.models || 0} 个模型`;
+  // 主数字用计数器动效：明确表达「这是刚取回来的新数据」
+  countTo("#ovBalance", acc.balance_remain, (n) => ovInt(Math.round(n)));
+  $("#ovBalanceRow").innerHTML = `
+    <div>今日消耗 <span>${ovCredit(today.credits)}</span></div>
+    <div>${win.days || 1} 天消耗 <span>${ovCredit(win.credits)}</span></div>
+    <div>户均 <span>${data.average_credits == null ? "—" : ovCredit(data.average_credits)}</span></div>`;
+  $("#ovBalanceNote").textContent = acc.disabled_balance
+    ? `另有 ${ovInt(acc.disabled_balance)} 在已禁用账号上，不参与统计`
+    : `总额度 ${ovInt(acc.balance_total)} · 启用 ${acc.total} 个账号`;
+  const ratio = acc.used_ratio;
+  const bar = $("#ovBalanceBar");
+  if (ratio == null) {
+    bar.style.width = "100%";
+    bar.style.background = "var(--fg-subtle)";
+  } else {
+    bar.style.width = Math.min(100, Math.max(0, ratio * 100)) + "%";
+    // 用得多 = 危险色；正常进度用品牌色
+    bar.style.background = ratio > 0.9 ? "var(--danger)"
+      : ratio > 0.7 ? "var(--warn,#f59e0b)" : "var(--brand)";
+  }
+
+  // ---- 用量（四个数字都做计数动效）----
+  countTo("#ovReq", win.requests, ovNum);
+  countTo("#ovTokIn", win.prompt_tokens, ovNum);
+  countTo("#ovTokOut", win.completion_tokens, ovNum);
+  countTo("#ovTokAll", win.total_tokens, ovNum);
+  $("#ovUsageFoot").innerHTML = `
+    <div>API Key <span class="ov-dot-sep">•</span> 模型: <b>${data.models || 0}</b></div>
+    <div>统计范围: ${_ovDays === 1 ? "今日" : _ovDays + " 天"}${
+      win.ok_requests !== undefined && win.requests
+        ? ` · 成功率 ${ovPct(win.ok_requests / win.requests, 1)}` : ""}</div>`;
+
+  // ---- 缓存命中率（conic-gradient 环形图）----
+  const rate = cache.rate;
+  const donut = $("#ovDonut");
+  const pctVal = rate == null ? 0 : Math.min(100, Math.max(0, rate * 100));
+  donut.style.background =
+    `conic-gradient(var(--brand) ${pctVal}%, var(--surface-2) 0)`;
+  // 环形图中心数字：它要带 `<span class="ov-donut-unit">%</span>`，
+  // 而计数器组件按 textContent 写值 —— 两者不兼容。
+  // 这里保留原写法（直接 innerHTML），百分比变化本身不需要滚动动效：
+  // 圆环的 conic-gradient 已经有过渡动画，数字再滚会显得吵。
+  const donutEl = $("#ovDonutVal");
+  donutEl.innerHTML = rate == null ? "—"
+    : `${pctVal.toFixed(0)}<span class="ov-donut-unit">%</span>`;
+  countTo("#ovCacheHit", cache.cached_tokens, ovNum);
+  $("#ovCacheRate").textContent = rate == null ? "—" : ovPct(rate);
+  countTo("#ovCachePrompt", cache.prompt_tokens, ovNum);
+  countTo("#ovCacheSamples", cache.samples, ovNum);
+  $("#ovCacheNote").textContent = cache.note
+    || (rate == null ? "当前区间没有可统计的输入 token" : "只统计含缓存字段的上游响应");
+
+  // ---- 账号监测：状态条 + 异常账号列表 ----
+  const buckets = [
+    ["active", "活跃", "ok"],
+    ["cooling", "冷却", "warn"],
+    ["breaker", "熔断", "warn"],
+    ["no_balance", "额度耗尽", "muted"],
+    ["disabled", "已禁用", "danger"],
+  ];
+  const total = monitor.total || 0;
+  $("#ovMonitorBars").innerHTML = buckets.map(([key, label, tone]) => {
+    const n = monitor[key] || 0;
+    const pct = total ? (n / total) * 100 : 0;
+    return `<div class="ov-bar-row">
+      <span class="ov-bar-label">${label}</span>
+      <div class="ov-bar-track"><div class="ov-bar-fill ${tone}" style="width:${pct}%"></div></div>
+      <span class="ov-bar-num" data-count="${n}">${n}</span>
+    </div>`;
+  }).join("");
+  // 状态条上的数字也做计数动效（数量小，用短时长，避免看着像卡顿）
+  document.querySelectorAll("#ovMonitorBars .ov-bar-num").forEach(node => {
+    animateNumber(node, Number(node.dataset.count) || 0, { duration: 260 });
+  });
+
+  const items = (monitor.items || []).filter(item => item.state !== "active").slice(0, 6);
+  $("#ovMonitorList").innerHTML = items.length
+    ? items.map(item => {
+        // 冷却剩余时间：把秒换成「x 分钟后自动重试」，用户最关心的是
+        // 「这个号什么时候能自己回来」，而不是一个 ISO 时间戳。
+        const mins = Math.max(0, Math.round((item.cool_remaining || 0) / 60));
+        const remainText = mins > 0 ? `${mins} 分钟后自动重试` : "";
+        // 哨兵记到的真实业务码（11140 / 403 …）优先级高于本地错误文本
+        const why = item.signal_code
+          ? `${item.signal_code}${item.signal_count > 1 ? " ×" + item.signal_count : ""}`
+          : (item.last_error || "");
+        return `<div class="ov-account-item">
+        <span class="ov-dot ${item.state === "disabled" ? "danger"
+          : item.state === "active" ? "ok" : "warn"}"></span>
+        <span class="ov-account-name" data-tooltip="${esc(item.name)}">${esc(item.name || ("#" + item.id))}</span>
+        <span class="ov-account-state">${esc(item.label)}</span>
+        <span class="ov-account-err" data-tooltip="${esc(item.signal_label || item.last_error ||"")}">${
+          esc(why.slice(0, 34))}${remainText ? ` · ${esc(remainText)}` : ""}</span>
+      </div>`;
+      }).join("")
+    : `<div class="ov-all-ok"><span class="ov-dot ok"></span> 所有账号状态正常</div>`;
+
+  // ---- 平台矩阵 ----
+  const items2 = (platforms && platforms.items) || [];
+  const curPid = window.WBPlatform ? window.WBPlatform.current().platform : "";
+  $("#ovPlatforms").innerHTML = items2.map(item => {
+    const realms = item.realm_counts || {};
+    const realmText = Object.keys(realms).length
+      ? Object.entries(realms)
+          .filter(([, v]) => v)
+          .map(([k, v]) => `${k === "cn" ? "国内" : k === "intl" ? "国际" : k} ${v}`)
+          .join(" · ")
+      : "—";
+    const active = item.id === curPid;
+    return `<button type="button" class="ov-platform-row${active ? " active" : ""}"
+        data-ov-platform="${esc(item.id)}"
+        data-tooltip="${esc(item.label)}"
+        data-tooltip-description="点击切换到这个平台，概览与账号池全部跟随">
+      <span class="ov-platform-logo">${window.WBPlatformIcons ? WBPlatformIcons.get(item.icon || item.id) : ""}</span>
+      <span class="ov-platform-body">
+        <span class="ov-platform-name">${esc(item.label)}</span>
+        <span class="ov-platform-sub">${esc(realmText)}</span>
+      </span>
+      <span class="ov-platform-count">${item.account_count || 0}</span>
+    </button>`;
+  }).join("") || '<p class="ov-note">还没有接入平台</p>';
+  // 点击平台行 = **原地切换概览**，不跳转到平台管理页。
+  //
+  // 要求：「概览底部的平台状态点击能切换其它平台的概览查看」。
+  // 所以切完平台后重新拉一次概览（`loadOverview(true)`），
+  // 而不是 `activateTab("platforms")` —— 那会离开当前页面。
+  $("#ovPlatforms").querySelectorAll("[data-ov-platform]").forEach(node => {
+    node.addEventListener("click", async () => {
+      const target = node.dataset.ovPlatform;
+      if (!target || !window.WBPlatform) return;
+      if (target === window.WBPlatform.current().platform) return;
+      window.WBPlatform.select(target);
+      await loadOverview(true);   // 平台切换是全局上下文变更，必须重取
+      const label = (window.WBPlatform.spec() || {}).label || target;
+      if (typeof toast === "function") toast(`已切换到 ${label}`);
+    });
+  });
+
+  // 侧栏角标：0 时整体隐藏（不占位）
+  setSideDot("#sideSentinelDot", affected);
+}
+
+/**
+ * 侧栏角标统一更新。
+ *
+ * `n <= 0` 时用 `hidden` 属性彻底隐藏 —— 只加 class 不够，
+ * 因为 `.side-dot` 自带 `display:inline-flex`，仅设文字为 "0"
+ * 会留下一个空的橙色圆点，反而更让人困惑。
+ */
+function setSideDot(selector, n) {
+  const dot = document.querySelector(selector);
+  if (!dot) return;
+  const value = Number(n) || 0;
+  if (value > 0) {
+    dot.hidden = false;
+    dot.classList.remove("hidden");
+    dot.textContent = value > 99 ? "99+" : value;
+  } else {
+    dot.hidden = true;
+    dot.classList.add("hidden");
+    dot.textContent = "0";
+  }
+}
+
+/* 区间切换：只改状态再重取，不重载页面 */
+document.addEventListener("click", event => {
+  const btn = event.target.closest("[data-ov-days]");
+  if (!btn) return;
+  const next = Number(btn.dataset.ovDays) || 1;
+  if (next === _ovDays) return;
+  _ovDays = next;
+  loadOverview(true);
+});
+
+/* ==========================================================================
+   风控哨兵面板
+   --------------------------------------------------------------------------
+   两个诉求：**看得见**（哪些账号被风控、什么时候、什么原因）与
+   **停得下**（一键暂停该平台，避免连坐扩大）。
+
+   数据每次刷新现取，不做前端缓存 —— 封控是分钟级事件，缓存只会误导。
+   ========================================================================== */
+
+let _sentinelData = null;
+
+async function loadSentinel(force) {
+  const summary = $("#sentinelSummary");
+  if (!summary) return;
+  try {
+    const r = await api("/api/sentinel/status?window=300");
+    if (!r.ok) return;
+    const data = await r.json();
+    _sentinelData = data;
+    renderSentinel(data);
+    // 侧栏角标：没打开面板也能看到「有账号正在被风控」
+    const n = data.accounts_affected || 0;
+    setSideDot("#sideSentinelDot", n);
+    const dot = $("#sideSentinelDot");
+    if (dot) dot.title = n > 0 ? `${n} 个账号近期被上游风控` : "";
+  } catch (e) {
+    summary.innerHTML = `<p class="fs-12" style="color:var(--danger)">哨兵加载失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 最近一次风控信号的人话时间（没有信号就是「—」）。 */
+function sentinelLastSignalText(data) {
+  const stamps = (data.accounts || []).map(a => Number(a.last_ts || 0)).filter(Boolean);
+  if (!stamps.length) return "—";
+  const age = Math.max(0, Math.floor(Date.now() / 1000 - Math.max(...stamps)));
+  if (age < 60) return "刚刚";
+  if (age < 3600) return Math.floor(age / 60) + " 分钟前";
+  return Math.floor(age / 3600) + " 小时前";
+}
+
+function renderSentinel(data) {
+  const paused = data.pause || {};
+  const pausedKeys = Object.keys(paused);
+  const tripped = data.tripped;
+
+  $("#sentinelSummary").innerHTML = `
+    <div class="sentinel-banner ${tripped ? "danger" : "ok"}">
+      <span class="sentinel-banner-icon">${tripped ? "!" : "✓"}</span>
+      <div class="sentinel-banner-body">
+        <strong>${tripped
+          ? `检测到批次级封控：最近 ${Math.round((data.window_seconds || 300) / 60)} 分钟内有 ${data.accounts_affected} 个账号被风控`
+          : "未检测到批次级封控"}</strong>
+        <span>阈值 ${data.threshold} 个账号 / ${Math.round((data.window_seconds || 300) / 60)} 分钟${
+          tripped ? ` · 建议暂停 ${data.suggested_pause_seconds} 秒止损` : ""}</span>
+      </div>
+      <div class="sentinel-banner-actions">
+        ${tripped
+          ? `<button type="button" class="console-btn danger" onclick="sentinelPause()">立即暂停止损</button>`
+          : ""}
+        ${pausedKeys.length
+          ? pausedKeys.map(k => `<button type="button" class="console-btn quiet"
+              onclick="sentinelResume(${jsv(k === "all" ? "" : k)})">恢复 ${esc(k)}</button>`).join("")
+          : ""}
+      </div>
+    </div>
+    <div class="sentinel-stats">
+      <div class="sentinel-stat"><span>${data.total_events || 0}</span><em>信号总数</em></div>
+      <div class="sentinel-stat"><span>${data.accounts_affected || 0}</span><em>涉及账号</em></div>
+      <div class="sentinel-stat"><span>${Object.keys(data.by_code || {}).length}</span><em>原因种类</em></div>
+      <div class="sentinel-stat"><span>${data.redis ? "Redis" : "内存"}</span><em>存储后端</em></div>
+      <div class="sentinel-stat"><span>${esc(sentinelLastSignalText(data))}</span><em>最近信号</em></div>
+      <div class="sentinel-stat${pausedKeys.length ? " is-warn" : ""}"><span>${pausedKeys.length || 0}</span><em>暂停中的平台</em></div>
+    </div>`;
+
+  // 账号表：谁处于什么阶段
+  const accounts = data.accounts || [];
+  $("#sentinelAccounts").innerHTML = `
+    <div class="sentinel-card-head"><h3>受影响账号</h3>
+      <span>按最近一次信号排序</span></div>
+    ${accounts.length ? `<div class="sentinel-table-wrap"><table class="tbl">
+      <thead><tr><th>账号</th><th>最近信号</th><th>次数</th><th>首次</th><th>最近</th></tr></thead>
+      <tbody>${accounts.map(item => `<tr>
+        <td class="sentinel-acc">#${item.account_id}</td>
+        <td><span class="sentinel-code">${esc(item.code || item.kind || "-")}</span>
+          ${esc(item.label || "")}</td>
+        <td class="tnum">${item.count}</td>
+        <td class="sentinel-ts">${fmtTime(new Date((item.first_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
+        <td class="sentinel-ts">${fmtTime(new Date((item.last_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
+      </tr>`).join("")}</tbody></table></div>`
+    : `<p class="sentinel-empty">最近没有账号被上游风控。</p>`}`;
+
+  // 原始事件流：排障时能定位到具体某次请求
+  const events = data.recent || [];
+  $("#sentinelEvents").innerHTML = `
+    <div class="sentinel-card-head"><h3>信号明细</h3>
+      <span>最近 ${events.length} 条（Redis 保留 15 分钟，自动过期）</span></div>
+    ${events.length ? `<div class="sentinel-table-wrap"><table class="tbl">
+      <thead><tr><th>时间</th><th>账号</th><th>类型</th><th>码</th><th>模型</th><th>细节</th></tr></thead>
+      <tbody>${events.map(ev => `<tr>
+        <td class="sentinel-ts">${fmtTime(new Date((ev.ts || 0) * 1000).toISOString().slice(0, 19))}</td>
+        <td class="sentinel-acc">#${ev.account_id}</td>
+        <td>${esc(ev.kind || "")}</td>
+        <td><span class="sentinel-code">${esc(ev.code || "-")}</span></td>
+        <td class="sentinel-model">${esc(ev.model || "-")}</td>
+        <td class="sentinel-detail" data-tooltip="${esc(ev.detail ||"")}">${esc((ev.detail || "").slice(0, 90))}</td>
+      </tr>`).join("")}</tbody></table></div>`
+    : `<p class="sentinel-empty">暂无明细。</p>`}`;
+}
+
+async function sentinelPause(platform) {
+  const cur = window.WBPlatform ? window.WBPlatform.current().platform : "";
+  const target = platform || cur || "";
+  const yes = await uiConfirm({
+    title: "暂停该平台止损",
+    message: `暂停 ${target || "全部平台"} 的上游请求 10 分钟？\n` +
+             "暂停期间请求会直接返回 503，不会消耗账号额度、也不会打到上游。",
+    okText: "暂停",
+  });
+  if (!yes) return;
+  const r = await api("/api/sentinel/pause", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ platform: target, seconds: 600, reason: "手动止损" }),
+  });
+  if (r.ok) { toast("已暂停，可随时恢复"); loadSentinel(true); loadOverview(); }
+  else toast("暂停失败", "err");
+}
+
+async function sentinelResume(platform) {
+  const r = await api("/api/sentinel/resume?platform=" + encodeURIComponent(platform || ""),
+                      { method: "POST" });
+  if (r.ok) { toast("已恢复"); loadSentinel(true); loadOverview(); }
+  else toast("恢复失败", "err");
+}
+
+/* ==========================================================================
+   平台网关（跨平台调度）
+   --------------------------------------------------------------------------
+   与「平台管理」的分工：
+     平台管理 = 我有哪些平台、每个平台几个号
+     平台网关 = 这些平台之间怎么调度（策略 / 优先级 / 禁用）
+
+   数据来自 /api/gateway/*，后端负责实际排序（见 admin/platform/gateway_router.py）。
+   前端只做展示与保存 —— 策略逻辑绝不在前端复刻一份，否则两处会算出不同顺序。
+   ========================================================================== */
+let _gwConfig = null;
+
+async function loadGateway() {
+  // 调度可视化：延后初始化，等策略网格渲染完再量尺寸
+  setTimeout(() => {
+    if (typeof gwInitTraffic === "function") gwInitTraffic(true);
+  }, 220);
+
+  try {
+    const [cfgResp, orderResp] = await Promise.all([
+      api("/api/gateway/config"),
+      api("/api/gateway/order"),
+    ]);
+    if (!cfgResp.ok) {
+      const host = $("#gwStrategies");
+      if (host) host.innerHTML = `<p class="ov-note">配置加载失败（HTTP ${cfgResp.status}）</p>`;
+      return;
+    }
+    _gwConfig = await cfgResp.json();
+    const order = orderResp.ok ? (await orderResp.json()).items || [] : [];
+    renderGatewayStrategies(_gwConfig);
+    renderGatewayPlatforms(_gwConfig, order);
+    renderGatewayOrder(order);
+  } catch (e) {
+    const host = $("#gwStrategies");
+    if (host) host.innerHTML = `<p class="ov-note" style="color:var(--danger)">加载失败：${esc(e.message)}</p>`;
+  }
+}
+
+function renderGatewayStrategies(cfg) {
+  const host = $("#gwStrategies");
+  if (!host) return;
+  host.innerHTML = (cfg.strategies || []).map(item => `
+    <button type="button" class="gw-strategy${item.value === cfg.strategy ? " active" : ""}"
+        data-gw-strategy="${esc(item.value)}">
+      <span class="gw-strategy-name">${esc(item.label)}</span>
+      <span class="gw-strategy-desc">${esc(item.description)}</span>
+    </button>`).join("");
+
+  host.querySelectorAll("[data-gw-strategy]").forEach(node => {
+    node.addEventListener("click", async () => {
+      const strategy = node.dataset.gwStrategy;
+      if (strategy === _gwConfig?.strategy) return;
+      const r = await api("/api/gateway/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy }),
+      });
+      if (r.ok) {
+        toast("策略已切换：" + node.querySelector(".gw-strategy-name").textContent);
+        loadGateway();
+        // 重建可视化并演示新策略的流向
+        if (typeof gwOnStrategyChanged === "function") {
+          gwOnStrategyChanged();
+        }
+      } else {
+        toast("切换失败", "err");
+      }
+    });
+  });
+}
+
+function renderGatewayPlatforms(cfg, order) {
+  const host = $("#gwPlatforms");
+  if (!host) return;
+  const rank = {};
+  (order || []).forEach((item, index) => { rank[item.platform] = index + 1; });
+  const disabled = cfg.disabled || {};
+  const priority = cfg.priority || {};
+
+  // 平台列表来自 /api/gateway/config 的 platforms 字段（平台自己注册的），
+  // 不是前端写死的 —— 新增平台自动出现在这里。
+  const items = cfg.platforms || [];
+  if (!items.length) {
+    host.innerHTML = `<p class="ov-note">还没有接入平台</p>`;
+    return;
+  }
+
+  host.innerHTML = items.map(item => {
+    const off = Object.prototype.hasOwnProperty.call(disabled, item.id);
+    const prio = Object.prototype.hasOwnProperty.call(priority, item.id)
+      ? priority[item.id] : "";
+    return `<div class="gw-platform-row${off ? " disabled" : ""}">
+      <span class="gw-platform-logo">${window.WBPlatformIcons ? WBPlatformIcons.get(item.id) : ""}</span>
+      <span class="gw-platform-name">${esc(item.label)}</span>
+      <span class="gw-platform-rank">${off ? "已禁用" : (rank[item.id] ? "第 " + rank[item.id] + " 位" : "无可用账号")}</span>
+      <label class="gw-priority">优先级
+        <input type="number" min="0" max="9999" value="${esc(String(prio))}"
+               data-gw-priority="${esc(item.id)}" placeholder="100">
+      </label>
+      <button type="button" class="gw-toggle ${off ? "on" : ""}"
+              data-gw-toggle="${esc(item.id)}" data-gw-enabled="${off ? "1" : "0"}">
+        ${off ? "启用" : "禁用"}
+      </button>
+    </div>`;
+  }).join("");
+
+  // 优先级：失焦时保存（避免每敲一个键就发一次请求）
+  host.querySelectorAll("[data-gw-priority]").forEach(node => {
+    node.addEventListener("change", async () => {
+      const pid = node.dataset.gwPriority;
+      const value = node.value.trim();
+      const next = { ...(cfg.priority || {}) };
+      if (value === "") delete next[pid];
+      else next[pid] = Number(value) || 0;
+      const r = await api("/api/gateway/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ priority: next }),
+      });
+      if (r.ok) { toast("优先级已保存"); loadGateway(); }
+      else toast("保存失败", "err");
+    });
+  });
+
+  // 禁用 / 启用
+  host.querySelectorAll("[data-gw-toggle]").forEach(node => {
+    node.addEventListener("click", async () => {
+      const pid = node.dataset.gwToggle;
+      const currentlyOff = node.dataset.gwEnabled === "1";
+      const action = currentlyOff ? "enable" : "disable";
+      if (action === "disable") {
+        const yes = await uiConfirm({
+          title: "禁用平台网关",
+          message: `禁用后该平台不再参与调度，它的模型权益将不可用。\n账号数据保留，随时可以恢复。`,
+          okText: "禁用",
+        });
+        if (!yes) return;
+      }
+      const r = await api("/api/gateway/" + action, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform: pid, reason: "控制台手动操作" }),
+      });
+      if (r.ok) {
+        toast(currentlyOff ? "已启用" : "已禁用");
+        loadGateway();
+      } else {
+        toast("操作失败", "err");
+      }
+    });
+  });
+}
+
+function renderGatewayOrder(order) {
+  const host = $("#gwOrder");
+  if (!host) return;
+  if (!order || !order.length) {
+    host.innerHTML = `<p class="sentinel-empty">当前没有可用平台（全部被禁用或没有可用账号）</p>`;
+    return;
+  }
+  host.innerHTML = order.map((item, index) => `
+    <div class="gw-order-row">
+      <span class="gw-order-rank">${index + 1}</span>
+      <span class="gw-order-name">${esc(item.label || item.platform)}</span>
+      <span class="gw-order-reason">${esc(item.reason || "")}</span>
+      <span class="gw-order-meta">${item.usable || 0} 个可用 · 额度 ${item.balance_remain || 0}</span>
+    </div>`).join("");
+}
+
+async function loadPlatformOverview() {
+  // 平台概览卡片：**完全由平台自己声明**，前端只负责渲染。
+  //
+  // 改造前这里是两套写死的分支（`if (isTrae) {...} else {...}`），
+  // 新增平台就得再加一个分支，而且前端必须认识每个平台的统计口径。
+  // 现在数据来自 `GET /api/platforms/{id}/overview`，卡片由平台返回：
+  // 加载对应网关 → 渲染卡片 → 平台增删自动反映，互不影响。
+  const host = $("#platformOverview");
+  if (!host || !window.WBPlatform) return;
+  const cur = window.WBPlatform.current();
+  const spec = window.WBPlatform.spec() || {};
+  const platformId = cur.platform || spec.id || "";
+
+  // 标题：平台名 + 固定区域（单区平台才拼区域后缀，避免「Trae 国内版 · 国内版」）
+  const fixedRealm = cur.realm || spec.realm || "";
+  const realmLabel = fixedRealm
+    ? (spec.realm_label
+       || (spec.realms || []).find(x => x.key === fixedRealm)?.label
+       || ({ cn: "国内版", intl: "国际版" })[fixedRealm] || fixedRealm)
+    : "";
+  const titleLabel = spec.label || platformId || "";
+  const showRealm = realmLabel && !titleLabel.includes(realmLabel);
+
+  try {
+    const r = await api("/api/platforms/" + encodeURIComponent(platformId) + "/overview");
+    if (!r.ok) {
+      host.innerHTML = `<p class="ov-note">该平台概览加载失败（HTTP ${r.status}）</p>`;
+      return;
+    }
+    const data = await r.json();
+    const cards = data.cards || [];
+
+    host.innerHTML = `
+      <div class="platform-overview-head">
+        <h2>${esc(titleLabel)}${showRealm ? " · " + esc(realmLabel) : ""}</h2>
+        <p>${esc(spec.notes || "")}</p>
+      </div>
+      ${cards.length
+        ? `<div class="stat-grid">${cards.map(renderPlatformCard).join("")}</div>`
+        : `<p class="ov-note">${esc(data.reason || "该平台暂未提供概览")}</p>`}`;
+
+    // 数值动画：只对「看起来是数字」的卡片做滚动，
+    // 避免给「内置默认」「反向代理」这种文案做无意义的计数动画。
+    cards.forEach(card => {
+      const node = host.querySelector(`[data-card-key="${card.key}"] .stat-value`);
+      if (!node) return;
+      const raw = String(card.value ?? "").replace(/[,\s%]/g, "");
+      const num = Number(raw);
+      if (!Number.isFinite(num) || raw === "") return;
+      const suffix = String(card.value).includes("%") ? "%" : "";
+      animateNumber(node, num, {
+        format: (n) => (suffix ? Math.round(n) + suffix
+                              : Math.round(n).toLocaleString("zh-CN")),
+      });
+    });
+  } catch (e) {
+    host.innerHTML = `<p class="ov-note" style="color:var(--danger)">概览加载失败：${esc(e.message)}</p>`;
+  }
+}
+
+/**
+ * 渲染一张平台概览卡片。
+ *
+ * 所有字段都来自后端（平台自己声明），前端不认识任何具体平台 ——
+ * 这是「新增平台前端不用改」的落点。
+ */
+function renderPlatformCard(card) {
+  const tone = card.tone ? ` is-${card.tone}` : "";
+  return `<div class="stat${tone}" data-card-key="${esc(card.key || "")}">
+    <div class="stat-head">
+      <span class="stat-label">${esc(card.label || "")}</span>
+    </div>
+    <div class="stat-value">${esc(String(card.value ?? "—"))}</div>
+    ${card.sub ? `<div class="stat-sub">${esc(card.sub)}</div>` : ""}
+  </div>`;
+}
+
+/* ==========================================================================
+   平台切换 = 全局上下文切换
+   --------------------------------------------------------------------------
+   切平台时，**所有**按平台统计的面板都要重新取数，否则看到的仍是
+   上一个平台的数字（这是「切换后数字没变」最难排查的一类问题：
+   接口没错、数据没错，只是没人重新请求）。
+
+   只有当前可见的面板立刻刷新；其余面板在 activateTab 时会自然重取，
+   因为 api() 已经自动带上新的 X-Platform。
+   ========================================================================== */
+document.addEventListener("wb-platform-change", () => {
+  // ⚠️ 不能用 `_tabFromUrl()`：它读 `location.search`，而 `activateTab` 是
+  // 用 `history.replaceState` 更新的 —— 切换平台发生在面板渲染**之后**，
+  // 此时 URL 可能还是上一次的值（首次进入更是空的）。读 URL 的后果是
+  // 「切完平台，当前面板的统计不刷新」，得手动切走再切回来才更新。
+  // 因此用面板切换时记录的模块级变量，它永远反映**当前真正显示**的面板。
+  const active = _activeTab;
+  // 概览必须**每次都重新拉**：它的数字全部带平台作用域，
+  // 而它又是默认首页 —— 漏了这条就会出现「切了平台，概览还是上一个平台的数」，
+  // 用户会以为有缓存（数据其实一直是各自平台的新数据，只是没重取）。
+  if (active === "overview") loadOverview(true);
+  if (active === "platforms") { loadPlatformOverview(); loadPlatformBench(); }
+  if (active === "accounts") loadAccounts();
+  if (active === "usage") loadUsageStats();
+  if (active === "logs") openLogsPanel();
+  if (active === "credits") loadCreditStats();
+  if (active === "keys") { loadKeys(); loadShareInfo(); }
+  // 模型面板：切平台时要**重置**过滤到新平台，否则会沿用上一个平台的筛选，
+  // 显示成空列表或别的平台的模型。
+  if (active === "models") { _modelPlatformFilter = ""; loadModels(); }
+  if (active === "schedules") loadSchedules();
+});
+
+/* ==========================================================================
+   移动端导航抽屉
+   --------------------------------------------------------------------------
+   桌面是固定侧栏，移动端折叠成汉堡菜单（样式见 <style> 的 @media 段落）。
+   这里只管开合状态，**不写死断点/宽度** —— 否则「什么时候该折叠」
+   会同时存在 CSS 与 JS 两处判断，迟早不一致。
+   ========================================================================== */
+
+/**
+ * 取某个面板的**纯文字**名称（用于移动端顶栏）。
+ *
+ * 为什么不用 `el.textContent`：导航项里可能夹着角标数字
+ * （「积分到期」右边有个待处理数），textContent 会把数字一起读进来，
+ * 顶栏就显示成「积分到期 3」。这里只取**第一个文本节点**。
+ */
+function _sideTabLabel(name) {
+  const el = document.querySelector(`.side-item[data-tab="${name}"]`);
+  if (!el) return name;
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = (node.textContent || "").trim();
+      if (t) return t;
+    }
+  }
+  return name;
+}
+function toggleSideMenu(ev) {
+  if (ev) ev.stopPropagation();
+  const shell = document.querySelector(".app-shell");
+  const aside = $("#appSide");
+  const btn = $("#sideToggle");
+  if (!shell || !aside) return;
+  const open = !aside.classList.contains("open");
+  aside.classList.toggle("open", open);
+  shell.classList.toggle("menu-open", open);
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function closeSideMenu() {
+  const shell = document.querySelector(".app-shell");
+  const aside = $("#appSide");
+  const btn = $("#sideToggle");
+  if (aside) aside.classList.remove("open");
+  if (shell) shell.classList.remove("menu-open");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+// 导航项：带 data-tab 的是面板切换（「退出登录」没有 data-tab，走自己的 onclick）。
+// 用 data-tab 存在性判断，比维护类名白名单更不容易漏。
+document.querySelectorAll(".side-item").forEach(b => {
+  b.addEventListener("click", () => {
+    if (b.dataset.tab) activateTab(b.dataset.tab);
+    closeSideMenu();          // 点任意项后都收起抽屉
+  });
+});
+
+// 前进/后退（含手改地址栏后回车）时同步面板。replaceState 不产生历史项，
+// 所以这只在用户真的跨页面前进/后退时触发。
+window.addEventListener("popstate", () => activateTab(_tabFromUrl(), { updateUrl: false }));
+
+// 窄→宽切换时清掉抽屉状态：从手机转到桌面后若还留着 open/menu-open，
+// 桌面侧栏会带上移动端的展开态（遮罩也可能残留）。
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 900) closeSideMenu();
+});
+
+// Esc 关闭抽屉（与关闭弹窗同键，行为一致）
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSideMenu();
+});
+
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+/* 把任意值安全地嵌进「内联 onclick 里的 JS 参数位」。
+ *
+ * 为什么不能直接用 esc()：esc 只做 HTML 实体转义（& < > "），
+ * 而 onclick="fn('${...}')" 是**先由 HTML 解析器解码属性、再交给 JS 解析**，
+ * 所以单引号/反斜杠/换行都还在 JS 语义里，一个 ' 就能闭合字符串跳出参数位。
+ * 这里改成 JSON.stringify（处理 \ " 换行 控制字符）+ esc（处理 & < > "），
+ * 产出的 `&quot;…&quot;` 解码后是合法的双引号 JS 字符串字面量。
+ */
+function jsv(v){
+  return esc(JSON.stringify(v == null ? "" : String(v))
+    .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029"));
+}
+/* 内联 SVG 图标（lucide 路径，数据见 icons.js，取自官方客户端 bundle）。
+ * 用法：ic('trash') / ic('spinner','wb-ic-spin') / ic('rotate','text-indigo-600')
+ * 找不到的图标退化成空串而不是抛错 —— 少一个图标远好过整页白屏。 */
+function ic(name, cls) {
+  const path = (window.WB_ICON_PATHS || {})[name];
+  if (!path) return '';
+  return `<svg class="wb-ic ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
+}
+/* 模型厂商图标 —— 严格照抄官方 getModelIcon() 的匹配顺序：
+ *   1) 精确命中 vendor（含 glm / kimi / hunyuan / deepseek / minimax / claude / openai …）
+ *   2) 模式 id 精确命中（fast / balanced / primary / deep）
+ *   3) 子串包含匹配（先 gpt→openai 归一化；跳过模式 id，避免 "deep" 抢走一切）
+ *   4) 都没有 → default
+ * 顺序照抄很重要：第 3 步如果允许模式名参与，"deepseek" 会被 "deep" 抢走。
+ *
+ * 图标来源分两批：
+ *   · icons.js           —— 官方客户端逆向出来的那批（hy3 / hunyuan / glm …）
+ *   · model-icons.js     —— 由 scripts/build_model_icons.py 从 @lobehub/icons
+ *                           拉取的品牌 mono SVG（gpt / gemini / grok / qwen /
+ *                           doubao / kling / stepfun）。两者合并挂在
+ *                           window.WB_MODEL_ICONS 上，这里不区分来源。
+ */
+const _MODEL_MODES = ['fast', 'balanced', 'primary', 'deep'];
+// 模型名里的别名 -> 图标 key。上游/Panel 的写法五花八门，先把这类差异抹平，
+// 再做子串匹配，否则 `seed_m8`（豆包）、`step-5`（阶跃）这类会一直空着。
+const _VENDOR_ALIASES = [
+  [/(^|[^a-z])gpt|o1|o3|chatgpt/, 'openai'],
+  [/gemini|bard/, 'gemini'],
+  [/grok|xai/, 'grok'],
+  [/qwen|qwq|tongyi|通义/, 'qwen'],
+  [/doubao|seed[_-]?m|volc|bytedance|豆包/, 'doubao'],
+  [/kling|可灵/, 'kling'],
+  [/step[_-]?\d|stepfun|阶跃/, 'stepfun'],
+  [/glm|chatglm|zhipu/, 'glm'],
+  [/kimi|moonshot/, 'kimi'],
+  [/deepseek/, 'deepseek'],
+  [/claude|anthropic/, 'claude'],
+  [/minimax|abab|mimo/, 'minimax'],
+  [/hunyuan|hy\d|tencent|混元/, 'hunyuan'],
+];
+function modelIconKey(vendor) {
+  const icons = window.WB_MODEL_ICONS || {};
+  const v = String(vendor || '').toLowerCase();
+  if (v && Object.prototype.hasOwnProperty.call(icons, v)) return v;
+  const mode = _MODEL_MODES.find(m => v === m);
+  if (mode && icons[mode]) return mode;
+  if (v) {
+    // 先按别名表归一，命中且图标存在就直接用
+    for (const [re, key] of _VENDOR_ALIASES) {
+      if (re.test(v) && icons[key]) return key;
+    }
+    const norm = v.includes('gpt') ? 'openai' : v;
+    const hit = Object.keys(icons).find(k => !_MODEL_MODES.includes(k) && norm.includes(k));
+    if (hit) return hit;
+  }
+  return icons.default ? 'default' : null;
+}
+function modelIcon(vendor, cls) {
+  const key = modelIconKey(vendor);
+  const entry = key ? (window.WB_MODEL_ICONS || {})[key] : null;
+  if (!entry) return '';
+  // ⚠️ 不能在这里写死 fill="none"：
+  //   · 官方逆向那批图标（icons.js）是**描边**风格，path 自己带 stroke，
+  //     需要 svg 上 fill="none"；
+  //   · @lobehub/icons 那批是**填充**风格，path **没有 fill 属性**，
+  //     继承 svg 的 fill。svg 上写 fill="none" 会让它们整块消失
+  //     （表现为「图标位置是空的」——这是实际踩过的坑）。
+  // 因此 fill 只在填充类图标上显式给 currentColor，描边类保持 none。
+  const filled = entry.fill === 'solid' || (!!window.__WB_SOLID_ICONS
+    && window.__WB_SOLID_ICONS[key]);
+  const fillAttr = filled ? 'currentColor' : 'none';
+  return `<svg class="wb-mic ${cls || ''}" viewBox="${entry.viewBox}" fill="${fillAttr}" aria-hidden="true">${entry.body}</svg>`;
+}
+function card(t, v, iconName, col) {
+  return `<div class="card p-4"><div class="text-slate-400 text-xs">${t}</div>
+    <div class="mt-1 flex items-center gap-2">${ic(iconName, col)}<span class="text-2xl font-bold">${v}</span></div></div>`;
+}
+function badge(st) {
+  const m = st === "active" ? ["bg-emerald-100 text-emerald-700","正常"] : ["bg-slate-100 text-slate-500","禁用"];
+  return `<span class="badge ${m[0]}">${m[1]}</span>`;
+}
+
+/* ==========================================================================
+   新版视觉组件（借鉴 workbuddy-switch 的设计系统）
+   --------------------------------------------------------------------------
+   旧函数 card()/badge() 保留不动：它们被十几处调用，逐个改的风险远大于收益。
+   新面板与重点区域统一用下面这几个，视觉上更接近参考项目：
+     * 数值等宽对齐（tabular-nums）—— 表格里数字不等宽会显得很廉价
+     * 语义色只用三档：橙=7 天内到期、红=已到期、灰=长期有效
+     * 卡片只用极淡的 slate 双层阴影，靠边框分隔而不是靠投影
+   ========================================================================== */
+
+/** 指标卡：大号等宽数值 + 小号标签，支持 brand/warn/danger 状态色。 */
+function statCard(label, value, opts) {
+  opts = opts || {};
+  const cls = opts.tone ? ` is-${opts.tone}` : "";
+  const icon = opts.icon ? ic(opts.icon, opts.iconColor || "") : "";
+  const sub = opts.sub ? `<div class="stat-sub">${opts.sub}</div>` : "";
+  // 数值统一过一遍千分位：同一个「11351」在概览是 11,351、在账号池是 11351，
+  // 是 issue #4 里最扎眼的一处不一致。字符串（如「会话鉴权」）原样输出。
+  const shown = opts.raw ? value : fmtAuto(value);
+  return `<div class="stat${cls}">
+    <div class="stat-label">${icon}${esc(label)}</div>
+    <div class="stat-value">${shown}</div>${sub}</div>`;
+}
+
+/** 统计卡的默认数值格式：整数千分位，小数最多两位，非数字原样返回。 */
+function fmtAuto(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return v;
+  if (Number.isInteger(v)) return v.toLocaleString("zh-CN");
+  return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+}
+
+/**
+ * 积分数值格式化。
+ *
+ * 分成两个函数，因为这两处的精度诉求**正好相反**：
+ *
+ *   `fmtCredit`      汇总/概览用 → **取整**。
+ *       顶部卡片的 69475.00 看着又长又乱，末尾两位小数对「我还有多少积分」
+ *       这个判断毫无信息量（对比 118030 的总额度，小数只是噪音）。
+ *
+ *   `fmtCreditExact` 单个积分包用 → 保留小数。
+ *       包级别的 459.49 / 459 是真实差异（一个包用到只剩 0.49），
+ *       抹成整数会让「这个包还剩多少」失真，对账时对不上。
+ */
+function fmtCredit(n) {
+  // 与表格里的 fmtInt 保持同一口径（千分位、取整）：
+  // 概览 11,351 / 账号池 11351 这种差异不该存在。
+  return (Math.round(Number(n) || 0)).toLocaleString("zh-CN");
+}
+
+/** 单个积分包的精确保留（最多两位小数，整数不补 .00）。 */
+function fmtCreditExact(n) {
+  n = Number(n) || 0;
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+/**
+ * 到期徽标。三档语义色与参考项目一致（那边 expiryClass 用
+ * orange-600 / destructive / muted）：橙=7 天内、红=已到期、灰=长期有效。
+ * 「7 天内」用橙色而不是黄色，是因为它与「一般警告」不是一回事 ——
+ * 黄色在整套配色里已经用于「注意」，用它会稀释紧迫感。
+ */
+function expiryBadge(daysLeft, expired, expiringSoon) {
+  if (expired) return `<span class="exp-badge dead"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg></span>已到期</span>`;
+  if (daysLeft == null) return `<span class="exp-badge ever">长期有效</span>`;
+  const txt = daysLeft < 1 ? `${Math.max(1, Math.round(daysLeft * 24))} 小时内`
+                           : `${Math.floor(daysLeft)} 天后`;
+  return `<span class="exp-badge ${expiringSoon ? 'soon' : 'ever'}">${
+    expiringSoon ? '<span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3q1 4 4 6.5t3 5.5a1 1 0 0 1-14 0 5 5 0 0 1 1-3 1 1 0 0 0 5 0c0-2-1.5-3-1.5-5q0-2 2.5-4"/></svg></span>' : ''}${txt}</span>`;
+}
+
+/**
+ * 积分明细弹窗里的单行（比 pkgRowHtml 多显示总量与已用量）。
+ * 抽成独立函数是为了让「仍有剩余」与「已用完」两组共用同一份渲染 ——
+ * 两处各写一遍很容易在改动时只改一处，出现同一种包两种样式的割裂。
+ */
+function pkgDetailRow(p) {
+  const low = Number(p.remaining) <= 0;
+  const color = p.expired ? 'var(--danger)' : (p.expiringSoon ? 'var(--warn)' : 'var(--fg-muted)');
+  const dateTxt = p.expired ? "已到期"
+    : (p.expireDate && p.expireDate !== "长期有效" ? p.expireDate + " 到期" : p.expireLabel);
+  return `<div class="pkg-row"${low ? ' style="opacity:.55"' : ''}>
+    <div class="pkg-line">
+      <span class="pkg-amt">${fmtCreditExact(p.remaining)}</span>
+      <span class="truncate" style="color:var(--fg-muted)">
+        ${esc(p.displayName || "积分包")}
+        <span style="color:var(--fg-subtle)">/ ${fmtCreditExact(p.total)} · 已用 ${fmtCreditExact(p.used)}</span>${
+          low ? '<span style="color:var(--fg-subtle)"> · 已用完</span>' : ""}</span>
+      <span class="tnum" style="color:${color};font-weight:${p.expiringSoon || p.expired ? 600 : 400}">
+        ${esc(dateTxt)}</span>
+    </div>
+    <div class="pkg-track"><i class="${p.expired ? 'dead' : (p.expiringSoon ? 'soon' : '')}"
+      style="width:${p.total > 0 ? Math.min(100, Math.max(0, p.remaining / p.total * 100)) : 0}%"></i></div>
+  </div>`;
+}
+
+/**
+ * 单个积分包明细行（紧凑版：数量 chip + 包名 + 到期日 + 细进度条）。
+ *
+ * 结构本身就是参考项目 account-card.tsx 里 CreditResourceRow 的形态。
+ * 这个布局比「一张多列表格」信息密度更高，也更容易一眼看出「哪个包快没了」。
+ */
+function pkgRowHtml(p, opts) {
+  opts = opts || {};
+  const remaining = Number(p.remaining || 0);
+  const total = Number(p.total || 0);
+  const ratio = total > 0 ? Math.min(100, Math.max(0, remaining / total * 100)) : 0;
+  const tone = p.expired ? "dead" : (p.expiring_soon ? "soon" : "");
+  const showAccount = opts.showAccount !== false && p.account_name;
+  const dateTxt = p.expired ? "已到期" : (p.expire_date || "长期");
+  const color = p.expired ? 'var(--danger)' : (p.expiring_soon ? 'var(--warn)' : 'var(--fg-muted)');
+  // 提示统一走系统的 actionTooltip：原生 title 要悬停一两秒才出、样式不受控，
+  // 而这一行本来就是「一眼看清这个包还剩多少、什么时候作废」。
+  return `<div class="pkg-row" data-tooltip="${esc(p.display_name || '积分包')}"
+    data-tooltip-description="${esc('剩余 ' + remaining + ' / ' + total + ' · ' + (p.expire_label || '长期有效'))}">
+    <div class="pkg-line">
+      <span class="pkg-amt">${fmtCreditExact(remaining)}</span>
+      <span class="truncate" style="color:var(--fg-muted)">${esc(p.display_name || "积分包")}${
+        showAccount ? ` <span style="color:var(--fg-subtle)">· ${esc(p.account_name)}</span>` : ""}</span>
+      <span class="tnum" style="color:${color};font-weight:${p.expiring_soon || p.expired ? 600 : 400}">${esc(dateTxt)}</span>
+    </div>
+    <div class="pkg-track"><i class="${tone}" style="width:${ratio}%"></i></div>
+  </div>`;
+}
+
+/* 列表分页大小。
+ * 从 10 提到 20：账号表改成紧凑行（142px → ~44px）之后，一页 10 条
+ * 显得太碎（翻页比滚动还频繁）。20 条在一屏内用内部滚动就能扫完。 */
+const PS = 20;
+let _accData = [], _keyData = [], _modelData = [];
+/* 账号列表的 summary（含到期汇总）。积分到期面板直接复用它，
+ * 避免为「侧栏角标 / 概览卡」再打一次接口。 */
+let _accSummary = null;
+/* 积分到期面板的最近一次数据。
+ * 声明必须放在**使用它的函数之前**（这里是 refreshAcc）：
+ * `let` 在声明语句执行前处于 TDZ，声明靠后会让先调用的函数抛
+ * 「Cannot access before initialization」—— 同 _usageOpts 那条注释的坑。 */
+let _creditStats = null;
+let _creditSyncing = false;
+/* 按 id 取账号（用于弹窗标题等展示，避免调用方重复传名称） */
+function accById(id) { return _accData.find(a => a.id === id); }
+let _accTerm = "", _keyTerm = "", _modelTerm = "";
+let _modelPage = 1;  // 模型配置当前页：跨操作与浏览器刷新保持
+//: 模型配置的平台过滤（空 = 全部平台）。
+//: 注意这是**模型列表内部**的过滤，不影响全局平台上下文 ——
+//: 模型是公共表，用户可能想一次看完所有平台，也可能只想看某一个。
+let _modelPlatformFilter = "";
+let _modelOfficialTotal = 0;  // 官方前端当前可见的模型数（同步时由 cli agent 名单落库）
+// 模型列表排序：'default'(按 id) | 'mult_asc' | 'mult_desc'
+let _modelSort = "default";
+function pagerHtml(total, page, totalPages, fn) {
+  if (totalPages <= 1) return `<span class="text-slate-400">共 ${total} 条</span>`;
+  return `<span>共 ${total} 条 · 第 ${page}/${totalPages} 页</span>
+    <span class="flex gap-1">
+      <button class="pg-btn px-2 py-1 rounded border text-xs ${page<=1?'opacity-40 pointer-events-none':''} hover:bg-slate-50" onclick="${fn}(${page-1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></span></button>
+      <button class="pg-btn px-2 py-1 rounded border text-xs ${page>=totalPages?'opacity-40 pointer-events-none':''} hover:bg-slate-50" onclick="${fn}(${page+1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span></button>
+    </span>`;
+}
+
+/* ==================== 账号 ==================== */
+/**
+ * 账号行的「积分到期」单元格 —— **压成一行**。
+ *
+ * 之前这里渲染 2 个积分包完整明细（名称 + 数量 chip + 进度条），
+ * 每包约 50px，把行高撑到 142px，一屏只能看 4 行（原先能看 20 行）。
+ * 表格该用来横向扫读对比，明细应去弹窗/积分面板看。
+ *
+ * 现在：徽标（快到期额度）+ 最近到期的包名与日期 + 包数，全部一行内；
+ * 完整逐包明细挂到 `title`，鼠标悬停即可见 —— 信息没丢，只是不占版面。
+ */
+function accExpiryCell(a) {
+  const soon = Number(a.credits_expiring_soon || 0);
+  const next = a.credits_next_expiring || [];
+  if (!a.credits_synced_at) {
+    return `<span class="acc-exp">
+      <span class="exp-badge ever">未采集</span>
+      <span class="acc-exp-note">点「重新采集」</span></span>`;
+  }
+  const badge = soon > 0
+    ? `<span class="exp-badge soon"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3q1 4 4 6.5t3 5.5a1 1 0 0 1-14 0 5 5 0 0 1 1-3 1 1 0 0 0 5 0c0-2-1.5-3-1.5-5q0-2 2.5-4"/></svg></span>${fmtCredit(soon)}</span>`
+    : (a.credits_soonest_expire_at
+        ? expiryBadge(a.credits_soonest_days_left, false, false)
+        : `<span class="exp-badge ever">长期有效</span>`);
+  const first = next[0];
+  const note = first
+    ? `${esc((first.display_name || "积分包").slice(0, 8))} ${esc(first.expire_date || "")}`
+    : "无剩余包";
+  const cnt = `<span class="acc-exp-note">· ${a.credits_active_package_count || next.length} 包</span>`;
+  // 悬停看前 3 个包的完整信息（信息不丢，只不占版面）
+  const tip = next.slice(0, 3)
+    .map(p => `${p.display_name} 剩 ${fmtCreditExact(p.remaining)}/${fmtCreditExact(p.total)}`
+              + `，${p.expired ? "已到期" : p.expire_label}`)
+    .join("\n");
+  const tipAttr = tip ? ` data-tooltip="${esc(tip)}"` : "";
+  return `<span class="acc-exp"${tipAttr}>${badge}
+    <span class="acc-exp-note">${note}</span>${cnt}</span>`;
+}
+
+function consoleIcon(name) {
+  const paths = {"fa-user-group": "<circle cx=\"9\" cy=\"7\" r=\"3\"/><path d=\"M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3\"/>", "fa-hourglass-half": "<path d=\"M6 2h12M6 22h12M7 2v5l10 10v5M17 2v5L7 17v5\"/>", "fa-chart-pie": "<path d=\"M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z\"/>", "fa-key": "<circle cx=\"8\" cy=\"8\" r=\"5\"/><path d=\"m12 12 9 9m-5-5 3-3m-1 5 3-3\"/>", "fa-cubes": "<path d=\"m12 3 8 4v10l-8 4-8-4V7Zm-8 4 8 4 8-4M12 11v10\"/>", "fa-layer-group": "<path d=\"m12 3 10 5-10 5L2 8Zm-9 10 9 5 9-5M3 18l9 5 9-5\"/>", "fa-clock-rotate-left": "<path d=\"M3 4v5h5m-5 0a9 9 0 1 1 0 7M12 7v5l3 2\"/>", "fa-list": "<path d=\"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01\"/>", "fa-fingerprint": "<path d=\"M4 12a8 8 0 0 1 16 0m-13 5v-5a5 5 0 0 1 10 0v3m-7 5v-8a2 2 0 0 1 4 0v5m-1 5a12 12 0 0 0 4-4M3 16v-1\"/>", "fa-cloud-arrow-up": "<path d=\"M6 18a5 5 0 1 1 1-10 6 6 0 0 1 11 1 4 4 0 0 1 0 8m-6 4V11m-4 4 4-4 4 4\"/>", "fa-gear": "<path d=\"m10 3-1 3-3 1-2 3 2 2v3l2 2 3-1 2 2 3-1 1-3 3-1 1-3-3-2V7l-3-2-2 1Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>", "fa-seedling": "<path d=\"M12 21v-9M12 16C5 16 3 11 3 7c6 0 9 3 9 9Zm0-4c0-6 3-9 9-9 0 6-3 9-9 9Z\"/>", "fa-cat": "<path d=\"m5 9-1-6 6 3h4l6-3-1 6a8 8 0 1 1-14 0Zm4 4h.01M15 13h.01m-4 4h2\"/>", "fa-list-ul": "<path d=\"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01\"/>", "fa-chart-line": "<path d=\"M3 3v18h18M6 15l4-5 4 3 6-7\"/>", "fa-right-to-bracket": "<path d=\"M14 3h6v18h-6M3 12h12m-4-4 4 4-4 4\"/>", "fa-rotate": "<path d=\"M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1\"/>", "fa-file-export": "<path d=\"M12 3H4v18h12v-5M9 10h12m-4-4 4 4-4 4\"/>", "fa-power-off": "<path d=\"M12 2v10M6 5a9 9 0 1 0 12 0\"/>", "fa-trash": "<path d=\"M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7\"/>"};
+  /** 补充图标：paths 之外用到的（漏一个就是一个空按钮 —— 账号行的
+   *  「账号并发上限」「更多操作」以前就是这个原因什么都没有画出来）。 */
+  const extraPaths = {
+    "fa-heart-pulse": "<path d=\"M3 12h4l2-6 4 12 2-6h6\"/>",
+    "fa-sliders": "<path d=\"M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0\"/><circle cx=\"16\" cy=\"6\" r=\"2\"/><circle cx=\"10\" cy=\"12\" r=\"2\"/><circle cx=\"18\" cy=\"18\" r=\"2\"/>",
+    "fa-ellipsis": "<circle cx=\"5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"19\" cy=\"12\" r=\"1.6\"/>",
+    "fa-snowflake": "<path d=\"M12 2v20M4 6l16 12M20 6 4 18\"/><path d=\"m9 4 3 3 3-3M9 20l3-3 3 3\"/>"
+  };
+  const path = paths[name] || extraPaths[name];
+  return path ? `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>` : '';
+}
+
+function accountActionDescription(title) {
+  const descriptions = {
+    '成长任务':'查看任务进度，完成任务并领取奖励',
+    '猫猫旅行':'查看旅行状态，派出或领取奖励',
+    '积分明细（逐包到期日）':'查看积分包余额、有效期与到期风险',
+    '请求用量':'查看该账号的上游请求与消耗明细',
+    '三项健康检查：积分、模型列表、真实对话':'依次验证积分、模型目录和一次真实上游对话',
+    '注入本机客户端':'将该账号登录态写入本机客户端',
+    '刷新余额与到期快照':'同步最新余额及积分包到期信息',
+    '导出登录态':'下载该账号凭据，供备份或重新导入',
+    '启用/禁用':'控制该账号是否参与网关调度',
+    '删除':'从账号池移除该账号'
+  };
+  return descriptions[title] || '';
+}
+/** 把「还有多久」写成人类可读的中文。 */
+function fmtRemaining(untilIso) {
+  if (!untilIso) return "";
+  const ms = Date.parse(untilIso) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return "已到期";
+  const total = Math.floor(ms / 1000);
+  if (total < 60) return total + " 秒后";
+  const min = Math.floor(total / 60);
+  if (min < 60) return min + " 分钟后";
+  const hour = Math.floor(min / 60);
+  const restMin = min - hour * 60;
+  if (hour < 24) return hour + " 小时" + (restMin ? restMin + " 分" : "") + "后";
+  const day = Math.floor(hour / 24);
+  const restHour = hour - day * 24;
+  return day + " 天" + (restHour ? restHour + " 小时" : "") + "后";
+}
+
+/**
+ * 账号状态徽标（冷却 / 模型冷却）。
+ *
+ * ## 为什么改成两行布局
+ *
+ * 原来这两个 chip 只有一行文字 + `data-tooltip`，问题有三个：
+ *   1. `limit-chip` 没有上下间距、也没有和账号名左对齐 ——
+ *      贴在名字右边挤成一团，多个 chip 之间还叠着。
+ *   2. 冷却**剩余时间**只在 tooltip 里有，页面上看不到「还差多久」。
+ *   3. **上游到底返回了什么**完全不展示，用户只看到「账号冷却」四个字，
+ *      不知道是额度耗尽、限流还是风控；解除后过一会儿又冷却，
+ *      也看不到为什么。
+ *
+ * 现在：文字直接写在徽标里（不用悬停），悬停时给出完整时间与原因。
+ */
+function accountLimitBadge(a) {
+  const limits = (a.model_limits || []).filter(l => !l.until || Date.parse(l.until) > Date.now());
+  const reasons = {
+    hard_credit: '账号额度耗尽',
+    soft_rate: '账号请求限流',
+    account_fault: '账号授权或风控限制',
+    breaker: '连续失败熔断',
+    degraded: '连续失败退避',
+    waf: '请求被网关拦截',
+    not_found: '接口暂不可用',
+    upstream_internal: '上游暂时故障',
+  };
+  const until = a.gateway_until;
+  const cooling = a.gateway_state === 'cooling' && (!until || Date.parse(until) > Date.now());
+  const reason = reasons[a.gateway_reason] || '账号暂时冷却';
+  const remain = fmtRemaining(until);
+
+  // ---- 上游返回的原始错误 ----
+  //
+  // 注意字段名：账号列表 API 返回的是 **`upstream_error`** 对象
+  // （{http_status, code, message, display_message, raw, client_message}），
+  // 而不是 `last_err_msg`（那是数据库列名，没有对外暴露）。
+  // 之前读 `a.last_err_msg` 恒为 undefined，所以「上游返回了啥」永远是空的 ——
+  // 用户只能看到「账号冷却」四个字，不知道是限流、额度还是风控。
+  const up = a.upstream_error || {};
+  const upstreamBits = [];
+  if (up.http_status) upstreamBits.push("HTTP " + up.http_status);
+  if (up.code !== null && up.code !== undefined && up.code !== "") {
+    upstreamBits.push("code " + up.code);
+  }
+  const upMsg = String(up.message || up.display_message || "").trim();
+  if (upMsg) upstreamBits.push(upMsg.slice(0, 160));
+  const upstreamLine = upstreamBits.length
+    ? upstreamBits.join(" · ")
+    : (up.raw ? String(up.raw).slice(0, 160) : "");
+
+  const chips = [];
+  if (cooling) {
+    // 徽标上一行只放**最关键的两个信息**：原因 + 还剩多久。
+    // 「冷却 · 账号授权或风控限制 · 44 分钟后恢复」这种长句在表格里
+    // 会被折成 4~5 行、比行还高 —— 精简成「冷却 44 分钟后 · 风控限制」，
+    // 完整句子仍保留在 tooltip 里。
+    const shortReason = {
+      hard_credit: '额度耗尽',
+      soft_rate: '请求限流',
+      account_fault: '风控限制',
+      breaker: '连续失败',
+      degraded: '退避重试',
+      waf: '网关拦截',
+      not_found: '接口不可用',
+      upstream_internal: '上游故障',
+    }[a.gateway_reason] || '暂时冷却';
+    const text = remain
+      ? `冷却 ${remain} · ${shortReason}`
+      : `冷却中 · ${shortReason}`;
+    const desc = [
+      `原因：${reason}`,
+      until ? `冷却至：${fmtTime(until)}（${remain}自动恢复）` : "",
+      upstreamLine ? `上游返回：${upstreamLine}` : "上游未记录具体错误信息",
+      "点击可立即解除冷却，让该账号重新参与调度。",
+    ].filter(Boolean).join("\n");
+    chips.push(
+      `<button type="button" class="gateway-chip" onclick="clearAccountCooldown(${a.id})"
+        data-tooltip="${esc(`${reason} · ${remain || '冷却中'}`)}"
+        data-tooltip-description="${esc(desc)}">${esc(text)}</button>`);
+  }
+  if (limits.length) {
+    const kinds = { model_daily: '日额度耗尽', model_rate: '短时限流',
+                    model_queue: '上游排队', model_block: '模型不可用' };
+    // 最近到期的那一个，直接写在按钮上
+    const soonest = limits.slice().sort(
+      (x, y) => (Date.parse(x.until || 0) || 0) - (Date.parse(y.until || 0) || 0))[0];
+    const soonestRemain = soonest && soonest.until ? fmtRemaining(soonest.until) : "";
+    const text = soonestRemain
+      ? `${limits.length} 模型冷却 · 最近 ${soonestRemain}`
+      : `${limits.length} 模型冷却`;
+    const detail = limits.map(l =>
+      `${l.model} · ${kinds[l.kind] || '暂时受限'} · ` +
+      `${modelLimitDeadlineLabel(l)} ${fmtTime(l.until)}` +
+      (l.upstream_message ? `（上游：${String(l.upstream_message).slice(0, 80)}）` : "")
+    ).join("\n");
+    const scope = cooling
+      ? "另有账号级冷却，当前全部模型暂不可调度"
+      : "仅以下模型冷却，其他模型仍可调度";
+    chips.push(
+      `<button type="button" class="limit-chip" onclick="openModelLimits(${a.id})"
+        data-tooltip="${esc(text)}" data-tooltip-description="${esc(scope + "\n" + detail)}"
+        aria-label="查看模型冷却列表">${esc(text)}</button>`);
+  }
+  if (!chips.length) return "";
+  // 包一层：保证多枚徽标上下有间距、彼此左对齐（见 .acc-chips）
+  return `<div class="acc-chips">${chips.join("")}</div>`;
+}
+function modelLimitDeadlineLabel(entry) {
+  return {upstream:'上游重置时间',client_midnight:'按客户端规则，次日零点可重试',queue_retry:'上游建议重试时间',estimated:'本地保守冷却至',backoff:'本地退避至'}[entry.reset_source] || '本地冷却至';
+}
+
+function upstreamEvidenceHtml(info) {
+  if (!info || (!info.raw && !info.http_status && !info.code)) return '<small>尚无上游错误原文</small>';
+  const display = typeof info.display_message === 'string' ? info.display_message : JSON.stringify(info.display_message || {});
+  return `<details><summary>上游 HTTP ${esc(info.http_status ?? '未记录')} / code ${esc(info.code ?? '未返回')}</summary>
+    ${info.client_message ? `<p>客户端解释：${esc(info.client_message)} ${esc(info.client_description || '')}</p>` : ''}
+    ${info.message != null ? `<p>上游 message：${esc(info.message)}</p>` : ''}
+    ${info.display_message ? `<p>上游 displayMsg：${esc(display)}</p>` : ''}
+    <pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:560px;max-height:220px;overflow:auto">${esc(info.raw)}</pre></details>`;
+}
+
+// One fixed tooltip avoids clipping by scroll containers and supports keyboard focus.
+//
+// 定位策略（修「tooltip 漂移」）：
+//   1. 先在不透明但**无动画**的状态下测量尺寸。入场动画只改 opacity，
+//      transform 会让 `getBoundingClientRect()` 读到动画中间值，算出来的位置
+//      和动画结束后的真实尺寸对不上 —— 这就是之前「提示框偏到旁边」的原因。
+//   2. 用 `left/top` 直接写最终坐标（不再叠加 translate），避免 transform
+//      与定位互相干扰。
+//   3. 翻转与夹取一次算完：优先放在锚点上方，放不下才翻到下方；两侧都按
+//      视口留 8px 边距夹住，不再产生负溢出。
+//   4. 测量前把 `visibility` 留在 hidden，浏览器仍会完成布局，所以量到的是
+//      最终尺寸，不会闪。
+let _actionTipTarget = null;
+
+
+const ACTION_TIP_GAP = 8;
+const ACTION_TIP_EDGE = 8;
+
+function hideActionTooltip() {
+  clearTimeout(_actionTipTimer);
+  clearTimeout(_actionTipHideTimer);
+  const tip = document.getElementById('actionTooltip');
+  if (tip) tip.hidden = true;
+  if (_actionTipTarget) _actionTipTarget.removeAttribute('aria-describedby');
+  _actionTipTarget = null;
+}
+
+/** 把提示框放到锚点附近，保证完整落在视口内。 */
+function positionActionTooltip(tip, target) {
+  const r = target.getBoundingClientRect();
+  const t = tip.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth || innerWidth;
+  const vh = document.documentElement.clientHeight || innerHeight;
+
+  // 水平：以锚点中心对齐，再夹进视口。
+  let left = r.left + r.width / 2 - t.width / 2;
+  left = Math.max(ACTION_TIP_EDGE, Math.min(vw - t.width - ACTION_TIP_EDGE, left));
+
+  // 垂直：优先上方，空间不足则下方；两侧都放不下时贴空间更大的一侧。
+  const above = r.top - t.height - ACTION_TIP_GAP;
+  const below = r.bottom + ACTION_TIP_GAP;
+  let top;
+  if (above >= ACTION_TIP_EDGE) top = above;
+  else if (below + t.height <= vh - ACTION_TIP_EDGE) top = below;
+  else top = Math.max(ACTION_TIP_EDGE, Math.min(vh - t.height - ACTION_TIP_EDGE,
+                                                r.top > vh - r.bottom ? above : below));
+
+  tip.style.left = Math.round(left) + 'px';
+  tip.style.top = Math.round(top) + 'px';
+}
+
+function showActionTooltip(target, immediate = false) {
+  clearTimeout(_actionTipHideTimer);
+  if (_actionTipTarget === target) return;
+  hideActionTooltip();
+  _actionTipTarget = target;
+  _actionTipTimer = setTimeout(() => {
+    if (!target.isConnected) return hideActionTooltip();
+    let tip = document.getElementById('actionTooltip');
+    if (!tip) {
+      tip = document.createElement('div'); tip.id = 'actionTooltip'; tip.role = 'tooltip';
+      tip.addEventListener('pointerenter', () => clearTimeout(_actionTipHideTimer));
+      tip.addEventListener('pointerleave', scheduleActionTooltipHide);
+      document.body.appendChild(tip);
+    }
+    const model=_modelData.find(m=>m.model_id===target.dataset.modelTooltip);
+    const info=model?WBModelMetadata.display(model):null;
+    tip.innerHTML = info ? `<strong class="model-tooltip-title">${esc(info.name)} ${modelPromotionBadges(info)}</strong><span>${esc(info.description||'上游暂未提供模型描述')}</span>${info.footer?`<div class="model-promotion-footer">${esc(info.footer)}</div>`:''}`
+      : `<strong>${esc(target.dataset.tooltip)}</strong><span>${esc(target.dataset.tooltipDescription || '')}</span>`;
+    // 先落位再显示：hidden→visible 之间测量会拿到 0 尺寸。
+    tip.style.visibility = 'hidden';
+    tip.hidden = false;
+    positionActionTooltip(tip, target);
+    tip.style.visibility = '';
+    target.setAttribute('aria-describedby', 'actionTooltip');
+  }, immediate ? 0 : 200);
+}
+function scheduleActionTooltipHide() {
+  clearTimeout(_actionTipHideTimer);
+  _actionTipHideTimer = setTimeout(() => {
+    const tip = document.getElementById('actionTooltip');
+    if (tip?.matches(':hover') || _actionTipTarget?.matches(':hover')) return;
+    const selection = getSelection();
+    if (selection && !selection.isCollapsed && tip?.contains(selection.anchorNode)) return;
+    hideActionTooltip();
+  }, 300);
+}
+document.addEventListener('pointerover', e => {
+  if (e.pointerType === 'touch') return;
+  const target = e.target.closest('[data-tooltip]');
+  if (target && !target.contains(e.relatedTarget)) showActionTooltip(target);
+});
+document.addEventListener('pointerout', e => {
+  if (_actionTipTarget?.contains(e.target) && !_actionTipTarget.contains(e.relatedTarget)) scheduleActionTooltipHide();
+});
+document.addEventListener('focusin', e => {
+  const target = e.target.closest('[data-tooltip]');
+  if (target) showActionTooltip(target, true);
+});
+document.addEventListener('focusout', e => {
+  if (!document.getElementById('actionTooltip')?.contains(e.relatedTarget)) scheduleActionTooltipHide();
+});
+document.addEventListener('scroll', e => {
+  if (!document.getElementById('actionTooltip')?.contains(e.target)) hideActionTooltip();
+}, true);
+document.addEventListener('click', e => {
+  if (!document.getElementById('actionTooltip')?.contains(e.target) && !_actionTipTarget?.contains(e.target)) hideActionTooltip();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideActionTooltip(); });
+window.addEventListener('resize', hideActionTooltip);
+
+async function openModelLimits(accountId = null) {
+  openModal(`<div class="section-head"><h3>模型额度与冷却</h3><button onclick="closeModal()" class="console-btn quiet" aria-label="关闭">关闭</button></div><div id="modelLimitsContent" class="limit-note">正在读取限额台账…</div>`, 'max-w-6xl');
+  try {
+    const [r, healthResponse] = await Promise.all([api('/api/accounts/model-limits'), api('/api/stats/model-health')]);
+    const healthResult = await safeJson(healthResponse);
+    const result = await safeJson(r);
+    const container = document.getElementById('modelLimitsContent');
+    if (!container) return;
+    if (!result.ok) { container.textContent = '读取失败，请稍后重试'; return; }
+    const d = result.data;
+    const limitPriority = {model_block:0, model_daily:1, model_rate:2, model_queue:3};
+    const entries = (d.items || []).filter(e => accountId == null || e.account_id === accountId).sort((a, b) =>
+      (limitPriority[a.kind] ?? 4) - (limitPriority[b.kind] ?? 4)
+      || String(a.model || '').localeCompare(String(b.model || ''))
+      || Number(a.account_id) - Number(b.account_id));
+    const healthItems = (healthResult.ok ? healthResult.data.items || [] : []).slice().sort((a, b) =>
+      Number(Number(a.available_accounts) > 0) - Number(Number(b.available_accounts) > 0)
+      || Number(b.limited_accounts || 0) - Number(a.limited_accounts || 0)
+      || String(a.model || '').localeCompare(String(b.model || '')));
+    const kind = {model_daily:'模型日限额已触发',model_rate:'短时限流',model_queue:'上游排队',model_block:'上游模型服务不存在 / 未配置'};
+    const source = {upstream:'上游明确重置时间',client_midnight:'客户端 6008 规则：次日零点重置（北京时间）',queue_retry:'上游 retry_after（重试间隔，不是排队结束时间）',estimated:'上游未给重置时间，本地保守冷却（默认 24 小时）',backoff:'本地退避策略，不代表上游已恢复'};
+    const risk = healthResult.ok ? healthResult.data.risk : null;
+    const observations = risk?.observations || {};
+    const riskCount = reason => Number(observations[reason]?.requests || 0);
+    const backgroundSkips = Object.values(risk?.maintenance?.skipped_since_start || {}).reduce((sum, n) => sum + Number(n), 0);
+    container.innerHTML = `<p class="limit-note">积分余额与模型每日额度分别计算，0 倍率模型也会触发日限额。6004 = 每日 Token 上限；6008 = 每日请求数上限，客户端说明次日零点重置。上游未提供每日限额数值时显示“未知”，不能用本网关用量推算官方剩余额度。冷却到期仅恢复重试资格。</p>
+      ${d.waf_remaining_seconds > 0 ? `<p class="limit-note">出口 IP 保护已触发，约 ${d.waf_remaining_seconds} 秒后解除本地保护，是否可用仍需上游确认。</p>` : ''}
+      ${risk ? `<p class="limit-note">近 ${Number(risk.window_minutes)} 分钟网关观测：WAF ${riskCount('waf')} 次，账号限流 ${riskCount('soft_rate')} 次，模型限流 / 排队 ${riskCount('model_rate')} 次，授权限制 ${riskCount('account_fault')} 次，登录失效 ${riskCount('session_dead')} 次。后台当前预留 ${Number(risk.maintenance.reserved_accounts)} 个账号，本进程启动以来累计保护跳过 ${backgroundSkips} 次；这是本网关观测，不代表官方风控评分。</p>` : ''}
+      <h4 class="health-title">当前模型限制 · 不可用优先</h4>
+      <div class="overflow-x-auto"><table class="tbl model-limit-table"><thead><tr><th>账号</th><th>模型</th><th>本网关判断 / 上游依据</th><th>重置 / 重试 / 本地冷却截止（北京时间）</th><th>时间依据</th><th class="text-right">官方日限额 / 剩余</th><th class="text-right">本网关今日成功 / 请求 · Token</th><th class="text-right">操作</th></tr></thead><tbody>${entries.map(e => `<tr><td>${esc(e.account_name)}</td><td>${esc(e.model)}</td><td>${e.upstream_code === '6004' ? '每日 Token 已达上限' : e.upstream_code === '6008' ? '每日请求数已达上限' : kind[e.kind] || esc(e.kind)}${upstreamEvidenceHtml(e.upstream_error)}</td><td>${modelLimitDeadlineLabel(e)}<br>${fmtTime(e.until)}</td><td>${source[e.reset_source] || '本地退避策略'}</td><td class="text-right tnum">${fmtEmpty(e.quota_total)} / ${fmtEmpty(e.quota_remaining)}</td><td class="text-right tnum">${fmtEmpty(e.successes_today)} / ${fmtNum(e.requests_today || 0)}<br>Token：${e.tokens_today == null ? FMT_EMPTY : fmtK(e.tokens_today)}</td><td class="text-right"><button class="console-btn quiet" onclick="clearModelLimit(${e.account_id},${esc(JSON.stringify(e.model))})">解除冷却</button></td></tr>`).join('') || '<tr><td colspan="8" class="account-empty">当前没有模型冷却记录</td></tr>'}</tbody></table></div>
+      <details class="limit-note"><summary>最近账号错误原文（${(d.account_errors || []).filter(e => accountId == null || e.account_id === accountId).length} 条，历史记录不代表当前不可用）</summary>${(d.account_errors || []).filter(e => accountId == null || e.account_id === accountId).map(e => `<div><b>${esc(e.account_name)}</b>${upstreamEvidenceHtml(e.upstream_error)}</div>`).join('')}</details>
+      <h4 class="health-title">模型健康 · 近 24 小时（无可选账号优先）</h4>
+      <div class="overflow-x-auto"><table class="tbl health-table"><thead><tr><th>模型</th><th class="text-right">可选 / 受限账号</th><th class="text-right">成功 / 请求</th><th class="text-right">失败率</th><th class="text-right">首响应 P50 / P95</th><th class="text-right">总耗时 P95</th><th class="text-right">最早冷却截止</th></tr></thead><tbody>${healthResult.ok ? healthItems.map(m => `<tr><td><b>${esc(m.model)}</b>${m.free ? '<small class="health-free">免费</small>' : ''}</td><td class="text-right tnum">${m.available_accounts} / ${m.limited_accounts}</td><td class="text-right tnum">${m.successes} / ${m.requests}</td><td class="text-right tnum">${fmtPct(m.failure_rate)}</td><td class="text-right tnum">${fmtDuration(m.ttfb_ms.p50)} / ${fmtDuration(m.ttfb_ms.p95)}</td><td class="text-right tnum">${fmtDuration(m.latency_ms.p95)}</td><td class="text-right">${m.earliest_model_recovery ? fmtTime(m.earliest_model_recovery) : FMT_EMPTY}</td></tr>`).join('') || '<tr><td colspan="7" class="account-empty">暂无模型观测</td></tr>' : '<tr><td colspan="7" class="account-empty">健康统计暂时不可用</td></tr>'}</tbody></table></div>
+      <p class="limit-note">延迟取最近最多 2000 条成功记录；账号可选数包含当前进程在途占用和出口保护。冷却截止只表示可再次尝试，不保证上游模型或账号已恢复可用。</p>
+`;
+  } catch(e) {
+    const container = document.getElementById('modelLimitsContent');
+    if (container) container.textContent = '读取失败，请稍后重试';
+  }
+}
+async function clearModelLimit(accountId, model) {
+  if (!await uiConfirm({title:'解除模型冷却',message:'仅清除本地冷却记录，不会重置官方额度；再次触发限额后将重新冷却。',danger:false})) return;
+  const r = await api('/api/accounts/' + accountId + '/model-limits/clear', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model})});
+  if (!r.ok) { toast('解除失败','err'); return; }
+  toast('已解除本地冷却'); loadAccounts(); openModelLimits();
+}
+async function clearAccountCooldown(accountId) {
+  if (!await uiConfirm({title:'解除账号冷却',message:'仅清除该账号的本地冷却 / 熔断 / 降权状态，不会重置官方额度，也不影响模型级冷却；再次触发后将重新冷却。',danger:false})) return;
+  const r = await api('/api/accounts/' + accountId + '/cooldown/clear', {method:'POST'});
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast('解除失败' + (data && data.detail ? '：' + data.detail : ''), 'err'); return; }
+  toast(data && data.cleared ? '已解除账号冷却' : '该账号当前不在冷却中');
+  loadAccounts();
+}
+
+/* 账号行操作：**常用 3 个 + 「更多」菜单**。
+ *
+ * 原来一行 12 个图标，不悬停根本分不清谁是谁（issue #4 的反馈）。
+ * 现在：
+ *   · 外面留 3 个高频动作（重登 / 健康检查 / 刷新）
+ *   · 其余收进「更多」，菜单里**带文字**，不用猜图标
+ * 菜单用 fixed 定位，避免被表格的 overflow 裁掉。
+ */
+const ACC_PRIMARY_OPS = ["重新登录", "三项健康检查：积分、模型列表、真实对话", "刷新余额与到期快照"];
+
+function accOpsHtml(a, ops) {
+  const primary = [];
+  const rest = [];
+  for (const item of ops) {
+    (ACC_PRIMARY_OPS.includes(item[3]) ? primary : rest).push(item);
+  }
+  const btn = ([fn, ic, col, ttl]) =>
+    `<button onclick="${fn}" class="${col}" data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}" aria-label="${ttl}">${consoleIcon(ic)}</button>`;
+  const menuItems = rest.map(([fn, ic, col, ttl]) => `
+    <div class="acc-menu-item" role="menuitem" tabindex="0"
+         onclick="event.stopPropagation();this.parentElement.classList.remove('open');${fn}">
+      <span class="acc-menu-icon ${col}">${consoleIcon(ic)}</span>
+      <span class="acc-menu-text">${esc(ttl.replace('（逐包到期日）', ''))}</span>
+    </div>`).join("");
+  return `${primary.map(btn).join("")}
+    <div class="acc-more">
+      <button class="acc-more-btn" data-tooltip="更多操作"
+              aria-haspopup="true" aria-label="更多操作"
+              onclick="event.stopPropagation();toggleAccMenu(this)">
+        ${consoleIcon("fa-ellipsis")}
+      </button>
+      <div class="acc-menu" role="menu">${menuItems}</div>
+    </div>`;
+}
+
+/** 打开/关闭「更多」菜单（同页面只允许一个打开）。 */
+function toggleAccMenu(btn) {
+  const box = btn.parentElement;
+  const wasOpen = box.classList.contains("open");
+  document.querySelectorAll(".acc-more.open").forEach(el => el.classList.remove("open"));
+  if (!wasOpen) {
+    box.classList.add("open");
+    // 展开瞬间收掉「更多操作」提示气泡：它固定在按钮上方，
+    // 会和刚弹出来的菜单叠在一起，第一眼像是菜单标题。
+    try { if (typeof hideActionTooltip === "function") hideActionTooltip(); } catch (e) {}
+    // 把菜单定位到按钮下方，避免被表格 overflow 裁掉
+    const menu = box.querySelector(".acc-menu");
+    if (menu) {
+      const r = btn.getBoundingClientRect();
+      const mh = menu.offsetHeight || 260;
+      // 下方放不下就向上翻：表格最后一行点「更多」时菜单原来会掉到视口外，
+      // 用户以为按钮没反应。
+      const below = window.innerHeight - r.bottom;
+      const openUp = below < mh + 12 && r.top > mh + 12;
+      menu.style.top = Math.round(openUp ? r.top - mh - 4 : r.bottom + 4) + "px";
+      menu.style.left = Math.round(Math.min(r.left, window.innerWidth - 208)) + "px";
+      menu.classList.toggle("drop-up", openUp);
+    }
+  }
+  event.stopPropagation();
+}
+
+// 点空白处关闭
+document.addEventListener("click", () => {
+  document.querySelectorAll(".acc-more.open").forEach(el => el.classList.remove("open"));
+}, true);
+
+// 令牌有效期徽标 —— 两条时间线，两套颜色。
+//
+// WorkBuddy 的凭证里有**两条**独立的时间线，混成一条会得出完全错误的结论：
+//
+//   accessToken   30 天。过期**不是终态**：`/v2/plugin/auth/token/refresh`
+//                 只要一个 `X-Refresh-Token` 头就换新令牌（实测 access 已过期、
+//                 签名被伪造、甚至完全不带 Authorization，三种都是 200）。
+//                 所以 access「剩 N 天」只是「下次保活该刷了」的提示。
+//   refreshToken  60 天滑动窗口，每次刷新成功整体后移。**这才是死亡线**：
+//                 窗口过了就再也换不了令牌，只能重新授权登录（要手机验证码）。
+//
+// 因此：access 快到期 → 黄，不影响服务；refresh 窗口告急 → 橙；真过期 → 红。
+// 只有最后一种需要人来处理，前两种等一次保活就好。
+function tokenBadge(a) {
+  // `token_supported` 为 false 的平台（Trae / Qoder / Loomy）不渲染任何徽标：
+  // 它们的凭证结构不同，这套解析器读不出东西是**预期**，不是异常。
+  if (a.token_supported === false) return "";
+
+  const bits = [];
+  const access = a.token_state;
+  const renewal = a.renewal_state;
+
+  // access：只报「已过期」（还能自动救回来，标黄）和「无法解析」。
+  // 「剩 N 天」按 30 天周期会长期显示，属于噪音，收进 tooltip。
+  if (access === "expired") {
+    bits.push(a.renewable
+      ? { text: "令牌待刷新", color: "var(--warn)", title: "accessToken 已过期，但续期窗口仍在 —— 跑一次保活即可自动换新，不需要重新登录" }
+      : { text: "凭据已过期", color: "var(--danger)", title: "accessToken 已过期且续期窗口已关闭，只能重新授权登录" });
+  }
+
+  // refresh：真正需要人关注的只有这里。
+  if (renewal === "expired") {
+    bits.push({ text: "续期窗口已关闭", color: "var(--danger)",
+      title: "refreshToken 的 60 天滑动窗口已过，无法再换新令牌。只能重新授权登录（需手机验证码）。" });
+  } else if (renewal === "expiring") {
+    bits.push({ text: `续期剩 ${a.renewal_days_left} 天`, color: "#f97316",
+      title: `refreshToken 续期窗口只剩 ${a.renewal_days_left} 天。每次保活成功刷新都会把窗口整体后移 60 天；若持续缩短说明保活没跑成，请检查定时任务与网络。` });
+  } else if (renewal === "unknown" && a.renewal_known === false && a.has_refresh_token) {
+    // 有 refreshToken 但推不出到期时间：凭证格式异常，值得试一次刷新把它写正。
+    bits.push({ text: "续期窗口未知", color: "var(--fg-muted)",
+      title: "凭证里有 refreshToken，但推不出它的到期时间（缺少 refreshExpiresAt / refreshExpiresIn，也不是 JWT）。跑一次保活刷新会把两个字段都补上。" });
+  }
+
+  // 两条时间线都读不出来、连 refreshToken 都没有 —— 这不是「正常」，
+  // 是凭证本身坏了（加密凭证缺解密密钥 / 结构异常）。必须留一个可见标记，
+  // 否则一个彻底用不了的号在列表上和健康号长得一模一样。
+  if (!bits.length && access === "unknown" && !a.has_refresh_token) {
+    bits.push({ text: "凭据无法解析", color: "var(--danger)",
+      title: "读不出 accessToken 的 exp，也没有 refreshToken。可能是加密凭证且本机缺少解密密钥，或凭证结构损坏。建议重新导入或授权登录。" });
+  }
+
+  if (!bits.length) return "";
+
+  const detail = [
+    a.token_expires_at ? `accessToken 到期 ${fmtTime(String(a.token_expires_at).replace("T", " "), false)}` : "",
+    a.renewal_expires_at ? `refreshToken 窗口至 ${fmtTime(String(a.renewal_expires_at).replace("T", " "), false)}` : "",
+    a.renewable ? "可自动续期：一次刷新即换新，无需人工。" : "",
+  ].filter(Boolean).join("　");
+
+  return bits.map(b => `<span class="c-uid" style="color:${b.color};font-weight:600" data-tooltip="${esc(b.title)}" data-tooltip-description="${esc(detail)}">${esc(b.text)}</span>`).join(" ");
+}
+
+function accRow(a) {
+  // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
+  const ops = [
+    [`WBReview.accountLimit(${a.id})`, "fa-sliders", "text-indigo-600", "账号并发上限"],
+    [`openReauthAccount(${a.id})`, "fa-key", "text-emerald-600", "重新登录"],
+    [`growthTasks(${a.id},${jsv(a.name||'')})`, "fa-seedling", "text-emerald-600", "成长任务"],
+    [`catTravel(${a.id})`, "fa-cat", "text-pink-600", "猫猫旅行"],
+    [`viewCreditDetails(${a.id},${jsv(a.name||'')})`, "fa-list-ul", "text-amber-600", "积分明细（逐包到期日）"],
+    [`viewRequestUsage(${a.id},${jsv(a.name||'')})`, "fa-chart-line", "text-blue-600", "请求用量"],
+    [`healthCheckAcc(${a.id})`, "fa-heart-pulse", "text-emerald-600", "三项健康检查：积分、模型列表、真实对话"],
+    [`injectAcc(${a.id})`, "fa-right-to-bracket", "text-violet-600", "注入本机客户端"],
+    [`refreshAcc(${a.id})`, "fa-rotate", "text-indigo-600", "刷新余额与到期快照"],
+    [`exportAcc(${a.id},${jsv(a.name||'')})`, "fa-file-export", "text-sky-600", "导出登录态"],
+    [`toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
+    [`delAcc(${a.id})`, "fa-trash", "text-red-500", "删除"],
+  ];
+  // data-label 是给**窄屏卡片形态**用的字段名（见 CSS 里的移动端段落）：
+  // 窄屏下表格变成卡片，靠 `td::before { content: attr(data-label) }`
+  // 在每行左边补出「总积分 / 剩余 / 积分到期」这些标签，
+  // 这样同一份 DOM 既能当表格又能当卡片，不必写两套渲染逻辑。
+  // 「剩余」列只放数字：7 天内到期量不再跟可变后缀「(xx)」——右对齐的是
+  // 「数字+后缀」整体，有后缀的行数字会被推左，整列数字上下对不齐。
+  // 该数字与「积分到期」列的 🔥 徽标同源同值，去掉不丢信息。
+  return `<tr>
+    <td class="c-name">
+      <div class="nm">
+        <b data-tooltip="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
+        <span class="c-uid" data-tooltip="账号 UID" data-tooltip-description="${esc(a.uid || '（该账号未提供 UID）')}">${esc(a.uid || "-")}</span>
+        ${tokenBadge(a)}
+        ${a.bound_key_id ? `<small class="text-indigo-600">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</small>` : ''}
+        ${a.post_login_automation ? `<small style="color:var(--fg-muted)" data-tooltip="登录后自动任务" data-tooltip-description="${esc((a.post_login_automation.result?.errors || []).join('；') || '由账号登录后自动排队的收尾任务（余额、模型、权益同步）')}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
+          ${a.resource_initialization && a.resource_initialization.status !== 'completed' ? `<small style="color:var(--fg-muted)" data-tooltip="资源初始化" data-tooltip-description="${esc((a.resource_initialization.errors || []).join('；') || '账号导入后会自动同步余额与模型目录')}">${esc(({queued:'余额与模型初始化排队中',running:'正在初始化余额与模型',failed:'初始化未完成，可刷新余额或同步模型',invalid_credential:'账号凭证不完整，请重新导入或授权登录',unsupported_region:'国际版凭证无法访问当前国内接口，请更换国内版凭证',auth_required:'上游鉴权失败，请重新授权登录'})[a.resource_initialization.status] || '')}</small>` : ''}
+      </div>
+      ${accountLimitBadge(a)}
+    </td>
+    <td class="col-status" data-label="状态">${badge(a.status)}</td>
+    <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${fmtInt(a.balance_total)}</td>
+    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}">${fmtInt(a.balance_remain)}</td>
+    <td data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, ops)}</td>
+  </tr>`;
+}
+
+
+let _accountPage = 1;
+let _overviewRefreshing = false;
+setInterval(async () => {
+  if (document.hidden || !TOKEN || $('#app').classList.contains('hidden') || _overviewRefreshing) return;
+  _overviewRefreshing = true;
+  try { await loadAccounts(); } catch (_) {}
+  finally { _overviewRefreshing = false; }
+}, 30000);
+async function loadAccounts() {
+  clearTimeout(_accountResourceTimer);
+  // 平台切换模块：账号池的所有数据都按当前平台取。
+  // 平台未就绪时先等它加载完（首屏是同一次 DOMContentLoaded 触发，
+  // 此时脚本可能还没执行），避免「先按 workbuddy 拉一次再被切换覆盖」的闪烁。
+  const platform = await ensurePlatforms();
+  // 按**落库平台**分派，不是「是不是 workbuddy」。
+  //
+  // 旧写法 `platform !== "workbuddy"` 会把所有新平台都当成 Trae ——
+  // 切到 Qoder 时调的是 /api/trae/accounts，显示的是 Trae 的账号。
+  // 三个平台的账号字段集不同（Trae 有区域/凭证到期，Qoder 有套餐/资源包），
+  // 必须各走各的渲染。
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(
+    spec.storage_platform || (platform && platform.platform) || ""
+  ).toLowerCase();
+  if (storage === "trae") {
+    return loadTraeAccounts(platform);
+  }
+  if (storage === "qoder") {
+    return loadQoderAccounts(platform);
+  }
+  if (storage === "loomy") {
+    return loadLoomyAccounts(platform);
+  }
+  const r = await api("/api/accounts"); if (!r.ok) return;
+  // 从 Trae 切回默认平台时把表头/脚注还原（两平台列语义不同，必须显式复位）
+  const headEl = $("#accTableHead");
+  if (headEl) {
+    headEl.innerHTML = `<th>名称</th><th>状态</th>
+      <th class="text-right">总积分</th><th class="text-right">剩余</th>
+      <th>积分到期</th><th class="text-right">操作</th>`;
+  }
+  const footEl = $("#accFootNote");
+  if (footEl) footEl.textContent = "积分统计仅包含已启用账号";
+  const footHintEl = $("#accFootHint");
+  if (footHintEl) footHintEl.textContent = "调度优先级与到期明细可在「积分到期」查看";
+  const d = await r.json();
+  const s = d.summary;
+  const soon = Number(s.credits_expiring_soon || 0);
+  const soonest = s.soonest_expire_at
+    ? expiryBadge((s.soonest_expire_at - Date.now()) / 86400000, false, true) : "";
+  $("#overview").innerHTML = `
+    ${statCard("账号总数", s.total, { icon:"fa-users", iconColor:"text-slate-400",
+        sub: `启用 ${s.active} · 可用 ${s.available}`
+             + (s.disabled ? ` · 已禁用 ${s.disabled}` : "") })}
+    ${statCard("可用积分", fmtCredit(s.balance_remain), { icon:"fa-wallet", iconColor:"text-slate-400",
+        tone: soon > 0 ? "warn" : "brand",
+        // 口径必须写明：这里**只算启用中的账号**。
+        // 已禁用（登录失效等）的号余额用不到，单独列出来，
+        // 否则用户会看到「号少了但积分没少」。
+        sub: `启用账号合计（总额度 ${fmtCredit(s.balance_total)}）`
+             + (s.disabled_balance_remain
+                 ? ` · 另有 ${fmtCredit(s.disabled_balance_remain)} 在已禁用号上（未计入）` : "") })}
+    ${statCard("7 天内到期", fmtCredit(soon), { icon:"fa-fire", iconColor:"text-orange-500",
+        tone: soon > 0 ? "warn" : "brand",
+        sub: soon > 0 ? `${s.expiring_accounts} 个账号 · 不用完会作废` : "暂无即将作废的额度" })}
+    ${statCard("最紧迫账号", s.expiring_accounts ? s.expiring_accounts + " 个待烧" : "无",
+        { icon:"fa-hourglass-half", iconColor:"text-slate-400",
+          tone: s.expiring_accounts ? "brand" : "",
+          sub: soonest ? `最近 ${soonest.replace(/<[^>]+>/g, "")}` : "全部长期有效" })}`;
+  const headCount = $("#accHeadCount");
+  if (headCount) headCount.textContent = s.total;
+  // 括号里补上「启用 / 禁用」，避免「共 xx 个」被误读成「xx 个都能用」
+  const headBreak = $("#accHeadBreak");
+  if (headBreak) {
+    headBreak.textContent = `（启用 ${s.active}`
+      + (s.disabled ? ` · 已禁用 ${s.disabled}` : "") + `）`;
+  }
+  _accData = d.items || [];
+  if (_accData.some(a => ['queued','running'].includes(a.resource_initialization?.status) || ['queued','running'].includes(a.post_login_automation?.status))) {
+    _accountResourceTimer = setTimeout(async () => { await loadAccounts(); await loadModels(); }, 2000);
+  }
+  _accSummary = s;
+  renderAccPage(_accountPage);
+  // 侧栏角标：没打开积分面板也能看到「有额度要作废」
+  const expiringN = Number(s.expiring_accounts || 0);
+  setSideDot("#sideExpiringDot", expiringN);
+  const dot = $("#sideExpiringDot");
+  if (dot) dot.title = expiringN > 0 ? `${expiringN} 个账号有 7 天内到期的积分` : "";
+}
+/* ==========================================================================
+   多平台账号池：Trae（国内版 / 国际版）
+   --------------------------------------------------------------------------
+   为什么单独一段渲染而不是复用 accRow：两个平台的「账号」字段集不同 ——
+   WorkBuddy 有积分包到期日、成长任务、猫猫旅行；Trae 有区域、设备指纹、
+   token 到期。硬套同一张表会让两种号都显示一半空列。
+
+   但**底层数据是同源的**：都来自 accounts 表，都进 usage_logs，
+   都受同一个 Key 配额约束 —— 所以列表之外（用量/日志/积分/K e）零改动。
+   ========================================================================== */
+let _traeState = { items: [], summary: null, loaded: false };
+
+function traeRealmLabel(realm) {
+  return ({ cn: "国内版", intl: "国际版" })[realm] || realm || "-";
+}
+
+function traeRow(a) {
+  const cooling = a.cool_until && new Date(a.cool_until).getTime() > Date.now();
+  const status = a.status === "active"
+    ? (cooling ? `<span class="badge badge-warn">冷却中</span>` : `<span class="badge badge-ok">已启用</span>`)
+    : `<span class="badge badge-danger">已禁用</span>`;
+  const expires = a.expires_at
+    ? fmtTime(new Date(a.expires_at * 1000).toISOString().slice(0, 19))
+    : "—";
+  const unit = a.balance_unit === "percent" ? "%" : "";
+  return `<tr>
+    <td class="c-name">
+      <div class="nm">
+        <b data-tooltip="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
+        <span class="c-uid" data-tooltip="Trae 用户 ID" data-tooltip-description="${esc(a.uid || "（该账号未提供 UID）")}">${esc(a.uid || "-")}</span>
+        <small style="color:var(--fg-muted)">${esc(traeRealmLabel(a.realm))}${a.region ? " · " + esc(a.region) : ""}${a.device_id ? " · 设备已绑定" : ""}</small>
+        ${a.last_err_msg ? `<small style="color:var(--danger)" data-tooltip="最近上游错误" data-tooltip-description="${esc(a.last_err_msg)}">${esc(a.last_err_msg.slice(0, 42))}</small>` : ""}
+      </div>
+    </td>
+    <td class="col-status" data-label="状态">${status}</td>
+    <td class="tnum text-right" data-label="额度总量" style="color:var(--fg-muted)">${fmtCredit(a.balance_total)}${unit}</td>
+    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain > 0 ? "var(--ok,#33587F)" : "var(--danger)"}">${fmtCredit(a.balance_remain)}${unit}</td>
+    <td data-label="凭证到期">${esc(expires)}</td>
+    <td class="c-ops" data-label="操作">${[
+      [`traeRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "刷新 token 与额度"],
+      [`traeTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查：token / 模型 / 真实对话 / 额度"],
+      [`traeClearCooling(${a.id})`, "fa-snowflake", "text-sky-600", "清除冷却与熔断"],
+      [`traeToggle(${a.id},'${a.status === "active" ? "disabled" : "active"}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
+      [`traeDelete(${a.id})`, "fa-trash", "text-red-500", "删除"],
+    ].map(([fn, icon, color, title]) =>
+      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`).join("")}</td>
+  </tr>`;
+}
+
+async function loadTraeAccounts(platform) {
+  // 区域：**先用 spec.realm**，再用 platform.realm。
+  //
+  // `platform-switch.js` 的 `current()` 返回的是「用户手动选中的区域」
+  // （`state.realm`），而 trae-cn / trae-intl 是**单区平台** —— 它们的区域
+  // 固定在 `spec.realm` 上，`state.realm` 永远是空串。
+  // 只用 `platform.realm` 的后果：请求不带 `realm=`，后端返回**全部 Trae 账号**
+  // （国内 1 + 国际 2 = 3 个），两个平台看起来完全一样 —— 这就是「合并混了」。
+  const spec = window.WBPlatform ? window.WBPlatform.spec() : null;
+  const realm = (spec && spec.realm) || (platform && platform.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/trae/accounts" + qs);
+  if (!r.ok) return;
+  const d = await r.json();
+  _traeState.items = d.items || [];
+  _traeState.summary = d.summary || {};
+  _traeState.loaded = true;
+  const s = _traeState.summary;
+  const unit = (_traeState.items[0] || {}).balance_unit === "percent" ? "%" : "";
+  $("#overview").innerHTML = `
+    ${statCard("账号总数", s.total ?? 0, { icon: "fa-users", iconColor: "text-slate-400",
+        sub: `启用 ${s.active ?? 0} · 冷却 ${s.cooling ?? 0}` + (s.disabled ? ` · 已禁用 ${s.disabled}` : "") })}
+    ${statCard("可用额度", fmtCredit(s.balance_remain) + unit, { icon: "fa-wallet", iconColor: "text-slate-400",
+        tone: "brand", sub: `额度口径：${(_traeState.items[0] || {}).balance_unit === "percent" ? "请求次数额度水位" : "Trae 积分"}` })}
+    ${statCard("额度总量", fmtCredit(s.balance_total) + unit, { icon: "fa-chart-simple", iconColor: "text-slate-400",
+        sub: `启用账号合计` })}
+    ${statCard("当前区域", traeRealmLabel(realm) || "全部", { icon: "fa-globe", iconColor: "text-slate-400",
+        sub: "切换上方区域可查看另一区账号" })}`;
+
+  const headCount = $("#accHeadCount");
+  if (headCount) headCount.textContent = s.total ?? _traeState.items.length;
+  const headBreak = $("#accHeadBreak");
+  if (headBreak) headBreak.textContent = `（启用 ${s.active ?? 0}）`;
+
+  // 表头/脚注随平台切换：Trae 没有「积分到期」概念，那一列是凭证到期。
+  const head = $("#accTableHead");
+  if (head) {
+    head.innerHTML = `<th>名称</th><th>状态</th>
+      <th class="text-right">额度总量</th><th class="text-right">剩余</th>
+      <th>凭证到期</th><th class="text-right">操作</th>`;
+  }
+  const foot = $("#accFootNote");
+  if (foot) foot.textContent = "额度统计仅包含已启用账号";
+  const footHint = $("#accFootHint");
+  if (footHint) footHint.textContent = "Trae 额度来自上游权益接口，可点「刷新额度」同步";
+
+  // 筛选器计数：**必须与 WorkBuddy 路径一致**。
+  //
+  // 原来这条路径完全不碰 `_accData` / 三个计数元素，于是切到 Trae 后
+  // 筛选条显示「全部 0 / 已启用 0 / 已禁用 0」，而表格里明明有号。
+  // 用户感知就是「数据丢了，刷新一下才回来」。
+  // Trae 的账号对象同样有 `status` 字段（active / disabled），
+  // 所以直接复用同一套计数逻辑，不需要新概念。
+  _accData = _traeState.items || [];
+  const filterAll = $("#filterAllCount");
+  if (filterAll) filterAll.textContent = _accData.length;
+  const filterActive = $("#filterActiveCount");
+  if (filterActive) {
+    filterActive.textContent = _accData.filter(a => a.status === "active").length;
+  }
+  const filterDisabled = $("#filterDisabledCount");
+  if (filterDisabled) {
+    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
+  }
+
+  const body = $("#accBody");
+  if (body) {
+    body.innerHTML = _traeState.items.map(traeRow).join("") ||
+      `<tr><td colspan="6"><div class="account-empty"><strong>还没有 Trae 账号</strong>用上方「导入本机账号」从本机 Trae 客户端读取，或点「扫描本机 Trae」先看看发现了什么。</div></td></tr>`;
+  }
+  const pager = $("#accPager");
+  if (pager) pager.innerHTML = "";
+  // 切到 Trae 平台时该平台没有「积分到期」概念，角标隐藏。
+  setSideDot("#sideExpiringDot", 0);
+}
+
+/**
+ * Qoder 账号池。
+ *
+ * 为什么不复用 `loadTraeAccounts` / 通用 `/api/accounts`：
+ * 三个平台的账号字段集不同 —— Trae 有「区域 / 凭证到期」，
+ * Qoder 有「套餐 / 资源包」，混用会显示错列。
+ */
+async function loadQoderAccounts(platform) {
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const realm = (spec && spec.realm) || (platform && platform.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/qoder/accounts" + qs);
+  if (!r.ok) {
+    const body = $("#accBody");
+    if (body) {
+      body.innerHTML = `<tr><td colspan="6"><div class="account-empty">
+        <strong>读取 Qoder 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+    }
+    return;
+  }
+  const d = await r.json();
+  const items = d.items || [];
+  const s = d.summary || {};
+
+  // 状态变量与其它平台保持一致，筛选器才能正确计数
+  _accData = items;
+
+  $("#overview").innerHTML = `
+    ${statCard("账号总数", s.total ?? 0, { icon: "fa-users", iconColor: "text-slate-400",
+        sub: `启用 ${s.active ?? 0}` + (s.disabled ? ` · 已禁用 ${s.disabled}` : "") })}
+    ${statCard("套餐额度", fmtCredit(s.balance_remain), { icon: "fa-wallet", iconColor: "text-slate-400",
+        tone: "brand", sub: `总额度 ${fmtCredit(s.balance_total)}` })}
+    ${statCard("资源包", fmtCredit(s.addon_remain), { icon: "fa-gift", iconColor: "text-slate-400",
+        tone: (s.addon_remain || 0) > 0 ? "brand" : "",
+        sub: "签到积分落在这里" })}
+    ${statCard("当前区域", traeRealmLabel(realm) || "中国版", { icon: "fa-globe",
+        iconColor: "text-slate-400", sub: "COSY 签名鉴权" })}`;
+
+  const headCount = $("#accHeadCount");
+  if (headCount) headCount.textContent = s.total ?? items.length;
+  const headBreak = $("#accHeadBreak");
+  if (headBreak) headBreak.textContent = `（启用 ${s.active ?? 0}）`;
+
+  const head = $("#accTableHead");
+  if (head) {
+    head.innerHTML = `<th>名称</th><th>状态</th>
+      <th class="text-right">套餐额度</th><th class="text-right">资源包</th>
+      <th>套餐</th><th class="text-right">操作</th>`;
+  }
+  const foot = $("#accFootNote");
+  if (foot) foot.textContent = "额度来自上游 /api/v2/quota/usage（套餐 + 资源包两个桶）";
+  const footHint = $("#accFootHint");
+  if (footHint) footHint.textContent = "Qoder 凭证加密在客户端原生层，额度由网关按 60 秒 TTL 同步";
+
+  // 筛选器计数（与 WorkBuddy 路径一致，缺了会显示「全部 0」）
+  const filterAll = $("#filterAllCount");
+  if (filterAll) filterAll.textContent = _accData.length;
+  const filterActive = $("#filterActiveCount");
+  if (filterActive) {
+    filterActive.textContent = _accData.filter(a => a.status === "active").length;
+  }
+  const filterDisabled = $("#filterDisabledCount");
+  if (filterDisabled) {
+    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
+  }
+
+  const body = $("#accBody");
+  if (body) {
+    body.innerHTML = items.map(qoderRow).join("") ||
+      `<tr><td colspan="6"><div class="account-empty">
+        <strong>还没有 Qoder 账号</strong>
+        用「导入 PAT」或设备授权添加。</div></td></tr>`;
+  }
+  const pager = $("#accPager");
+  if (pager) pager.innerHTML = "";
+  setSideDot("#sideExpiringDot", 0);
+}
+
+function qoderRow(a) {
+  const ok = a.status === "active";
+  const status = ok
+    ? '<span class="badge badge-ok">已启用</span>'
+    : '<span class="badge badge-warn">已禁用</span>';
+  const plan = a.plan ? esc(String(a.plan).replace(/_/g, " ")) : "—";
+  return `<tr>
+    <td class="text-xs" data-tooltip="${esc(a.name || "")}">${esc((a.name || "").slice(0, 16))}</td>
+    <td class="col-status" data-label="状态">${status}</td>
+    <td class="tnum text-right" data-label="套餐额度"
+        style="color:var(--fg-muted)">${fmtCredit(a.balance_remain)} / ${fmtCredit(a.balance_total)}</td>
+    <td class="tnum text-right font-medium" data-label="资源包"
+        style="color:${(a.addon_remain || 0) > 0 ? "var(--ok)" : "var(--fg-subtle)"}">${fmtCredit(a.addon_remain)}</td>
+    <td class="text-xs" data-label="套餐">${plan}</td>
+    <td class="c-ops" data-label="操作">${[
+      [`qoderRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "刷新额度"],
+      [`qoderTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
+    ].map(([fn, icon, color, title]) =>
+      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}"><i class="fa ${icon}"></i></button>`
+    ).join("")}</td>
+  </tr>`;
+}
+
+/**
+ * Loomy 账号池。
+ *
+ * 与其它平台的关键差异：**计量制** —— 没有「剩余额度」，
+ * 只有「累计消耗 points」。所以列是「模型数 / 累计消耗」，
+ * 不是「总额度 / 剩余」。伪造一个「剩余」会误导用户。
+ */
+async function loadLoomyAccounts(platform) {
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const realm = (spec && spec.realm) || (platform && platform.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api("/api/loomy/accounts" + qs);
+  if (!r.ok) {
+    const body = $("#accBody");
+    if (body) {
+      body.innerHTML = `<tr><td colspan="6"><div class="account-empty">
+        <strong>读取 Loomy 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+    }
+    return;
+  }
+  const d = await r.json();
+  const items = d.items || [];
+  const s = d.summary || {};
+  _accData = items;
+
+  const models = items.reduce((max, i) => Math.max(max, i.models || 0), 0);
+  const available = items.reduce((sum, i) => sum + (i.balance_remain || 0), 0);
+  const daily = items.reduce((sum, i) => sum + (i.daily_balance || 0), 0);
+
+  $("#overview").innerHTML = `
+    ${statCard("账号总数", s.total ?? 0, { icon: "fa-users", iconColor: "text-slate-400",
+        sub: `启用 ${s.active ?? 0}` + (s.disabled ? ` · 已禁用 ${s.disabled}` : "") })}
+    ${statCard("可用积分", available, { icon: "fa-wallet", iconColor: "text-slate-400",
+        tone: "brand", sub: `其中当日额度 ${daily}` })}
+    ${statCard("可用模型", models, { icon: "fa-cube", iconColor: "text-slate-400",
+        sub: "已过滤图像模型" })}
+    ${statCard("鉴权方式", "会话鉴权", { icon: "fa-key", iconColor: "text-slate-400",
+        sub: "双 token 头 + traceparent" })}`;
+
+  const headCount = $("#accHeadCount");
+  if (headCount) headCount.textContent = s.total ?? items.length;
+  const headBreak = $("#accHeadBreak");
+  if (headBreak) headBreak.textContent = `（启用 ${s.active ?? 0}）`;
+
+  const head = $("#accTableHead");
+  if (head) {
+    head.innerHTML = `<th>名称</th><th>状态</th>
+      <th class="text-right">可用积分</th><th class="text-right">当日额度</th>
+      <th class="text-right">模型数</th><th class="text-right">操作</th>`;
+  }
+  const foot = $("#accFootNote");
+  if (foot) foot.textContent = "可用积分 = 基础余额 + 当日额度（当日部分每日重置）";
+  const footHint = $("#accFootHint");
+  if (footHint) footHint.textContent = "凭证为客户端明文 auth-session.json，可重复扫描同步";
+
+  const filterAll = $("#filterAllCount");
+  if (filterAll) filterAll.textContent = _accData.length;
+  const filterActive = $("#filterActiveCount");
+  if (filterActive) {
+    filterActive.textContent = _accData.filter(a => a.status === "active").length;
+  }
+  const filterDisabled = $("#filterDisabledCount");
+  if (filterDisabled) {
+    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
+  }
+
+  const body = $("#accBody");
+  if (body) {
+    body.innerHTML = items.map(loomyRow).join("") ||
+      `<tr><td colspan="6"><div class="account-empty">
+        <strong>还没有 Loomy 账号</strong>点上方「扫描本机」自动导入。</div></td></tr>`;
+  }
+  const pager = $("#accPager");
+  if (pager) pager.innerHTML = "";
+  setSideDot("#sideExpiringDot", 0);
+}
+
+function loomyRow(a) {
+  const ok = a.status === "active";
+  const status = ok
+    ? '<span class="badge badge-ok">已启用</span>'
+    : '<span class="badge badge-warn">已禁用</span>';
+  return `<tr>
+    <td class="text-xs" data-tooltip="${esc(a.name || "")}${a.phone ? " · " + esc(a.phone) : ""}">${esc((a.name || "").slice(0, 16))}</td>
+    <td class="col-status" data-label="状态">${status}</td>
+    <td class="tnum text-right font-medium" data-label="可用积分"
+        style="color:var(--brand)">${fmtCredit(a.balance_remain)}</td>
+    <td class="tnum text-right" data-label="当日额度"
+        style="color:var(--fg-muted)">${fmtCredit(a.daily_balance)}</td>
+    <td class="tnum text-right" data-label="模型数">${a.models || 0}</td>
+    <td class="c-ops" data-label="操作">${[
+      [`loomyRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "探活并刷新"],
+      [`loomyTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
+    ].map(([fn, icon, color, title]) =>
+      `<button onclick="${fn}" class="${color}" data-tooltip="${title}" aria-label="${title}"><i class="fa ${icon}"></i></button>`
+    ).join("")}</td>
+  </tr>`;
+}
+
+async function loomyRefresh(id) {
+  const r = await api(`/api/loomy/accounts/${id}/refresh`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (ok) {
+    toast(`已刷新：${(data.quota || {}).models || 0} 个模型可用`);
+    loadAccounts();
+  } else {
+    toast((data && data.detail) || "刷新失败", "err");
+  }
+}
+
+async function loomyTest(id) {
+  toast("正在检查（session → 模型）…");
+  const r = await api(`/api/loomy/accounts/${id}/test`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("检查失败", "err"); return; }
+  const stages = data.stages || {};
+  const lines = Object.keys(stages).map(k =>
+    `${k}: ${stages[k].ok ? "✓" : "✗"} ${stages[k].detail || ""}`);
+  openModal(`<h3 class="font-semibold text-lg mb-3">连通性检查 · ${esc(data.account || "")}</h3>
+    <pre class="text-xs" style="background:var(--surface-2);padding:12px;border-radius:8px">${esc(lines.join("\n"))}</pre>`);
+}
+
+async function qoderRefresh(id) {
+  const r = await api(`/api/qoder/accounts/${id}/refresh`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (ok) {
+    toast(`已刷新：${fmtCredit(data.balance_remain)} / ${fmtCredit(data.balance_total)}`);
+    loadAccounts();
+  } else {
+    toast((data && data.detail) || "刷新失败", "err");
+  }
+}
+
+async function qoderTest(id) {
+  toast("正在检查（凭证 → 资料 → 模型 → 额度）…");
+  const r = await api(`/api/qoder/accounts/${id}/test`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("检查失败", "err"); return; }
+  const stages = data.stages || {};
+  const lines = Object.keys(stages).map(k =>
+    `${k}: ${stages[k].ok ? "✓" : "✗"} ${stages[k].detail || ""}`);
+  openModal(`<h3 class="font-semibold text-lg mb-3">连通性检查 · ${esc(data.account || "")}</h3>
+    <pre class="text-xs" style="background:var(--surface-2);padding:12px;border-radius:8px">${esc(lines.join("\n"))}</pre>`);
+}
+
+async function traeRefresh(id) {
+  const r = await api(`/api/trae/accounts/${id}/refresh?force=true`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (ok) {
+    toast(`已刷新：剩余 ${fmtCredit(data.balance_remain)} / ${fmtCredit(data.balance_total)}`);
+    loadAccounts();
+  } else {
+    toast((data.detail && data.detail.message) || data.detail || "刷新失败", "err");
+  }
+}
+
+async function traeTest(id) {
+  toast("正在检查（token → 模型 → 真实对话 → 额度）…");
+  const r = await api(`/api/trae/accounts/${id}/test`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("检查失败", "err"); return; }
+  const stage = data.stages || {};
+  const lines = ["token", "models", "conversation", "quota"].map(key => {
+    const item = stage[key] || {};
+    const mark = item.ok ? "✅" : "❌";
+    const detail = key === "models" ? (item.count ?? 0) + " 个模型"
+      : key === "conversation" ? (item.ok ? `「${esc((item.text || "").slice(0, 30))}」` : (item.message || "无可用模型"))
+        : key === "quota" ? `${fmtCredit(item.remain)} / ${fmtCredit(item.total)}`
+          : item.ok ? "有效" : (item.message || "不可用");
+    return `${mark} ${key}：${detail}`;
+  });
+  openModal(`<h3>Trae 账号检查 · ${esc(data.realm || "")}</h3>
+    <p class="limit-note">四段链路依次验证，任一段失败即停在该段，便于定位是凭证、模型名还是额度问题。</p>
+    <div style="line-height:2">${lines.join("<br>")}</div>`, "max-w-2xl");
+  if (data.ok) loadAccounts();
+}
+
+async function traeClearCooling(id) {
+  const r = await api(`/api/trae/accounts/${id}/cooling/clear`, { method: "POST" });
+  if (r.ok) { toast("冷却与熔断已清空"); loadAccounts(); }
+  else toast("操作失败", "err");
+}
+
+async function traeToggle(id, status) {
+  const r = await api(`/api/trae/accounts/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  if (r.ok) { toast(status === "active" ? "已启用" : "已禁用"); loadAccounts(); }
+  else toast("操作失败", "err");
+}
+
+async function traeDelete(id) {
+  const yes = await uiConfirm({ title: "删除 Trae 账号", message: "删除后需要重新从本机导入，确定继续？" });
+  if (!yes) return;
+  const r = await api(`/api/trae/accounts/${id}`, { method: "DELETE" });
+  if (r.ok) { toast("已删除"); loadAccounts(); }
+  else toast("删除失败", "err");
+}
+
+/* 平台切换模块派发的动作（只由 Trae 平台产生：扫描 / 导入 / 刷新额度）。
+ *
+ * ⚠️ 不能再判断 `platform === "trae"`：平台已拆成 `trae-cn` / `trae-intl`，
+ * 旧写法永远为 false，于是这三个按钮点了**一点反应都没有**
+ * （事件发出了、处理器直接 return，连报错都没有 —— 最难查的一类）。
+ * 这里按**落库平台**判断，与 loadPlatformOverview / loadAccounts 同一套口径。
+ *
+ * WorkBuddy 不经过这里：它的扫描/导入入口在账号池页面，不重复注册 ——
+ * 否则移动端会把桌面专属入口带出去（见 platform-switch.js 的 actionsFor）。
+ */
+/* 平台动作分发器。
+ *
+ * ## 改了什么（重要）
+ *
+ * 原来写死「只有 trae 有动作」：
+ *
+ *     if (storage !== "trae") return;              // Qoder / Loomy 被丢弃
+ *     if (action === "scan") return traeScanLocal();
+ *
+ * 后果：新增平台点「扫描本机」一点反应都没有 ——
+ * 事件发出了、处理器直接 return，连报错都没有（最难查的一类）。
+ *
+ * 现在按 `storage_platform` 分派到各平台自己的接口。
+ * 新增平台时只要实现 /api/<storage>/scan-local，这里不用改。
+ */
+document.addEventListener("wb-platform-action", async event => {
+  const { action, platform, spec } = event.detail || {};
+  const storage = ((spec && spec.storage_platform) || platform || "").toLowerCase();
+
+  // 各平台通用动作：扫描 / 导入 / 刷新额度
+  if (action === "scan") {
+    if (storage === "trae") return traeScanLocal();
+    return platformScanLocal(spec, storage);
+  }
+  if (action === "import") {
+    if (storage === "trae") return traeImportLocal();
+    return platformImportLocal(spec, storage);
+  }
+  if (action === "refresh-quota") {
+    if (storage === "trae") return traeRefreshAll();
+    return platformRefreshAll(spec, storage);
+  }
+
+  // 签到：各平台自己的接口。
+  // Trae 也没有独立的签到函数（它的签到走定时任务），
+  // 所以统一走 platformCheckin —— 按 storage_platform 推接口前缀。
+  if (action === "checkin") {
+    return platformCheckin(spec, storage);
+  }
+
+  // 授权登录（设备流）：Qoder 的登录态加密在原生层，读不出文件，
+  // 只能走设备授权 —— 用户点一次链接就自动拿到可续期的 token。
+  if (action === "begin-auth") {
+    return platformBeginAuth(spec, storage);
+  }
+
+  // 「用量明细」：Trae 有网页 cookie 专用实现，其它平台走通用账号用量表
+  if (action === "usage") {
+    if (storage === "trae") return traeUsageDetail(spec);
+    return platformUsageDetail(spec, storage);
+  }
+
+  // Trae 专属动作
+  if (storage !== "trae") return;
+  if (action === "web-cookie") return traeWebCookie(spec);
+});
+
+/**
+ * 账号池「添加与迁移账号」区随当前平台切换可点的动作。
+ *
+ * 之前这里只有 WorkBuddy 的「手机号登录 / 导入 / 扫描本机」，切到 Trae /
+ * Qoder / Loomy 后整个账号池页面**没有任何登录入口** —— 用户只能去「平台」tab
+ * 点平台卡片才看得到「授权登录」，手机版尤其容易找不到（issue #7）。
+ *
+ * 现在：WorkBuddy 显示原 5 个按钮；其它平台在这里直接渲染该平台的
+ * 授权登录 / 扫描本机 / 导入本机 / 签到等动作（同一套 `spec.actions`），
+ * 点哪一个都走 `WBPlatform.action()`，与「平台」tab 完全一致。
+ */
+function renderIntakePlatformLogin() {
+  const wb = document.getElementById("intakeWbActions");
+  const host = document.getElementById("intakePlatformLogin");
+  if (!host) return;
+  const spec = (window.WBPlatform && window.WBPlatform.spec) ? window.WBPlatform.spec() : null;
+  const storage = ((spec && spec.storage_platform) || "").toLowerCase();
+  const isWb = !storage || storage === "workbuddy";
+  if (wb) wb.hidden = !isWb;
+  if (isWb) { host.hidden = true; host.innerHTML = ""; return; }
+  const actions = (window.WBPlatformActions && window.WBPlatformActions.actionsFor)
+    ? window.WBPlatformActions.actionsFor(spec) : [];
+  if (!actions.length) { host.hidden = true; host.innerHTML = ""; return; }
+  const icons = (window.WBPlatformActions && window.WBPlatformActions.icons) || {};
+  host.hidden = false;
+  host.innerHTML =
+    `<span class="intake-login-hint">当前平台：${esc(spec.label || storage)}</span>` +
+    actions.map(a => `<button type="button" class="console-btn ${a.primary ? "primary" : "quiet"}" ` +
+      `onclick="WBPlatform.action(${JSON.stringify(a.name)})">${icons[a.icon] || ""}${esc(a.label)}</button>`).join("");
+}
+
+// 切平台就重渲染账号池顶部的「添加与迁移账号」动作区
+document.addEventListener("wb-platform-change", function () {
+  try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake] 渲染平台登录入口失败", e); }
+});
+
+/**
+ * 用量明细。
+ *
+ * ⚠️ 上游接口只认**网页会话 cookie**：用 IDE token 调恒返回 total=0
+ * （实测 6 个时间窗 × 8 组参数；传错参数会报 9004，证明鉴权是通的，
+ * 只是这个接口不返数据）。所以结果必须区分三种情况：
+ *
+ *   缺 Cookie  -> 明确提示去补，不要显示「无记录」
+ *   有 Cookie  -> 正常展示会话列表
+ *   出错       -> 显示 errors
+ *
+ * 另外始终展示「本网关记录」作为对照 —— 那是经过本系统的请求，
+ * 与上游账单口径不同，但排障更有用。
+ */
+async function traeUsageDetail(spec) {
+  const realm = (spec && spec.realm) || "";
+  openModal('<p id="usageLoading">正在读取用量明细…</p>', "max-w-4xl");
+  const qs = new URLSearchParams({ days: "30" });
+  if (realm) qs.set("realm", realm);
+  const r = await api("/api/trae/usage?" + qs.toString());
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    openModal(`<h3 class="font-semibold text-lg mb-2">用量明细</h3>
+      <p style="color:var(--danger)">读取失败：${esc((data && data.detail) || r.status)}</p>`);
+    return;
+  }
+
+  const sessions = data.sessions || [];
+  const local = data.local || [];
+  const errors = data.errors || [];
+  const missing = data.accounts_missing_cookie || [];
+
+  let body = "";
+  if (data.need_web_cookie) {
+    // 关键：这不是「没有用量」，是「查不到」——必须说清区别
+    body = `<div class="limit-note" style="border-color:var(--warn)">
+      <p><b>需要网页会话 Cookie</b></p>
+      <p>${esc(data.hint || "")}</p>
+      <p style="color:var(--fg-muted)">受影响账号：${missing.map(id => "#" + id).join("、")}</p>
+      <button type="button" class="console-btn primary mt-2"
+              onclick="traeWebCookie(window.WBPlatform.spec())">去填写 Cookie</button>
+    </div>`;
+  } else if (sessions.length) {
+    body = `<table class="tbl"><thead><tr>
+        <th>账号</th><th>时间</th><th>模型</th><th class="text-right">消耗</th>
+      </tr></thead><tbody>${sessions.map(item => `<tr>
+        <td class="text-xs">${esc(item.account || "")}</td>
+        <td class="text-xs">${esc(fmtTime(item.session_start_time || item.start_time || ""))}</td>
+        <td class="text-xs font-mono">${esc(item.model || item.model_name || "—")}</td>
+        <td class="text-xs text-right tnum">${esc(String(item.cost ?? item.amount ?? item.usage ?? "—"))}</td>
+      </tr>`).join("")}</tbody></table>`;
+  } else {
+    body = `<p class="sentinel-empty">上游近 30 天没有用量记录（已成功查询 ${data.accounts_queried || 0} 个账号）</p>`;
+  }
+
+  // 本网关记录：**始终展示**，即使上游查不到。
+  //
+  // 这是经过本系统的真实请求（token 数 / 请求数），不依赖上游凭证，
+  // 所以永远有数据。与上游账单口径不同（上游按 token 折成美元/积分），
+  // 但排障时更直接 —— 「到底有没有人用过这个平台」看这里。
+  const localItems = (local && local.items) || [];
+  const localTotals = (local && local.totals) || {};
+  const localBlock = localItems.length
+    ? `<h4 class="font-semibold text-sm mt-4 mb-2">
+         本网关记录（近 ${esc(String(local.days || 30))} 天）</h4>
+       <p class="text-[11px] mb-2" style="color:var(--fg-subtle)">
+         经过本系统的实际请求，与上游账单口径不同（上游按 token 折成美元/积分），
+         但不受上游凭证影响，永远可查。</p>
+       <div class="flex gap-4 text-xs mb-2">
+         <span>请求 <b>${esc(String(localTotals.requests || 0))}</b> 次</span>
+         <span>Token <b>${esc(Number(localTotals.total_tokens || 0).toLocaleString("zh-CN"))}</b></span>
+         ${localTotals.credits ? `<span>积分 <b>${esc(String(localTotals.credits))}</b></span>` : ""}
+       </div>
+       <table class="tbl"><thead><tr>
+         <th>模型</th><th class="text-right">请求</th>
+         <th class="text-right">输入</th><th class="text-right">输出</th>
+         <th class="text-right">合计</th>
+       </tr></thead><tbody>${localItems.map(i => `<tr>
+         <td class="text-xs font-mono">${esc(i.model || "—")}</td>
+         <td class="text-xs text-right tnum">${esc(String(i.requests || 0))}</td>
+         <td class="text-xs text-right tnum">${esc(Number(i.prompt_tokens || 0).toLocaleString("zh-CN"))}</td>
+         <td class="text-xs text-right tnum">${esc(Number(i.completion_tokens || 0).toLocaleString("zh-CN"))}</td>
+         <td class="text-xs text-right tnum">${esc(Number(i.total_tokens || 0).toLocaleString("zh-CN"))}</td>
+       </tr>`).join("")}</tbody></table>`
+    : `<p class="text-xs mt-4" style="color:var(--fg-subtle)">
+         本网关近 ${esc(String((local && local.days) || 30))} 天没有该平台的请求记录。</p>`;
+
+  const errBlock = errors.length
+    ? `<div class="limit-note mt-3"><p><b>查询失败</b></p>${errors.map(e =>
+        `<p>#${esc(String(e.account_id))} ${esc(e.account || "")}：${esc(e.error || "")}</p>`).join("")}</div>`
+    : "";
+
+  openModal(`<h3 class="font-semibold text-lg mb-3">
+      用量明细 · ${esc((spec && spec.label) || realm || "Trae")}
+    </h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      数据来源：${data.source === "upstream" ? "上游权益接口" : "本地记录"} ·
+      近 ${data.days} 天
+    </p>
+    ${body}${localBlock}${errBlock}`, "max-w-4xl");
+}
+
+/** 填写网页会话 cookie（用于查询上游用量明细）。 */
+async function traeWebCookie(spec) {
+  const realm = (spec && spec.realm) || "";
+  const realmLabel = realm === "intl" ? "国际版" : realm === "cn" ? "国内版" : "全部";
+  openModal(`<h3 class="font-semibold text-lg mb-2">填写网页 Cookie · ${esc(realmLabel)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      上游用量明细只认浏览器会话。步骤：登录
+      <code>${realm === "intl" ? "www.trae.ai" : "www.trae.cn"}</code> →
+      F12 打开开发者工具 → Network → 点任意请求 → 复制 <code>Cookie</code> 请求头整行。
+    </p>
+    <textarea id="webCookieInput" rows="6" class="w-full font-mono text-[11px]"
+      style="border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--surface)"
+      placeholder="sid_tt=...; sessionid=...; X-Cloudide-Session=..."></textarea>
+    <p class="text-[11px] mt-2" style="color:var(--fg-subtle)">
+      只保存在本地数据库，仅用于读取用量，不会用于其他请求。
+    </p>
+    <div class="flex gap-2 mt-3">
+      <button type="button" class="console-btn primary" onclick="saveTraeWebCookie(${JSON.stringify(realm)})">保存</button>
+      <button type="button" class="console-btn quiet" onclick="closeModal()">取消</button>
+    </div>`, "max-w-2xl");
+}
+
+async function saveTraeWebCookie(realm) {
+  const input = $("#webCookieInput");
+  const cookie = (input && input.value || "").trim();
+  if (!cookie) { toast("请先粘贴 Cookie", "err"); return; }
+  const r = await api("/api/trae/web-cookie", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookie }),
+  });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast((data && data.detail) || "保存失败", "err"); return; }
+  toast(`已保存到 ${(data.updated || []).length} 个账号`);
+  closeModal();
+}
+
+/**
+ * 各平台的「扫描本机」。
+ *
+ * 之前所有平台都走同一个扫描实现（`/api/accounts/scan-local`），
+ * 那是 WorkBuddy 的实现，会去读
+ * `%LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth`。
+ * 在 Loomy 平台点扫描，扫的却是 CodeBuddy 的目录 —— 实测发现的。
+ *
+ * 这里按 storage_platform 路由到各平台自己的接口。
+ */
+/**
+ * 各平台的「签到」。
+ *
+ * 差异说明：
+ *   Loomy  -> POST /points/first-login，**幂等**（当天已领导致
+ *             alreadyProcessed: true，不是错误），每日赠送 5000 积分
+ *   Qoder  -> 领取权益（campaigns 里可领的那些）
+ *
+ * 结果必须区分「新领取」和「今日已领」，否则用户会以为没生效。
+ */
+/**
+ * 设备授权登录（Qoder 用）。
+ *
+ * 流程：start -> 展示链接 -> 每 3 秒 poll -> 拿到凭证即 claim 落账号。
+ *
+ * 为什么前端轮询而不是后端阻塞：后端阻塞一个请求 5 分钟会被
+ * 网关/浏览器超时切断；前端每 3 秒拉一次，用户授权完下一次就能拿到。
+ */
+/** 官方登录页（Trae 没有设备授权端点时的「授权登录」入口）。 */
+const PLATFORM_LOGIN_URL = {
+  trae: "https://www.trae.ai/",
+  "trae-cn": "https://www.trae.cn/",
+  "trae-intl": "https://www.trae.ai/",
+};
+
+// ===== 平台授权形态（由各平台 /meta 的 auth_mode 声明）=====
+//
+// 三个平台的上游能力不一样，前端不该硬编码「有没有授权按钮」：
+//   callback            Trae  —— 浏览器回调，服务器部署要配公网基址
+//   device-poll         Qoder —— 服务端轮询，任意设备授权都行
+//   local-session-only  Loomy —— 上游没有授权接口，只能扫本机
+//
+// 缓存按 storage_platform 存，页面生命周期内只需查一次。
+const _PLATFORM_META_CACHE = new Map();
+
+async function platformAuthMeta(storage) {
+  const key = String(storage || "").toLowerCase();
+  if (_PLATFORM_META_CACHE.has(key)) return _PLATFORM_META_CACHE.get(key);
+  let meta = { auth_mode: "", auth_explain: "" };
+  try {
+    const r = await api(`/api/${encodeURIComponent(key)}/meta`);
+    const { ok, data } = await safeJson(r);
+    if (ok && data) {
+      meta = {
+        auth_mode: String(data.auth_mode || ""),
+        auth_explain: String(data.auth_explain || ""),
+      };
+    }
+  } catch (e) {
+    // 拿不到就按「支持授权」处理，让用户点一下试，而不是直接藏掉入口
+  }
+  _PLATFORM_META_CACHE.set(key, meta);
+  return meta;
+}
+
+/** 该平台是否支持「在线授权登录」。 */
+async function platformSupportsAuth(storage) {
+  const meta = await platformAuthMeta(storage);
+  return meta.auth_mode !== "local-session-only";
+}
+
+async function platformBeginAuth(spec, storage) {
+  const realm = (spec && spec.realm) || "cn";
+  const id = String((spec && spec.id) || storage || "").toLowerCase();
+
+  // Trae 没有 PKCE 设备端点：这里的「授权登录」= 打开官方登录页拿 IDE 登录态，
+  // 登录后本机 storage.json 会更新，回到这里点「扫描本机」即可导入。
+  // 之前 Trae 的登录入口是「贴网页 Cookie」—— 那只是用量查询用的，不是登录。
+  if (id.startsWith("trae")) {
+    // 走真正的 PKCE 授权链：后端生成 code_challenge 并起本地回调端口，
+    // 用户点链接登录 → 浏览器自动回调 → 后端用 code 换 token 写号池。
+    // 不再要求用户手动贴 Cookie，也不再依赖本机 storage.json。
+    const realm = (spec && spec.realm) || "cn";
+    let start;
+    try {
+      start = await api(`/api/trae/device/start?realm=${encodeURIComponent(realm)}`,
+                        { method: "POST" });
+    } catch (e) {
+      toast("开始授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok, data } = await safeJson(start);
+    if (!ok || !data || !data.auth_url) {
+      toast("开始授权失败：" + ((data && data.detail) || "无授权地址"), "err");
+      return;
+    }
+    // 上游强制回环回调（auth_type=local 写死），所以**服务器部署时**
+    // 浏览器一定会跳到用户自己电脑的 127.0.0.1 —— 打不开是正常的，
+    // 但地址栏里那条 URL 带着完整授权码，复制回来提交就能完成。
+    //
+    // ⚠️ 手动提交表单**始终显示**，不再按 reachable 隐藏：
+    // 用户反馈「只有一行等待中 + 一个链接，找不到粘贴的地方」——
+    // 即使是在本机能自动回调的场景，表单留着也是无害的兜底。
+    const reachable = data.callback_reachable !== false;
+    openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
+
+      <div style="padding:12px 14px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);margin-bottom:14px">
+        <p class="text-sm m-0 mb-2" style="color:var(--fg)">
+          <b>操作步骤</b>
+        </p>
+        <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:20px;line-height:1.95">
+          <li>点下面的链接，在打开的 Trae 授权页上选择账号并点「授权」</li>
+          <li>浏览器会跳转到一个 <b>无法访问</b> 的页面（地址以 <code>http://127.0.0.1</code> 开头）——
+              <b style="color:var(--warn)">这是正常的，不是出错</b></li>
+          <li>在那个「无法访问」的页上，<b>点「复制这条链接」</b>按钮
+              （没有按钮就手动全选地址栏复制）</li>
+          <li>回到这里，把链接<b>粘贴到下面的输入框</b>，点「提交回调链接」</li>
+        </ol>
+        ${reachable ? `<p class="text-xs mt-2 mb-0" style="color:var(--fg-subtle)">
+          当前是<b>本机访问</b>，理论上浏览器会自动回跳，本页会自动提示成功；
+          若超过 1 分钟没反应，就走上面第 3~4 步手动提交。</p>` : ''}
+      </div>
+
+      <div class="mb-3">
+        <p class="text-xs mb-1" style="color:var(--fg-muted)">① 授权链接（点它去授权）</p>
+        <p class="text-xs" style="word-break:break-all;margin:0">
+          <a href="${esc(data.auth_url)}" target="_blank" rel="noopener"
+             style="color:var(--brand);text-decoration:underline">${esc(data.auth_url)}</a>
+        </p>
+        <button type="button" class="console-btn" id="traeCopyAuthBtn"
+                style="margin-top:8px">复制授权链接</button>
+      </div>
+
+      <form id="traeCallbackForm" class="mb-3" style="padding-top:12px;border-top:1px dashed var(--border)">
+        <label for="traeCallbackUrl" class="block text-xs mb-1" style="color:var(--fg-muted)">
+          ② 授权后跳转回来的链接（粘到这里）
+          <span style="color:var(--fg-subtle)">— 就是那个打不开的页面，地址栏里那一整条</span>
+        </label>
+        <textarea id="traeCallbackUrl" rows="3" class="w-full text-xs"
+          style="padding:8px;border:1px solid var(--border);border-radius:8px;resize:vertical;background:var(--bg);color:var(--fg)"
+          placeholder="http://127.0.0.1:8790/authorize?isRedirect=true&amp;...&amp;authCodeInfo=..."
+          spellcheck="false" autocomplete="off"></textarea>
+        <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:8px">
+          <span class="text-xs" style="color:var(--fg-subtle)">
+            <b>粘贴即自动提交</b>；按钮只在自动提交没触发时兜底
+          </span>
+          <button id="traeCallbackSubmit" type="submit" class="console-btn primary">
+            提交回调链接
+          </button>
+        </div>
+        <p id="traeCallbackError" class="text-xs mt-1" style="color:var(--danger)"></p>
+      </form>
+
+      <p id="traeAuthStatus" class="text-sm" style="color:var(--fg-muted)">
+        等待授权…（提交上面的链接后这里会显示进度）
+      </p>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+        <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
+      </div>`);
+
+    const nonce = data.nonce;
+    // 复制授权链接按钮（独立绑定，避免内联 onclick 里的引号把模板打断）
+    try {
+      const copyBtn = document.getElementById("traeCopyAuthBtn");
+      if (copyBtn) {
+        copyBtn.addEventListener("click", async () => {
+          const url = data.auth_url || "";
+          if (await writeClipboard(url)) {
+            copyBtn.textContent = "已复制";
+            toast("授权链接已复制");
+            setTimeout(() => { copyBtn.textContent = "复制授权链接"; }, 2000);
+          } else {
+            toast("复制失败，请手动选中链接复制", "err");
+          }
+        });
+      }
+    } catch (e) { /* 复制按钮绑不上不影响主流程 */ }
+
+    // 手动提交回调链接：服务器部署时的必经之路（上游只接受回环回调地址，
+    // 浏览器必然跳到用户自己电脑的 127.0.0.1，打不开但地址栏里有授权码）。
+    //
+    // **表单始终存在**（不按 reachable 隐藏），所以这里不再加 if 判断。
+    {
+      const form = document.getElementById("traeCallbackForm");
+      const input = document.getElementById("traeCallbackUrl");
+      const errEl = document.getElementById("traeCallbackError");
+      const btn = document.getElementById("traeCallbackSubmit");
+
+      /** 看着像 Trae 回调链接吗（避免把剪贴板里别的东西当成授权码提交）。 */
+      const looksLikeCallback = text => /127\.0\.0\.1|localhost|authCodeInfo|loginTraceID/i
+        .test(String(text || "").trim());
+
+      /** 真正提交。`auto=true` 表示由「粘贴/自动填充」触发。
+       *
+       * 用户的要求很明确：链接粘进来就该自己去换 token，不必再点一次按钮。
+       * 按钮保留，只作为「自动提交没触发 / 想重试」的兜底 —— 不能因为它存在
+       * 就强迫用户多点一次。
+       */
+      let submitting = false;
+      const submitCallback = async auto => {
+        if (submitting) return;
+        const url = (input && input.value ? input.value : "").trim();
+        if (errEl) errEl.textContent = "";
+        if (!url) {
+          if (errEl) errEl.textContent = "请先粘贴授权后跳转页面的完整链接";
+          return;
+        }
+        if (!looksLikeCallback(url)) {
+          if (errEl) errEl.textContent = "这不像回调链接：应包含 127.0.0.1 / authCodeInfo / loginTraceID";
+          return;
+        }
+        submitting = true;
+        btn.disabled = true;
+        btn.textContent = "提交中…";
+        if (auto && window.toast) toast("已自动提交回调链接");
+        try {
+          const r = await api("/api/trae/device/callback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nonce, callback_url: url }),
+          });
+          const { ok: cok, data: cd } = await safeJson(r);
+          if (!cok) {
+            if (errEl) errEl.textContent = (cd && (cd.detail || cd.message)) || "提交失败";
+            return;                       // 失败**保留输入框内容**，便于改一下再试
+          }
+          const status = document.getElementById("traeAuthStatus");
+          if (status) status.textContent = "回调已接收，正在完成授权…";
+          if (input) input.value = "";
+        } catch (e) {
+          if (errEl) errEl.textContent = "提交出错：" + (e && e.message ? e.message : e);
+        } finally {
+          submitting = false;
+          btn.disabled = false;
+          btn.textContent = "提交回调链接";
+        }
+      };
+
+      /** 尝试把剪贴板内容填进输入框。
+       *
+       * 用户在那张「打不开」的回调页上已经点过「复制这条链接」，
+       * 所以这里**主动读一次剪贴板自动回填** —— 能省掉「粘贴」这一步。
+       *
+       * 注意：`navigator.clipboard.readText()` 需要用户手势授权，
+       * 无手势时浏览器会直接 reject（或弹权限框）。失败**不能报错打扰用户**，
+       * 静默放弃、让他手动粘贴即可 —— 这是备选路径，不是主路径。
+       */
+      const autofillFromClipboard = async silent => {
+        if (!input || input.value.trim()) return false;
+        try {
+          if (!navigator.clipboard || !navigator.clipboard.readText) return false;
+          const text = (await navigator.clipboard.readText() || "").trim();
+          // 只接受看着像回调链接的内容，避免把用户剪贴板里别的东西填进来
+          if (!looksLikeCallback(text)) return false;
+          input.value = text;
+          if (errEl) errEl.textContent = "";
+          if (!silent && window.toast) toast("已从剪贴板自动填入回调链接");
+          return true;
+        } catch (e) {
+          // 无权限 / 非安全上下文 / 用户拒绝 —— 都不打扰
+          return false;
+        }
+      };
+
+      if (form) {
+        // 打开弹窗即尝试一次（多数浏览器这里会失败，因为还没有用户手势）
+        autofillFromClipboard(true).then(filled => { if (filled) submitCallback(true); });
+        // 用户一点输入框（说明他准备粘贴/操作），再试一次 —— 这次有手势了
+        if (input) {
+          input.addEventListener("focus", async () => {
+            const filled = await autofillFromClipboard(false);
+            if (filled) submitCallback(true);
+          });
+
+          // **粘贴即提交**：这是主路径。paste 事件里 DOM 还没更新，
+          // 所以等一个 tick 再读 value；确认是回调链接就直接换 token。
+          input.addEventListener("paste", () => {
+            setTimeout(() => {
+              const v = (input.value || "").trim();
+              if (looksLikeCallback(v)) submitCallback(true);
+            }, 40);
+          });
+          // 兜底：不用鼠标、靠键盘输入/回车粘贴时也能触发（防抖 700ms）
+          let typingTimer = null;
+          input.addEventListener("input", () => {
+            if (typingTimer) clearTimeout(typingTimer);
+            typingTimer = setTimeout(() => {
+              const v = (input.value || "").trim();
+              if (looksLikeCallback(v) && v.length > 60) submitCallback(true);
+            }, 700);
+          });
+        }
+
+        form.addEventListener("submit", event => {
+          event.preventDefault();
+          submitCallback(false);
+        });
+      }
+    }
+    for (let i = 0; i < 150; i += 1) {
+      await new Promise(r => setTimeout(r, 2000));
+      const el = document.getElementById("traeAuthStatus");
+      if (!el) return;                       // 弹窗被关掉了
+      let poll;
+      try {
+        poll = await api("/api/trae/device/poll?nonce=" + encodeURIComponent(nonce));
+      } catch (e) { continue; }
+      const { ok: pok, data: pd } = await safeJson(poll);
+      // **不要把错误当「继续等」**：换 token 失败会返回 502，
+      // 之前 `if (!pok) continue` 会一直等下去，表现就是
+      // 「回调页说授权完成，控制台却一直等待浏览器授权」。
+      if (!pok) {
+        el.textContent = "授权失败：" + ((pd && (pd.detail || pd.message)) || "请求出错");
+        el.style.color = "var(--danger)";
+        return;
+      }
+      if (pd && pd.pending) continue;
+      if (pd && pd.ok) {
+        el.textContent = "授权成功，账号已写入号池";
+        el.style.color = "var(--ok)";
+        toast("Trae 授权成功");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          // 平台卡底部的账号数**必须重新拉**：它来自 /api/platforms 的
+          // account_count，不重拉就一直是页面打开时的旧数字。
+          // 原来这里只刷了概览和账号池，所以「授权成功、账号也进来了，
+          // 但卡片上还是 0 个账号」（2026-10-31 实测）。
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+        return;
+      }
+      el.textContent = "授权失败：" + ((pd && (pd.error || pd.detail)) || "未知原因");
+      el.style.color = "var(--danger)";
+      return;
+    }
+    return;
+  }
+
+  const start = await api(`/api/${storage}/device/start?realm=${encodeURIComponent(realm)}`,
+                          { method: "POST" });
+  const { ok, data } = await safeJson(start);
+  if (!ok) {
+    toast(`发起授权失败：${(data && data.detail) || start.status}`, "err");
+    return;
+  }
+  const authUrl = data.auth_url || "";
+  const nonce = data.nonce || "";
+  if (!authUrl || !nonce) {
+    toast("授权链接生成异常", "err");
+    return;
+  }
+
+  // 设备码授权（Qoder 这类）：token 由**服务端轮询**取回，
+  // 浏览器在哪台机器上完全不重要 —— 手机上打开授权也行。
+  // 文案直接这么写，避免服务器部署的用户以为只能在本机点。
+  openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${esc((spec && spec.label) || storage)}</h3>
+    <ol class="text-sm mb-3" style="color:var(--fg-muted);padding-left:18px">
+      <li>用<b>任意设备</b>的浏览器打开下面的链接（手机也行）</li>
+      <li>选择要接入的账号并确认授权</li>
+      <li>本页会自动完成 —— 凭证由服务端轮询取回，与浏览器在哪无关</li>
+    </ol>
+    <p class="text-xs mb-3" style="word-break:break-all">
+      <a href="${esc(authUrl)}" target="_blank" rel="noopener"
+         style="color:var(--brand);text-decoration:underline">${esc(authUrl)}</a>
+    </p>
+    <p id="authStatus" class="text-sm" style="color:var(--fg-muted)">等待授权…</p>
+    <div class="flex justify-end mt-4">
+      <button onclick="closeModal()" class="console-btn quiet">关闭</button>
+    </div>`);
+
+  // 轮询：每 3 秒一次，最多 100 次（5 分钟）
+  const statusEl = () => document.getElementById("authStatus");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    if (!document.getElementById("authStatus")) return;   // 弹窗被关了
+    let poll;
+    try {
+      poll = await api(`/api/${storage}/device/poll?nonce=${encodeURIComponent(nonce)}`);
+    } catch (error) {
+      continue;
+    }
+    if (poll.status === 404) {
+      const el = statusEl();
+      if (el) el.textContent = "授权会话已过期，请重新发起";
+      return;
+    }
+    const parsed = await safeJson(poll);
+    if (!parsed.ok) continue;
+    const payload = parsed.data || {};
+    if (payload.pending) {
+      const el = statusEl();
+      if (el) el.textContent = payload.summary || "等待授权…";
+      continue;
+    }
+    // 拿到凭证 -> 落账号
+    const el = statusEl();
+    if (el) el.textContent = "授权成功，正在保存…";
+    const claim = await api(`/api/${storage}/device/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credentials: payload.credentials }),
+    });
+    const claimed = await safeJson(claim);
+    if (claimed.ok) {
+      const info = claimed.data || {};
+      if (el) {
+        el.style.color = "var(--success, #33587F)";
+        el.textContent = `已添加账号：${info.name || info.uid || "成功"}`;
+      }
+      toast("授权完成，账号已添加");
+      // ⚠️ 不能只调 loadAccounts()：
+      // 它按 `window.WBPlatform.spec()` 分派，而授权期间当前平台
+      // 可能不是刚授权的那个 -> 会去渲染别的平台的账号池，
+      // 表现为「数据没进来，手动刷新才显示」。
+      //
+      // 正确做法：先显式切到该平台（select 内部会重新拉数据），
+      // 再等一拍补一次 loadAccounts()。
+      try {
+        if (window.WBPlatform && typeof window.WBPlatform.select === "function") {
+          await window.WBPlatform.select(spec && spec.id ? spec.id : storage, realm);
+        }
+      } catch (error) {
+        // 切平台失败也要刷，至少别让用户以为没成功
+      }
+      await new Promise(resolve => setTimeout(resolve, 600));
+      loadAccounts();
+      // 平台卡账号数同步刷新（`select()` 里已经带了 refresh，这里再补一次
+      // 是为了覆盖「切平台失败 / 本来就停在该平台」的分支，见上面 try 的注释）。
+      if (window.WBPlatform) window.WBPlatform.refreshCounts();
+      setTimeout(() => closeModal(), 900);
+    } else {
+      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || claim.status}`;
+    }
+    return;
+  }
+  const el = statusEl();
+  if (el) el.textContent = "授权超时（5 分钟），请重新发起";
+}
+
+async function platformCheckin(spec, storage) {
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const prefix = storage === "workbuddy" ? "/api/accounts" : `/api/${storage}`;
+  toast("正在签到…");
+  const r = await api(prefix + "/checkin" + qs, { method: "POST" });
+  if (r.status === 404) {
+    // 该平台没有手动签到接口（签到在定时任务里跑）
+    openModal(`<h3 class="font-semibold text-lg mb-2">该平台没有手动签到接口</h3>
+      <p class="text-sm" style="color:var(--fg-muted)">
+        ${esc((spec && spec.label) || storage)} 的签到由<strong>定时任务</strong>执行，
+        不提供手动按钮。到「定时任务」里配置 <code>${esc(storage)}_checkin</code> 即可。
+      </p>`);
+    return;
+  }
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`签到失败：${(data && data.detail) || r.status}`, "err");
+    return;
+  }
+  if (data.supported === false) {
+    openModal(`<h3 class="font-semibold text-lg mb-2">该平台没有签到</h3>
+      <p class="text-sm" style="color:var(--fg-muted)">${esc(data.summary || "")}</p>`);
+    loadAccounts();
+    return;
+  }
+
+  const items = data.items || [];
+  const rows = items.map(it => `<tr class="border-t">
+      <td class="text-xs">${esc(it.account || "")}</td>
+      <td class="text-xs">${it.already_processed ? "今日已领" : "新领取"}</td>
+      <td class="text-xs tnum text-right">${it.current_balance ?? "-"}</td>
+      <td class="text-xs tnum text-right">${it.daily_balance ?? "-"}</td>
+    </tr>`).join("");
+
+  openModal(`<h3 class="font-semibold text-lg mb-2">签到结果</h3>
+    <p class="text-sm mb-2" style="color:var(--fg-muted)">${esc(data.summary || "")}</p>
+    ${rows ? `<table class="w-full text-sm">
+      <thead><tr class="text-xs" style="color:var(--fg-subtle)">
+        <th class="text-left">账号</th><th class="text-left">状态</th>
+        <th class="text-right">可用积分</th><th class="text-right">当日额度</th>
+      </tr></thead><tbody>${rows}</tbody></table>` : ""}
+    ${(data.failed || []).length ? `<p class="text-xs mt-2" style="color:var(--danger)">
+      失败：${esc(JSON.stringify(data.failed))}</p>` : ""}`);
+  loadAccounts();
+}
+
+/**
+ * 各平台接口前缀。
+ *
+ * WorkBuddy 是主应用（挂在 /api/accounts 下），其余平台是
+ * `/api/<storage>`。**但导入路径不是统一的**：
+ *   · workbuddy / loomy / trae  -> POST {prefix}/import-local
+ *   · qoder                     -> POST {prefix}/import（且必须带 PAT，
+ *                                  原生层的 auth.v1.dat 解不开）
+ * 之前一律拼 import-local，Qoder 直接 404 —— 表现就是「扫描没通」。
+ */
+function platformApiPrefix(spec, storage) {
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  if (id === "workbuddy" || id === "codebuddy") return "/api/accounts";
+  return "/api/" + (storage || id);
+}
+
+/**
+ * 账号**列表 / 单号操作**的基础路径。
+ *
+ * 与 `platformApiPrefix` 的区别：那个是「平台命名空间」（扫描/导入/用量都在
+ * 它下面），这里要的是**账号集合**，各平台不是同一个前缀：
+ *
+ *   workbuddy -> /api/accounts          （admin 自己的账号池）
+ *   trae      -> /api/trae/accounts
+ *   qoder     -> /api/qoder/accounts
+ *   loomy     -> /api/loomy/accounts
+ *
+ * 「刷新额度」原来拼的是 `/api/{storage}`，缺最后一级 —— `GET /api/qoder`
+ * 没有这个路由，直接 404，表现就是「点刷新额度提示读取账号列表失败」，
+ * 而账号池面板是好的（它走的是正确路径）。2026-10-31 实测确认。
+ */
+function platformAccountBase(spec, storage) {
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  if (id === "workbuddy" || id === "codebuddy") return "/api/accounts";
+  return "/api/" + (storage || id) + "/accounts";
+}
+
+function platformImportPath(spec, storage) {
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  const base = platformApiPrefix(spec, storage);
+  // Qoder 的导入是 /api/qoder/import，且需要 pat 字段
+  return id === "qoder" ? base + "/import" : base + "/import-local";
+}
+
+async function platformScanLocal(spec, storage) {
+  // WorkBuddy 有**专用**的扫描弹窗（`scanLocal()`）：按 UID 去重、
+  // 标注「当前 / 号池已有」、逐条导入、显示 Token 到期时间。
+  // 通用渲染（showScanResult）拿不到这些字段，会显示成一堆「不可导入」。
+  // 这里直接复用专用实现，避免两套界面并存。
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  if (id === "workbuddy" || id === "codebuddy") {
+    // Android 版构建会**删掉**整个 `scanLocal` 实现（桌面专属功能），
+    // 所以这里必须做存在性判断，否则移动端调用直接 ReferenceError。
+    if (typeof scanLocal === "function") return scanLocal();
+    toast("移动端不支持扫描本机，请在桌面端操作", "err");
+    return;
+  }
+
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const prefix = platformApiPrefix(spec, storage);
+  const r = await api(prefix + "/scan-local" + qs);
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`扫描失败：${(data && data.detail) || r.status}`, "err");
+    return;
+  }
+  await showScanResult(data, spec, storage);
+}
+
+/**
+ * 各平台的「导入本机」。
+ *
+ * Loomy 的凭证是明文 JSON，可以直接导入（用户零操作）；
+ * Qoder 的凭证加密在原生层，导入会返回需要 PAT/设备流的提示。
+ */
+async function platformImportLocal(spec, storage) {
+  const path = platformImportPath(spec, storage);
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  // 必须带 JSON body：ImportLocalIn 是必填模型，空 body 会 422
+  // （WorkBuddy 的「导入本机」就是这么失效的）。all=true = 导入目录下全部账号。
+  const payload = id === "qoder" ? { all: true } : { all: true };
+  const r = await api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`导入失败：${(data && data.detail) || r.status}`, "err");
+    return;
+  }
+  if (data.imported > 0) {
+    toast(`已导入 ${data.imported} 个账号`);
+    loadAccounts();
+    return;
+  }
+  // 导入 0 个要**说清原因**，不要静默
+  const hint = data.hint || data.reason || "本机没有可读凭证";
+  openModal(`<h3 class="font-semibold text-lg mb-2">没有导入任何账号</h3>
+    <p class="text-sm" style="color:var(--fg-muted)">${esc(hint)}</p>
+    ${data.scanned ? `<p class="text-xs mt-2" style="color:var(--fg-subtle)">已扫描 ${data.scanned} 项</p>` : ""}`);
+}
+
+/**
+ * 通用「用量明细」：按账号列出余额 / 今日请求 / 今日积分，点单个账号看上游明细。
+ *
+ * 为什么不再只给 Trae 做：WorkBuddy / Qoder / Loomy 的按钮都由后端
+ * `actions` 声明了 `usage`，但前端只有 Trae 分支 —— 其它平台点了没反应。
+ */
+async function platformUsageDetail(spec, storage) {
+  const prefix = storage === "workbuddy" ? "/api/accounts" : `/api/${storage}`;
+  openModal(`<h3 class="font-semibold text-lg mb-1">用量明细 · ${esc((spec && spec.label) || storage)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">读取中…</p>`, "max-w-3xl");
+  let items = [];
+  try {
+    const { ok, data } = await safeJson(await api(prefix + "?page_size=200"));
+    if (ok) items = (data && data.items) || [];
+  } catch (e) { /* 下面统一提示 */ }
+  const box = $("#modalBox");
+  if (!box) return;
+  if (!items.length) {
+    box.innerHTML += `<p class="text-sm" style="color:var(--fg-muted)">该平台还没有账号，先在「平台管理」里扫描/导入。</p>
+      <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`;
+    return;
+  }
+  const rows = items.map(a => {
+    const today = (a.usage_today && (a.usage_today.requests ?? a.usage_today.count)) || 0;
+    const credit = (a.usage_today && a.usage_today.credits) || 0;
+    return `<tr class="border-t">
+      <td class="py-2 pr-2 text-sm">${esc(a.name || a.uid || ("#" + a.id))}</td>
+      <td class="py-2 px-2 text-xs">${a.status === "active"
+        ? '<span class="badge bg-emerald-100 text-emerald-700">正常</span>'
+        : '<span class="badge bg-slate-100 text-slate-500">停用</span>'}</td>
+      <td class="py-2 px-2 text-right text-xs tnum">${fmtNum(a.balance_remain ?? 0)}</td>
+      <td class="py-2 px-2 text-right text-xs tnum">${today || "—"}</td>
+      <td class="py-2 px-2 text-right text-xs tnum">${credit ? fmtCredit(credit) : "—"}</td>
+      <td class="py-2 pl-2 text-right">
+        <button class="console-btn quiet" onclick="platformUsageOne(${jsv(prefix)}, ${Number(a.id)}, ${jsv(a.name || "")})">上游明细</button>
+      </td></tr>`;
+  }).join("");
+  box.innerHTML = `<h3 class="font-semibold text-lg mb-1">用量明细 · ${esc((spec && spec.label) || storage)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">余额为本站记录；「上游明细」直接读该账号的请求用量（上游接口）。</p>
+    <div class="overflow-x-auto"><table class="w-full text-sm">
+      <thead><tr class="text-[10px]" style="color:var(--fg-subtle)">
+        <th class="text-left py-1 pr-2">账号</th><th class="text-left py-1 px-2">状态</th>
+        <th class="text-right py-1 px-2">可用积分</th><th class="text-right py-1 px-2">今日请求</th>
+        <th class="text-right py-1 px-2">今日积分</th><th class="text-right py-1 pl-2">操作</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>
+    <div id="platformUsageOne" class="mt-3"></div>
+    <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`;
+}
+
+/** 单个账号的上游用量（分页拉最近 20 条）。 */
+async function platformUsageOne(prefix, accountId, name) {
+  const host = $("#platformUsageOne");
+  if (!host) return;
+  host.innerHTML = `<p class="text-xs" style="color:var(--fg-subtle)">读取 ${esc(name)} 的上游用量…</p>`;
+  let payload = null;
+  try {
+    const { ok, data } = await safeJson(await api(`${prefix}/${accountId}/request-usage`));
+    if (ok) payload = data;
+  } catch (e) {}
+  const rows = (payload && payload.data && payload.data.data) || payload && payload.data || [];
+  if (!Array.isArray(rows) || !rows.length) {
+    host.innerHTML = `<p class="text-xs" style="color:var(--fg-warn)">该账号没有可读的上游用量（可能未同步或接口不支持）。</p>`;
+    return;
+  }
+  host.innerHTML = `<div class="text-xs font-medium mb-1">${esc(name)} · 最近 ${rows.length} 条</div>
+    <div class="overflow-x-auto" style="max-height:260px"><table class="w-full text-xs">
+    <thead><tr style="color:var(--fg-subtle)"><th class="text-left py-1">时间</th><th class="text-left py-1">模型</th>
+      <th class="text-right py-1">积分</th><th class="text-left py-1">输入摘要</th></tr></thead>
+    <tbody>${rows.slice(0, 20).map(r => `<tr class="border-t">
+      <td class="py-1 pr-2 whitespace-nowrap">${esc(String(r.requestTime || r.request_time || "—").slice(5))}</td>
+      <td class="py-1 pr-2 font-mono">${esc(r.model || "—")}</td>
+      <td class="py-1 pr-2 text-right tnum">${fmtCredit(r.credit ?? r.credits ?? 0)}</td>
+      <td class="py-1" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.inputTrunc || r.input || "—")}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+/** 各平台的「刷新额度」：**只刷当前平台**的账号。 */
+async function platformRefreshAll(spec, storage) {
+  const base = platformAccountBase(spec, storage);
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const r = await api(base + qs);
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`刷新失败：读取账号列表失败（HTTP ${r.status}）`, "err");
+    return;
+  }
+  const items = (data && data.items) || [];
+  if (!items.length) { toast("该平台还没有账号", "err"); return; }
+  let total = 0;
+  const failures = [];
+  for (const item of items) {
+    const rr = await api(`${base}/${item.id}/refresh`, { method: "POST" });
+    if (rr.ok) { total += 1; continue; }
+    // 失败要**说清是上游拒绝还是本地问题**：上游 401 的原文是
+    // 「APISIX 401 Authorization Required」，直接弹 401 会让人以为
+    // 控制台登录失效（实测用户就是这么理解的）。
+    let detail = null;
+    try { detail = (await safeJson(rr)).data; } catch (e) {}
+    const up = (detail && detail.detail && detail.detail.upstream) || {};
+    const reason = (up.client_message || (detail && detail.detail && detail.detail.message)
+                    || (detail && detail.detail) || item.message || rr.status);
+    failures.push(`${item.name || ("#" + item.id)}：${reason}`);
+  }
+  toast(`已刷新 ${total}/${items.length} 个账号` + (failures.length
+    ? `；${failures.length} 个失败 —— ${failures[0]}${failures.length > 1 ? " 等" : ""}` : ""),
+    failures.length ? "err" : "ok");
+  loadAccounts();
+  // 平台卡底部的账号数 / 概览卡也要跟着更新（它们不随账号池自动刷新）
+  if (window.WBPlatform) window.WBPlatform.refreshCounts();
+  if (typeof _activeTab !== "undefined" && _activeTab === "platforms") loadPlatformOverview();
+}
+
+/**
+ * 统一渲染扫描结果。
+ *
+ * 必须区分三种情况，不能一律显示「没找到」：
+ *   1. 找到明文凭证 -> 可以导入
+ *   2. 找到目录但凭证加密 -> 需要授权/重新登录
+ *   3. 根本没找到目录 -> 客户端可能没装/没登录
+ */
+/**
+ * 平台速度与稳定性卡片。
+ *
+ * 每个平台一行：排名 / 名称 / 成功率 / p50 延迟条 / 抖动 / 操作
+ * （「设为最高优先级」直接写 gateway priority，省得再去网关页翻）。
+ */
+/**
+ * 平台速度表：TTFT（首 token 延迟）+ TPS（输出速度）。
+ *
+ * 这两个是观感的决定因素：
+ *   TTFT 1500ms  vs 3000ms  -> "点发送后要等多久才出字"
+ *   TPS  220     vs 40      -> "出字是哗哗的还是一蹦一蹦的"
+ * 只放一个「延迟」看不出这两件事，所以单独列出来。
+ */
+async function loadGatewaySpeed() {
+  const host = document.querySelector("#gwSpeedTable");
+  if (!host) return;
+  host.innerHTML = '<p class="sentinel-empty" style="padding:10px">统计中…</p>';
+  let data = null;
+  try {
+    const { ok, data: payload } = await safeJson(await api("/api/platform/speed?hours=24"));
+    if (ok) data = payload;
+  } catch (e) { /* 下面统一提示 */ }
+  const rows = ((data && data.items) || []).filter(r => r.requests > 0);
+  if (!rows.length) {
+    host.innerHTML = '<p class="sentinel-empty" style="padding:10px">近 24 小时还没有样本。</p>';
+    return;
+  }
+  const maxTps = Math.max(1, ...rows.map(r => r.tps_p50 || 0));
+  // 用**平均值**排序展示：用户的目标是「看出哪个平台快、然后手动用它」，
+  // 均值比中位数更贴近体感；中位数留在 tooltip 里当参考。
+  const byTtft = [...rows].sort((a, b) => (a.ttfb_avg || 9e9) - (b.ttfb_avg || 9e9));
+  const fastestId = byTtft[0] ? byTtft[0].platform : "";
+  host.innerHTML = `<div class="gw-speed-row gw-speed-head">
+      <span>平台</span><span>成功率</span><span>TTFT 均值</span><span>TPS 均值</span>
+      <span>总耗时均值</span><span>样本</span>
+    </div>` + rows.map(r => {
+    const tone = r.success_rate >= 98 ? "ok" : r.success_rate >= 90 ? "warn" : "danger";
+    const w = Math.max(6, Math.round((r.tps_avg || 0) / maxTps * 100));
+    const badge = r.platform === fastestId ? '<b class="gw-speed-tag">最快</b>' : "";
+    return `<div class="gw-speed-row">
+      <span class="gw-speed-name">${esc(r.label || r.platform)}${badge}</span>
+      <span class="tone-${tone}">${r.success_rate}%</span>
+      <span data-tooltip="中位 ${r.ttfb_p50 || 0}ms">${r.ttfb_avg ? r.ttfb_avg + "ms" : "—"}</span>
+      <span class="gw-speed-tps"><i style="width:${w}%"></i><em>${r.tps_avg ? r.tps_avg.toFixed(0) : "—"} tok/s</em></span>
+      <span data-tooltip="中位 ${r.latency_p50 || 0}ms">${r.latency_avg ? r.latency_avg + "ms" : "—"}</span>
+      <span class="gw-speed-sub">${fmtNum(r.requests)}</span>
+    </div>`;
+  }).join("") + `<p class="bench-note">
+    表中均为<b>平均值</b>（悬停看中位数）。TTFT 越低越好、TPS 越高越好。
+    想固定用某个平台：复制带 <code>-平台名</code> 后缀的模型 id 即可
+    （如 <code>DeepSeek-V4.1-Flash-loomy</code>），网关会直接路由到该平台。
+  </p>`;
+  const hint = document.querySelector("#gwSpeedHint");
+  if (hint) hint.textContent = `近 ${data.hours} 小时 · ${rows.length} 个平台有样本`;
+}
+
+async function loadPlatformBench() {
+  const host = document.querySelector("#platformBench");
+  if (!host) return;
+  host.innerHTML = '<p class="sentinel-empty" style="padding:10px 2px">统计中…</p>';
+  let data = null;
+  try {
+    const { ok, data: payload } = await safeJson(await api("/api/platform/speed?hours=24"));
+    if (ok) data = payload;
+  } catch (e) { /* 下面统一提示 */ }
+  if (!data || !(data.items || []).length) {
+    host.innerHTML = '<p class="sentinel-empty" style="padding:10px 2px">近 24 小时还没有足够样本。</p>';
+    return;
+  }
+  const items = data.items.filter(row => row.requests > 0);
+  const slowest = Math.max(1, ...items.map(row => row.latency_p50 || 1));
+  const rows = items.map(row => {
+    const tone = row.success_rate >= 98 ? "ok" : row.success_rate >= 90 ? "warn" : "danger";
+    // 同一个平台可能既最快又最稳：两个徽标都要显示，不能互斥。
+    const badge = (row.platform === data.fastest
+        ? '<span class="bench-badge fastest">最快</span>' : '')
+      + (row.platform === data.steadiest
+        ? '<span class="bench-badge steadiest">最稳</span>' : '');
+    const width = Math.max(6, Math.round((row.latency_p50 || 0) / slowest * 100));
+    return `<div class="bench-row">
+      <span class="bench-rank">#${row.rank}</span>
+      <span class="bench-name">${esc(row.label || row.platform)}${badge}
+        ${row.low_sample ? '<span class="bench-low">样本少</span>' : ""}</span>
+      <span class="bench-rate tone-${tone}">${row.success_rate}%</span>
+      <span class="bench-track"><i style="width:${width}%"></i></span>
+      <span class="bench-lat">${row.latency_p50 ? fmtDuration(row.latency_p50) : "—"}</span>
+      <span class="bench-jitter" data-tooltip="延迟标准差，越小越稳">±${row.jitter}ms</span>
+      <span class="bench-ops">
+        <button class="console-btn quiet" data-bench-priority="${esc(row.platform)}">设为最高优先级</button>
+      </span>
+    </div>`;
+  }).join("");
+  host.innerHTML = rows + `<p class="bench-note">
+    按「延迟 + 抖动 + 失败率」综合排序；p50 为总耗时中位数，±为抖动。
+    点「设为最高优先级」会把该平台优先级设为 1（其余自动顺延），策略需为「优先级」时生效。
+  </p>`;
+  const hint = document.querySelector("#platformBenchHint");
+  if (hint) hint.textContent = `近 ${data.hours} 小时 · ${items.length} 个平台有样本`;
+
+  host.querySelectorAll("[data-bench-priority]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const platform = btn.dataset.benchPriority;
+      btn.disabled = true;
+      try {
+        const { ok } = await safeJson(await api("/api/gateway/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ priority: { [platform]: 1 } }),
+        }));
+        toast(ok ? `已把 ${platform} 设为最高优先级` : "设置失败", ok ? "ok" : "err");
+        if (ok) loadGateway && loadGateway();
+      } finally { btn.disabled = false; }
+    });
+  });
+}
+
+async function showScanResult(data, spec, storage) {
+  const items = (data && data.items) || [];
+  const canImport = Boolean(data && data.can_import);
+  // 各平台的 items 字段名不同，按可能的键依次取：
+  //   Loomy     -> source / session / phone
+  //   Qoder     -> account_id / uid_hint
+  //   WorkBuddy -> data_dir / account_id
+  const pick = (it, keys) => {
+    for (const k of keys) {
+      if (it && it[k] !== undefined && it[k] !== null && it[k] !== "") return it[k];
+    }
+    return "";
+  };
+  // 用**表格**展示，而不是裸 <li>：一列一个含义，路径过长自动省略，
+  // 鼠标悬停看完整路径。之前所有信息挤在一行里，路径一长就没法读。
+  const rows = items.map((it, index) => {
+    // 字段名各平台不同，这里把实际返回的全列出来（WorkBuddy 用
+    // nickname / file / domain；Loomy 用 session / source；
+    // Qoder 用 account_id / uid_hint）。漏一个就会显示成空值。
+    const where = pick(it, ["source", "file", "data_dir", "dir", "path"]);
+    const who = pick(it, ["nickname", "session", "account_id", "uid_hint",
+                          "uid", "phone", "name"]);
+    const realm = pick(it, ["realm", "domain"]);
+    // WorkBuddy 不返回 has_plain_credential（它的 .info 本身就是明文），
+    // 有文件就视为可导入；其它平台仍看这个字段。
+    const ok = Boolean(it.has_plain_credential) || Boolean(it.file);
+    const note = pick(it, ["note", "credential_error"]);
+    return `<tr>
+      <td class="scan-idx">${index + 1}</td>
+      <td>${ok
+        ? '<span class="scan-ok">可导入</span>'
+        : '<span class="scan-miss">不可导入</span>'}</td>
+      <td class="scan-who" data-tooltip="${esc(String(who || "—"))}">${esc(String(who || "—"))}</td>
+      <td>${realm ? `<span class="scan-realm">${esc(String(realm))}</span>` : "—"}</td>
+      <td class="scan-path" data-tooltip="${esc(String(where || ""))}">${esc(String(where || "—"))}</td>
+    </tr>`;
+  }).join("");
+
+  // 目录信息也展示（Qoder 的 data_dirs 有多个）
+  const dirs = (data && (data.data_dirs || [])) || [];
+  const dirBlock = dirs.length
+    ? `<div class="text-xs mt-2" style="color:var(--fg-subtle)">
+        扫描目录：${dirs.map(d => `<code>${esc(String(d))}</code>`).join("、")}</div>`
+    : "";
+
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  // 「要不要显示授权登录按钮」不再硬编码 qoder：
+  // 由各平台 /meta 的 auth_mode 决定（Loomy 是 local-session-only，天然没有）。
+  const authMeta = await platformAuthMeta(storage);
+  const supportsAuth = authMeta.auth_mode !== "local-session-only";
+  const authExplain = authMeta.auth_explain || "";
+  const needAuth = !canImport && supportsAuth;
+  const body = `
+    <h3 class="font-semibold text-lg mb-2">扫描结果 · ${esc((spec && spec.label) || storage)}</h3>
+    <p class="text-sm mb-2" style="color:var(--fg-muted)">
+      ${canImport ? "找到可导入的凭证" : (needAuth ? "本机没有可直接导入的凭证（凭证加密在客户端原生层）" : "没有找到可导入凭证")}
+      ${data && data.config_root ? `<br><span class="text-xs">配置目录：<code>${esc(data.config_root)}</code></span>` : ""}
+      ${data && data.base_url ? `<br><span class="text-xs">上游：<code>${esc(data.base_url)}</code></span>` : ""}
+    </p>
+    ${rows ? `<div class="scan-table-wrap">
+      <table class="scan-table">
+        <thead><tr>
+          <th style="width:34px">#</th><th style="width:74px">状态</th>
+          <th style="width:150px">账号</th><th style="width:56px">区</th>
+          <th>来源路径</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>` : ""}
+    ${dirBlock}
+    ${data && data.hint ? `<p class="text-xs mt-2" style="color:var(--fg-subtle)">${esc(data.hint)}</p>` : ""}
+    ${authExplain ? `<p class="text-xs mt-2" style="color:var(--fg-muted);padding:8px 10px;border-radius:8px;background:var(--surface-2)">
+      ${esc(authExplain)}</p>` : ""}
+    <div class="flex justify-end gap-2 mt-4">
+      ${(needAuth && supportsAuth) ? `<button onclick="closeModal();platformBeginAuth(window.WBPlatform.spec(),${jsv(storage)})"
+          class="console-btn primary">立即授权登录</button>` : ""}
+      ${canImport ? `<button onclick="closeModal();platformImportLocal(window.WBPlatform.spec(),${jsv(storage)})"
+          class="console-btn primary">导入这些凭证</button>` : ""}
+      <button onclick="closeModal()" class="console-btn quiet">关闭</button>
+    </div>`;
+  openModal(body);
+}
+
+async function traeScanLocal() {
+  const r = await api("/api/trae/scan-local");
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast((data.detail && data.detail.message) || "扫描失败", "err"); return; }
+  const items = data.items || [];
+  const realmName = (k) => ({ cn: "国内版", intl: "国际版" })[k] || k || "-";
+  const errors = data.errors || [];
+
+  const body = items.length ? `
+    <div class="trae-scan-table">
+      <table class="tbl">
+        <thead><tr>
+          <th>区域</th><th>名称</th><th>UID</th><th>地区</th>
+          <th>凭证</th><th>设备指纹</th>
+        </tr></thead>
+        <tbody>
+          ${items.map(item => `<tr>
+            <td><span class="trae-realm-chip ${item.realm === 'cn' ? 'cn' : 'intl'}">${esc(realmName(item.realm))}</span></td>
+            <td class="trae-scan-name" data-tooltip="${esc(item.name || '')}">${esc(item.name || "-")}</td>
+            <td class="trae-scan-uid" data-tooltip="${esc(item.uid || '')}">${esc(item.uid || "-")}</td>
+            <td>${esc(item.region || "-")}</td>
+            <td>${item.has_refresh_token
+              ? '<span class="trae-chip ok">可续期</span>'
+              : '<span class="trae-chip warn">仅 token</span>'}</td>
+            <td>${item.device_id
+              ? '<span class="trae-chip ok">已绑定</span>'
+              : '<span class="trae-chip">无</span>'}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>` : `
+    <div class="trae-scan-empty">
+      <strong>没有发现可导入的登录态</strong>
+      请先在本机的 Trae 客户端登录（国内版或国际版），再回来重新扫描。
+    </div>`;
+
+  openModal(`
+    <div class="trae-modal">
+      <h3>本机 Trae 登录态</h3>
+      <p class="trae-modal-note">
+        从本机 Trae 客户端的 <code>storage.json</code> 读取并解密登录凭证。
+        共发现 <b>${items.length}</b> 个账号。
+      </p>
+      <p class="trae-modal-path" data-tooltip="${esc(data.storage || '')}">${esc(data.storage || "未找到 Trae 安装目录")}</p>
+      ${body}
+      ${errors.length ? `<div class="trae-modal-errors">
+        <strong>${errors.length} 条读取失败</strong>
+        ${errors.map(e => `<div>${esc(e.error || JSON.stringify(e))}</div>`).join("")}
+      </div>` : ""}
+      ${items.length ? `<div class="trae-modal-actions">
+        <button type="button" class="console-btn primary" onclick="closeModal(); traeImportLocal()">
+          导入这 ${items.length} 个账号
+        </button>
+        <button type="button" class="console-btn quiet" onclick="closeModal()">关闭</button>
+      </div>` : ""}
+    </div>`, "max-w-3xl");
+}
+
+async function traeImportLocal() {
+  toast("正在导入本机 Trae 账号…");
+  const r = await api("/api/trae/import-local", { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast((data.detail && data.detail.message) || "导入失败", "err");
+    return;
+  }
+  const errs = data.errors || [];
+  const added = data.added || 0;
+  const updated = data.updated || 0;
+  // 导入结果必须**看得见**：只弹一个 3 秒消失的 toast，用户会怀疑
+  // 「到底导没导进去」（尤其 added=0 时）。这里给一份带明细的确认框。
+  if (!errs.length) {
+    toast(`导入完成：新增 ${added}，更新 ${updated}`, "ok");
+    openModal(`
+      <div class="trae-modal">
+        <h3>导入完成</h3>
+        <p class="trae-modal-note">凭证已写入统一号池，可在「账号池」查看与刷新额度。</p>
+        <div class="trae-import-summary">
+          <div class="trae-import-stat">
+            <span class="trae-import-num">${added}</span>
+            <span class="trae-import-label">新增账号</span>
+          </div>
+          <div class="trae-import-stat">
+            <span class="trae-import-num">${updated}</span>
+            <span class="trae-import-label">更新凭证</span>
+          </div>
+          <div class="trae-import-stat">
+            <span class="trae-import-num">0</span>
+            <span class="trae-import-label">失败</span>
+          </div>
+        </div>
+        <div class="trae-modal-actions">
+          <button type="button" class="console-btn primary"
+            onclick="closeModal(); activateTab('accounts')">去账号池查看</button>
+          <button type="button" class="console-btn quiet" onclick="closeModal()">关闭</button>
+        </div>
+      </div>`, "max-w-lg");
+  } else {
+    toast(`导入完成：新增 ${added}，更新 ${updated}，${errs.length} 条失败`, "err");
+    openModal(`
+      <div class="trae-modal">
+        <h3>导入完成（部分失败）</h3>
+        <div class="trae-import-summary">
+          <div class="trae-import-stat"><span class="trae-import-num">${added}</span>
+            <span class="trae-import-label">新增账号</span></div>
+          <div class="trae-import-stat"><span class="trae-import-num">${updated}</span>
+            <span class="trae-import-label">更新凭证</span></div>
+          <div class="trae-import-stat bad"><span class="trae-import-num">${errs.length}</span>
+            <span class="trae-import-label">失败</span></div>
+        </div>
+        <div class="trae-modal-errors">
+          <strong>以下条目未能写入号池</strong>
+          ${errs.map(e => `<div>${esc(e.error || JSON.stringify(e))}</div>`).join("")}
+        </div>
+        <div class="trae-modal-actions">
+          <button type="button" class="console-btn quiet" onclick="closeModal()">关闭</button>
+        </div>
+      </div>`, "max-w-2xl");
+  }
+  // 账号池 / 平台卡的数字都要立刻更新，否则用户点过去还是旧数
+  if (window.WBPlatform) window.WBPlatform.refreshCounts();
+  loadAccounts();
+  if (typeof _activeTab !== "undefined" && _activeTab === "platforms") loadPlatformOverview();
+}
+
+async function traeRefreshAll() {
+  toast("正在刷新所有 Trae 账号额度…");
+  const r = await api("/api/trae/refresh-all", { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("刷新失败", "err"); return; }
+  toast(`刷新完成：成功 ${data.ok}，失败 ${data.failed}`);
+  loadAccounts();
+}
+
+let _accountFilter = "all";function closeAccountMenu() {
+  document.getElementById("accountBatchMenu").open = false;
+}
+function setAccountFilter(status) {
+  _accountFilter = status;
+  document.querySelectorAll("[data-account-filter]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.accountFilter === status));
+  });
+  renderAccPage(1);
+}
+document.addEventListener("click", event => {
+  const menu = document.getElementById("accountBatchMenu");
+  if (menu && menu.open && !menu.contains(event.target)) closeAccountMenu();
+});
+document.addEventListener("keydown", event => {
+  const menu = document.getElementById("accountBatchMenu");
+  if (event.key === "Escape" && menu && menu.open) {
+    closeAccountMenu();
+    menu.querySelector("summary").focus();
+  }
+});
+function renderAccPage(p) {
+  const term = (_accTerm = ($("#accSearch") ? $("#accSearch").value : "").trim().toLowerCase());
+  const data = _accData.filter(a => (_accountFilter === "all" || a.status === _accountFilter)
+    && (!term || (a.name||"").toLowerCase().includes(term) || (a.uid||"").toLowerCase().includes(term)));
+  $("#filterAllCount").textContent = _accData.length;
+  $("#filterActiveCount").textContent = _accData.filter(a => a.status === "active").length;
+  $("#filterDisabledCount").textContent = _accData.filter(a => a.status === "disabled").length;
+  const total = data.length, totalPages = Math.max(1, Math.ceil(total / PS));
+  p = Math.min(Math.max(1, p), totalPages);
+  _accountPage = p;
+  const slice = data.slice((p - 1) * PS, p * PS);
+  $("#accBody").innerHTML = slice.map(accRow).join("") ||
+    `<tr><td colspan="6"><div class="account-empty"><strong>${term || _accountFilter !== "all" ? "没有匹配的账号" : "添加第一个账号"}</strong>${term || _accountFilter !== "all" ? "试试其他关键词，或切换账号状态筛选。" : "通过手机号登录，或导入已有账号备份即可开始。"}</div></td></tr>`;
+  $("#accPager").innerHTML = pagerHtml(total, p, totalPages, "renderAccPage");
+}
+async function refreshAcc(id){
+  const r = await api("/api/accounts/"+id+"/refresh",{method:"POST"});
+  const { ok, data } = await safeJson(r);
+  if (r.ok) {
+    // 刷新现在会一并更新积分到期快照（后端 with_expiry 默认开），
+    // 所以提示里带上「7 天内到期」的数字 —— 这才是用户刷新想确认的事。
+    const soon = Number((data && data.credits_expiring_soon) || 0);
+    toast(data?.warnings?.length ? '余额已刷新，到期快照未完整更新' : soon > 0 ? `已刷新：${soon} 积分将在 7 天内到期` : "余额与积分到期快照已刷新");
+  } else {
+    const detail = data?.detail;
+    toast(typeof detail === 'object' ? detail.message : '刷新失败' + (detail ? '：' + detail : ''), 'err');
+    if (detail?.upstream) openModal(`<h3>账号余额刷新失败</h3><p class="limit-note">本网关记录的上游响应如下：</p>${upstreamEvidenceHtml(detail.upstream)}`, 'max-w-3xl');
+  }
+  if (r.ok && data?.warnings?.length) openModal(`<h3>余额已刷新，到期快照未完整更新</h3>${data.warnings.map(upstreamEvidenceHtml).join('')}`, 'max-w-3xl');
+  if (r.ok) { loadAccounts(); if (_creditStats) loadCreditStats(); }
+}
+function healthStageText(item) {
+  const stages = item.stages || {};
+  const label = {balance:'积分', models:'模型列表', conversation:'真实对话'};
+  return Object.keys(label).map(key => {
+    const stage = stages[key] || {};
+    if (stage.ok && key === 'balance') return `${label[key]}通过 ${stage.remain ?? 0}/${stage.total ?? 0}`;
+    if (stage.ok && key === 'models') return `${label[key]}通过 ${stage.count ?? 0} 个`;
+    if (stage.ok && key === 'conversation') return `${label[key]}通过 ${stage.model || ''}${stage.free_model ? '（免费）' : '（可能消耗少量积分）'}`;
+    return `${label[key]}失败${stage.status ? ' HTTP ' + stage.status : ''}${stage.code ? ' / ' + stage.code : ''}${stage.message ? '：' + stage.message : ''}`;
+  }).join(' · ') || item.reason || '';
+}
+function healthStageIcon(item) {
+  return item.healthy
+    ? '<span class="wb-icon text-emerald-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+    : item.status === 'skipped'
+      ? '<span class="wb-icon text-slate-400 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>'
+      : '<span class="wb-icon text-red-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>';
+}
+function healthCheckOptions(submitUrl, title, total) {
+  return {
+    title, submitUrl, body: {},
+    label: item => item.account || item.account_id,
+    detail: item => healthStageText(item),
+    amount: item => item.healthy ? '<span class="text-emerald-600 font-semibold">健康</span>' : '',
+    icon: healthStageIcon,
+    doneText: job => job.result?.summary || `检查完成：${job.result?.healthy || 0}/${total} 个账号健康`,
+    summaryHtml: job => job.result?.summary || '',
+    doneToast: job => job.result?.summary || '健康检查完成',
+    onFinish: () => loadAccounts(),
+  };
+}
+async function healthCheckAcc(id) {
+  if (!await uiConfirm({kind:'info', danger:false, title:'账号三项健康检查',
+      message:'依次调用积分、模型列表和一次最大输出 1 token 的真实对话。优先免费模型；没有免费模型时可能消耗少量积分。失败只显示诊断，不会因此禁用账号；三项通过可恢复由自动失效判断禁用的账号。',
+      okText:'开始检查'})) return;
+  await accountBatchAction(() => runJob(healthCheckOptions(
+    `/api/accounts/${id}/health-check`, '账号三项上游健康检查', 1)));
+}
+async function healthCheckAll() {
+  if (!_accData.length) { toast('没有可检查的账号', 'err'); return; }
+  if (!await uiConfirm({kind:'info', danger:false, title:'一键健康检查',
+      message:`将对全部 ${_accData.length} 个账号依次调用积分、模型列表和一次最大输出 1 token 的真实对话。优先免费模型；没有免费模型时可能消耗少量积分。检查失败只显示诊断，不会因此禁用账号。`,
+      okText:'开始检查'})) return;
+  await accountBatchAction(() => runJob(healthCheckOptions(
+    '/api/accounts/health-check-batch', '账号池三项上游健康检查', _accData.length)));
+}
+async function toggleAcc(id,st){ await api("/api/accounts/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:st})}); loadAccounts(); }
+async function delAcc(id){ if(!await uiConfirm({message:"确认删除该账号？", title:"删除账号"}))return; const r=await api("/api/accounts/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"删除失败",r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
+async function injectAcc(id){
+  if(!await uiConfirm({kind:"warn", danger:false, title:"注入本机客户端",
+      message:"确认把该账号注入到本机 WorkBuddy 客户端？\n会先自动备份当前活动登录态（*.bak-时间戳）。", okText:"确认注入"})) return;
+  const r = await api("/api/accounts/"+id+"/inject",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:true})});
+  const d = await r.json().catch(()=>({}));
+  if(r.ok){ toast(`已注入到本机客户端（备份: ${d.backup?d.backup.split(/[\\/]/).pop():"无"}）`); }
+  else { toast("注入失败: "+(d.detail||""), "err"); }
+}
+
+/* 猫猫旅行：同意协议 → 首次领养(+300) → 派猫 → 领奖。逐步展示结果。 */
+function catStepRow(s) {
+  const icon = s.skipped ? '<span class="wb-icon text-slate-400"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>'
+             : s.ok      ? '<span class="wb-icon text-emerald-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+                         : '<span class="wb-icon text-red-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>';
+  const name = { agreement:"同意协议", adopt:"首次领养", status:"查询状态",
+                 depart:"派出旅行", claim:"领取奖励", info:"查询猫档案" }[s.step] || s.step;
+  const rw = s.reward > 0 ? `<span class="ml-2 font-semibold text-amber-600">+${s.reward} 积分</span>` : "";
+  return `<div class="flex items-start gap-2 py-1.5 border-b last:border-0">
+    <span class="mt-0.5">${icon}</span>
+    <div class="flex-1 text-sm">
+      <span class="font-medium text-slate-700">${name}</span>
+      <span class="text-slate-500 ml-1">${esc(s.message||"")}</span>${rw}
+    </div></div>`;
+}
+function catResultHtml(d) {
+  const steps = (d.steps || []).map(catStepRow).join("");
+  const head = d.credits > 0
+    ? `<div class="mb-2 text-emerald-600 font-semibold"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5A4.8 8 0 0 1 12 8a4.8 8 0 0 1 4.5-5 2.5 2.5 0 0 1 0 5"/></svg></span>${esc(d.summary||"")}</div>`
+    : `<div class="mb-2 ${d.ok?'text-slate-500':'text-red-500'} font-semibold">${esc(d.summary||"")}</div>`;
+  const bal = d.balance_remain !== undefined
+    ? `<div class="mt-3 text-xs text-slate-400">当前剩余积分：${d.balance_remain}</div>` : "";
+  return head + `<div class="rounded-lg border bg-slate-50 px-3 py-1">${steps}</div>` + bal;
+}
+async function catTravel(id) {
+  const name = (accById(id) || {}).name || id;
+  openModal(`<h3 class="font-bold mb-1"><span class="wb-icon mr-1 text-pink-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 7 .57 1.07 1 2.24 1 3.44C21 17.9 16.97 21 12 21s-9-3-9-7.56c0-1.25.5-2.4 1-3.44 0 0-1.89-6.42-.5-7 1.39-.58 4.72.23 6.5 2.23A9.04 9.04 0 0 1 12 5Z"/><path d="M8 14v.5"/><path d="M16 14v.5"/><path d="M11.25 16.25h1.5L12 17l-.75-.75Z"/></svg></span> 猫猫旅行 — ${esc(name)}</h3>
+    <p class="text-xs text-slate-400 mb-3">正在执行：同意协议 → 首次领养 → 派出 → 领奖...</p><div id="catBody"></div>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+  try {
+    const r = await api("/api/accounts/" + id + "/cat-travel", { method: "POST" });
+    const { ok, data: d } = await safeJson(r);
+    if (!r.ok) { $("#catBody").innerHTML = `<p class="text-red-500 text-sm">执行失败: ${esc(d.detail||"未知错误")}</p>`; return; }
+    $("#catBody").innerHTML = catResultHtml(d);
+    /* 关键：领取成功必须有明确提示，不能只体现在积分明细里 */
+    if (d.credits > 0) toast(`领取成功，获得 ${d.credits} 积分`, "ok");
+    else if (d.ok)      toast("执行完成，本次无新增积分", "ok");
+    else                toast("执行失败：" + (d.summary || ""), "err");
+    loadAccounts();
+  } catch (e) {
+    $("#catBody").innerHTML = `<p class="text-red-500 text-sm">执行异常: ${esc(String(e))}</p>`;
+  }
+}
+
+/* ==========================================================================
+   后台任务进度（批量做任务 / 猫猫旅行）
+   --------------------------------------------------------------------------
+   这类批量是串行 + 限速的，一个账号要好几秒，全量跑完可能几分钟。
+   同步等会让 nginx 先超时（默认 60s）→ 504。所以：
+     1. 请求只负责「提交」，立即拿到 job_id；
+     2. 弹窗每 1.5 秒轮询一次进度，实时追加已完成账号；
+     3. 关掉弹窗不会中断后台执行（线程还在跑），重新点按钮能看到进度。
+   ========================================================================== */
+
+let _accountActionBusy = false;
+let _accountJob = null;
+
+function syncAccountBatchButtons() {
+  const busy = _accountActionBusy || !!_accountJob;
+  document.querySelectorAll('[data-account-batch]').forEach(button => {
+    if (busy && !button.dataset.batchLocked) {
+      button.dataset.batchWasDisabled = button.disabled ? '1' : '0';
+      button.dataset.batchLocked = '1';
+      button.disabled = true;
+    } else if (!busy && button.dataset.batchLocked) {
+      button.disabled = button.dataset.batchWasDisabled === '1';
+      delete button.dataset.batchLocked;
+    }
+    button.setAttribute('aria-busy', String(busy));
+  });
+  const status = document.getElementById('accountJobStatus');
+  if (status) {
+    status.hidden = !busy;
+    status.disabled = !_accountJob;
+    status.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span> ' + (_accountJob ? '执行中 · 查看进度' : '准备中…');
+  }
+}
+async function accountBatchAction(action) {
+  if (_accountJob) { showAccountJob(); return; }
+  if (_accountActionBusy) return;
+  _accountActionBusy = true;
+  syncAccountBatchButtons();
+  try { await action(); }
+  catch (error) { toast('批量操作失败：' + esc(String(error.message || error)), 'err'); }
+  finally { _accountActionBusy = false; syncAccountBatchButtons(); }
+}
+function showAccountJob() {
+  if (!_accountJob) return;
+  openModal(`<h3 class="font-bold mb-2">${esc(_accountJob.opts.title)}</h3>
+    <div id="jobHead" class="text-sm">正在提交，请稍候…</div>
+    <div id="jobList" class="rounded-lg border bg-slate-50 px-3 py-1 max-h-72 overflow-auto text-sm"></div>
+    <p class="text-xs mt-3" style="color:var(--fg-muted)">关闭弹窗后任务继续执行，可点击“查看进度”重新打开。</p>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="console-btn">关闭</button></div>`);
+  if (_accountJob.snapshot) updateJobProgress(_accountJob.snapshot, _accountJob.opts);
+}
+
+/** Only stop polling when the task finishes; closing the modal keeps it alive. */
+function stopJobPoll() {
+  if (_jobTimer) { clearInterval(_jobTimer); _jobTimer = null; }
+}
+
+/** 进度头部（文字 + 进度条 + 汇总）。**不含**账号列表。 */
+function jobProgressHtml(d, opts) {
+  const pct = d.percent || 0;
+  const done = d.status !== "running";
+  // 细粒度进度：当前账号已完成几个任务。
+  // 一个账号要跑十几个任务、几分钟，只有账号级进度时界面会长时间不动，
+  // 用户以为卡死了 —— 所以要显示「本账号已完成 N 个任务」。
+  const taskBit = (!done && d.task_done)
+    ? ` <span class="text-slate-400 font-normal text-xs">· 本账号已完成 ${d.task_done} 个任务</span>`
+    : "";
+
+  const head = done
+    ? `<div class="mb-2 font-semibold ${d.status === "failed" ? "text-red-500" : "text-emerald-600"}">
+         ${d.status === "failed" ? "执行失败：" + esc(d.error || "") : esc(opts.doneText(d))}</div>`
+    : `<div class="mb-2 text-slate-600 font-semibold">
+         <span class="wb-icon mr-1 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+         ${esc(d.phase || "执行中")} ${d.done}/${d.total}
+         <span class="text-slate-400 font-normal text-xs ml-1">已用 ${d.elapsed_s}s</span>
+       </div>
+       ${d.current ? `<div class="text-xs text-slate-500 mb-2">
+           <span class="wb-icon mr-1 text-sky-500 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v4"/><path d="m16.2 7.8 2.9-2.9"/><path d="M18 12h4"/><path d="m16.2 16.2 2.9 2.9"/><path d="M12 18v4"/><path d="m4.9 19.1 2.9-2.9"/><path d="M2 12h4"/><path d="m4.9 4.9 2.9 2.9"/></svg></span>
+           正在处理 <b class="text-slate-700">${esc(d.current)}</b>${taskBit}
+           ${d.task_current ? `<div class="mt-1">${esc(d.task_current)}</div>` : ""}
+         </div>` : ""}`;
+
+  return `${head}
+    <div class="h-2 rounded-full bg-slate-100 overflow-hidden mb-2">
+      <div class="h-full rounded-full transition-all duration-300 ${done ? "bg-emerald-500" : "bg-sky-500"}"
+           style="width:${pct}%"></div>
+    </div>
+    ${done ? `<div class="text-xs text-slate-500 mb-2">${opts.summaryHtml ? opts.summaryHtml(d) : ""}</div>` : ""}`;
+}
+
+/** 已完成账号列表（**单独一块**，便于局部更新、不整块闪烁）。 */
+function jobProgressRows(d, opts) {
+  return (d.items || []).map(x => {
+    const label = opts.label(x);
+    const detail = opts.detail(x);
+    const amount = opts.amount(x);
+    const icon = opts.icon(x);
+    return `<div class="flex items-center gap-2 py-1.5 border-b last:border-0">
+      ${icon}
+      <span class="flex-1 truncate">${esc(label)}</span>
+      <span class="text-slate-500 text-xs truncate maxw-45">${esc(detail)}</span>
+      ${amount}
+    </div>`;
+  }).join("") || `<div class="text-slate-400 text-xs py-2">${esc(opts.emptyText || "等待第一个账号完成...")}</div>`;
+}
+
+/**
+ * 局部更新进度：**只替换真正变了的那部分**。
+ *
+ * 为什么不能用 `innerHTML = jobProgressHtml(...)`：那样每 1.5 秒把整块
+ * DOM（含滚动位置、hover 状态、CSS 过渡）全部销毁重建，视觉上就是
+ * 「卡片一直在闪」。这里把头部与列表拆成两个固定容器，分别比对内容，
+ * 只有内容真的变了才写 —— 列表没变就完全不动它，滚动条也不会跳回顶部。
+ */
+function updateJobProgress(d, opts) {
+  const head = $("#jobHead");
+  const list = $("#jobList");
+  if (!head || !list) return;
+  const headHtml = jobProgressHtml(d, opts);
+  if (head.dataset.sig !== headHtml) {
+    head.innerHTML = headHtml;
+    head.dataset.sig = headHtml;
+  }
+  const listHtml = jobProgressRows(d, opts);
+  if (list.dataset.sig !== listHtml) {
+    list.innerHTML = listHtml;
+    list.dataset.sig = listHtml;
+  }
+}
+
+/** 提交后台任务并开始轮询进度。 */
+async function runJob(opts) {
+  if (_accountJob) { showAccountJob(); return; }
+  stopJobPoll();
+  // 两个**固定容器**：轮询时只更新它们的内容，不重建整块 DOM。
+  // 整块重建会让列表每 1.5 秒消失再出现 —— 就是「卡片闪来闪去」的原因。
+  _accountJob = {opts, snapshot:null};
+  syncAccountBatchButtons();
+  showAccountJob();
+
+  let d;
+  try {
+    const r = await api(opts.submitUrl, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts.body || {}),
+    });
+    const j = await safeJson(r);
+    if (!r.ok || !j.ok || !j.data?.job_id) {
+      showAccountJob();
+      $("#jobHead").innerHTML = `<span class="text-red-500">提交失败: ${esc(j.data?.detail || "未知错误")}</span>`;
+      _accountJob = null; syncAccountBatchButtons();
+      return;
+    }
+    d = j.data;
+  } catch (e) {
+    showAccountJob();
+    $("#jobHead").innerHTML = `<span class="text-red-500">提交异常: ${esc(String(e))}</span>`;
+    _accountJob = null; syncAccountBatchButtons();
+    return;
+  }
+
+  if (d.reused) toast("已有批量任务在执行，显示其进度", "ok");
+  _accountJob.snapshot = d;
+  updateJobProgress(d, opts);
+
+  let polling = false;
+  _jobTimer = setInterval(async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const r = await api(`${opts.pollUrl || '/api/growth/job/'}${d.job_id}`);
+      const j = await safeJson(r);
+      if (!r.ok || !j.data) return;
+      const cur = j.data;
+      if (_accountJob) _accountJob.snapshot = cur;
+      updateJobProgress(cur, opts);
+      if (cur.status !== "running") {
+        stopJobPoll();
+        showAccountJob();
+        _accountJob = null; syncAccountBatchButtons();
+        if (cur.status === "failed") toast("批量执行失败：" + esc(cur.error || ""), "err");
+        else toast(esc(opts.doneToast(cur)), "ok");
+        opts.onFinish && opts.onFinish(cur);
+      }
+    } catch (e) {
+      if ($("#jobHead")) $("#jobHead").textContent = '进度连接暂时中断，正在重试；请勿重复提交。';
+    } finally { polling = false; }
+  }, 1500);
+}
+
+/* 猫猫旅行：批量执行 */
+async function catTravelBatch() {
+  const list = _accData.filter(a => a.status === "active");
+  if (!list.length) { toast("没有可执行的账号", "err"); return; }
+  if (!await uiConfirm({kind:"info", danger:false, title:"批量猫猫旅行",
+      message:`确认对 ${list.length} 个账号执行猫猫旅行？\n流程：同意协议 → 首次领养(+300) → 派出 → 领奖`, okText:"开始执行"})) return;
+
+  await runJob({
+    title: "批量猫猫旅行",
+    iconHtml: '<span class="wb-icon mr-1 text-pink-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 7 .57 1.07 1 2.24 1 3.44C21 17.9 16.97 21 12 21s-9-3-9-7.56c0-1.25.5-2.4 1-3.44 0 0-1.89-6.42-.5-7 1.39-.58 4.72.23 6.5 2.23A9.04 9.04 0 0 1 12 5Z"/><path d="M8 14v.5"/><path d="M16 14v.5"/><path d="M11.25 16.25h1.5L12 17l-.75-.75Z"/></svg></span>',
+    submitUrl: "/api/accounts/cat-travel/batch-async",
+    body: {},
+    label: x => x.account || x.id,
+    detail: x => x.summary || "",
+    amount: x => x.credits > 0 ? `<span class="font-semibold text-amber-600 shrink-0">+${x.credits}</span>` : "",
+    icon: x => x.credits > 0 ? '<span class="wb-icon text-emerald-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+             : x.ok ? '<span class="wb-icon text-slate-400 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>'
+                    : '<span class="wb-icon text-red-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>',
+    doneText: d => {
+      const b = (d.result && d.result.buckets) || {};
+      const tot = (d.result && d.result.credits) || 0;
+      return `完成，共 ${d.total} 个账号，合计获得 ${tot} 积分`;
+    },
+    summaryHtml: d => {
+      const b = (d.result && d.result.buckets) || {};
+      const parts = [];
+      if (b.adopted) parts.push(`首次领养 <b class="text-emerald-600">${b.adopted}</b> 个（+${b.adopt_credits}）`);
+      if (b.travel_claimed) parts.push(`旅行返现 <b class="text-amber-600">${b.travel_claimed}</b> 个（+${b.travel_credits}）`);
+      if (b.travel_none) parts.push(`无新增 ${b.travel_none} 个`);
+      if (b.traveling) parts.push(`旅行中 ${b.traveling} 个`);
+      if (b.gate_blocked) parts.push(`<span class="text-orange-600">门槛未达标 ${b.gate_blocked} 个</span>`);
+      if (b.error) parts.push(`<span class="text-red-600">失败 ${b.error} 个</span>`);
+      return parts.join(" · ") || "";
+    },
+    doneToast: d => {
+      const b = (d.result && d.result.buckets) || {};
+      const tot = (d.result && d.result.credits) || 0;
+      return tot > 0 ? `批量完成，共获得 ${tot} 积分` : "批量完成，无新增积分";
+    },
+    onFinish: () => loadAccounts(),
+  });
+}
+
+/* ==========================================================================
+   成长任务
+   --------------------------------------------------------------------------
+   任务进度由「模型请求体里的 extra_vars.growthEvent」驱动，走的是与正常
+   对话完全相同的接口，因此不需要客户端参与、可全自动完成。
+   已实测可自动完成的任务见后端 admin/growth_plans.py 的策略表；其余任务
+   在面板上标为「复杂」，仍可点击尝试，失败会自动说明原因。
+   ========================================================================== */
+
+/* 难度标签样式 */
+function growthLevelBadge(level, label){
+  const cls = {
+    auto:  "bg-emerald-50 text-emerald-700 border-emerald-200",
+    multi: "bg-sky-50 text-sky-700 border-sky-200",
+    manual:"bg-amber-50 text-amber-700 border-amber-200",
+    skip:  "bg-slate-100 text-slate-500 border-slate-200",
+  }[level] || "bg-slate-100 text-slate-500 border-slate-200";
+  return `<span class="text-xs px-1.5 py-0.5 rounded border ${cls} whitespace-nowrap">${esc(label||level)}</span>`;
+}
+
+/* 任务状态标签 */
+function growthStatusBadge(status){
+  const map = {
+    claimed:      ["已领取", "text-slate-400"],
+    completed:    ["待领取", "text-amber-600 font-semibold"],
+    in_progress:  ["进行中", "text-sky-600"],
+    accepted:     ["已参与", "text-slate-500"],
+    not_accepted: ["未参与", "text-slate-400"],
+  };
+  const [label, cls] = map[status] || [status || "-", "text-slate-400"];
+  return `<span class="text-xs ${cls}">${esc(label)}</span>`;
+}
+
+/* 单账号任务弹窗 */
+async function growthTasks(id, name){
+  openModal(
+    `<h3 class="font-bold mb-1"><span class="wb-icon mr-1 text-emerald-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9.536V7a4 4 0 0 1 4-4h1.5a.5.5 0 0 1 .5.5V5a4 4 0 0 1-4 4 4 4 0 0 0-4 4c0 2 1 3 1 5a5 5 0 0 1-1 3"/><path d="M4 9a5 5 0 0 1 8 4 5 5 0 0 1-8-4"/><path d="M5 21h14"/></svg></span> 成长任务 — ${esc(name)}</h3>
+     <p class="text-xs text-slate-400 mb-3">加载中...</p>
+     <div id="growthBody" class="text-sm"></div>`, "max-w-4xl");
+
+  try {
+    const r = await api("/api/growth/accounts/" + id + "/tasks");
+    const { ok, data: d } = await safeJson(r);
+    if (!r.ok) {
+      $("#growthBody").innerHTML =
+        `<p class="text-red-500">获取失败: ${esc(d.detail || "未知错误")}</p>
+         <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`;
+      return;
+    }
+    window._growthTaskAccount = id;
+    renderGrowthTasks(d);
+  } catch (e) {
+    $("#growthBody").innerHTML = `<p class="text-red-500">请求异常: ${esc(String(e))}</p>`;
+  }
+}
+
+function renderGrowthTasks(d){
+  const s = d.summary || {};
+  const tasks = d.tasks || [];
+  // 可执行 = 标为可自动 且 未领取
+  const runnable = tasks.filter(t => t.actionable && t.accept_status !== "claimed");
+  const claimable = tasks.filter(t => t.accept_status === "completed");
+
+  const rows = tasks.map(t => {
+    const pr = t.progress || {};
+    const prog = (pr.target != null) ? `${pr.current || 0}/${pr.target}` : "-";
+    const canRun = t.actionable && t.accept_status !== "claimed";
+    const canClaim = t.accept_status === "completed";
+    return `<tr class="border-b hover:bg-slate-50">
+      <td class="px-3 py-2">
+        <div class="font-medium">${esc(t.title || t.task_code)}</div>
+        <div class="text-xs text-slate-400">${esc(t.task_code)}</div>
+      </td>
+      <td class="px-3 py-2">${growthLevelBadge(t.level, t.level_label)}</td>
+      <td class="px-3 py-2">${growthStatusBadge(t.accept_status)}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${esc(prog)}</td>
+      <td class="px-3 py-2 text-amber-600 font-medium">${t.reward_credit || 0}</td>
+      <td class="px-3 py-2 text-xs text-slate-400 max-w-[16rem]">${esc(t.strategy || "")}</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap">
+        ${canClaim ? `<button onclick="growthDoClaim(${d.account_id},${jsv(t.task_code)},this)" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">领奖</button>` : ""}
+        ${canRun ? `<button onclick="growthDoRun(${d.account_id},${jsv(t.task_code)},this)" class="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 ml-1">完成</button>` : ""}
+      </td>
+    </tr>`;
+  }).join("");
+
+  $("#growthBody").innerHTML = `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+      <div class="rounded-lg border px-3 py-2"><div class="text-xs text-slate-400">总任务</div><div class="font-semibold">${s.total || 0}</div></div>
+      <div class="rounded-lg border px-3 py-2"><div class="text-xs text-slate-400">已完成</div><div class="font-semibold text-emerald-600">${s.done || 0}</div></div>
+      <div class="rounded-lg border px-3 py-2"><div class="text-xs text-slate-400">待领取</div><div class="font-semibold text-amber-600">${s.claimable || 0}</div></div>
+      <div class="rounded-lg border px-3 py-2"><div class="text-xs text-slate-400">可领积分</div><div class="font-semibold text-amber-600">${s.claimable_credit || 0}</div></div>
+    </div>
+    <div class="text-xs text-slate-400 mb-2">
+      等级 ${(d.profile && d.profile.level) || "-"} · 已自动完成 ${s.actionable || 0} 个可自动化任务
+    </div>
+    <div class="flex flex-wrap gap-2 mb-3">
+      <button onclick="growthDoRun(${d.account_id},null,this)" ${runnable.length ? "" : "disabled"}
+        class="text-sm px-3 py-1.5 rounded-lg border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed">
+        <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg></span> 完成可自动化任务 (${runnable.length})</button>
+      <button onclick="growthDoClaim(${d.account_id},null,this)" ${claimable.length ? "" : "disabled"}
+        class="text-sm px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed">
+        <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5A4.8 8 0 0 1 12 8a4.8 8 0 0 1 4.5-5 2.5 2.5 0 0 1 0 5"/></svg></span> 领取全部奖励 (${claimable.length})</button>
+      <button onclick="growthTasks(${d.account_id},${jsv(d.name || "")})" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50">
+        <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span> 刷新</button>
+    </div>
+    <div class="card overflow-auto max-h-[55vh]">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-500 text-left sticky top-0">
+          <tr>
+            <th class="px-3 py-2">任务</th><th class="px-3 py-2">难度</th>
+            <th class="px-3 py-2">状态</th><th class="px-3 py-2">进度</th>
+            <th class="px-3 py-2">积分</th><th class="px-3 py-2">说明</th>
+            <th class="px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="flex justify-between items-center mt-3">
+      <p class="text-xs text-slate-400">「完成」只对已实测可自动化的任务开放；标为「复杂」的任务需在客户端手动完成。<br>
+        执行按「参与 → 等待落库 → 触发 → 复查」串行进行，请勿中途并行操作同一账号。</p>
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+    </div>`;
+}
+
+/* ==========================================================================
+   按钮「加载中」态（防呆 + 让用户知道要等）
+   --------------------------------------------------------------------------
+   之前的问题：点「执行」后按钮**毫无变化**，也没有防重复点击。
+   而单账号跑一轮要几分钟 —— 用户只能对着一个没反应的按钮猜，
+   于是以为卡死，还会反复点（叠出更多请求）。
+   这里统一：立刻禁用 + 转圈 + 显示已用秒数。
+   ========================================================================== */
+
+/** 按钮进入「加载中」，返回一个 restore 函数（务必在 finally 里调用）。 */
+function btnBusy(btn, text) {
+  if (!btn) return () => {};
+  const html = btn.innerHTML;
+  const wasDisabled = btn.disabled;
+  btn.dataset.busy = "1";
+  btn.disabled = true;
+  btn.classList.add("opacity-60", "cursor-not-allowed");
+  const t0 = Date.now();
+  const render = () => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    // 显示秒数：用户能看出「在动」，也能大致判断还要等多久
+    btn.innerHTML = `<span class="wb-icon mr-1 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>${esc(text)}${s ? " " + s + "s" : ""}`;
+  };
+  render();
+  const timer = setInterval(render, 1000);
+  return () => {
+    clearInterval(timer);
+    btn.dataset.busy = "";
+    btn.disabled = wasDisabled;
+    btn.classList.remove("opacity-60", "cursor-not-allowed");
+    btn.innerHTML = html;
+  };
+}
+
+/** 是否正在忙（防呆：重复点击直接忽略）。 */
+function btnIsBusy(btn) {
+  return !!(btn && btn.dataset && btn.dataset.busy === "1");
+}
+
+/* 执行任务（taskCode 为空 = 全部可自动化任务）
+   走**异步接口 + 进度弹窗**：单账号十几个任务要跑几分钟，
+   同步接口只会让用户对着一个没有反馈的按钮干等，还会撞 nginx 60s 超时。 */
+async function growthDoRun(id, taskCode, btn){
+  if (btnIsBusy(btn)) return;          // 防呆：已在执行就别再点一次
+  const label = taskCode ? `任务 ${taskCode}` : "全部可自动化任务";
+  if (!await uiConfirm({kind:"info", danger:false, title:"执行成长任务",
+      message:`确认对账号执行「${label}」？\n将自动参与并触发完成，随后自动领奖。\n（单账号可能需要几分钟，可关闭弹窗，后台继续执行）`,
+      okText:"开始执行"})) return;
+
+  const restore = btnBusy(btn, "执行中");
+  try {
+    await runJob({
+      title: "执行成长任务",
+      iconHtml: '<span class="wb-icon mr-1 text-emerald-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9.536V7a4 4 0 0 1 4-4h1.5a.5.5 0 0 1 .5.5V5a4 4 0 0 1-4 4 4 4 0 0 0-4 4c0 2 1 3 1 5a5 5 0 0 1-1 3"/><path d="M4 9a5 5 0 0 1 8 4 5 5 0 0 1-8-4"/><path d="M5 21h14"/></svg></span>',
+      submitUrl: "/api/growth/run-async",
+      body: { account_ids: [id], task_codes: taskCode ? [taskCode] : null },
+      label: x => x.name || x.account_id,
+      detail: x => {
+        if (!x.ok) return x.skipped || x.msg || "失败";
+        if (x.noop) return x.noop_reason || "无可做任务";
+        const done = (x.tasks || []).filter(t => t.ok && !t.skipped).length;
+        const skipped = (x.tasks || []).filter(t => t.skipped).length;
+        return done ? `完成 ${done} 个任务` + (skipped ? `，跳过 ${skipped}` : "")
+                    : `跳过 ${skipped} 个`;
+      },
+      amount: x => (x.credit > 0)
+        ? `<span class="font-semibold text-amber-600 shrink-0">+${x.credit}</span>` : "",
+      icon: x => (x.credit > 0)
+        ? '<span class="wb-icon text-emerald-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+        : x.ok ? '<span class="wb-icon text-slate-400 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>'
+               : '<span class="wb-icon text-red-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>',
+      doneText: d => {
+        const r = (d.items || [])[0] || {};
+        const c = r.credit || 0;
+        return c > 0 ? `完成，获得 ${c} 积分` : "执行完成";
+      },
+      summaryHtml: d => {
+        const r = (d.items || [])[0] || {};
+        const parts = [];
+        const done = (r.tasks || []).filter(t => t.ok && !t.skipped).length;
+        if (done) parts.push(`完成 <b>${done}</b> 个任务`);
+        if (r.credit) parts.push(`<b class="text-amber-600">+${r.credit} 积分</b>`);
+        if (r.energy) parts.push(`+${r.energy} 能量`);
+        if (r.balance_remain != null) {
+          parts.push(`余额 <b>${r.balance_remain}/${r.balance_total}</b>`);
+        }
+        // 跳过/失败要说清原因，否则只有「完成 0 个」像执行失败
+        const blocked = (r.tasks || []).filter(t => !t.ok && !t.skipped);
+        if (blocked.length) {
+          parts.push(`<span class="text-red-600">${blocked.length} 个未完成</span>`);
+        }
+        return parts.join(" · ") || "执行完成";
+      },
+      doneToast: d => {
+        const r = (d.items || [])[0] || {};
+        return r.credit > 0 ? `执行完成，获得 ${r.credit} 积分` : "执行完成";
+      },
+      // 完成后刷新列表（余额）**并**刷新任务弹窗 —— 完成之后没刷新」
+      onFinish: () => {
+        loadAccounts();
+        const cur = window._growthTaskAccount;
+        if (cur === id) growthTasks(id, "");
+      },
+    });
+  } finally {
+    restore();
+  }
+}
+
+/* 领取奖励（taskCode 为空 = 所有已完成待领取） */
+async function growthDoClaim(id, taskCode, btn){
+  if (btnIsBusy(btn)) return;
+  const restore = btnBusy(btn, "领取中");
+  try {
+    const r = await api("/api/growth/claim", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_ids: [id], task_codes: taskCode ? [taskCode] : null }),
+    });
+    const { ok, data: d } = await safeJson(r);
+    if (!r.ok) { toast("领取失败: " + (d.detail || "未知错误"), "err"); return; }
+    const a = (d.results || [])[0] || {};
+    const got = a.total_credit || 0;
+    if (got > 0) {
+      // 带上刷新后的余额，用户能立刻看到「积分确实到账了」
+      const bal = (a.balance_remain != null)
+        ? `，当前余额 ${a.balance_remain}/${a.balance_total}` : "";
+      toast(`领取成功，获得 ${got} 积分${bal}`, "ok");
+    }
+    else if ((a.claimed || []).length && (a.claimed || []).every(c => c.already))
+      toast("奖励此前已领取", "ok");
+    else toast("没有可领取的奖励", "ok");
+    loadAccounts();
+    // 刷新弹窗内容（列表里的状态/余额要跟着变）
+    const cur = window._growthTaskAccount;
+    if (cur === id) growthTasks(id, "");
+  } catch (e) {
+    toast("领取异常: " + String(e), "err");
+  } finally {
+    restore();
+  }
+}
+
+/* 批量做任务：所有 active 账号，逐个执行 + 领奖 */
+async function growthRunBatch(){
+  // 仅拿计数，不把几万账号全拉下来 —— 那才是批量任务「卡死」的主因之一
+  const r0 = await api("/api/accounts/count", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+  const d0 = await safeJson(r0);
+  const active = (d0.data && d0.data.active) || 0;
+  if (!active) { toast("没有可用账号", "err"); return; }
+
+  if (!await uiConfirm({kind:"warn", danger:true, title:"批量做成长任务",
+      message:`确认对 ${active} 个账号批量执行？\n流程：自动参与 → 触发完成 → 自动领取。\n仅处理已实测可自动化的任务，其余跳过。`,
+      okText:"开始执行"})) return;
+
+  // 交给后台线程串行跑，前端只轮询进度：
+  // 原先前端逐个账号发两轮请求（run + claim），xx 个账号要 6 分钟以上，
+  // nginx 默认 60s 就超时，体感是「点了没反应」。现在点完立刻有进度条。
+  await runJob({
+    title: "批量做成长任务",
+    iconHtml: '<span class="wb-icon mr-1 text-emerald-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9.536V7a4 4 0 0 1 4-4h1.5a.5.5 0 0 1 .5.5V5a4 4 0 0 1-4 4 4 4 0 0 0-4 4c0 2 1 3 1 5a5 5 0 0 1-1 3"/><path d="M4 9a5 5 0 0 1 8 4 5 5 0 0 1-8-4"/><path d="M5 21h14"/></svg></span>',
+    submitUrl: "/api/growth/run-async",
+    body: { account_ids: [], task_codes: null },
+    label: x => x.name || x.account_id,
+    detail: x => {
+      if (!x.ok) return x.msg || "失败";
+      if (x.noop) return x.noop_reason || "无可做任务";
+      const done = (x.tasks || []).filter(t => t.ok && !t.skipped).length;
+      return done ? `完成 ${done} 个任务` : "无可做任务";
+    },
+    amount: x => (x.credit > 0)
+      ? `<span class="font-semibold text-amber-600 shrink-0">+${x.credit}</span>` : "",
+    icon: x => (x.credit > 0)
+      ? '<span class="wb-icon text-emerald-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+      : x.ok ? '<span class="wb-icon text-slate-400 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>'
+             : '<span class="wb-icon text-red-500 shrink-0"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>',
+    doneText: d => {
+      const r = d.result || {};
+      return `完成，共 ${r.accounts || d.total} 个账号，合计获得 ${r.credit || 0} 积分`;
+    },
+    summaryHtml: d => {
+      const r = d.result || {};
+      const items = d.items || [];
+      const noopN = items.filter(x => x.noop).length;
+      const parts = [`完成任务 <b>${r.tasks_done || 0}</b> 个`];
+      if (r.credit) parts.push(`<b class="text-amber-600">+${r.credit} 积分</b>`);
+      if (r.energy) parts.push(`+${r.energy} 能量`);
+      // 全部无可做时要说清原因，否则只有一句「完成 0 个」看着像执行失败
+      if (noopN) {
+        parts.push((noopN === d.total && !d.items_truncated)
+          ? `<span class="text-slate-600">${noopN} 个账号的任务已全部领完，本次无新任务</span>`
+          : `${noopN} 个账号无可做任务`);
+      }
+      if (r.failed && r.failed.length) parts.push(`<span class="text-red-600">失败 ${r.failed.length} 个账号</span>`);
+      // 账号多时明细只保留最近 N 条（避免进度接口回传几万条拖死界面）
+      if (d.items_truncated) parts.push(`<span class="text-slate-500">明细仅显示最近 ${items.length} 条</span>`);
+      return parts.join(" · ");
+    },
+    doneToast: d => {
+      const r = d.result || {};
+      const noopN = (d.items || []).filter(x => x.noop).length;
+      if (r.credit > 0) return `批量完成，共获得 ${r.credit} 积分`;
+      if (noopN && noopN === d.total && !d.items_truncated) return `批量完成：${noopN} 个账号的任务均已领完，无新任务`;
+      return "批量完成，无新增积分";
+    },
+    onFinish: () => loadAccounts(),
+  });
+}
+
+/* 积分明细（全部积分包，按到期升序）
+ *
+ * 优先用库内快照（秒开）；点「重新采集」才真调上游。这是本次的性能取向：
+ * 打开弹窗时再打一次上游，每个号要等 0.4s，用户只是想看一眼而已。
+ * 到期口径由后端 admin/credits.py 统一处理，前端只负责展示 ——
+ * 之前前端自己用 `new Date(p.deduction_end)` 判过期，踩的就是
+ * 2034 占位值被当成真实到期日的坑（那个包永远显示「未过期」）。 */
+async function viewCreditDetails(id, name, force){
+  openModal(`<h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></svg></span> 积分明细 — ${esc(name)}</h3>
+    <div class="flex items-center justify-between mb-3 gap-2">
+      <p class="text-xs m-0" style="color:var(--fg-muted)">按到期时间升序 —— 排最前的就是最先作废的包。</p>
+      <button onclick="viewCreditDetails(${id},${jsv(name)},true)" id="cdReloadBtn"
+              class="text-xs px-2-5 py-1.5 rounded-lg border hover:bg-slate-50 whitespace-nowrap">
+        <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg></span>重新采集</button>
+    </div>
+    <div id="creditDetailBody"><p class="text-sm" style="color:var(--fg-subtle)">加载中...</p></div>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+  try {
+    const r = await api("/api/accounts/"+id+"/credit-details" + (force ? "?refresh=true" : ""));
+    const { ok, data:d } = await safeJson(r);
+    if(!r.ok){ $("#creditDetailBody").innerHTML = `<p class="text-red-500 text-sm">获取失败: ${esc(d.detail||"未知错误")}</p>`; return; }
+    const c = d.credits || {};
+    // 「积分明细」要看**全量**（含已用完的，用户需要确认某个包确实用完了），
+    // 而且后端已按到期升序排好 —— 前端不再自己排，避免两处排序口径漂移。
+    const rs = c.all_resources || c.resources || [];
+    const active = rs.filter(p => Number(p.remaining) > 0);
+    const usedUp = rs.filter(p => Number(p.remaining) <= 0);
+    const soon = Number(c.expiring_soon_remaining || 0);
+    const stale = d.source === "cache"
+      ? `<span class="exp-badge ever"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></span>本地快照</span>` : "";
+
+    $("#creditDetailBody").innerHTML = `
+      <div class="modal-stat-grid gap-3 mb-3">
+        ${statCard("当前剩余", fmtCredit(c.total_remaining),
+            { icon:"fa-wallet", iconColor:"text-slate-400", sub:`总额度 ${fmtCredit(c.total_capacity)}` })}
+        ${statCard(`${c.expiring_soon_days || 7} 天内到期`, fmtCredit(soon),
+            { icon:"fa-fire", iconColor:"text-orange-500", tone: soon > 0 ? "warn" : "",
+              sub: soon > 0 ? "不用完会作废" : "暂无即将作废" })}
+        ${statCard("最近到期", c.soonest_days_left != null
+              ? (c.soonest_days_left < 1
+                  ? Math.max(1, Math.round(c.soonest_days_left * 24)) + " 小时内"
+                  : Math.floor(c.soonest_days_left) + " 天后")
+              : "长期有效",
+            { icon:"fa-hourglass-half", iconColor:"text-slate-400",
+              tone: soon > 0 ? "warn" : "", sub: esc(c.soonest_expire_at
+                  ? fmtTime(new Date(c.soonest_expire_at).toISOString().replace('T',' ').slice(0,19)) : "") })}
+        ${statCard("积分包", `${active.length} / ${rs.length}`,
+            { icon:"fa-boxes-stacked", iconColor:"text-slate-400",
+              sub: active.length < rs.length ? `已用完 ${rs.length - active.length} 个` : "全部仍有剩余" })}
+      </div>
+      ${d.error ? `<div class="mb-3 fs-11-5" style="color:var(--danger)">
+        <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>上游采集失败（显示的是本地快照）：${esc(d.error)}</div>` : ""}
+      <div class="flex items-center gap-2 mb-2 text-[11px]">${stale}
+        <span style="color:var(--fg-subtle)">${d.source === "live" ? "本次已从上游采集" : "来自本地快照，可点「重新采集」更新"}</span>
+        <span style="color:var(--fg-subtle)">· 按到期时间升序</span></div>
+      <div class="card p-3">
+        ${active.length ? active.map(p => pkgDetailRow(p)).join("")
+          : `<div class="empty">该账号没有仍有剩余的积分包。</div>`}
+        ${usedUp.length ? `
+          <details class="mt-2">
+            <summary class="cursor-pointer fs-11-5 select-none py-1"
+                     style="color:var(--fg-muted)">已用完的 ${usedUp.length} 个包（点击展开）</summary>
+            <div class="mt-1">${usedUp.map(p => pkgDetailRow(p)).join("")}</div>
+          </details>` : ""}
+      </div>`;
+  } catch(e) { $("#creditDetailBody").innerHTML = `<p class="text-red-500 text-sm">请求异常: ${esc(e.message)}</p>`; }
+}
+
+/* 请求用量（服务端分页） */
+let _ruState = { id:0, name:"", page:1, size:20, total:0, start:"", end:"" };
+const _RU_FIELD_MAP = {
+  requestId:"请求ID", credit:"积分消耗", model:"模型",
+  client:"客户端", requestTime:"请求时间",
+  inputTrunc:"输入(截断)", input:"输入(完整)", agentPurpose:"用途",
+};
+async function viewRequestUsage(id, name){
+  const today = new Date().toISOString().slice(0,10);
+  _ruState = { id, name, page:1, size:20, total:0, start:today, end:today };
+  openModal(`
+    <h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg></span> 请求用量 — ${esc(name)}</h3>
+    <div class="flex gap-2 mb-3 flex-wrap">
+      <input id="ruStart" type="date" class="border rounded px-2 py-1 text-sm" value="${today}" />
+      <input id="ruEnd" type="date" class="border rounded px-2 py-1 text-sm" value="${today}" />
+      <button onclick="_ruState.start=$('#ruStart').value;_ruState.end=$('#ruEnd').value;doLoadRequestUsage(1)" class="px-3 py-1 bg-wb text-white rounded text-sm">查询</button>
+    </div>
+    <div id="ruBody" class="text-sm text-slate-400">点击「查询」加载用量数据（来自 WorkBuddy 后端 API）</div>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+}
+async function doLoadRequestUsage(page){
+  _ruState.page = page || 1;
+  const start = (_ruState.start || "") + " 00:00:00";
+  const end = (_ruState.end || "") + " 23:59:59";
+  const body = $("#ruBody"); if(body) body.innerHTML = "查询中...";
+  try {
+    const r = await api(`/api/accounts/${_ruState.id}/request-usage?start_time=${encodeURIComponent(start)}&end_time=${encodeURIComponent(end)}&page_num=${_ruState.page}&page_size=${_ruState.size}`);
+    const { ok, data:d } = await safeJson(r);
+    if(!r.ok){ if(body) body.innerHTML = `<p class="text-red-500">查询失败: ${esc(d.detail||"")}</p>`; return; }
+    const wrapper = d.data || {};
+    const items = wrapper.data || wrapper.list || wrapper.records || [];
+    const arr = Array.isArray(items) ? items : (items ? [items] : []);
+    const total = wrapper.total || arr.length;
+    _ruState.total = total;
+    if(!arr.length){ if(body) body.innerHTML = `<p class="text-slate-400">该时间段无请求数据</p>`; return; }
+
+    const allKeys = new Set();
+    for(const it of arr){ for(const k of Object.keys(it)) allKeys.add(k); }
+    const keyOrder = ["requestTime","model","credit","client","agentPurpose","inputTrunc","input","requestId"];
+    const sortedKeys = [...allKeys].sort((a,b) => {
+      const ia = keyOrder.indexOf(a), ib = keyOrder.indexOf(b);
+      if(ia>=0 && ib>=0) return ia-ib; if(ia>=0) return -1; if(ib>=0) return 1; return a.localeCompare(b);
+    });
+    const trunc = (s, len=80) => !s ? '' : (String(s).length > len ? String(s).slice(0,len)+'...' : s);
+    const table = `
+      <div class="rounded-lg border overflow-x-auto">
+        <table class="w-full text-xs min-w"><thead class="bg-slate-50 text-slate-500 sticky top-0"><tr>${
+          sortedKeys.map(k => `<th class="px-2 py-1.5 text-left whitespace-nowrap">${_RU_FIELD_MAP[k]||k}</th>`).join('')
+        }</tr></thead><tbody>${arr.map(it => `<tr class="border-t hover:bg-slate-50">${
+          sortedKeys.map(k => {
+            let v = it[k];
+            if(k === 'credit') return `<td class="px-2 py-1 ${v>0?'text-amber-600 font-medium':'text-slate-400'}">${v}</td>`;
+            const sv = String(v ?? '');
+            if(sv.length > 60) return `<td class="px-2 py-1 max-w-[260px]" data-tooltip="${esc(sv)}">${esc(trunc(sv))}</td>`;
+            return `<td class="px-2 py-1 whitespace-nowrap">${esc(sv||'-')}</td>`;
+          }).join('')
+        }</tr>`).join('')}</tbody></table>
+      </div>`;
+    const totalPages = Math.max(1, Math.ceil(total / _ruState.size));
+    const pager = totalPages > 1 ? `<div class="flex justify-between items-center mt-3 text-xs text-slate-500">
+        <span>共 ${total} 条 · 第 ${_ruState.page}/${totalPages} 页</span>
+        <span class="flex gap-1">
+          <button class="pg-btn px-2 py-1 rounded border ${_ruState.page<=1?'opacity-40 pointer-events-none':''} hover:bg-slate-50" onclick="doLoadRequestUsage(${_ruState.page-1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></span></button>
+          <button class="pg-btn px-2 py-1 rounded border ${_ruState.page>=totalPages?'opacity-40 pointer-events-none':''} hover:bg-slate-50" onclick="doLoadRequestUsage(${_ruState.page+1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span></button>
+        </span></div>` : `<div class="text-xs text-slate-400 mt-3">共 ${total} 条</div>`;
+    if(body) body.innerHTML = table + pager;
+  } catch(e){ if(body) body.innerHTML = `<p class="text-red-500">异常: ${esc(e.message)}</p>`; }
+}
+
+/* 扫描本机账号（已按 UID 去重 + 标记号池已有；解释「磁盘无文件但号池已有」的情况） */
+async function scanLocal(){
+  const r = await api("/api/accounts/scan-local"); const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("扫描失败","err"); return; }
+  if(!d.exists){ openModal(`<h3 class="font-bold mb-3">扫描本机账号</h3><p class="text-sm text-slate-500">未找到登录目录：<br><code class="text-xs">${esc(d.dir||"")}</code></p><div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`); return; }
+  // 交叉对比号池，标出「已在号池但本机无登录文件」的账号（如多设备导入的情况）
+  let poolUids = new Set();
+  try { const ar = await api("/api/accounts"); const ad = await ar.json(); poolUids = new Set((ad.items||[]).map(a=>a.uid)); } catch(e){}
+  // 过滤国际版账号（www.workbuddy.ai）：本网关只对接国内版
+  // （workbuddy.cn / copilot.tencent.com）。国际版的登录态拿到国内站
+  // 也用不了，列出来只会让人误以为「能扫码但不能导入」。
+  const isIntl = (it) => /(^|\.)workbuddy\.ai$/i.test(String(it && it.domain || ""));
+  d.items = (d.items || []).filter(it => !isIntl(it));
+
+  const scanUids = new Set((d.items||[]).map(it=>it.uid));
+  const onlyInPool = [...poolUids].filter(u => u && !scanUids.has(u));
+  const notePool = onlyInPool.length ? `<div class="mt-3 text-[11px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2 border border-amber-100">提示：号池中还有 ${onlyInPool.length} 个账号（如 ${esc(onlyInPool.slice(0,3).join("、"))}${onlyInPool.length>3?' 等':''}）本机登录目录里找不到对应 .info 文件——它们通常是其它设备导入或登录态已清理，不会出现在下方扫描列表，属于正常情况。</div>` : "";
+  const scanTotal = (d.items||[]).length;
+  const currentCount = (d.items||[]).filter(it=>it.is_active).length;
+  const poolExisting = (d.items||[]).filter(it=>poolUids.has(it.uid)).length;
+
+  const makeExpLabel = (it) => {
+    const expired = it.expires_ts && it.expires_ts < Date.now();
+    let label = it.expires_at || '-';
+    if (it.expires_at && !expired && it.expires_ts) {
+      const days = Math.floor((it.expires_ts - Date.now()) / 86400000);
+      if (days < 365) label += ` · ${days}天后`;
+    }
+    return { expired, label };
+  };
+
+  const desktopRows = (d.items||[]).map(it => {
+    const inPool = poolUids.has(it.uid);
+    const shortUid = (it.uid||"").length > 12 ? it.uid.slice(0,8)+"..."+it.uid.slice(-4) : (it.uid||"-");
+    const fileName = it.file ? it.file.replace(/^.*[\\\\/]/,'') : "-";
+    const { expired, label } = makeExpLabel(it);
+    return `
+    <tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50">
+      <td class="px-3 py-2.5">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold shrink-0">${esc((it.nickname||"?").slice(0,1))}</div>
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-slate-700 truncate" data-tooltip="${esc(it.nickname)}">${esc(it.nickname||"-")}</div>
+            <div class="text-[11px] text-slate-400 truncate max-w-[220px]" data-tooltip="${esc(it.file)}">${esc(fileName)}</div>
+            <div class="text-[11px] text-slate-400 font-mono truncate" data-tooltip="${esc(it.uid)}">${esc(shortUid)} · ${esc(it.domain||"-")}</div>
+          </div>
+        </div>
+      </td>
+      <td class="px-3 py-2.5 text-xs ${expired?'text-red-500 font-medium':'text-slate-500'}"><span class="whitespace-nowrap">${label}</span>${it.credential_error?`<div class="text-amber-600 mt-1">${esc(it.credential_error)}</div>`:''}</td>
+      <td class="px-3 py-2.5 text-right">
+        <div class="flex flex-wrap items-center justify-end gap-1.5">
+          ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
+          ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
+          <button onclick="importOne(${jsv(it.file)})" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="3" class="px-3 py-8 text-center text-slate-400 text-sm">未发现 .info 登录文件</td></tr>`;
+
+  const mobileCards = (d.items||[]).map(it => {
+    const inPool = poolUids.has(it.uid);
+    const shortUid = (it.uid||"").length > 12 ? it.uid.slice(0,8)+"..."+it.uid.slice(-4) : (it.uid||"-");
+    const fileName = it.file ? it.file.replace(/^.*[\\\\/]/,'') : "-";
+    const { expired, label } = makeExpLabel(it);
+    return `
+    <div class="px-3 py-3 border-b border-slate-100 last:border-0">
+      <div class="flex items-start gap-2.5">
+        <div class="w-9 h-9 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold shrink-0">${esc((it.nickname||"?").slice(0,1))}</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-slate-700 truncate" data-tooltip="${esc(it.nickname)}">${esc(it.nickname||"-")}</div>
+          <div class="text-[11px] text-slate-400 truncate" data-tooltip="${esc(it.file)}">${esc(fileName)}</div>
+          <div class="text-[11px] text-slate-400 font-mono truncate">${esc(shortUid)} · ${esc(it.domain||"-")}</div>
+          <div class="text-[11px] ${expired?'text-red-500 font-medium':'text-slate-500'} mt-0.5">Token 到期：${label}</div>
+          ${it.credential_error?`<div class="text-[11px] text-amber-600 mt-1">${esc(it.credential_error)}</div>`:''}
+          <div class="flex flex-wrap items-center gap-1.5 mt-2">
+            ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
+            ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
+            <button onclick="importOne(${jsv(it.file)})" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border">${ic(inPool?'check':'download','mr-1')}${inPool?'已导入':'导入'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join("") || `<div class="px-3 py-8 text-center text-slate-400 text-sm">未发现 .info 登录文件</div>`;
+
+  openModal(`
+    <div class="flex flex-col md:flex-row md:items-start justify-between mb-3 gap-3">
+      <div class="min-w-0">
+        <h3 class="text-base font-bold text-slate-800 flex items-center gap-2"><span class="wb-icon text-indigo-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></span> 扫描本机账号</h3>
+        <p class="text-xs text-slate-500 mt-1 break-all">目录：<code class="bg-slate-100 px-1 rounded text-[11px]">${esc(d.dir)}</code>${d.active_uid?` · 当前 UID：<code class="bg-slate-100 px-1 rounded text-[11px]">${esc(d.active_uid.slice(0,12))}</code>`:''}</p>
+      </div>
+      <div class="flex flex-row flex-wrap gap-1.5 text-[10px] shrink-0">
+        <span class="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100">新发现 ${scanTotal}</span>
+        <span class="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-100">当前 ${currentCount}</span>
+        <span class="px-2 py-1 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">号池已有 ${poolExisting}</span>
+      </div>
+    </div>
+    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div class="scan-desktop overflow-x-auto max-h-72">
+        <table class="tbl">
+          <thead class="bg-slate-50 text-slate-500 text-left sticky top-0 z-10 shadow-sm"><tr>
+            <th class="px-3 py-2 text-xs font-medium">账号</th><th class="px-3 py-2 text-xs font-medium whitespace-nowrap">Token 到期</th><th class="px-3 py-2 text-xs font-medium text-right">状态 / 操作</th>
+          </tr></thead>
+          <tbody>${desktopRows}</tbody>
+        </table>
+      </div>
+      <div class="scan-mobile max-h-72 overflow-y-auto">${mobileCards}</div>
+    </div>${notePool}
+    <div class="flex flex-col md:flex-row justify-between items-stretch md:items-center mt-4 pt-3 border-t border-slate-100 gap-3">
+      <span class="text-xs text-slate-400">导入后自动用真实昵称命名，并刷新余额；已导入账号会被跳过。</span>
+      <div class="flex gap-2 justify-end">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm hover:bg-slate-50">关闭</button>
+        <button onclick="importAll()" class="px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></span>全部导入号池</button>
+      </div>
+    </div>`);
+}
+async function importOne(file){
+  const r = await api("/api/accounts/import-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({files:[decodeURIComponent(file)]})});
+  const d = await r.json().catch(()=>({}));
+  if(r.ok){
+    toast(d.skipped ? `该账号已在号池，已跳过` : `已导入 ${d.added||0} 个`,
+          d.skipped ? "err" : "ok");
+    closeModal(); loadAccounts();
+  }
+  else toast("导入失败","err");
+}
+async function importAll(){
+  const r = await api("/api/accounts/import-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({all:true})});
+  const d = await r.json().catch(()=>({}));
+  if(r.ok){
+    const parts = [`已导入 ${d.added||0} 个`];
+    if(d.skipped) parts.push(`跳过 ${d.skipped} 个重复`);
+    if(d.errors && d.errors.length) parts.push(`${d.errors.length} 个失败`);
+    toast(parts.join("，"));
+    closeModal(); loadAccounts();
+  }
+  else toast("导入失败","err");
+  if(d.errors) console.warn(d.errors);
+}
+async function refreshAll(){
+  // **只刷当前平台**：`_accData` 就是账号池按平台作用域取回来的那一份。
+  // 原来 body 传空对象，后端 `refresh_batch` 会 `db.query(Account).all()`
+  // 拿**全库** id，再用 WorkBuddy 的 backend 去刷 Trae / Qoder / Loomy ——
+  // 每个号必然失败一次，账号一多就是「点了卡住」（2026-10-31 实测）。
+  const ids = (_accData || []).map(a => Number(a.id)).filter(Boolean);
+  if (!ids.length) { toast("当前平台没有可刷新的账号", "err"); return; }
+  await runJob({title:`刷新 ${ids.length} 个账号的余额与到期快照`,
+    submitUrl:'/api/accounts/refresh-batch', body:{account_ids: ids},
+    label:item => item.account || item.account_id, detail:item => item.reason || '',
+    amount:() => '', icon:item => item.ok ? '<span class="wb-icon text-emerald-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>' : '<span class="wb-icon text-amber-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="10"/></svg></span>',
+    doneText:job => job.result?.summary || '刷新完成', summaryHtml:() => '',
+    doneToast:job => job.result?.summary || '刷新完成',
+    onFinish:() => { loadAccounts(); if (_creditStats) loadCreditStats();
+                     if (window.WBPlatform) window.WBPlatform.refreshCounts(); }
+  });
+}
+
+/* ==========================================================================
+   积分到期面板（这是「快到期的先用完」这条策略的观察窗）
+   --------------------------------------------------------------------------
+   借鉴参考项目 workbuddy-switch 的两处：
+     * 「近期到期」——把最近要作废的积分包直接摊开，而不是只给一个总额
+     * 「积分总览 / 账号消耗构成」——把存量（还剩多少、多久到期）与
+       流量（谁在烧）放在一起看，才能判断「调度到底有没有把快过期的用掉」
+
+   关键设计：**排序与后端调度共用同一套分级**（admin/credits.urgency_rank）。
+   界面上排第一的账号就是下一个会被选中的账号 —— 两处口径一旦不一致，
+   用户会认为调度坏了，而实际只是排序不同。
+   ========================================================================== */
+
+async function loadCreditStats(sync) {
+  if (sync) {
+    if (_creditSyncing) { toast("正在采集中，请稍候", "err"); return; }
+    _creditSyncing = true;
+    const btn = $("#creditSyncBtn");
+    const old = btn ? btn.innerHTML : "";
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="wb-icon mr-1 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span> 采集中...'; }
+    try {
+      // 逐号串行采集，账号多时会到几十秒 —— 给明确的等待提示，
+      // 而不是让界面静默卡住（用户会以为点坏了）。
+      toast("开始重新采集全部账号的积分到期快照…");
+      const r = await api("/api/accounts/credits/sync", { method: "POST" });
+      const { ok, data } = await safeJson(r);
+      if (!ok) { toast("采集失败: " + (data.detail || ""), "err"); return; }
+      const failed = data.failed || 0;
+      toast(`采集完成：成功 ${data.refreshed}/${data.total}`
+        + (failed ? `，${failed} 个失败` : "")
+        + (data.credits_expiring_soon ? `，7 天内到期 ${data.credits_expiring_soon}` : ""));
+      loadAccounts();   // 概览卡与侧栏角标同步刷新
+    } catch (e) {
+      toast("采集异常: " + (e && e.message ? e.message : e), "err");
+    } finally {
+      _creditSyncing = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = old; }
+    }
+  }
+
+
+const includeDisabled = $("#creditShowDisabled") ? $("#creditShowDisabled").checked : false;
+  // **必须带平台**：积分到期是「哪个平台的钱快过期」，
+  // 后端虽然支持按平台过滤，但前端不传就等于全平台混算 ——
+  // 在某个平台的视图里会看到别的平台的账号。
+  const scopeQs = platformScopeQuery();
+  const r = await api("/api/credits/expiry?include_disabled="
+    + (includeDisabled ? "true" : "false") + platformScopeQuery());
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("加载积分到期失败: " + (data.detail || ""), "err"); return; }
+  _creditStats = data;
+  renderCreditOverview(data);
+  renderCreditRisk(data);
+  renderCreditPackages(data);
+  renderCreditUsage(data);
+  renderCreditRoutingPolicy(data);
+  renderCreditAccounts(data);
+}
+
+function _creditRoutingMode(policy, mode) {
+  return (policy?.modes || []).find(x => x.value === mode) || {value: mode, label: mode, description: ''};
+}
+
+function renderCreditRoutingPolicy(d) {
+  const policy = d.routing_policy || {};
+  const select = $('#creditSelectionMode');
+  const interval = $('#creditStartInterval');
+  if (!select || !interval) return;
+  const current = policy.mode || 'expiry_weighted';
+  const options = policy.modes || [];
+  select.outerHTML = uiSelectHTML('creditSelectionMode', {options, value: current,
+    class: 'w-full border rounded-lg px-3 py-2 text-sm', onChange: updateCreditSelectionHint});
+  initUISelects([['creditSelectionMode','选号模式']]);
+  interval.value = Number.isFinite(Number(policy.upstream_start_interval_ms))
+    ? Number(policy.upstream_start_interval_ms) : 75;
+  updateCreditSelectionHint();
+}
+
+function updateCreditSelectionHint() {
+  const select = $('#creditSelectionMode');
+  const hint = $('#creditSelectionHint');
+  if (!select || !hint) return;
+  const policy = _creditStats?.routing_policy || {};
+  const item = _creditRoutingMode(policy, uiSelectValue('creditSelectionMode'));
+  hint.textContent = item.description || '';
+}
+
+/* 平台切换 -> 积分数据立即重载。
+   之前切平台后积分页还是旧平台的数据，要手动刷新才更新。
+   这里监听统一事件，切了就重拉，不做整页刷新。 */
+document.addEventListener("wb-platform-change", function () {
+  // 只有积分面板可见时才拉，避免在别的页面白跑请求
+  const panel = document.getElementById("panel-credits");
+  if (panel && !panel.classList.contains("hidden")) {
+    if (typeof loadCreditStats === "function") loadCreditStats();
+  }
+});
+
+async function saveCreditRoutingPolicy() {
+  const button = $('#creditRoutingSave');
+  const mode = uiSelectValue('creditSelectionMode') || 'expiry_weighted';
+  const raw = $('#creditStartInterval')?.value ?? '75';
+  const interval = Number(raw);
+  if (!Number.isInteger(interval) || interval < 0 || interval > 60000) {
+    toast('上游启动间隔必须是 0 到 60000 的整数毫秒', 'err');
+    return;
+  }
+  if (button) { button.disabled = true; button.textContent = '保存中…'; }
+  try {
+    const response = await api('/api/credits/selection-policy', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode, upstream_start_interval_ms: interval})
+    });
+    const result = await safeJson(response);
+    if (!result.ok) { toast(result.data.detail || '策略保存失败', 'err'); return; }
+    toast('账号调度策略已保存，新会话立即按新策略分配');
+    if (_creditStats) { _creditStats.routing_policy = result.data; renderCreditRoutingPolicy(_creditStats); renderCreditAccounts(_creditStats); }
+    await loadCreditStats();
+  } catch (error) {
+    toast('策略保存失败：' + (error.message || error), 'err');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '保存策略'; }
+  }
+}
+
+/** 概览卡：存量 + 风险 + 最紧迫账号。 */
+/**
+ * 当前平台的查询串（`&platform=xxx&realm=yyy`）。
+ *
+ * 后端每个列表接口都支持按平台收窄，但前端很多地方**没传**，
+ * 于是「在某平台视图里看到别的平台数据」。统一从这里取，保证口径一致。
+ *
+ * 注意：**必须定义在全局作用域**。之前被误插入 `loadCreditStats` 内部，
+ * 结果只有那一处能用，其它地方调用直接 ReferenceError。
+ */
+function platformScopeQuery() {
+  try {
+    const cur = window.WBPlatform && window.WBPlatform.current
+      ? window.WBPlatform.current() : null;
+    if (!cur || !cur.platform) return "";
+    const parts = ["platform=" + encodeURIComponent(cur.platform)];
+    if (cur.realm) parts.push("realm=" + encodeURIComponent(cur.realm));
+    return "&" + parts.join("&");
+  } catch (e) {
+    return "";
+  }
+}
+
+function renderCreditOverview(d) {
+  const s = d.summary;
+  const box = $("#creditOverview");
+  if (!box) return;
+  const atRisk = Number(s.at_risk_ratio || 0) * 100;
+  // 概览卡用**余额口径**的可用积分（与账号面板「可用积分」一致）。
+  // 快照口径只覆盖采集过到期数据的号，拿它当「总剩余」会偏小，
+  // 于是同一块屏上两个面板显示两个不同的总数。
+  const avail = Number(s.available_remaining != null ? s.available_remaining : s.total_remaining);
+  const snapAcc = Number(s.snapshot_accounts || s.accounts || 0);
+  box.innerHTML = `
+    ${statCard("可用积分", fmtCredit(avail), {
+        icon:"fa-wallet", iconColor:"text-slate-400", tone:"brand",
+        sub:`${s.accounts} 个启用账号 · ${s.expiring_packages} 个快到期包` })}
+    ${statCard(`${d.expiring_soon_days} 天内到期`, fmtCredit(s.expiring_soon_remaining), {
+        icon:"fa-fire", iconColor:"text-orange-500",
+        tone: s.expiring_soon_remaining > 0 ? "warn" : "brand",
+        sub: s.expiring_soon_remaining > 0
+          ? `占全部剩余 ${atRisk.toFixed(1)}% · 不用完会作废`
+          : "暂无即将作废的额度" })}
+    ${statCard("长期有效", fmtCredit(s.evergreen_remaining), {
+        icon:"fa-infinity", iconColor:"text-slate-400", tone:"brand",
+        sub:"没有作废风险，留到最后用" })}
+    ${statCard("最紧迫账号", s.soonest_account_name || "无", {
+        icon:"fa-hourglass-half", iconColor:"text-slate-400",
+        tone: s.expiring_soon_remaining > 0 ? "warn" : "brand",
+        sub: s.soonest_days_left != null
+          ? `${s.soonest_days_left < 1
+              ? Math.max(1, Math.round(s.soonest_days_left * 24)) + " 小时内到期"
+              : Math.floor(s.soonest_days_left) + " 天后到期"}`
+          : "全部长期有效" })}
+    ${s.expired_remaining > 0 ? `<div style="grid-column:1/-1" class="fs-11-5 px-1"
+        style="color:var(--danger)"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+        有 ${fmtCredit(s.expired_remaining)} 积分已过期但账面仍有剩余（上游扣减延迟），建议核对。</div>` : ""}`;
+}
+
+/** 到期风险分布：把各时间档要作废的额度画成一条堆叠条 + 图例。 */
+function renderCreditRisk(d) {
+  const box = $("#creditRiskBar");
+  const hint = $("#creditRiskHint");
+  if (!box) return;
+  const wins = (d.windows || []).filter(w => w.amount > 0);
+  const total = Number(d.summary.total_remaining || 0);
+  const evergreen = Number(d.summary.evergreen_remaining || 0);
+  // 如实标注覆盖范围：分档条只统计「已采集到期快照」的账号
+  // （`total_remaining` 是快照口径），没采集的号不在其中。
+  // 不写清楚的话，用户会拿它跟上面的「可用积分」对比，觉得数字对不上。
+  const _snapN = Number(d.summary.snapshot_accounts || 0);
+  const _allN = Number(d.summary.accounts || 0);
+  const _cover = _snapN && _allN && _snapN < _allN
+    ? `（已采集 ${_snapN}/${_allN} 个账号）` : "";
+  if (hint) hint.textContent = total > 0
+    ? `共 ${fmtCredit(total)} 积分，按到期时间分档${_cover}` : "";
+  if (!wins.length) {
+    box.innerHTML = `<div class="empty">没有任何即将到期的额度 —— 全部积分包都是长期有效或已清空。</div>`;
+    return;
+  }
+  const colors = ["var(--danger)", "var(--warn-bar)", "#f59e0b", "#84cc16", "var(--c1)"];
+  // windows 是**累计**金额（≤1 天 / ≤3 天 / …），画堆叠条要取增量才不重叠。
+  // 各段之和必然 ≤ total，但可能不等于 total：
+  //   * 30 天以外的有限期额度（有到期日但很远）既不在任何档里，也
+  //     不属于「长期有效」—— 用一个中性灰段把它显示出来，
+  //     否则条形图会「看起来少了一截」而没有任何解释。
+  let prev = 0;
+  const segs = wins.map((w, i) => {
+    const delta = Math.max(0, w.amount - prev);
+    prev = w.amount;
+    const pct = total > 0 ? Math.max(0.6, delta / total * 100) : 0;
+    return `<span style="width:${pct}%;background:${colors[i % colors.length]}"
+      data-tooltip="≤${w.days} 天到期：${fmtCredit(delta)} 积分（${w.packages} 个包）"></span>`;
+  }).join("");
+  const rest = Math.max(0, total - prev - evergreen);
+  const everPct = total > 0 ? Math.max(0, evergreen / total * 100) : 0;
+  const restPct = total > 0 ? Math.max(0, rest / total * 100) : 0;
+  box.innerHTML = `
+    <div class="risk-bar mb-3">${segs}${
+      restPct > 0.4 ? `<span style="width:${restPct}%;background:var(--c8)"
+        data-tooltip="30 天以外到期：${fmtCredit(rest)} 积分"></span>` : ""}${
+      everPct > 0.4 ? `<span style="width:${everPct}%;background:var(--surface-3)"
+        data-tooltip="长期有效：${fmtCredit(evergreen)} 积分"></span>` : ""}</div>
+    <div class="flex flex-wrap gap-x-4 gap-y-1-5 fs-11-5" style="color:var(--fg-muted)">
+      ${wins.map((w, i) => `<span class="flex items-center gap-1.5">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${colors[i % colors.length]}"></span>
+        ≤${w.days} 天：<b class="tnum" style="color:var(--fg)">${fmtCredit(w.amount)}</b>
+        <span style="color:var(--fg-subtle)">（${w.packages} 个包）</span></span>`).join("")}
+      ${rest > 0 ? `<span class="flex items-center gap-1.5">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--c8)"></span>
+        30 天以外：<b class="tnum" style="color:var(--fg)">${fmtCredit(rest)}</b></span>` : ""}
+      <span class="flex items-center gap-1.5">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--surface-3)"></span>
+        长期有效：<b class="tnum" style="color:var(--fg)">${fmtCredit(evergreen)}</b></span>
+    </div>`;
+}
+
+/** 「最近快到期的积分包」：逐包平铺、按到期升序，**分页 + 滚动到底自动加载**。
+ *
+ * 后端一页只给 60 条（总包数实测 400+ 且会随账号数继续长）。
+ * 已加载的页累积在 `_creditPkgLoaded`，用户滚到接近底部时自动取下一页 ——
+ * 不用手动点按钮（手点很烦），也不会把整页拉成无限长（那会越用越卡）。
+ */
+let _creditPkgLoaded = [];      // 已加载的包（按到期升序拼接）
+let _creditPkgLoading = false;  // 防重入：一次只发一个续页请求
+let _creditPkgScrollBound = false;
+
+function renderCreditPackages(d) {
+  const box = $("#creditPackages");
+  const hint = $("#creditPkgHint");
+  if (!box) return;
+  _creditPkgLoaded = d.packages || [];     // 重新加载面板时重置为第一页
+  _creditPkgLoading = false;
+  const total = Number(d.packages_total || _creditPkgLoaded.length);
+  if (hint) {
+    hint.textContent = total
+      ? `按到期升序 · 已显示 ${_creditPkgLoaded.length}/${total} 个`
+      : "";
+  }
+  if (!_creditPkgLoaded.length) {
+    box.innerHTML = `<div class="empty">没有仍有剩余的积分包。<br>点右上「重新采集」从上游拉取最新明细。</div>`;
+    updateCreditPkgMore(false);
+    return;
+  }
+  box.innerHTML = _creditPkgLoaded.map(p => pkgRowHtml(p)).join("");
+  box.scrollTop = 0;
+  updateCreditPkgMore(!!d.has_more);
+  bindCreditPkgScroll();
+}
+
+/**
+ * 绑定「滚动到底自动续页」。
+ *
+ * 为什么用 `scroll` 事件 + 阈值而不是 IntersectionObserver：
+ * 容器固定高度、滚动的是容器本身（不是 window），scroll 事件最直观可靠，
+ * 且不需要维护观察者生命周期。**只绑一次**（`_creditPkgScrollBound` 守卫），
+ * 否则每次重新渲染都会叠加一个监听器，滚动一次触发 N 次请求。
+ */
+function bindCreditPkgScroll() {
+  const box = $("#creditPackages");
+  if (!box || _creditPkgScrollBound) return;
+  _creditPkgScrollBound = true;
+  box.addEventListener("scroll", () => {
+    if (_creditPkgLoading) return;
+    // 距底部 120px 内就预取下一页 —— 等真正见底再加载会有一段空白等待
+    const nearBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 120;
+    if (!nearBottom) return;
+    const total = Number((_creditStats && _creditStats.packages_total) || 0);
+    if (total && _creditPkgLoaded.length >= total) return;   // 已取完
+    loadMoreCreditPackages();
+  }, { passive: true });
+}
+
+/**
+ * 续页提示行的显隐。
+ *
+ * `loading=true` 时才显示「正在加载更多」。
+ * 注意**不能**用「has_more 就显示」—— 滚动加载的场景下，绝大多数时间
+ * 都不是在加载，一直挂个转圈会让用户以为卡住了（这正是第一版的 bug）。
+ * 全部取完后 `has_more=false`，此时也不显示。
+ */
+function updateCreditPkgMore(hasMore, loading) {
+  const wrap = $("#creditPkgMore");
+  if (!wrap) return;
+  wrap.classList.toggle("hidden", !loading);
+}
+
+/** 取下一页积分包并**追加**到列表（不重建整页，滚动位置不跳）。 */
+async function loadMoreCreditPackages() {
+  if (_creditPkgLoading) return;
+  _creditPkgLoading = true;
+  updateCreditPkgMore(true, true);
+  try {
+    const r = await api(`/api/credits/expiry?package_offset=${_creditPkgLoaded.length}&package_limit=60${platformScopeQuery()}`);
+    const { ok, data } = await safeJson(r);
+    if (!ok) { toast("加载失败：" + (data.detail || ""), "err"); return; }
+    const box = $("#creditPackages");
+    const add = data.packages || [];
+    if (box && add.length) {
+      // 追加而不是整体重建：避免滚动位置跳回顶部（用户正在往下翻）
+      box.insertAdjacentHTML("beforeend", add.map(p => pkgRowHtml(p)).join(""));
+    }
+    _creditPkgLoaded = _creditPkgLoaded.concat(add);
+    if (_creditStats) {           // 让「总数」与后续判断保持一致
+      _creditStats.packages_total = data.packages_total;
+      _creditStats.has_more = data.has_more;
+    }
+    const hint = $("#creditPkgHint");
+    const total = Number(data.packages_total || _creditPkgLoaded.length);
+    if (hint) {
+      hint.textContent = `按到期升序 · 已显示 ${_creditPkgLoaded.length}/${total} 个`
+        + (data.has_more ? "" : " · 已全部加载");
+    }
+  } catch (e) {
+    toast("加载异常：" + (e && e.message ? e.message : e), "err");
+  } finally {
+    _creditPkgLoading = false;
+    updateCreditPkgMore(false, false);   // 加载结束即隐藏转圈
+  }
+}
+
+/** 账号消耗构成：谁在烧积分（数据源 usage_logs 的积分聚合）。 */
+async function renderCreditUsage(d) {
+  const box = $("#creditUsage");
+  const hint = $("#creditUsageHint");
+  if (!box) return;
+  box.innerHTML = `<div class="fs-12-5 py-4 text-center" style="color:var(--fg-subtle)">加载中...</div>`;
+  try {
+    // 必须带平台：这个面板是「当前平台的号谁在烧积分」，
+    // 不传平台就会把所有平台的账号混进来。
+    const r = await api("/api/credits/usage?days=7&top=12" + platformScopeQuery());
+    const { ok, data } = await safeJson(r);
+    if (!ok) { box.innerHTML = `<div class="empty">加载失败：${esc(data.detail || "")}</div>`; return; }
+    const rows = (data.accounts || []).filter(x => x.credits > 0);
+    const maxC = Math.max(1, ...rows.map(x => x.credits));
+    if (hint) hint.textContent = `近 ${data.range_days} 天 · 合计 ${fmtCredit(data.total_credits)} 积分`;
+    if (!rows.length) {
+      box.innerHTML = `<div class="empty">近 ${data.range_days} 天没有产生积分消耗。</div>`;
+      return;
+    }
+    box.innerHTML = `<div class="flex flex-col gap-2.5">${rows.map(x => {
+      const w = Math.max(2, x.credits / maxC * 100);
+      const soonTag = x.expiring_soon_remaining > 0
+        ? `<span class="exp-badge soon">${fmtCredit(x.expiring_soon_remaining)} 将到期</span>` : "";
+      return `<div>
+        <div class="flex items-center justify-between gap-2 fs-12-5">
+          <span class="truncate font-medium">${esc(x.account_name)}</span>
+          <span class="shrink-0 tnum" style="color:var(--fg-muted)">
+            <b style="color:var(--fg)">${fmtCredit(x.credits)}</b> 积分
+            <span style="color:var(--fg-subtle)">· ${x.requests} 次</span></span>
+        </div>
+        <div class="pkg-track" style="margin-top:4px"><i style="width:${w}%"></i></div>
+        <div class="flex items-center gap-2 fs-10-5 mt-1" style="color:var(--fg-subtle)">
+          <span>剩余 ${fmtCredit(x.remaining)}</span>${soonTag}
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty">加载异常：${esc(String(e && e.message || e))}</div>`;
+  }
+}
+
+/** 账号到期排行：用于观察到期风险；真实选号由当前策略决定。 */
+function renderCreditAccounts(d) {
+  const body = $("#creditBody");
+  const hint = $("#creditAccHint");
+  if (!body) return;
+  const rows = d.accounts || [];
+  const policy = d.routing_policy || {};
+  const modeItem = _creditRoutingMode(policy, policy.mode || 'expiry_weighted');
+  if (hint) hint.textContent = `${rows.length} 个账号 · ${d.selection_mode === 'manual' ? '手动优先级（已覆盖自动策略）' : '自动：' + modeItem.label} · 排名用于观察到期风险`;
+  if ($('#creditAutoOrder')) $('#creditAutoOrder').disabled = d.selection_mode !== 'manual';
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="8"><div class="empty">没有账号。先在「账号池」里添加。</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map((a, i) => {
+    const soon = Number(a.expiring_soon_remaining || 0);
+    const expired = Number(a.expired_remaining || 0);
+    const rank = i + 1;
+    // 前三名给「快到期」的视觉权重；自动模式是否优先使用由策略决定。
+    const rankHtml = soon > 0 && rank <= 3
+      ? `<span class="exp-badge soon" data-tooltip="优先级 ${rank}"
+           data-tooltip-description="这是到期风险排行第 ${rank} 名。实际流量按当前调度策略分配，排名越靠前只代表到期更紧迫。">${rank}</span>`
+      : `<span class="tnum" style="color:var(--fg-subtle)">${rank}</span>`;
+    const next = (a.next_expiring || []).slice(0, 2)
+      .map(p => pkgRowHtml(p, { showAccount: false })).join("");
+    const disabled = a.status !== "active"
+      ? `<span class="fs-10-5" style="color:var(--fg-subtle)">（不参与调度）</span>` : "";
+    return `<tr>
+      <td class="align-top">${rankHtml}</td>
+      <td class="align-top">
+        <div class="font-medium">${esc(a.account_name)}</div>
+        <div class="fs-10-5 font-mono" style="color:var(--fg-subtle)">${esc(a.uid || "-")}</div>
+      </td>
+      <td class="align-top">${badge(a.status)}${disabled}</td>
+      <td class="align-top text-right tnum font-medium">${fmtCredit(a.total_remaining)}</td>
+      <td class="align-top text-right tnum" style="color:${soon > 0 ? 'var(--warn)' : 'var(--fg-subtle)'};font-weight:${soon > 0 ? 600 : 400}">
+        ${soon > 0 ? fmtCredit(soon) : "—"}</td>
+      <td class="align-top text-right tnum" style="color:var(--fg-muted)">${fmtCredit(a.evergreen_remaining)}</td>
+      <td class="align-top">${expiryBadge(a.soonest_days_left, expired > 0 && a.soonest_expire_at === null, a.expiring_soon)}
+        ${a.synced_at ? `<div class="text-[10px] mt-0.5" style="color:var(--fg-subtle)">${fmtTime(new Date(a.synced_at).toISOString().replace('T',' ').slice(0,19), false)} 采集</div>` : ""}</td>
+      <td class="align-top" style="min-width:230px">${next || `<span class="text-[11px]" style="color:var(--fg-subtle)">没有仍有剩余的积分包</span>`}</td>
+      <td class="align-top text-right whitespace-nowrap credit-ops">
+        <!-- 操作提示统一走系统的 actionTooltip（data-tooltip / data-tooltip-description）：
+             title 属性是浏览器原生气泡，延迟 1~2 秒才出现、样式不可控、鼠标一动就消失，
+             而这张表里「上移/下移会改变真实选号顺序」必须说清楚，误点代价不小。
+             排序按钮加浅色底：它们是这个表格里唯一会改变系统行为的操作，
+             不能和「查看明细」「重新采集」这种只读操作长得一样。 -->
+        <button type="button" class="console-btn quiet credit-sort-btn" onclick="moveCreditAccount(${a.account_id},-1)"
+                aria-label="上移账号 ${esc(a.account_name)}"
+                data-tooltip="上移 · 提高真实使用优先级"
+                data-tooltip-description="${esc('把「' + a.account_name + '」与上一名对调。保存后立刻影响真实选号顺序，在途请求继续执行；只有手动排序模式下才会生效。')}"
+                ${i === 0 ? 'disabled' : ''}><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></span></button>
+        <button type="button" class="console-btn quiet credit-sort-btn" onclick="moveCreditAccount(${a.account_id},1)"
+                aria-label="下移账号 ${esc(a.account_name)}"
+                data-tooltip="下移 · 降低真实使用优先级"
+                data-tooltip-description="${esc('把「' + a.account_name + '」与下一名对调。保存后立刻影响真实选号顺序，在途请求继续执行；只有手动排序模式下才会生效。')}"
+                ${i === rows.length - 1 ? 'disabled' : ''}><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></span></button>
+        <button type="button" class="console-btn quiet credit-op-btn" onclick="viewCreditDetails(${a.account_id},${jsv(a.account_name)})"
+                aria-label="查看 ${esc(a.account_name)} 的全部积分包"
+                data-tooltip="积分明细 · 逐包到期日"
+                data-tooltip-description="查看该账号全部积分包的余额、总额度与到期日（按到期升序，排最前的最先作废）。默认读库内快照，秒开；要最新数据请在弹窗里点「重新采集」。"
+                style="color:var(--warn)"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></svg></span></button>
+        <button type="button" class="console-btn quiet credit-op-btn" onclick="refreshAcc(${a.account_id}).then(loadCreditStats)"
+                aria-label="重新采集 ${esc(a.account_name)} 的积分与到期快照"
+                data-tooltip="重新采集该账号"
+                data-tooltip-description="只对这一个账号真实调用上游（余额 + 逐包到期快照，约 0.4~2 秒）。全部账号请用右上角「重新采集」。"
+                style="color:var(--brand-ink)"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span></button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+let _creditOrderSaving = false;
+async function saveCreditOrder(mode, ids, description) {
+  if (_creditOrderSaving || !_creditStats) return;
+  _creditOrderSaving = true;
+  const expected = [...(_creditStats.selection_order || [])];
+  try {
+    if (!await uiConfirm({title:'确认调整真实账号优先级', danger:true,
+      message:description + '这会改变实际被优先使用的账号，下一次选号即生效。停用、额度限制、冷却和账号独享绑定仍然有效；在途请求继续执行。是否确认？', okText:'确认调整'})) return;
+    const response = await api('/api/credits/selection-order', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode, ids, expected_ids:expected, confirm:true})});
+    const result = await safeJson(response);
+    if (!result.ok) { toast(result.data.detail || '保存排序失败', 'err'); await loadCreditStats(); return; }
+    toast(mode === 'manual' ? '真实账号优先级已更新' : '已恢复当前自动调度策略');
+    await loadCreditStats();
+  } catch (error) { toast('保存排序失败：' + error.message, 'err'); }
+  finally { _creditOrderSaving = false; }
+}
+async function moveCreditAccount(accountId, direction) {
+  const visible = _creditStats?.accounts || [];
+  const index = visible.findIndex(a => a.account_id === accountId);
+  const other = visible[index + direction];
+  if (index < 0 || !other || ![-1, 1].includes(direction)) return;
+  const ids = [...(_creditStats.selection_order || [])];
+  const from = ids.indexOf(accountId), to = ids.indexOf(other.account_id);
+  if (from < 0 || to < 0) return;
+  [ids[from], ids[to]] = [ids[to], ids[from]];
+  await saveCreditOrder('manual', ids, `将「${visible[index].account_name}」从第 ${index + 1} 位移至第 ${index + direction + 1} 位。`);
+}
+async function resetCreditOrder() {
+  const policy = _creditStats?.routing_policy || {};
+  const mode = _creditRoutingMode(policy, policy.mode || 'expiry_weighted');
+  await saveCreditOrder('automatic', [], `恢复「${mode.label}」自动调度，清除手动优先级。`);
+}
+
+/* ==================== 手机号登录（全自动授权换凭证） ====================
+ * 与「批量上传」的区别：这里不需要用户手上有 .info 文件，
+ * 应用户手机号 + 验证码，由**服务端**完成整条 auth 授权并把凭证直接入库。
+ * 全程不需要安装 WorkBuddy 客户端，手机浏览器也能走完。
+ */
+let _plSid = "", _plTimer = null, _plCountdown = 0, _plBusy = false, _plRetryUntil = 0, _plRestoring = false;
+function plSave() {
+  WBPhone.save('wb_admin_phone', {sid:_plSid, mobile:$('#plMobile')?.value || '',
+    country:$('#plCountry')?.value || '86', retryUntil:_plRetryUntil,
+    codeSent:!$('#plStep2')?.classList.contains('hidden')});
+}
+
+let _plAccountId = null;
+async function openPhoneLogin(accountId = null){
+  const sameTarget = _plAccountId === accountId;
+  _plAccountId = accountId;
+  if (sameTarget && $('#plMobile') && $('#plStep3').classList.contains('hidden')) {
+    $('#modal').classList.remove('hidden'); $('#modal').classList.add('flex');
+    $('#modal').dataset.closeOnly = '1'; return;
+  }
+  const saved = WBPhone.read('wb_admin_phone');
+  _plSid = saved.sid || '';
+  openModal(`
+    <h3 class="font-bold mb-1"><span class="wb-icon mr-1 text-emerald-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg></span> 手机号登录</h3>
+    <p class="text-xs text-slate-500 mb-2">${accountId ? `正在重新登录账号 #${Number(accountId)}，只接受原身份，保留历史与绑定。` : ""}</p>
+    <p class="text-xs text-slate-500 mb-4">输入手机号获取验证码。登录成功后系统会自动完成授权，把凭证加入账号池；<b>无需安装客户端</b>。</p>
+
+    <div id="plStep1">
+      <label class="text-xs text-slate-500">手机号</label>
+      <div class="flex gap-2 mt-1">
+        <select id="plCountry" aria-label="地区" onchange="plSave()">
+          <option value="86">+86 中国大陆</option><option value="852">+852 中国香港</option><option value="853">+853 中国澳门</option>
+        </select>
+        <input id="plMobile" type="tel" inputmode="numeric" maxlength="11" placeholder="11 位手机号"
+               oninput="plSave()" class="flex-1 min-w-0 border rounded-lg px-3 py-2 text-sm font-mono" />
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+        <button id="plSendBtn" onclick="plSend()" class="px-3 py-1.5 rounded-lg btn-primary">获取验证码</button>
+      </div>
+    </div>
+
+    <div id="plStep2" class="hidden">
+      <label class="text-xs text-slate-500">验证码</label>
+      <div class="flex gap-2 mt-1">
+        <input id="plCode" type="tel" inputmode="numeric" maxlength="6" placeholder="6 位验证码"
+               class="flex-1 border rounded-lg px-3 py-2 text-sm font-mono tracking-widest" />
+        <button id="plResendBtn" onclick="plSend()" class="px-3 py-1.5 rounded-lg border text-sm shrink-0 whitespace-nowrap" disabled>重新获取</button>
+      </div>
+      <p id="plHint" class="text-xs text-slate-400 mt-2"></p>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+        <button id="plVerifyBtn" onclick="plVerify()" class="px-3 py-1.5 rounded-lg btn-primary">登录并上传</button>
+      </div>
+    </div>
+
+    <div id="plStep3" class="hidden text-center py-4">
+      <div id="plResultIcon" class="text-4xl mb-2"></div>
+      <div id="plResultMsg" class="text-sm"></div>
+      <div class="flex justify-center gap-2 mt-4">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+      </div>
+    </div>
+    <div class="phone-login-footer">
+      <a href="/join" target="_blank" rel="noopener noreferrer" onclick="watchJoinAuthorization()"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></span>授权页面</a>
+      <span>在浏览器完成授权后自动加入账号池</span>
+    </div>`, "max-w-md");
+  $('#modal').dataset.closeOnly = '1';
+  $('#plMobile').value = saved.mobile || '';
+  $('#plCountry').value = ['86','852','853'].includes(saved.country) ? saved.country : '86';
+  WBPhone.mountRegion($('#plCountry'), $('#plMobile'));
+  $('#plMobile').maxLength = $('#plCountry').value === '86' ? 11 : 8;
+  _plRetryUntil = saved.retryUntil || 0;
+  _plRestoring = !!_plSid;
+  plStartCountdown(Math.max(0, Math.ceil((_plRetryUntil-Date.now())/1000)));
+  if (_plSid) {
+    try {
+      const response = await api('/api/login/status/' + encodeURIComponent(_plSid));
+      if (!response.ok) throw new Error('无法恢复登录会话');
+      const state = await response.json();
+      if (state.alive && !state.consumed && state.code_sent) {
+        $('#plMobile').value = state.mobile; $('#plCountry').value = state.country_code;
+        WBPhone.syncRegion($('#plCountry'));
+        $('#plStep1').classList.add('hidden'); $('#plStep2').classList.remove('hidden');
+        $('#plHint').textContent = '验证码已发送至 +' + state.country_code + ' ' + state.mobile;
+        plStartCountdown(Math.max(state.retry_after || 0, Math.ceil((_plRetryUntil-Date.now())/1000)));
+      } else if (!state.alive || state.consumed) { _plSid = ''; WBPhone.clear('wb_admin_phone'); }
+    } catch (e) { toast(e.message, 'err'); }
+    finally {
+      _plRestoring = false;
+      if ($('#plSendBtn')) $('#plSendBtn').disabled = _plBusy || Date.now() < _plRetryUntil;
+      if ($('#plResendBtn')) $('#plResendBtn').disabled = _plBusy || Date.now() < _plRetryUntil;
+    }
+  }
+  setTimeout(() => { const el = $("#plMobile"); if(el) el.focus(); }, 60);
+}
+
+let _joinRefreshPending = false;
+function watchJoinAuthorization(){ _joinRefreshPending = true; }
+function refreshAfterJoin(){
+  if(!_joinRefreshPending || document.visibilityState === "hidden") return;
+  _joinRefreshPending = false;
+  loadAccounts();
+}
+window.addEventListener("focus", refreshAfterJoin);
+window.addEventListener("wb-shell-resume", refreshAfterJoin);
+document.addEventListener("visibilitychange", refreshAfterJoin);
+
+/* 发起会话（拿 sid）。发码前必须先有 sid —— 整条授权链绑定在它上面。 */
+async function plStart(){
+  const r = await api("/api/login/start", { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if(!ok || !data.sid){
+    throw new Error((data.detail && (data.detail.message || data.detail)) || "发起登录失败");
+  }
+  _plSid = data.sid;
+  plSave();
+  return data.sid;
+}
+
+function plStartCountdown(sec){
+  _plRetryUntil = Date.now() + Math.max(0, sec) * 1000;
+  const btn = $("#plResendBtn");
+  if(_plTimer) clearInterval(_plTimer);
+  const tick = () => {
+    _plCountdown = Math.max(0, Math.ceil((_plRetryUntil - Date.now()) / 1000));
+    const b = $("#plResendBtn");
+    if(!b) { clearInterval(_plTimer); return; }
+    if(_plCountdown <= 0){
+      clearInterval(_plTimer); _plTimer = null;
+      b.disabled = _plBusy || _plRestoring; b.textContent = "重新获取";
+      if ($('#plSendBtn')) { $('#plSendBtn').disabled = _plBusy || _plRestoring; $('#plSendBtn').textContent = '获取验证码'; }
+      return;
+    }
+    b.disabled = true; b.textContent = _plCountdown + "s";
+    if ($('#plSendBtn')) { $('#plSendBtn').disabled = true; $('#plSendBtn').textContent = _plCountdown + 's'; }
+  };
+  tick();
+  if (_plCountdown > 0) _plTimer = setInterval(tick, 1000);
+  plSave();
+}
+
+async function plSend(){
+  if (_plBusy || _plRestoring || Date.now() < _plRetryUntil) return;
+  const mobile = ($("#plMobile").value || "").replace(/\D/g, "");
+  const country_code = $('#plCountry').value;
+  if(!WBPhone.valid(country_code, mobile)){ toast("请输入所选地区的有效手机号", "err"); return; }
+  _plBusy = true;
+  const btn = $("#plSendBtn") || $("#plResendBtn");
+  if(btn) btn.disabled = true;
+  try {
+    if(!_plSid) await plStart();
+    const r = await api("/api/login/send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: _plSid, mobile, country_code })
+    });
+    const { ok, data } = await safeJson(r);
+    if(!ok){
+      const d = data.detail;
+      const msg = (d && (d.message || d)) || "发送失败";
+      // 会话可能已过期（超时/已消费）→ 清掉，下次点击自动重开
+      if(d && d.step === "session") _plSid = "";
+      toast(String(msg), "err");
+      plStartCountdown(Number(r.headers.get('Retry-After')) || 60);
+      return;
+    }
+    $("#plStep1").classList.add("hidden");
+    $("#plStep2").classList.remove("hidden");
+    $("#plHint").textContent = "验证码已发送至 +" + country_code + ' ' + mobile + "，请查看短信";
+    plStartCountdown(data.retry_after || 60);
+    setTimeout(() => { const el = $("#plCode"); if(el) el.focus(); }, 60);
+  } catch(e){
+    toast(String(e.message || e), "err");
+    plStartCountdown(60);
+  } finally { _plBusy = false; }
+}
+
+async function plVerify(){
+  if (_plBusy) return;
+  const code = ($("#plCode").value || "").replace(/\D/g, "");
+  if(code.length !== 6){ toast("请输入 6 位验证码", "err"); return; }
+  if(!_plSid){ toast("会话已失效，请重新获取验证码", "err"); return; }
+  _plBusy = true;
+  const btn = $("#plVerifyBtn");
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="wb-icon mr-1 wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span> 登录中…'; }
+  try {
+    const r = await api("/api/login/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: _plSid, code, account_id: _plAccountId })
+    });
+    const { ok, data } = await safeJson(r);
+    if(ok){
+      $('#plStep2').classList.add('hidden'); $('#plStep3').classList.remove('hidden');
+      _plSid = ''; WBPhone.clear('wb_admin_phone');
+      // 上游验证结果一并展示：既证明凭证真实可用，也让「积分/账号名」
+      // 直接来自腾讯侧的事实（而不是凭证里那个可能被改过的 account 字段）
+      const ck = data.check || {};
+      $("#plResultIcon").innerHTML = '<span class="wb-icon text-emerald-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>';
+      $("#plResultMsg").innerHTML = `<div class="font-medium text-emerald-700">${esc(data.message || "登录成功")}</div>
+        <div class="text-slate-500 mt-1 text-xs">账号：${esc((data.account && data.account.name) || "-")}${data.uid ? " · UID " + esc(data.uid) : ""}</div>
+        ${ck.live_message ? `<div class="text-emerald-600 mt-1 text-xs"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 22V2"/></svg></span>${esc(ck.live_message)}</div>` : ""}
+        ${data.invitation && data.invitation.status !== 'disabled' ? `<div class="mt-1 text-xs">${esc(data.invitation.message)}</div>` : ""}`;
+      if(_plTimer){ clearInterval(_plTimer); _plTimer = null; }
+      loadAccounts();
+    } else {
+      const d = data.detail;
+      const msg = (d && (d.message || d)) || "登录失败";
+      toast(esc(String(msg)), 'err');
+    }
+  } catch(e){
+    toast(esc(String(e.message || e)), 'err');
+  } finally {
+    _plBusy = false;
+    if(btn){ btn.disabled = false; btn.textContent = '登录并上传'; }
+  }
+}
+
+/* 批量上传 */
+function openUpload(){
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  const isWb = !storage || storage === "workbuddy" || storage === "codebuddy";
+  const platLabel = spec.label || (storage || "WorkBuddy");
+  const intro = isWb
+    ? `<p class="text-xs text-slate-500 mb-2">粘贴 WorkBuddy 登录态，支持单个 JSON、JSON 数组或每行一个 JSON。也可选择多个凭证文件：新版加密、旧版明文及 .info.bak-时间戳备份均支持，按文件内容验证。</p>`
+    : `<p class="text-xs text-slate-500 mb-2">当前目标平台：<b>${esc(platLabel)}</b>。请粘贴该平台的备份（JSONL 或 JSON 数组，形如 <code>{"realm":"cn","token":"…","uid":"…","phone":"…"}</code>）。手机版导出的账号直接贴进来即可，<b>不需要</b> WorkBuddy 的 auth/account 客户端凭证结构（issue #8）。</p>`;
+  const placeholder = isWb
+    ? '{"auth":{...},"account":{...}}'
+    : '{"realm":"cn","token":"...","uid":"...","phone":"..."}';
+  openModal(`
+    <h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4"/></svg></span> 批量上传账号</h3>
+    ${intro}
+    <p class="text-xs text-amber-600 mb-2"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 22V2"/></svg></span>每条都会调真实上游接口验证是否可用，<b>伪造的凭证会被拒收</b>（因此上传略慢，属正常）。</p>
+    <textarea id="upText" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder='${placeholder}'></textarea>
+    <input id="upFile" type="file" multiple class="upload-file-input" aria-label="选择账号凭证或备份文件" />
+    <div id="upResult" class="upload-result hidden" role="status" aria-live="polite"></div>
+    <div class="upload-footer">
+      <button id="upSubmit" type="button" onclick="submitUpload()" class="console-btn primary upload-submit"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg><span>确认导入</span></button>
+      <span class="upload-footer-note">支持多文件，重复账号会更新凭证</span>
+      <button type="button" onclick="closeModal()" class="console-btn upload-cancel">取消</button>
+    </div>`, "max-w-2xl");
+}
+async function submitUpload(){
+  const submit = $("#upSubmit");
+  if(submit?.disabled) return;
+  const text = $("#upText").value.trim();
+  const files = $("#upFile").files;
+  if(!text && !files.length){ toast("内容为空","err"); return; }
+
+  // 去掉 BOM，避免 Windows 生成的 .info 文件解析失败
+  function stripBOM(s){ return s.replace(/^\uFEFF/, ''); }
+  function tryParse(s){
+    s = stripBOM(s).trim();
+    if(!s) return null;
+    try { return JSON.parse(s); } catch { return null; }
+  }
+
+  let allItems = [];
+  let rawTexts = [];   // 非 WB 平台导入需要的原始备份文本（逐个文件累积）
+
+  // 1) 解析文本域：支持 JSON 数组 / 单个 JSON 对象 / JSONL 每行一个对象
+  if(text){
+    rawTexts.push(text);   // 非 WB 平台需要原文交给平台自己的 import_batch
+    const j = tryParse(text);
+    if(j){ allItems = Array.isArray(j) ? j : [j]; }
+    else {
+      for(const line of text.split("\n")){
+        const t = line.trim(); if(!t) continue;
+        const o = tryParse(t); if(o) allItems.push(o);
+      }
+    }
+  }
+
+  // 2) 逐个解析文件，避免多文件拼接后格式混乱
+  for(const f of files){
+    try {
+      const s = await f.text();
+      if (s && s.trim()) rawTexts.push(s);
+      const j = tryParse(s);
+      if(j){ allItems = allItems.concat(Array.isArray(j) ? j : [j]); }
+      else {
+        for(const line of s.split("\n")){
+          const t = line.trim(); if(!t) continue;
+          const o = tryParse(t); if(o) allItems.push(o);
+        }
+      }
+    } catch(e) {
+      console.warn("文件读取失败:", f.name, e);
+    }
+  }
+
+  // 统一走异步导入（后台线程 + 进度条）。
+  //
+  // 关键点（issue #8）：非 WorkBuddy 平台**不能**用 /api/accounts/batch ——
+  // 那条路要求 WorkBuddy 的 auth/account 客户端凭证，会把 Loomy 的
+  // {realm,token,uid,phone} 备份整批拒收。这里按当前平台分流：
+  //   WB/codebuddy → items（沿用原 /batch 的凭据结构）
+  //   其他平台     → text（JSON 数组或 JSONL 原文，交平台自己的 import_batch）
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(spec.storage_platform || spec.id || "workbuddy").toLowerCase();
+  const isWb = !storage || storage === "workbuddy" || storage === "codebuddy";
+
+  let payload;
+  if (isWb) {
+    if (!allItems.length) { toast("未解析出任何账号凭证", "err"); return; }
+    payload = {
+      storage: storage || "workbuddy",
+      verify: true,
+      items: allItems.map(x => ({
+        name: [x.account?.nickname, x.name].find(v => typeof v === "string" && v.trim()) || "",
+        auth_json: JSON.stringify(x),
+      })),
+    };
+  } else {
+    const combined = rawTexts.join("\n");
+    if (!combined.trim()) { toast("未解析出任何账号凭证", "err"); return; }
+    payload = { storage, text: combined };
+  }
+
+  const result = $("#upResult");
+  const showResult = message => { result.textContent = message; result.classList.remove("hidden"); };
+  const previous = submit.innerHTML;
+  submit.disabled = true;
+  submit.setAttribute("aria-busy", "true");
+  submit.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span><span>正在导入…</span>';
+  const count = isWb ? payload.items.length : payload.text.split("\n").filter(l => l.trim()).length;
+  showResult(`正在导入 ${count} 条到 ${spec.label || storage || "WorkBuddy"}…`);
+
+  const summarize = d => {
+    const r = (d && d.result) || {};
+    if (d && d.status === "failed") return `导入失败：${d.error || "未知错误"}`;
+    if (isWb) {
+      const parts = [`已添加 ${r.added || 0} 个账号`];
+      if (r.skipped) parts.push(`更新 ${r.skipped} 个已有账号`);
+      if (r.errors && r.errors.length) parts.push(`${r.errors.length} 个失败`);
+      return parts.join("，") + (r.errors?.length ? "\n" + r.errors.join("\n") : "");
+    }
+    const parts = [`已添加 ${r.added || 0} 个`];
+    if (r.updated) parts.push(`更新 ${r.updated} 个`);
+    if (r.failed) parts.push(`${r.failed} 个失败`);
+    return parts.join("，") + (r.errors?.length ? "\n" + r.errors.join("\n") : "");
+  };
+
+  await runJob({
+    title: `批量导入账号 · ${spec.label || storage || "WorkBuddy"}`,
+    submitUrl: "/api/accounts/import-async",
+    pollUrl: "/api/accounts/job/",
+    body: payload,
+    label: () => "", detail: () => "", amount: () => "", icon: () => "",
+    emptyText: "正在逐条校验并写入账号，进度见上方进度条…",
+    doneText: summarize,
+    doneToast: d => {
+      const r = (d && d.result) || {};
+      return `导入完成：新增 ${r.added || 0} 个${r.failed || r.errors?.length ? "，有失败项" : ""}`;
+    },
+    onFinish: d => {
+      const message = summarize(d);
+      showResult(message);
+      toast(message.split("\n")[0],
+            (d.status === "failed" || (d.result && (d.result.failed || d.result.errors?.length))) ? "err" : "ok");
+      loadAccounts();
+    },
+  }).catch(e => {
+    showResult("导入请求失败，请检查服务连接后重试。");
+    console.warn("导入失败", e);
+  }).finally(() => {
+    submit.disabled = false;
+    submit.removeAttribute("aria-busy");
+    submit.innerHTML = previous;
+  });
+}
+/* ==========================================================================
+   账号导出
+   --------------------------------------------------------------------------
+   单账号为官方加密 .info，批量为加密凭证集合或明文备份。
+   ========================================================================== */
+
+/** 触发浏览器下载一个文本文件。 */
+async function downloadText(filename, text, mime = "application/json") {
+  if(window.WBMobile?.saveText) return WBMobile.saveText(filename, text, mime);
+  if(window.pywebview?.api?.save_text) {
+    const result = await pywebview.api.save_text(filename, text, mime);
+    if (!result?.ok) throw new Error(result?.cancelled ? '已取消保存' : result?.error || '文件未保存');
+    return;
+  }
+  if (window.pywebview?.api || document.documentElement.classList.contains('native-window'))
+    throw new Error('当前安装包缺少文件保存功能，请更新 EXE');
+  const blob = new Blob([text], { type: mime + ";charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** 导出时间戳，形如 20260914-1530。 */
+function exportStamp() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+async function openExport() {
+  // 账号数量走轻量 /count（只聚合 id），绝不为了显示个数字去拉全量账号 ——
+  // 几万级账号时那一下就是几秒白屏。
+  let total = (_accData || []).length;
+  let active = (_accData || []).filter(a => a.status === "active").length;
+  try {
+    const r = await api("/api/accounts/count", { method: "POST" });
+    const j = await safeJson(r);
+    if (r.ok && j.data) { total = j.data.total || 0; active = j.data.active || 0; }
+  } catch (e) { /* 计数失败不阻塞导出，退回已加载数量 */ }
+  const disabled = Math.max(0, total - active);
+  openModal(`
+    <h3 class="font-bold mb-3"><span class="wb-icon mr-1 text-sky-600"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.226 20.925A2 2 0 0 0 6 22h12a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v3.127"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="m5 11-3 3"/><path d="m5 17-3-3h10"/></svg></span> 批量导出账号</h3>
+    <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 mb-3">
+      <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+      导出内容包含登录 token，等同账号凭据，请勿外传或提交到代码仓库。
+    </div>
+    <label class="block text-sm mb-3">导出格式
+      <select id="expFormat" class="w-full border rounded-lg px-3 py-2 mt-2">
+        ${window.WBMobile ? '' : '<option value="client">官方新版加密凭证集（.jsonl）</option>'}
+        <option value="backup">系统明文备份（.jsonl）</option>
+      </select>
+    </label>
+    <label class="block text-sm mb-3">导出范围
+      <select id="expScope" class="w-full border rounded-lg px-3 py-2 mt-2">
+        <option value="all">全部（可用 ${active} + 禁用 ${disabled}）</option>
+        <option value="active">仅可用账号（${active}）</option>
+        <option value="disabled">仅禁用账号（${disabled}）</option>
+      </select>
+    </label>
+    <label class="block text-sm mb-3">筛选账号（可留空）
+      <input id="expKeyword" type="text" placeholder="按名称 / uid 关键字筛选" class="w-full border rounded-lg px-3 py-2 mt-2" />
+    </label>
+    <label class="block text-sm mb-3">分批条数（0 = 全部）
+      <input id="expLimit" type="number" min="0" step="100" value="0" class="w-full border rounded-lg px-3 py-2 mt-2" />
+      <span class="text-xs text-slate-400">设成正数可只导前 N 个，处理完再导下一批</span>
+    </label>
+    <div class="text-sm text-slate-600 mb-3">
+      当前平台账号 <b>${total}</b> 个，其中可用 <b>${active}</b> 个
+      <span class="text-xs text-slate-400">（分批写出，带进度条，不会卡住界面）</span>
+    </div>
+    <div class="flex justify-between gap-2 mt-4">
+      <button onclick="copyExport()" class="px-3 py-1.5 rounded-lg border text-sm"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></span>复制到剪贴板</button>
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+        <button onclick="exportAsync()" class="px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></span>开始导出（后台）</button>
+      </div>
+    </div>`);
+}
+
+/** 异步导出：后台线程逐条写出文件并上报进度，前端有进度条，完成后可下载。 */
+async function exportAsync() {
+  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  const format = (document.getElementById('expFormat') || {}).value || 'backup';
+  const keyword = ((document.getElementById('expKeyword') || {}).value || '').trim();
+  const limit = parseInt((document.getElementById('expLimit') || {}).value || '0', 10) || 0;
+  const body = { format, ids: [], keyword, limit };
+  if (scope === 'active') body.status = 'active';
+  else if (scope === 'disabled') body.status = 'disabled';
+  else body.include_disabled = true;   // 「当前平台全部」= 可用 + 禁用
+  await runJob({
+    title: "批量导出账号",
+    submitUrl: "/api/accounts/export-async",
+    pollUrl: "/api/accounts/job/",
+    body,
+    label: () => "", detail: () => "", amount: () => "", icon: () => "",
+    emptyText: "正在分批读取并写出账号，进度见上方进度条…",
+    doneText: d => `导出完成，共 ${d.result ? d.result.count : 0} 个账号`
+      + (d.result && d.result.skipped ? `（跳过 ${d.result.skipped} 个无效凭据）` : ""),
+    summaryHtml: d => {
+      const r = d.result || {};
+      const tok = r.file_token;
+      if (tok) return `已生成文件（${r.count} 个账号）。`
+        + `<a href="/api/accounts/export-download?token=${encodeURIComponent(tok)}" `
+        + `class="underline text-sky-600" download>点击下载</a>`;
+      return `导出完成：${r.count || 0} 个账号`;
+    },
+    doneToast: d => `已导出 ${d.result ? d.result.count : 0} 个账号`,
+    onFinish: d => {
+      loadAccounts();
+      // 成功就把文件直接推给浏览器/手机保存，省一次「再去点一下链接」。
+      const tok = d.result && d.result.file_token;
+      if (tok && d.status === "finished") {
+        try { downloadExportToken(tok); } catch (e) { console.warn("自动下载失败", e); }
+      }
+    },
+  });
+}
+
+/** 凭 token 触发浏览器下载导出文件（供 onFinish 自动下载等场景）。 */
+function downloadExportToken(token) {
+  const a = document.createElement('a');
+  a.href = `/api/accounts/export-download?token=${encodeURIComponent(token)}`;
+  a.download = "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+async function _fetchExport() {
+  const scope = $('#expScope')?.value || 'all';
+  const body = { ids: [], format: $('#expFormat')?.value || 'client' };
+  const kw = ($('#expKeyword')?.value || '').trim();
+  const lim = parseInt($('#expLimit')?.value || '0', 10) || 0;
+  if (kw) body.keyword = kw;
+  if (lim > 0) body.limit = lim;
+  if (scope === 'active') body.status = 'active';
+  else if (scope === 'disabled') body.status = 'disabled';
+  else body.include_disabled = true;
+  const r = await api("/api/accounts/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return null; }
+  if (!d.items || !d.items.length) { toast("没有可导出的账号", "err"); return null; }
+  return d;
+}
+
+async function doExport() {
+  try {
+    const d = await _fetchExport();
+    if (!d) return;
+    // Each line is independently importable as an account backup.
+    const text = d.items.map(x => JSON.stringify(JSON.parse(x))).join("\n");
+    await downloadText(`miraihub-accounts-${d.format === 'client' ? 'encrypted' : 'backup'}-${exportStamp()}.jsonl`, text, 'application/x-ndjson');
+    closeModal();
+    toast(`已导出 ${d.count} 个账号${d.skipped ? `（跳过 ${d.skipped} 个无效凭据）` : ""}`, "ok");
+  } catch(error) { toast(error.message || '文件未保存', 'err'); }
+}
+
+async function copyExport() {
+  // 剪贴板是把全部内容塞进一个字符串再交给系统，几万账号时浏览器会直接卡死。
+  // 超过阈值就明确引导走文件导出（后台写文件 + 进度条 + 下载）。
+  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  let n = (_accData || []).length;
+  try {
+    const rc = await api("/api/accounts/count", { method: "POST" });
+    const jc = await safeJson(rc);
+    if (rc.ok && jc.data) {
+      n = scope === 'active' ? (jc.data.active || 0)
+        : scope === 'disabled' ? (jc.data.disabled || 0)
+        : (jc.data.total || 0);
+    }
+  } catch (e) { /* 估算失败就按已加载数量判断 */ }
+  if (n > 2000) {
+    toast(`账号较多（约 ${n} 个），请用「开始导出（后台）」生成文件，剪贴板会卡死`, "err");
+    return;
+  }
+  const d = await _fetchExport();
+  if (!d) return;
+  const text = d.items.map(x => JSON.stringify(JSON.parse(x))).join("\n");
+  if (await writeClipboard(text)) {
+    toast(`已复制 ${d.count} 个账号到剪贴板`, "ok");
+    return;
+  }
+  // 剪贴板彻底不可用时降级：把内容放进文本框让用户手动复制
+  openModal(`
+      <h3 class="font-bold mb-3">手动复制（剪贴板不可用）</h3>
+      <textarea class="w-full border rounded-lg p-2 text-xs h-60 font-mono">${esc(text)}</textarea>
+      <div class="flex justify-end mt-3">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+      </div>`);
+}
+
+/** 导出单个账号。 */
+async function exportAcc(id, name) {
+  try {
+    const r = await api(`/api/accounts/${id}/export?format=${window.WBMobile ? 'backup' : 'client'}`);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return; }
+    const safe = String(name || d.name || d.uid || id).replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
+    await downloadText(`${safe || "account"}-${id}.info`, JSON.stringify(JSON.parse(d.item), null, 2));
+    toast(`已导出账号「${name || d.name || id}」`, "ok");
+  } catch(error) { toast(error.message || '文件未保存', 'err'); }
+}
+
+function openReauthAccount(id) {
+  openModal(`<h3 class="font-bold mb-2">重新登录 · 账号 #${Number(id)}</h3>
+    <p class="text-sm mb-4">验证通过后更新原账号凭证，保留排序、Key 绑定与历史记录。模型日限不会因重登而重置。</p>
+    <button class="console-btn mb-3" onclick="openPhoneLogin(${Number(id)})">手机号验证码登录</button>
+    <label class="block text-sm mb-2">上传凭证或备份文件 <input id="reauthFile" type="file" /></label>
+    <p class="text-xs text-slate-500 mb-2">支持新版加密、旧版明文及 .info.bak-时间戳备份；将验证凭证是否仍可用、是否属于原账号。</p>
+    <textarea id="reauthJson" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder="或粘贴最新账号凭证"></textarea>
+    <div class="flex gap-2 mt-3"><button id="reauthSubmit" class="console-btn" onclick="submitReauthAccount(${Number(id)})">验证并更新原账号</button><button class="console-btn quiet" onclick="closeModal()">取消</button></div>`);
+  $('#reauthFile').onchange = async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 1024 * 1024) { toast('凭证文件过大', 'err'); return; }
+    $('#reauthJson').value = await file.text();
+  };
+}
+async function submitReauthAccount(id) {
+  const button = $('#reauthSubmit');
+  const auth_json = $('#reauthJson').value.trim();
+  if (!auth_json) { toast('请上传或粘贴最新凭证', 'err'); return; }
+  button.disabled = true;
+  try {
+    const {ok, data} = await safeJson(await api('/api/accounts/' + Number(id) + '/reauth', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({auth_json})}));
+    if (!ok) { toast(typeof data.detail === 'string' ? data.detail : data.detail?.message || '验证失败，原凭证未修改', 'err'); return; }
+    closeModal(); toast(data.message); loadAccounts();
+  } catch (_) { toast('更新失败，请检查连接后重试', 'err'); }
+  finally { button.disabled = false; }
+}
+
+function openAddAccount(){
+  openModal(`
+    <h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> 添加单个账号</h3>
+    <input id="accName" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="名称（可选）" />
+    <textarea id="accJson" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder='粘贴单个 .info JSON'></textarea>
+    <div class="flex justify-end gap-2 mt-4">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button onclick="submitAddAccount()" class="px-3 py-1.5 rounded-lg btn-primary">添加</button>
+    </div>`);
+}
+async function submitAddAccount(){
+  const auth_json = $("#accJson").value.trim();
+  if(!auth_json){ toast("请粘贴 JSON","err"); return; }
+  const r = await api("/api/accounts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:$("#accName").value||"",auth_json})});
+  const d = await r.json().catch(()=>({}));
+  closeModal();
+  if(!r.ok){ toast("添加失败", "err"); return; }
+  // 按 uid 去重：已存在时不再新增记录，并明确告诉用户
+  if(d.duplicated){ toast(d.message || "该账号已存在，未重复添加", "err"); return; }
+  toast("已添加", "ok"); loadAccounts();
+}
+
+/* ==================== Keys ==================== */
+function keyIpBadges(summary) {
+  return (summary?.top_ips || []).slice(0,3).map(item =>
+    `<span class="badge bg-indigo-100 text-indigo-700" data-tooltip="来源 IP 用量" data-tooltip-description="${Number(item.active_requests || 0)} 路并发 · 近 24 小时 ${Number(item.requests || 0)} 次请求。">${esc(item.ip)} · ${Number(item.active_requests || 0)} 并发 · ${Number(item.requests || 0)} 次</span>`
+  ).join("");
+}
+/**
+ * 一键复制完整 Key。
+ *
+ * 之前必须点「眼睛」打开弹窗再手动复制，多两步。现在点钥匙图标直接进剪贴板。
+ * Key 只在创建/查看接口返回，所以先取一次再写剪贴板。
+ */
+async function copyKeyValue(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/keys/" + Number(id) + "/view");
+    const { ok, data } = await safeJson(r);
+    if (!ok || !data || !data.key) {
+      toast((data && data.detail) || "读取 Key 失败", "err");
+      return;
+    }
+    await copyRawText(data.key);
+  } catch (e) {
+    toast("读取 Key 失败：" + (e && e.message ? e.message : e), "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function keyRow(k) {
+  return `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${k.account_id ? `独占账号：${esc(k.account_name || ("#" + k.account_id))}` : "公共账号池"}</div></td>
+      <td class="px-4 py-3 font-mono text-xs text-slate-500">
+        <div class="key-cell">
+          <span class="key-cell-text">${esc(k.masked)}</span>
+          <button type="button" class="key-copy-btn" onclick="copyKeyValue(${Number(k.id)}, this)"
+                  data-tooltip="点击复制完整 Key">${ic("key","wb-ic")}</button>
+        </div>
+      </td>
+      <td class="px-4 py-3 text-right tnum">${k.unlimited?"∞":fmtNum(k.credit_limit)}</td>
+      <td class="px-4 py-3 text-right tnum ${k.credit_used>=k.credit_limit&&!k.unlimited?'text-red-500':''}">${fmtNum(k.credit_used)}</td>
+      <td class="px-4 py-3 text-right tnum" data-tooltip="并发与频率" data-tooltip-description="同一个 Key 的所有对话共享这里的并发上限和每分钟请求额度。空=跟随全局，0=不限。">${k.max_concurrent===0?'不限':(k.max_concurrent==null?'全局':k.max_concurrent)}<div class="text-xs text-slate-400">${k.rate_per_minute===0?'不限频率':(k.rate_per_minute==null?'频率随全局':k.rate_per_minute+' 次/分')}</div></td>
+      <td class="px-4 py-3"><button type="button" onclick="WBKeyIP.open(${Number(k.id)})" class="text-blue-600 whitespace-nowrap" data-tooltip="来源 IP" data-tooltip-description="查看该 Key 的来源 IP 与请求次数，用于识别共享范围与异常来源。"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg></span>${Number(k.ip_summary?.unique_ips || 0)} 个 / 24h</button><div class="mt-1 flex flex-wrap gap-1">${WBIP.concurrentTag(k.ip_summary?.active_requests)}${keyIpBadges(k.ip_summary)}</div></td>
+      <td class="px-4 py-3">${k.group_name
+          ? `<span class="badge bg-indigo-100 text-indigo-700" data-tooltip="已绑定分组" data-tooltip-description="该 Key 仅可使用所绑定分组内的模型，组外模型会返回 403。">${esc(k.group_name)}</span>`
+          : `<span class="text-xs text-slate-300" data-tooltip="全部模型" data-tooltip-description="未绑定分组，可用全部已启用的模型。">全部模型</span>`}</td>
+      <td class="px-4 py-3 col-status">${k.status==="active"?'<span class="badge bg-emerald-100 text-emerald-700">正常</span>':'<span class="badge bg-slate-100 text-slate-500">已停用</span>'}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        <button onclick="viewKeyUsage(${k.id},${jsv(k.name||'')})" class="text-blue-600 hover:text-blue-800 mr-1" data-tooltip="查看用量" data-tooltip-description="按模型与时间范围查看该 Key 的调用次数、Token 与积分消耗。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></svg></span></button>
+        <button onclick="viewKeyFull(${k.id},${jsv(k.name||'')})" class="text-violet-600 hover:text-violet-800 mr-1" data-tooltip="查看完整 Key" data-tooltip-description="显示该 Key 的完整密钥，可复制给客户端使用。等同凭据，请勿外传。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></span></button>
+        <button onclick="editKey(${k.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" data-tooltip="调整限额" data-tooltip-description="修改积分限额、并发与每分钟请求数。已用量不清零。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg></span></button>
+        <button onclick="toggleKeyStatus(${k.id},this)" class="${k.status==='active'?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} mr-1" data-tooltip="${k.status==='active'?'停用 Key':'启用 Key'}" data-tooltip-description="${k.status==='active'?'停用后该 Key 立即无法调用网关，配额与用量记录保留，可随时恢复。':'恢复后该 Key 按剩余额度继续可用。'}" aria-label="${k.status==='active'?'停用':'启用'} API Key">${ic(k.status==='active'?'pause':'play')}</button>
+        <button onclick="deleteKey(${k.id})" class="text-red-500 hover:text-red-700" data-tooltip="删除 Key" data-tooltip-description="删除后该 Key 立即无法调用网关，用量记录保留。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+      </td>
+    </tr>`;
+}
+async function loadKeys(){
+  const r = await api("/api/keys"); if(!r.ok) return; const d = await r.json();
+  _keyData = d.items || [];
+  renderKeyPage(1);
+  try {
+    const policy = await safeJson(await api('/api/credits/selection-policy'));
+    if (policy.ok && $('#keySelectionPolicy')) $('#keySelectionPolicy').textContent =
+      (policy.data.modes || []).find(x => x.value === policy.data.mode)?.label || '账号调度策略';
+  } catch (_) {}
+}
+/* 对外对接信息：暴露 baseurl + 启用模型列表，供把 Key 共享给外部使用 */
+/** 对接说明卡的折叠开关（默认收起，把 Key 列表顶到第一屏）。
+ *
+ * 顺手把展开状态记在 localStorage：常看的人不用每次都点开。
+ */
+function toggleApiShare(btn) {
+  const box = document.getElementById('apiShareGrid');
+  if (!box) return;
+  const open = box.classList.toggle('is-collapsed') === false;
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  try { localStorage.setItem('wb_api_share_open', open ? '1' : '0'); } catch (e) {}
+}
+
+/** 恢复上次的展开状态（首屏渲染时调用一次）。 */
+function restoreApiShareState() {
+  const box = document.getElementById('apiShareGrid');
+  const btn = document.querySelector('.api-share-toggle');
+  if (!box) return;
+  let open = false;
+  try { open = localStorage.getItem('wb_api_share_open') === '1'; } catch (e) {}
+  box.classList.toggle('is-collapsed', !open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+async function loadShareInfo() {
+  const selected = uiSelectValue('shareAddress');
+  const choices = new Map([[location.origin, '当前访问 · ' + location.host]]);
+  let status = '';
+  try {
+    const response = await api('/api/app/network');
+    if (!response.ok) throw new Error('无法读取内网地址');
+    const network = await response.json();
+    const port = location.port || (['localhost', '127.0.0.1'].includes(location.hostname) ? network.port : '');
+    const suffix = port ? ':' + port : '';
+    choices.set('http://127.0.0.1' + suffix, '本机 · 127.0.0.1' + suffix);
+    for (const ip of network.lan_ips || []) choices.set('http://' + ip + suffix, '局域网 · ' + ip + suffix);
+    if (!(network.lan_ips || []).length) status = '未检测到内网 IPv4，请检查 Wi-Fi 或有线网络连接。';
+  } catch (_) { status = '内网地址读取失败，可点击刷新重试。'; }
+  const picker = $('#shareAddressWrap');
+  if (picker) {
+    const value = choices.has(selected) ? selected : location.origin;
+    picker.innerHTML = uiSelectHTML('shareAddress', {value, options:[...choices].map(([value,label])=>({value,label})), onChange:renderShareAddress});
+    initUISelects([['shareAddress','连接地址']]);
+    renderShareAddress(value);
+  }
+  if ($('#shareNetworkStatus')) $('#shareNetworkStatus').textContent = status;
+  try {
+    // 可用模型必须**按模型聚合**：同一个模型在各平台有不同 system 名
+    // （hy3 / dmodel / spark-x2.6…），平铺会把同一模型重复列好几次。
+    // 这里只显示一个 chip，悬停展开各平台的具体 model_id 与倍率。
+    const r = await api("/api/models/aggregate");
+    const { ok, data } = await safeJson(r);
+    if (!ok) return;
+    const groups = (data.items || []).filter(item => item.enabled_any !== false);
+    const box = $("#shareModels");
+    if ($("#shareModelCount")) {
+      $("#shareModelCount").textContent = groups.length;
+    }
+    if (box) {
+      box.innerHTML = groups.length
+        ? groups.map(item => {
+            const platforms = (item.platforms || []).filter(p => p.enabled !== false);
+            // model_id 点一下就能复制 —— 用户经常要「用某个平台的那个 id」。
+            // 因为不同平台常有**同名 id**（dfmodel / hy3 这种），
+            // 所以每行都标明归属平台，避免复制错。
+            // 多平台同名时，光复制 model_id 分不清落点。这里直接把
+            // 「带平台后缀」的名字作为可复制值（`xxx-workbuddy`），
+            // 用户粘到 model 字段就固定走那个平台，不用再加 header。
+            // 单平台模型没必要加后缀（加了也能用，但名字更长）。
+            const needSuffix = platforms.length > 1;
+            const detail = platforms.map(p => {
+              const pid = p.platform_id || p.platform;
+              const copyValue = needSuffix ? `${p.model_id}-${pid}` : p.model_id;
+              return `<div class="model-chip-row">
+                <span>${esc(p.platform_label || p.platform)}</span>
+                <code data-copy-model="${esc(copyValue)}"
+                      data-tooltip="点击复制${needSuffix ? " · 带平台后缀，直接指定该平台" : ""}"
+                >${esc(needSuffix ? copyValue : p.model_id)}</code>
+                <span>${p.multiplier == null ? "—"
+                  : (Number(p.multiplier) === 0 ? "FREE" : "×" + p.multiplier)}</span>
+              </div>`;
+            }).join("");
+            return `<span class="model-chip-wrap">
+              <span class="model-chip"><b>${esc(item.name)}</b>
+                ${platforms.length > 1
+                  ? `<span class="model-chip-more">${platforms.length} 平台</span>` : ""}
+              </span>
+              <span class="model-chip-pop">
+                <div class="model-chip-pop-head">
+                  <b>${esc(item.name)}</b>
+                  <span>共 ${platforms.length} 个平台可调度</span>
+                </div>
+                ${detail || "<div>暂无平台明细</div>"}
+                <div class="model-chip-hint">
+                  点 ID 复制；带平台后缀的名字会**直接路由到该平台**
+                </div>
+              </span>
+            </span>`;
+          }).join("")
+        : '<span class="text-xs text-slate-400">未配置模型白名单（放行全部模型）</span>';
+      if (box) {
+        box.querySelectorAll("[data-copy-model]").forEach(el => {
+          el.addEventListener("click", event => {
+            event.stopPropagation();
+            // copyText() 期望的是**选择器**，不是文本内容 —— 直接传文字
+            // 会让 $(sel) 返回 null，函数静默 return，于是「提示成功但没复制」。
+            copyRawText(el.dataset.copyModel);
+          });
+        });
+      }
+    }
+  } catch (e) {}
+}
+function renderShareAddress(origin) {
+  // 两个 SDK 对 base_url 的约定不同，必须分别给出：
+  //   OpenAI 系    -> origin + "/v1"（SDK 自己拼 /chat/completions）
+  //   Anthropic 系 -> origin        （SDK 自己拼 /v1/messages，再带 /v1 会变成 /v1/v1/messages）
+  // 两者共用同一批 Key 与配额。
+  const base = origin + "/v1";
+  if ($("#shareBaseUrl")) $("#shareBaseUrl").textContent = base;
+  if ($("#shareBaseUrlClaude")) $("#shareBaseUrlClaude").textContent = origin;
+  if ($('#shareCurlAudio')) $('#shareCurlAudio').textContent = [
+    `curl "${base}/audio/transcriptions"`,
+    '  -H "Authorization: Bearer <你的 Key>"',
+    '  -F "file=@recording.webm"',
+    '  -F "model=workbuddy-asr"',
+    '  -F "response_format=json"'
+  ].join(' \\\n');
+  if ($('#sharePythonAudio')) $('#sharePythonAudio').textContent = [
+    'from openai import OpenAI',
+    `client = OpenAI(api_key="<你的 Key>", base_url="${base}")`,
+    'with open("recording.webm", "rb") as audio:',
+    '    result = client.audio.transcriptions.create(model="workbuddy-asr", file=audio)',
+    'print(result.text)'
+  ].join('\n');
+  if ($('#sharePythonImages')) $('#sharePythonImages').textContent = [
+    'from openai import OpenAI',
+    `client = OpenAI(api_key="<你的 Key>", base_url="${base}")`,
+    'result = client.images.generate(model="hunyuan-image-alpha", prompt="白色背景上的蓝色圆形", n=1)',
+    'print(result.data[0].url)',
+    'with open("input.png", "rb") as image:',
+    '    edited = client.images.edit(model="hunyuan-image-alpha", image=image, prompt="把圆形改成绿色")',
+    'print(edited.data[0].url)'
+  ].join('\n');
+  if ($('#shareCurlVideo')) $('#shareCurlVideo').textContent = [
+    '# 1) 创建任务：立即返回 queued，不阻塞等待生成',
+    `curl "${base}/videos"`,
+    '  -H "Authorization: Bearer <你的 Key>"',
+    '  -H "Content-Type: application/json"',
+    '  -d \'{"model":"kling-video-v3","prompt":"一只猫在弹钢琴","seconds":"4","size":"1280x720"}\'',
+    '',
+    '# 2) 轮询（用上一步返回的 id），直到 status=completed',
+    `curl "${base}/videos/<视频 ID>" -H "Authorization: Bearer <你的 Key>"`,
+    '',
+    '# 3) 下载 MP4',
+    `curl "${base}/videos/<视频 ID>/content" -H "Authorization: Bearer <你的 Key>" -o output.mp4`
+  ].join(' \\\n');
+  if ($('#sharePythonVideo')) $('#sharePythonVideo').textContent = [
+    'import time',
+    'from openai import OpenAI',
+    `client = OpenAI(api_key="<你的 Key>", base_url="${base}")`,
+    '',
+    'video = client.videos.create(',
+    '    model="kling-video-v3",',
+    '    prompt="一只猫在弹钢琴",',
+    '    seconds="4",',
+    '    size="1280x720",',
+    ')',
+    'print(video.id, video.status)          # queued',
+    '',
+    'while video.status not in ("completed", "failed"):',
+    '    time.sleep(5)',
+    '    video = client.videos.retrieve(video.id)',
+    '',
+    'if video.status == "completed":',
+    '    content = client.videos.download_content(video.id)',
+    '    content.write_to_file("output.mp4")',
+    '    print("已保存 output.mp4")',
+    '',
+    '# 图生视频：传入参考图（HTTPS 或 data: URL）',
+    'video = client.videos.create(model="kling-video-v3",',
+    '                             input_reference="https://example.com/frame.png",',
+    '                             prompt="镜头缓慢推近")'
+  ].join('\n');
+  if ($("#shareCurl")) {
+    $("#shareCurl").textContent =
+      "curl " + base + "/chat/completions \\\n" +
+      '  -H "Authorization: Bearer <你的 Key>" \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      "  -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}'";
+  }
+  if ($("#shareCurlClaude")) {
+    $("#shareCurlClaude").textContent =
+      "curl " + origin + "/v1/messages \\\n" +
+      '  -H "x-api-key: <你的 Key>" \\\n' +
+      '  -H "anthropic-version: 2023-06-01" \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      "  -d '{\"model\":\"claude-sonnet-4-5-20250929\",\"max_tokens\":1024," +
+      "\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}'";
+  }
+}
+function renderKeyPage(p) {
+  const term = (_keyTerm = ($("#keySearch") ? $("#keySearch").value : "").trim().toLowerCase());
+  const data = term ? _keyData.filter(k => (k.name||"").toLowerCase().includes(term)) : _keyData;
+  const total = data.length, totalPages = Math.max(1, Math.ceil(total / PS));
+  p = Math.min(Math.max(1, p), totalPages);
+  const slice = data.slice((p - 1) * PS, p * PS);
+  $("#keyBody").innerHTML = slice.map(keyRow).join("") ||
+    `<tr><td colspan="8" class="px-4 py-8 text-center text-slate-400">${term ? "无匹配的 Key" : "还没有 Key，点「创建 Key」"}</td></tr>`;
+  $("#keyPager").innerHTML = pagerHtml(total, p, totalPages, "renderKeyPage");
+}
+async function keyAccountOptions(key) {
+  const r = await api("/api/accounts");
+  const { ok, data } = await safeJson(r);
+  if (!ok) throw new Error("账号列表加载失败，请重试");
+  const options = [{ value: "0", label: "不绑定（使用公共账号池）" }].concat(
+    (data.items || []).filter(a => !a.bound_key_id || a.bound_key_id === key?.id)
+      .map(a => ({ value: String(a.id), label: `${a.name || a.uid || "账号"} #${a.id} · ${a.balance_remain} 积分${a.status !== "active" ? " · 已禁用" : ""}` })));
+  if (key?.account_id && !options.some(o => o.value === String(key.account_id)))
+    options.push({ value: String(key.account_id), label: `原绑定账号 #${key.account_id}（不存在）` });
+  return options;
+}
+/**
+ * 独占平台下拉（空 = 不限制）。
+ *
+ * 与账号多选联动：选了平台，账号列表只显示该平台的。
+ */
+function keyPlatformSelect(id, platforms, value) {
+  const options = [{ value: "", label: "不限制（全部平台）" }].concat(
+    (platforms || []).map(item => ({
+      value: String(item.storage || item.id || "").toLowerCase(),
+      label: item.label || item.storage || item.id,
+    })).filter(item => item.value));
+  return `<div class="mb-2">
+    <label class="text-xs text-slate-500">独占平台（可选）</label>
+    <div class="mt-1">${uiSelectHTML(id, {
+      value: String(value || ""), options,
+      // uiSelectHTML 读的是 `onChange`（驼峰），写 `onchange` 会被忽略
+      onChange: onKeyPlatformChange,
+    })}</div>
+    <p class="text-[11px] text-slate-400 mt-1">绑定后该 Key 只在这个平台的账号池里选号；请求头 <code>X-Platform</code> 仍可覆盖。</p>
+  </div>`;
+}
+
+/**
+ * 独占账号**选择器**：select 形态 + 搜索筛选（可多选）。
+ *
+ * 为什么不再用裸 checkbox 列表：平台一多、账号一多，长列表会把弹窗撑爆，
+ * 也看不出「已选了几个」。这里做成下拉面板：触发器显示已选摘要，
+ * 面板里带搜索框，勾选即时写回隐藏 input（提交逻辑只读隐藏值）。
+ *
+ * @param {string} prefix   "k"（创建）/ "ek"（编辑）
+ */
+function keyAccountPicker(prefix, accounts, selected, platform) {
+  const picked = new Set((selected || []).map(Number));
+  const rows = (accounts || []).filter(item => {
+    if (!platform) return true;
+    return String(item.platform || "").toLowerCase() === platform;
+  });
+  const summary = picked.size
+    ? `已选 ${picked.size} 个账号 · 只用这些，不换号`
+    : "不限制（使用公共账号池）";
+  const list = rows.length ? rows.map(item => {
+    const on = picked.has(Number(item.id));
+    const name = esc(item.name || item.uid || "账号") + " #" + item.id;
+    const sub = [
+      platform ? "" : (item.platform || ""),
+      `${item.balance_remain ?? 0} 积分`,
+      item.status !== "active" ? "已禁用" : "",
+    ].filter(Boolean).map(esc).join(" · ");
+    return `<label class="key-picker-row" data-search="${esc(
+        `${item.name || ""} ${item.uid || ""} ${item.id} ${item.platform || ""}`.toLowerCase())}">
+      <input type="checkbox" value="${item.id}" ${on ? "checked" : ""}
+             data-acc-prefix="${prefix}" onchange="keyAccChange(${jsv(prefix)})">
+      <span class="key-picker-row-main">
+        <span class="key-picker-row-name">${name}</span>
+        <span class="key-picker-row-sub">${sub || "—"}</span>
+      </span>
+    </label>`;
+  }).join("") : `<p class="sentinel-empty" style="padding:8px 6px">${
+    platform ? "该平台下没有可用账号" : "没有可用账号"}</p>`;
+  return `<div class="mb-2 key-picker" id="${prefix}AccountPicker">
+    <label class="text-xs text-slate-500">独占绑定账号（可选，多选）</label>
+    <div class="mt-1">
+      <button type="button" class="key-picker-trigger"
+              onclick="keyAccToggle(${jsv(prefix)})">
+        <span class="key-picker-summary${picked.size ? " has-value" : ""}"
+              id="${prefix}AccountSummary">${esc(summary)}</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="key-picker-pop" id="${prefix}AccountPop" hidden>
+        <input class="key-picker-search" id="${prefix}AccountSearch"
+               placeholder="搜索账号 / UID / 平台" autocomplete="off"
+               oninput="keyAccFilter(${jsv(prefix)}, this.value)">
+        <div class="key-picker-list" id="${prefix}AccountList">${list}</div>
+        <div class="key-picker-foot">
+          <span>${rows.length} 个可选账号</span>
+          <button type="button" class="key-picker-clear"
+                  onclick="keyAccClear(${jsv(prefix)})">清空选择</button>
+        </div>
+      </div>
+      <input type="hidden" id="${prefix}AccountIds"
+             value="${JSON.stringify([...picked])}">
+    </div>
+    <p class="text-[11px] text-slate-400 mt-1">不勾选 = 使用公共账号池；勾选后该 Key 只用这些账号，账号不可用时不换号。</p>
+  </div>`;
+}
+
+function keyAccToggle(prefix) {
+  const pop = document.getElementById(prefix + "AccountPop");
+  if (!pop) return;
+  const willOpen = pop.hidden;
+  // 同一弹窗里只开一个
+  document.querySelectorAll(".key-picker-pop").forEach(node => { node.hidden = true; });
+  pop.hidden = !willOpen;
+  if (willOpen) {
+    // 弹窗本体是 max-h-[88vh] + overflow-y-auto：面板若用 absolute 定位，
+    // 一定会被滚动容器裁掉。
+    // 因此改成 fixed 定位，并按触发器的实际位置贴上去，再按视口剩余空间
+    // 决定向下还是向上展开。滚动/缩放时重新贴一次。
+    keyAccPlace(prefix);
+    const search = document.getElementById(prefix + "AccountSearch");
+    if (search) { search.value = ""; keyAccFilter(prefix, ""); search.focus(); }
+  }
+}
+
+/** 把账号面板贴到触发器下方（空间不够则翻到上方），并夹在视口内。 */
+function keyAccPlace(prefix) {
+  const pop = document.getElementById(prefix + "AccountPop");
+  if (!pop || pop.hidden) return;
+  const trigger = pop.parentElement && pop.parentElement.querySelector(".key-picker-trigger");
+  if (!trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const margin = 8;
+  // 面板不必和触发器同宽：它是「列表 + 搜索」，铺满 1000px 后每行留白太多，
+  // 反而看不出层级。上限 440px，左边缘与触发器对齐并夹在视口内。
+  const width = Math.min(rect.width, 440, window.innerWidth - margin * 2);
+  const spaceBelow = window.innerHeight - rect.bottom - margin;
+  const spaceAbove = rect.top - margin;
+  // 面板理想高度：搜索框 38 + 列表 240 + 脚注 28 + 内边距 16 ≈ 340
+  const ideal = 340;
+  const flip = spaceBelow < Math.min(ideal, 240) && spaceAbove > spaceBelow;
+  const space = flip ? spaceAbove : spaceBelow;
+  const maxHeight = Math.max(170, Math.min(ideal, space));
+  pop.style.position = "fixed";
+  pop.style.width = width + "px";
+  pop.style.left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin) + "px";
+  pop.style.maxHeight = maxHeight + "px";
+  pop.classList.toggle("flip", flip);
+  if (flip) {
+    // 关键：base 样式里有 `top:0`，不显式写 `auto` 的话 top 会压过 bottom，
+    // 面板被钉在视口顶部（实测矮视口下面板跑到 y=0，完全错位）。
+    pop.style.top = "auto";
+    pop.style.bottom = (window.innerHeight - rect.top + 6) + "px";
+  } else {
+    pop.style.bottom = "auto";
+    pop.style.top = (rect.bottom + 6) + "px";
+  }
+}
+
+// 弹窗内滚动 / 窗口缩放时重新定位（面板是 fixed，不跟随滚动会飘走）
+(function () {
+  function reposition() {
+    document.querySelectorAll(".key-picker-pop").forEach(node => {
+      if (!node.hidden) keyAccPlace(node.id.replace(/AccountPop$/, ""));
+    });
+  }
+  window.addEventListener("resize", reposition);
+  document.addEventListener("scroll", reposition, true);
+})();
+
+function keyAccFilter(prefix, term) {
+  const query = String(term || "").trim().toLowerCase();
+  document.querySelectorAll(`#${prefix}AccountList .key-picker-row`).forEach(row => {
+    row.style.display = !query || (row.dataset.search || "").includes(query) ? "" : "none";
+  });
+}
+
+function keyAccChange(prefix) {
+  const ids = [...document.querySelectorAll(`#${prefix}AccountList input[type="checkbox"]:checked`)]
+    .map(node => Number(node.value)).filter(value => Number.isFinite(value) && value > 0);
+  const hidden = document.getElementById(prefix + "AccountIds");
+  if (hidden) hidden.value = JSON.stringify(ids);
+  const summary = document.getElementById(prefix + "AccountSummary");
+  if (summary) {
+    summary.textContent = ids.length
+      ? `已选 ${ids.length} 个账号 · 只用这些，不换号`
+      : "不限制（使用公共账号池）";
+    summary.classList.toggle("has-value", ids.length > 0);
+  }
+}
+
+function keyAccClear(prefix) {
+  document.querySelectorAll(`#${prefix}AccountList input[type="checkbox"]`)
+    .forEach(node => { node.checked = false; });
+  keyAccChange(prefix);
+}
+
+document.addEventListener("click", event => {
+  if (event.target.closest(".key-picker")) return;
+  document.querySelectorAll(".key-picker-pop").forEach(node => { node.hidden = true; });
+});
+
+/** 聚合开关（默认开）。 */
+function keyAggregateSwitch(value, inputId) {
+  const on = value !== false;
+  const id = inputId || "kAggregate";
+  return `<label class="ui-check mb-2">
+    <input id="${id}" type="checkbox" ${on ? "checked" : ""}>
+    <span>
+      <strong>聚合模型</strong>
+      <span class="ui-check-hint">开启后模型列表按「同模型跨平台」合并，调用聚合名可由网关挑平台转发。</span>
+    </span>
+  </label>`;
+}
+
+function keyAccountSelect(id, options, value = 0) {
+  return `<div class="mb-3"><label class="text-xs text-slate-500">独占绑定账号（可选）</label>
+    <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
+    <p class="text-[11px] text-slate-400 mt-1">绑定后公共池跳过该账号；此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
+}
+/** 拉平台列表 + 全平台账号（Key 表单用）。 */
+async function keyFormData() {
+  let platforms = [];
+  let accounts = [];
+
+  // 1) 平台列表：按 storage_platform 去重（trae-cn/trae-intl 同为 trae），
+  //    保留每个 storage 的第一个 label。
+  try {
+    const r = await api("/api/platforms");
+    const { ok, data } = await safeJson(r);
+    if (ok && data && Array.isArray(data.items)) {
+      const byStorage = new Map();
+      for (const item of data.items) {
+        const storage = String(
+          item.storage_platform || item.id || "").toLowerCase();
+        if (!storage || byStorage.has(storage)) continue;
+        byStorage.set(storage, {
+          storage,
+          label: item.label || storage,
+        });
+      }
+      platforms = [...byStorage.values()];
+    }
+  } catch (error) {
+    console.warn("[keyForm] 平台列表加载失败", error);
+  }
+
+  // 2) 全平台账号：显式带 all_platforms=1，否则只回当前平台的
+  try {
+    const r = await api("/api/accounts?all_platforms=1");
+    const { ok, data } = await safeJson(r);
+    if (ok && data && Array.isArray(data.items)) accounts = data.items;
+  } catch (error) {
+    console.warn("[keyForm] 账号列表加载失败", error);
+  }
+
+  return { platforms, accounts };
+}
+
+/** 平台切换时重渲染账号选择器。 */
+async function onKeyPlatformChange() {
+  // 创建弹窗用 kPlatform/kAccountsHost，编辑弹窗用 ekPlatform/ekAccountsHost。
+  // 哪个存在就操作哪个（两个弹窗不会同时打开）。
+  const isEdit = Boolean(document.querySelector("#ekPlatform"));
+  const prefix = isEdit ? "ek" : "k";
+  // ⚠️ `uiSelectHTML` 是自定义组件，值在模块内的映射表里，
+  // **DOM 上读不到 `.value`** —— 必须用项目自己的 `uiSelectValue()`。
+  const platform = String(
+    uiSelectValue(isEdit ? "ekPlatform" : "kPlatform") || "").toLowerCase();
+  const host = document.querySelector(isEdit ? "#ekAccountsHost" : "#kAccountsHost");
+  if (!host) return;
+  const state = window._keyFormState || {};
+  const picked = keySelectedAccountIds(prefix);
+  host.innerHTML = keyAccountPicker(prefix, state.accounts || [], picked, platform);
+  window._keyFormState = { ...state, platform, picked };
+}
+
+/** 收集多选账号 id（从隐藏 input 读，选择器自己维护它）。 */
+function keySelectedAccountIds(prefix) {
+  const hidden = document.getElementById((prefix || "k") + "AccountIds");
+  if (!hidden) return [];
+  try {
+    const value = JSON.parse(hidden.value || "[]");
+    return Array.isArray(value)
+      ? value.map(Number).filter(item => Number.isFinite(item) && item > 0)
+      : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function openAddKey(){
+  const formData = await keyFormData();
+  window._keyFormState = { accounts: formData.accounts, platform: "", picked: [] };
+  // 拉一次分组列表填下拉；失败不阻塞创建（下拉退化为「不限制」）
+  let groups = [];
+  try {
+    const r = await api("/api/groups");
+    const { ok, data } = await safeJson(r);
+    if (ok) groups = data.items || [];
+  } catch (e) { /* 忽略：无分组时仍可创建不限制的 Key */ }
+
+
+  openModal(`
+    <h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg></span> 创建 API Key</h3>
+    <input id="kName" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="名称（可选）" />
+    <label class="ui-check mb-2"><input id="kUnlimited" type="checkbox" checked
+      onchange="if(this.checked) document.getElementById('kLimit').value=''" />
+      <span><strong>不限额（∞，默认）</strong>
+        <span class="ui-check-hint">取消后可填写积分上限；0 表示零额度。</span></span></label>
+    <input id="kLimit" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="留空不限额；填写 0 表示零额度" oninput="document.getElementById('kUnlimited').checked=this.value.trim()===''" />
+    <input id="kMaxConcurrent" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-1 text-sm" placeholder="并发上限（空=全局，0=不限）" data-tooltip="key 并发≠账号在途上限（ADMIN_POOL_MAX_IN_FLIGHT）" />
+    <p class="text-[11px] text-slate-400 mb-2">并发：空=全局默认；0=不限；N=此 Key 所有对话合计最多 N 个在途请求，每个对话可同时发出多个请求。</p>
+    <input id="kRatePerMinute" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-1 text-sm" placeholder="每分钟请求数（空=全局，0=不限）" />
+    <p class="text-[11px] text-slate-400 mb-2">频率与并发独立。提高并发不会提高每分钟请求额度；积分不限额也不会解除流量限制。</p>
+    <div class="mb-2">
+      <label class="text-xs text-slate-500">模型分组（可选）</label>
+      <div class="mt-1">${uiSelectHTML("kGroup", {
+        value: "0",
+        options: [{ value: "0", label: "不限制（全部可用模型）" }].concat(
+          groups.map(g => ({ value: String(g.id), label: `${g.name}（${g.effective_count} 个模型）` }))),
+      })}</div>
+      <p class="text-[11px] text-slate-400 mt-1">选择后该 Key 只能调用组内模型，调用组外模型返回 403。</p>
+    </div>
+    ${keyAggregateSwitch(false)}
+    ${keyPlatformSelect("kPlatform", formData.platforms, "")}
+    <div id="kAccountsHost">
+      ${keyAccountPicker("k", formData.accounts, [], "")}
+    </div>
+    <input id="kNote" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="备注（可选）" />
+    <div class="flex justify-end gap-2 mt-2">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button onclick="submitAddKey()" class="px-3 py-1.5 rounded-lg btn-primary">创建</button>
+    </div>`);
+}
+async function submitAddKey(){
+  const unlimited = $("#kUnlimited").checked || $("#kLimit").value.trim() === "";
+  const mcRaw = $("#kMaxConcurrent").value;
+  const rpmRaw = $("#kRatePerMinute").value;
+  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0),
+    // 新控件：聚合开关 / 独占平台 / 多选账号
+    aggregate: ($("#kAggregate")||{}).checked !== false,
+    platform: String(uiSelectValue("kPlatform") || "").toLowerCase(),
+    account_ids: keySelectedAccountIds("k"),
+    max_concurrent: mcRaw === "" ? null : Number(mcRaw), rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw) };
+  const r = await api("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const d = await r.json().catch(()=>({}));
+  if(r.ok){
+    openModal(`<h3 class="font-bold mb-3 text-emerald-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span> Key 已创建</h3>
+      <p class="text-xs text-slate-500 mb-2">可随时在列表中点击「眼睛」图标再次查看：</p>
+      <div class="flex gap-2"><input id="newKey" readonly class="w-full border rounded-lg px-2 py-2 text-xs font-mono" value="${esc(d.key)}"><button onclick="copyText('#newKey')" class="px-3 bg-wb text-white rounded-lg text-sm">复制</button></div>
+      <div class="flex justify-end mt-4"><button onclick="closeModal();loadKeys()" class="px-3 py-1.5 rounded-lg border text-sm">完成</button></div>`);
+  } else { toast("创建失败：" + (d.detail || "未知错误"),"err"); }
+}
+async function viewKeyFull(id, name){
+  openModal(`<h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></span> 查看 Key — ${esc(name)}</h3><p class="text-xs text-slate-400 mb-3">加载中...</p><div id="keyFullBody"></div>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+  try{
+    const r = await api("/api/keys/"+id+"/view");
+    const { ok, data:d } = await safeJson(r);
+    if(!r.ok){ $("#keyFullBody").innerHTML=`<p class="text-red-500 text-sm">读取失败: ${esc(d.detail||"")}</p>`; return; }
+    $("#keyFullBody").innerHTML = `
+      <div class="mb-2 text-xs text-slate-400">创建于 ${fmtTime(d.created_at)}</div>
+      <div class="flex gap-2"><input readonly id="fullKeyValue" class="w-full border rounded-lg px-3 py-2 text-sm font-mono bg-slate-50" value="${esc(d.key)}"><button onclick="copyText('#fullKeyValue')" class="px-3 bg-wb text-white rounded-lg text-sm shrink-0">复制</button></div>`;
+  } catch(e){ $("#keyFullBody").innerHTML=`<p class="text-red-500 text-sm">异常: ${esc(e.message)}</p>`; }
+}
+async function viewKeyUsage(id, name){
+  openModal(`<h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></svg></span> Key 用量 — ${esc(name)}</h3><p class="text-xs text-slate-400 mb-3">加载中...</p><div id="keyUsageBody"></div>
+    <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+  try{
+    const r = await api("/api/keys/"+id+"/usage");
+    const { ok, data:d } = await safeJson(r);
+    if(!ok){ $("#keyUsageBody").innerHTML=`<p class="text-red-500 text-sm">读取失败: ${esc(d.detail||"")}</p>`; return; }
+    const pct = d.usage_percent ?? null;
+    const barColor = d.unlimited ? 'bg-emerald-500' : (pct >= 90 ? 'bg-red-500' : pct >= 60 ? 'bg-amber-500' : 'bg-emerald-500');
+    $("#keyUsageBody").innerHTML = `
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        <div class="p-3 bg-slate-50 rounded-lg"><div class="text-xs text-slate-400">限额</div><div class="text-lg font-bold">${d.unlimited?'∞（无限制）':d.credit_limit}</div></div>
+        <div class="p-3 bg-slate-50 rounded-lg"><div class="text-xs text-slate-400">已用</div><div class="text-lg font-bold">${d.credit_used}</div></div>
+        <div class="p-3 bg-slate-50 rounded-lg"><div class="text-xs text-slate-400">剩余</div><div class="text-lg font-bold ${d.unlimited?'text-emerald-600':Number(d.credit_remaining)<=0?'text-red-500':'text-emerald-600'}">${d.unlimited?'∞':d.credit_remaining}</div></div>
+        <div class="p-3 bg-slate-50 rounded-lg"><div class="text-xs text-slate-400">使用率</div><div class="text-lg font-bold">${pct!==null?pct+'%':'N/A'}</div></div>
+      </div>
+      ${!d.unlimited ? `<div class="mb-2"><div class="w-full h-3 bg-slate-200 rounded-full overflow-hidden"><div class="h-full ${barColor} transition-all" style="width:${Math.min(pct||0,100)}%"></div></div></div>` : ''}
+      <div class="text-xs text-slate-400">状态: ${d.status==='active'?'<span class="text-emerald-600">正常</span>':'<span class="text-red-500">已停用</span>'} · 创建: ${fmtTime(d.created_at)}</div>`;
+  } catch(e){ $("#keyUsageBody").innerHTML=`<p class="text-red-500 text-sm">异常: ${esc(e.message)}</p>`; }
+}
+/* 编辑 Key：名称 / 分组 / 限额 / 重置已用 */
+async function editKey(id){
+  const k = _keyData.find(x => x.id === id);
+  if (!k) { toast("Key 不存在", "err"); return; }
+
+  let accountOptions;
+  try { accountOptions = await keyAccountOptions(k); } catch(e) { toast(e.message, "err"); return; }
+  // 平台列表 + 全平台账号（独占平台 / 多选账号用）
+  const formData = await keyFormData();
+  window._keyFormState = {
+    accounts: formData.accounts,
+    platform: k.platform || "",
+    picked: (k.account_ids || []).map(Number),
+  };
+  // 分组下拉数据；拉取失败也不阻塞编辑（退化为仅「不限制」）
+  let groups = [];
+  try {
+    const r = await api("/api/groups");
+    const { ok, data } = await safeJson(r);
+    if (ok) groups = data.items || [];
+  } catch (e) { /* 忽略 */ }
+
+  const groupOpts = [{ value: "0", label: "不限制（全部可用模型）" }]
+    .concat(groups.map(g => ({ value: String(g.id), label: `${g.name}（${g.effective_count} 个模型）` })));
+
+  openModal(`<h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg></span> 编辑 API Key</h3>
+    <label class="block text-xs text-slate-500 mb-1">名称</label>
+    <input id="ekName" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm" placeholder="名称" value="${esc(k.name || '')}" />
+
+    <label class="block text-xs text-slate-500 mb-1">模型分组</label>
+    <div class="mb-3">${uiSelectHTML("ekGroup", {
+      value: String(k.group_id || 0), options: groupOpts,
+    })}</div>
+    <p class="text-[11px] text-slate-400 -mt-2 mb-3">不限制 = 可用全部启用模型；选了分组则只能调用组内模型。</p>
+
+    ${keyAggregateSwitch(k.aggregate !== false, "ekAggregate")}
+    ${keyPlatformSelect("ekPlatform", formData.platforms, k.platform || "")}
+    <div id="ekAccountsHost">
+      ${keyAccountPicker("ek", formData.accounts, k.account_ids || [], k.platform || "")}
+    </div>
+    <label class="block text-xs text-slate-500 mb-1">积分限额（credits）</label>
+    <input id="ekLimit" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm" value="${k.unlimited ? "" : k.credit_limit}" placeholder="留空不限额；填写 0 表示零额度" oninput="document.getElementById('ekUnlimited').checked=this.value.trim()===''" />
+    <label class="ui-check mb-2"><input id="ekUnlimited" type="checkbox" onchange="if(this.checked) document.getElementById('ekLimit').value=''" ${k.unlimited ? "checked" : ""} />
+      <span><strong>不限额（∞）</strong>
+        <span class="ui-check-hint">取消后可填写积分上限。</span></span></label>
+    <label class="ui-check mb-2"><input id="ekReset" type="checkbox" />
+      <span><strong>重置已用额度</strong>
+        <span class="ui-check-hint">当前已用 ${k.credit_used}，勾选后归零（不影响历史日志）。</span></span></label>
+
+    <label class="block text-xs text-slate-500 mb-1">并发上限</label>
+    <input id="ekMaxConcurrent" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-1 text-sm" value="${k.max_concurrent == null ? "" : k.max_concurrent}" placeholder="空=全局，0=不限" data-tooltip="key 并发≠账号在途上限（ADMIN_POOL_MAX_IN_FLIGHT）" />
+    <p class="text-[11px] text-slate-400 mb-2">空=全局默认；0=不限；N=此 Key 所有对话合计最多 N 个在途请求，每个对话可同时发出多个请求。</p>
+    <label class="block text-xs text-slate-500 mb-1">每分钟请求数</label>
+    <input id="ekRatePerMinute" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-1 text-sm" value="${k.rate_per_minute == null ? "" : k.rate_per_minute}" placeholder="空=全局，0=不限" />
+    <p class="text-[11px] text-slate-400 mb-2">频率与并发独立。提高并发不会提高每分钟请求额度；积分不限额也不会解除流量限制。</p>
+
+    <div class="flex justify-end gap-2 mt-2"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+    <button onclick="submitEditKey(${id})" class="px-3 py-1.5 rounded-lg btn-primary">保存</button></div>`);
+}
+
+async function submitEditKey(id){
+  const name = ($("#ekName").value || "").trim();
+  if (!name) { toast("名称不能为空", "err"); return; }
+  const mcRaw = $("#ekMaxConcurrent").value;
+  const rpmRaw = $("#ekRatePerMinute").value;
+  const body = {
+    name,
+    group_id: Number(uiSelectValue("ekGroup") || 0),
+    // 新控件：聚合 / 独占平台 / 多选账号
+    aggregate: ($("#ekAggregate")||{}).checked !== false,
+    platform: String(uiSelectValue("ekPlatform") || "").toLowerCase(),
+    account_ids: keySelectedAccountIds("ek"),
+    credit_limit: Number($("#ekLimit").value || 0),
+    unlimited: $("#ekUnlimited").checked || $("#ekLimit").value.trim() === "",
+    max_concurrent: mcRaw === "" ? null : Number(mcRaw),
+    rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw),
+    reset_used: $("#ekReset").checked,
+  };
+  const r = await api("/api/keys/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const { ok, data: d } = await safeJson(r);
+  if (!ok) { toast("保存失败: " + (d.detail || "未知错误"), "err"); return; }
+  closeModal(); toast("已保存"); loadKeys(); loadGroups(); loadAccounts();
+}
+async function toggleKeyStatus(id, button) {
+  const key = _keyData.find(item => item.id === id);
+  if (!key) return;
+  const status = key.status === 'active' ? 'revoked' : 'active';
+  if (button) button.disabled = true;
+  try {
+    const response = await api('/api/keys/' + id, {method: 'PATCH',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})});
+    const result = await safeJson(response);
+    if (!result.ok) { toast(result.data.detail || '状态更新失败', 'err'); return; }
+    toast(status === 'active' ? 'Key 已启用' : 'Key 已停用，排队请求将停止，已发往上游的请求继续完成');
+    await loadKeys();
+  } catch (error) {
+    toast('状态更新失败：' + (error.message || error), 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+async function deleteKey(id){ if(!await uiConfirm({message:"确认删除该 Key？此操作不可恢复。如需临时停止调用，请使用停用按钮。", title:"删除 API Key"}))return; const r=await api("/api/keys/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"删除失败", r.ok?"ok":"err"); if(r.ok) loadKeys(); }
+
+/* ==================== 模型配置 ==================== */
+const MODEL_BUSY_LABELS = {idle:'空闲', normal:'空闲', busy:'轻微拥堵', congested:'极度拥堵', unavailable:'不可用', unknown:'未知'};
+
+let _modelHealth = {}, _modelProbes = {}, _modelProbeBusy = false;
+
+async function loadModelHealth(manual = false) {
+  const button = $('#modelHealthRefresh');
+  if (manual && button) { button.disabled = true; button.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>正在刷新…'; }
+  try {
+    if (!_modelHealthLoading) _modelHealthLoading = fetchModelHealth();
+    await _modelHealthLoading;
+    if (manual) toast('模型健康状态已刷新（最近 24 小时统计）');
+  } catch (error) { toast(error.message, 'err'); }
+  finally {
+    _modelHealthLoading = null;
+    if (manual && button) { button.disabled = false; button.innerHTML = '<span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新健康状态'; }
+  }
+}
+async function fetchModelHealth() {
+  try {
+    const response = await api('/api/stats/model-health');
+    if (!response.ok) throw new Error('无法读取模型健康状态');
+    const result = await response.json();
+    _modelHealth = Object.fromEntries((result.items || []).map(row => [row.model, row]));
+    renderModelPage(_modelPage);
+  } catch (error) { throw error; }
+}
+async function loadModelDescriptions() {
+  try {
+    const response = await api('/api/models/descriptions');
+    if (!response.ok) return;
+    const result = await response.json();
+    const descriptions = new Map((result.items || []).map(m=>[m.model_id,m]));
+    _modelData.forEach(m=>{ if(descriptions.has(m.model_id)) Object.assign(m,descriptions.get(m.model_id)); });
+    renderModelPage(_modelPage);
+  } catch (_) {}
+}
+function modelHealthCell(model) {
+  const row = _modelHealth[model] || {}, probe = _modelProbes[model];
+  const ms = value => value == null ? '—' : fmtDuration(value);
+  const ttft = row.ttfb_ms || {};
+  const tps = row.tps || {};
+  const tpsText = tps.samples ? `TPS P50 ${tps.p50 ?? '—'} / 均值 ${tps.mean ?? '—'}` : 'TPS 暂无样本';
+  const health = row.requests ? `成功 ${(100 * row.success_rate).toFixed(1)}% · ${row.requests} 次` : '暂无调用样本';
+  return `<div class="model-health-cell"><span>${health}</span>
+    <small data-tooltip="首字延迟 P50 / P95" data-tooltip-description="最近 24 小时成功调用的首字延迟，包含网络、上游排队与推理耗时。P95 与 P50 的差值反映请求延迟波动，不等同于网络 RTT 抖动。">首字 P50 ${ms(ttft.p50)} / P95 ${ms(ttft.p95)}</small>
+    <small data-tooltip="吞吐 TPS" data-tooltip-description="输出 Token / 纯解码耗时（总耗时减首字延迟），仅统计解码段 ≥300ms 且折算不超过 300 tok/s 的成功请求（${tps.samples || 0} 个样本）。上游把整段一次性吐出的「突发」样本量不出真实出字速度，已剔除。">正常 ${tpsText}</small>
+    <small data-tooltip="延迟波动" data-tooltip-description="P95 与 P50 的差值，反映请求延迟波动，不等同于网络 RTT 抖动。">延迟波动 ${ms(ttft.p95 == null ? null : ttft.p95 - ttft.p50)} · 可用 ${row.available_accounts ?? '—'} 账号</small>
+    ${probe ? `<small data-tooltip="最近一次检测" data-tooltip-description="${esc(fmtTime(probe.observed_at))}">检测：${ms(probe.ttft_ms)} · 响应头 ${ms(probe.headers_ms)}</small><small data-tooltip="输出间隔波动" data-tooltip-description="增量到达间隔的标准差，包含模型生成与网络传输，不是纯网络抖动。">输出间隔波动 ${ms(probe.inter_delta_jitter_ms)}</small>` : ''}</div>`;
+}
+let _modelDisplay = {show_multiplier:true, show_busy:true, official_only:true};
+function applyModelDisplay(options) {
+  _modelDisplay = {..._modelDisplay, ...(options || {})};
+  $('#modelShowMultiplier').checked = _modelDisplay.show_multiplier !== false;
+  $('#modelShowBusy').checked = _modelDisplay.show_busy !== false;
+  $('#modelOfficialOnly').checked = _modelDisplay.official_only !== false;
+  const parts = ['model-id'];
+  if (_modelDisplay.show_multiplier !== false) parts.push('×1.25');
+  if (_modelDisplay.show_busy !== false) parts.push('空闲');
+  $('#modelNamePreview').textContent = 'name: ' + parts.join(' · ');
+}
+async function saveModelDisplay() {
+  const fields = [$('#modelShowMultiplier'), $('#modelShowBusy'), $('#modelOfficialOnly')];
+  const options = {show_multiplier:fields[0].checked, show_busy:fields[1].checked, official_only:fields[2].checked};
+  fields.forEach(field => { field.disabled = true; });
+  try {
+    const response = await api('/api/models/display', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(options)});
+    if (!response.ok) throw new Error('展示设置保存失败');
+    applyModelDisplay(await response.json());
+    // 「官方同显」直接改变可见行集合，必须重绘表格（其余两个开关只改接口 name 文本）
+    if (!$('#panel-models').classList.contains('hidden')) renderModelPage(_modelPage);
+  } catch (error) { toast(error.message, 'err'); }
+  finally { fields.forEach(field => { field.disabled = false; }); }
+}
+function modelBusyBadge(m) {
+  const state = _modelBusy[m.model_id] || {};
+  const level = Object.prototype.hasOwnProperty.call(MODEL_BUSY_LABELS, state.busy_level) ? state.busy_level : 'unknown';
+  const tip = state.observed_at ? `上游采集：${fmtTime(state.observed_at)}${state.stale ? '（刷新失败，显示上次结果）' : ''}` : '尚未获取上游繁忙程度';
+  return `<span class="model-busy ${level}" data-tooltip="上游繁忙程度 · ${esc(MODEL_BUSY_LABELS[level])}" data-tooltip-description="${esc(tip)}">${MODEL_BUSY_LABELS[level]}${state.stale && state.observed_at ? ' · 缓存' : ''}</span>`;
+}
+function scheduleModelBusy() {
+  clearTimeout(_modelBusyTimer);
+  _modelBusyTimer = null;
+  if (document.hidden || !TOKEN || $('#panel-models').classList.contains('hidden')) return;
+  _modelBusyTimer = setTimeout(async () => { await loadModelBusy(); scheduleModelBusy(); }, 50000);
+}
+async function loadModelBusy() {
+  if (_modelBusyLoading || document.hidden || !TOKEN || $('#panel-models').classList.contains('hidden')) return;
+  _modelBusyLoading = true;
+  try {
+    const r = await api('/api/models/busy');
+    if (!r.ok) throw new Error('busy fetch failed');
+    const d = await r.json();
+    _modelBusy = Object.fromEntries((d.items || []).map(m => [m.model_id, {...m, observed_at:d.observed_at, stale:d.stale}]));
+    renderModelPage(_modelPage);
+  } catch(e) {
+    Object.values(_modelBusy).forEach(m => { m.stale = true; });
+    renderModelPage(_modelPage);
+  } finally { _modelBusyLoading = false; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) loadModelBusy();
+  scheduleModelBusy();
+});
+function modelPromotionBadges(info) {
+  return info.badges.map(b=>{
+    const color=/^#[0-9a-f]{6}$/i.test(b.color||'')?b.color:'var(--brand-ink)';
+    const label=b.shortLabel||b.label;
+    const icon=String(b.label).includes('夜间')?'fa-moon':String(b.label).includes('免费')||String(b.label).includes('限免')?'fa-gift':'fa-tag';
+    return `<span class="model-promotion-badge" style="--promotion-color:${color}">${ic(icon)}${esc(label)}</span>`;
+  }).join('');
+}
+// Re-evaluate on minute boundaries, including when a hidden window resumes.
+function refreshModelPromotions(){
+  if(!document.hidden&&_modelData.length&&!$('#panel-models').classList.contains('hidden')) renderModelPage(_modelPage);
+}
+function schedulePromotionRefresh(){
+  setTimeout(()=>{refreshModelPromotions();schedulePromotionRefresh();},60000-Date.now()%60000+50);
+}
+schedulePromotionRefresh();
+window.addEventListener('focus',refreshModelPromotions);
+window.addEventListener('pageshow',refreshModelPromotions);
+document.addEventListener('visibilitychange',refreshModelPromotions);
+function modelRow(m) {
+  const info=WBModelMetadata.display(m);
+  info.kind=m.model_type||info.kind||(/^hunyuan-image-/i.test(m.model_id||'')?'image':'text');
+  if(info.kind!=='text') { info.price=null; info.base=null; }
+  const isFree = info.price === 0;
+  const mult = info.price;
+  const kindLabel={image:'IMAGE',video:'VIDEO',text:'TEXT'}[info.kind]||'TEXT';
+  const kindIcon={image:'fa-image',video:'fa-film',text:'fa-font'}[info.kind]||'fa-font';
+  const kindTitle={image:'图片生成模型',video:'视频生成模型（异步任务，按实际用量计费）',text:'文本输出模型'}[info.kind]||'文本输出模型';
+  const typeTag=`<span class="model-type-tag ${info.kind}" data-tooltip="${kindLabel} · ${kindTitle}" data-tooltip-description="${{image:'输出为图片。按上游返回的 usage.credit 实际积分记账，不套文本倍率。',video:'输出为视频。异步任务：创建后需轮询到 completed 再下载；按上游 usage.credit 实际积分记账。',text:'输出为文本，按下方倍率与 token 计费。'}[info.kind]||''}">${ic(kindIcon,'wb-ic-sm')}${kindLabel}</span>`;
+  const officialTag=m.official_visible===false?`<span class="model-official-tag" data-tooltip="旧模型" data-tooltip-description="官方客户端前端当前不显示该模型（不在官方 cli agent 名单内）。关闭「官方同显」可查看并启用。">旧模型</span>`:'';
+  // 「需会员」标记：来自上游客户端的 identity_list（`plan_free === false`）。
+  // 与 FREE 徽标是**两件事**：FREE 是本站不计费，这个是「免费账号调不通」。
+  // 免费号选到这类模型上游会直接拒，提前标出来能省掉一轮无效重试。
+  const planTag = m.plan_free === false
+    ? `<span class="model-plan-tag" data-tooltip="需会员" data-tooltip-description="上游客户端的套餐白名单里不含免费身份（identity_list 无 0），免费账号调用会被上游拒绝。需要 Lite/Pro/Pro+/Ultra 订阅。">需会员</span>`
+    : '';
+
+  // 品牌标识（`MiraiHub` / `1017`）已从模型列表移除：它只表达模型来源，
+  // 与「能不能用、多少钱」无关，却在每行都占一个彩色徽标的位置。
+  // 品牌信息仍保留在 API 响应与 metadata 里（`vendor` 字段），需要时可用。
+
+  // ---- 计费口径按平台分流 ----
+  //
+  // WorkBuddy：按「每千 token 倍率」计费，所以显示倍率 + FREE 徽标。
+  // Trae：上游**按 token 实际用量计费**（官方已从按次数改为按 token，
+  //   见 https://docs.trae.ai/ide/models ），本站不套倍率 ——
+  //   显示「按用量」而不是伪造一个倍率数字。
+  // 繁忙程度：Trae 的上游接口没有这个概念（那是 WorkBuddy 的采集项），
+  //   给 Trae 显示繁忙徽标等于展示一个永远为「未知」的假信息。
+  const platformKey = (m.platform || "").toLowerCase();
+  // 后端给的是**权威倍率**（`credit_multiplier`），优先用它：
+  //   > 0  -> 收费，显示 ×N
+  //   = 0  -> 免费（FREE）
+  //   < 0  -> 无量纲（Loomy 按 token 计量，没有倍率概念）
+  //   null -> 尚未同步
+  //
+  // 原来只看 `info.price`（从 upstream_metadata 推测），
+  // 而 Qoder 的 price_factor 不在 metadata 里 -> 全部显示「未知」。
+  const rawMult = (typeof m.credit_multiplier === "number")
+    ? m.credit_multiplier
+    : (typeof m.credit_multiplier === "string" && m.credit_multiplier !== ""
+        ? Number(m.credit_multiplier) : null);
+
+  let multDisplay;
+  if (info.kind !== 'text') {
+    multDisplay = '<span class="text-xs text-slate-500" data-tooltip="按实际用量" data-tooltip-description="按上游返回的 usage.credit 实际积分记账，不套文本模型的每千 token 倍率。目录未给价格不代表免费。">按实际用量</span>';
+  } else if (rawMult == null) {
+    multDisplay = `<span class="text-xs text-slate-400" data-tooltip="尚未同步" data-tooltip-description="该模型还没有从上游同步到倍率信息。点「从后端同步」拉取。">未知</span>`;
+  } else if (rawMult < 0) {
+    // 无量纲：上游按 token 实际消耗计费，没有倍率概念
+    multDisplay = `<span class="text-xs text-slate-500" data-tooltip="按 Token 计费" data-tooltip-description="该平台没有倍率概念，按上游实际 token 消耗扣费。0 倍率才叫免费，这里不是。">按用量</span>`;
+  } else if (rawMult === 0) {
+    multDisplay = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700" data-tooltip="免费" data-tooltip-description="0 倍率：本站不计费。">FREE</span>';
+  } else {
+    multDisplay = `<span class="text-amber-600 font-medium" data-tooltip="倍率 ${rawMult.toFixed(2)}" data-tooltip-description="按该倍率计费（×token 数）。0 倍率才免费。">×${rawMult.toFixed(2)}</span>`;
+  }
+  const original = (rawMult != null && rawMult > 0
+                    && info.discountMode === 'strikethrough'
+                    && info.base != null && info.base !== rawMult)
+    ? `<del class="model-original-price">×${info.base.toFixed(2)}</del>` : '';
+  return `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3 text-xs"><span class="model-id-line">${modelIcon(m.model_id,'wb-mic-sm')}<span tabindex="0" class="model-id-description" data-model-tooltip="${esc(m.model_id)}" data-tooltip="${esc(m.note || m.model_id)}" data-tooltip-description="${esc(m.model_id)} · ${esc(info.description || '上游暂未提供模型描述')}">${esc(m.note || m.model_id)}</span></span><div class="model-promotion-row">${typeTag}${planTag}${officialTag}${modelPromotionBadges(info)}</div>${(m.note && m.note !== m.model_id) ? `<div style="margin-top:2px;color:var(--fg-subtle);font-size:10px;font-family:ui-monospace,monospace">${esc(m.model_id)}</div>` : ''}</td>
+      <td class="px-4 py-3 text-xs">${platformBadge(m.platform)}</td>
+      <td class="px-4 py-3 model-mult-column">${original}${multDisplay}</td>
+      <td class="px-4 py-3 whitespace-nowrap model-busy-column">${
+        (platformKey === "workbuddy")
+          ? modelBusyBadge(m)
+          : '<span class="text-slate-300" data-tooltip="该平台没有繁忙程度接口">—</span>'}
+      <td class="px-4 py-3">${modelHealthCell(m.model_id)}</td>
+      <td class="px-4 py-3 text-slate-400 text-xs">${esc(m.note||'-')}</td>
+      <td class="px-4 py-3 col-status">${m.enabled?'<span class="badge bg-emerald-100 text-emerald-700">启用</span>':'<span class="badge bg-slate-100 text-slate-500">禁用</span>'}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        <button onclick="speedTestModel(${esc(JSON.stringify(m.model_id))}, this)" ${info.kind!=='text'?'disabled':''} class="text-sky-600 hover:text-sky-800 text-sm mr-2 disabled:opacity-30 disabled:cursor-not-allowed" data-tooltip="模型测速" data-tooltip-description="${info.kind==='video'?'视频模型走 /v1/videos 异步任务，不支持文本测速。':info.kind==='image'?'图片模型不支持文本测速，请用生图接口验证。':'发起一次真实短请求，检测延迟与健康。会消耗少量积分。'}"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg></span></button>
+        <button onclick="toggleModel(${m.id},${!m.enabled})" class="${m.enabled?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} text-sm mr-2" data-tooltip="${m.enabled?'禁用模型':'启用模型'}" data-tooltip-description="${m.enabled?'禁用后该模型从 /v1/models 与自动选型中移除，已有调用不受影响。':'启用后该模型重新出现在 /v1/models，可用 Key 即可调用。'}">${ic(m.enabled?'ban':'check')}</button>
+        <button onclick="deleteModelConfig(${m.id})" class="text-red-500 hover:text-red-700" data-tooltip="移除模型配置" data-tooltip-description="从本地白名单删除该模型。重新同步模型目录会把它加回来。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+      </td>
+    </tr>`;
+}
+const MODEL_SORT_FIELDS = ['id','level','mult','busy','success','requests','p50','p95','jitter','accounts','note','enabled'];
+function toggleModelSort(field = 'mult'){
+  if(!MODEL_SORT_FIELDS.includes(field)) return;
+  _modelSort = _modelSort === field+'_asc' ? field+'_desc' : _modelSort === field+'_desc' ? 'default' : field+'_asc';
+  try { localStorage.setItem('wb_model_sort',_modelSort); } catch(_) {}
+  updateModelSortIcon(); renderModelPage(1);
+}
+function updateModelSortIcon(){
+  document.querySelectorAll('[data-model-sort]').forEach(button=>{
+    const field=button.dataset.modelSort, active=_modelSort.startsWith(field+'_');
+    const direction=active?(_modelSort.endsWith('_asc')?'ascending':'descending'):'none';
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-label',button.textContent.trim()+'，'+(direction==='none'?'未排序':direction==='ascending'?'升序':'降序'));
+    button.querySelector('.wb-icon').innerHTML = '<svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true">' + ((window.WB_ICON_PATHS||{})[active?(direction==='ascending'?'sort-up':'sort-down'):'sort']||'') + '</svg>';
+    button.closest('th').setAttribute('aria-sort',direction);
+  });
+  // The health column offers several independent sort fields.
+  const selected=document.querySelector('[data-model-sort].active');
+  if(selected) selected.closest('th').setAttribute('aria-sort',_modelSort.endsWith('_asc')?'ascending':'descending');
+}
+/* 模型平台过滤芯片：委托绑定一次，避免每次重渲染都重挂事件。 */
+document.addEventListener("click", event => {
+  const chip = event.target.closest("[data-platform-filter]");
+  if (!chip) return;
+  _modelPlatformFilter = chip.dataset.platformFilter || "";
+  renderModelPage(1);
+});
+function sortModelData(list){
+  if(_modelSort === 'default') return list;
+  const [field,order]=_modelSort.split('_'), dir=order==='asc'?1:-1;
+  const value=m=>{
+    const health=_modelHealth[m.model_id]||{}, ttft=health.ttfb_ms||{};
+    switch(field){
+      case 'id':return m.model_id||'';
+      case 'level':return m.level==='system'?0:1;
+      case 'mult':return WBModelMetadata.display(m).price;
+      case 'busy':return ({idle:0,normal:0,busy:1,congested:2,unavailable:3})[_modelBusy[m.model_id]?.busy_level] ?? null;
+      case 'success':return health.requests ? health.success_rate : null;
+      case 'requests':return health.requests ?? 0;
+      case 'p50':return ttft.p50 ?? null;
+      case 'p95':return ttft.p95 ?? null;
+      case 'jitter':return ttft.p95==null||ttft.p50==null?null:ttft.p95-ttft.p50;
+      case 'accounts':return health.available_accounts ?? null;
+      case 'note':return m.note||'';
+      case 'enabled':return Number(Boolean(m.enabled));
+      default:return null;
+    }
+  };
+  return list.slice().sort((a,b)=>{
+    const av=value(a),bv=value(b);
+    // Missing observations stay at the end in both directions.
+    if(av==null&&bv!=null) return 1;
+    if(bv==null&&av!=null) return -1;
+    const delta=av==null?0:typeof av==='string'?av.localeCompare(bv,'zh-CN',{numeric:true}):av-bv;
+    return delta*dir||(a.model_id||'').localeCompare(b.model_id||'')||a.id-b.id;
+  });
+}
+/**
+ * 按平台同步「显示倍率 / 显示繁忙程度 / 官方同显」三个开关的可见性。
+ *
+ * 为什么不能一律显示：
+ *   · Trae **按 token 计费**（https://docs.trae.ai/ide/models 已明确），
+ *     后端不返回倍率，留着「显示倍率」开关等于暗示一个不存在的功能；
+ *   · Trae 上游没有繁忙度接口，那一列永远是「—」；
+ *   · 「官方同显」比较的是 WorkBuddy 的官方模型名单，对 Trae 无意义。
+ */
+function syncModelDisplayControls() {
+  const curSpec = window.WBPlatform ? window.WBPlatform.spec() : null;
+  const storage = ((curSpec && curSpec.storage_platform)
+                   || (window.WBPlatform ? window.WBPlatform.current().platform : "")
+                   || "").toLowerCase();
+  const isTrae = storage === "trae";
+  [["#modelShowMultiplierLabel", true], ["#modelShowBusyLabel", true],
+   ["#modelOfficialOnly", true]].forEach(([sel]) => {
+    const node = document.querySelector(sel);
+    if (!node) return;
+    node.hidden = isTrae;
+    node.style.display = isTrae ? "none" : "";
+  });
+}
+
+// ===== 模型列表：聚合显示 =====
+//
+// 聚合 = 同一模型跨平台合并成一行。悬停看各平台的具体 model_id。
+// 关闭时回到平铺视图（一行 = 一个平台的模型）。
+
+/** 聚合开关状态（记住用户选择）。 */
+function modelAggregateOn() {
+  try {
+    return localStorage.getItem("wb_model_aggregate") !== "0";
+  } catch (error) {
+    return true;
+  }
+}
+
+function toggleModelAggregate() {
+  try {
+    localStorage.setItem("wb_model_aggregate",
+      modelAggregateOn() ? "0" : "1");
+  } catch (error) { /* 忽略 */ }
+  loadModels();
+}
+
+/** 把聚合开关的勾选状态与 localStorage 对齐。 */
+function syncAggregateSwitch() {
+  const box = document.querySelector("#modelAggregate");
+  if (box) box.checked = modelAggregateOn();
+}
+
+/** 渲染聚合视图。 */
+async function renderAggregatedModels() {
+  const body = document.querySelector("#modelBody");
+  const pager = document.querySelector("#modelPager");
+  const head = document.querySelector("#modelTableHead");
+  if (!body) return;
+
+  let data = null;
+  try {
+    const r = await api("/api/models/aggregate");
+    const parsed = await safeJson(r);
+    if (parsed.ok) data = parsed.data;
+  } catch (error) {
+    console.warn("[models] 聚合列表加载失败", error);
+  }
+  if (!data) {
+    body.innerHTML = `<tr><td colspan="8" class="px-4 py-8 text-center"
+      style="color:var(--fg-subtle)">聚合列表加载失败</td></tr>`;
+    return;
+  }
+
+  if (head) {
+    head.innerHTML = `<th class="px-4 py-3">模型</th>
+      <th class="px-4 py-3">平台数</th>
+      <th class="px-4 py-3">最低倍率</th>
+      <th class="px-4 py-3">免费</th>
+      <th class="px-4 py-3">各平台模型</th>`;
+  }
+
+  // 搜索框在聚合视图里原本完全没接上 —— 输入什么都不筛选。这里按组名 / 各平台模型 id / 平台名 / 描述匹配。
+  const term = ($("#modelSearch") ? $("#modelSearch").value : "").trim().toLowerCase();
+  const platformFilter = (_modelPlatformFilter || "").toLowerCase();
+  const matches = item => {
+    if (platformFilter && !(item.platforms || []).some(
+        p => String(p.platform || "").toLowerCase() === platformFilter)) return false;
+    if (!term) return true;
+    const hay = [
+      item.name, item.key,
+      ...(item.platforms || []).flatMap(p => [p.model_id, p.platform, p.platform_label, p.display_name]),
+      (item.platforms || []).map(p => p.description || "").join(" "),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(term);
+  };
+  const allMulti = (data.items || []).filter(item => item.platform_count > 1);
+  const items = allMulti.filter(matches);
+  const multi = allMulti.length;
+  if (pager) {
+    pager.innerHTML = `<span class="text-xs" style="color:var(--fg-subtle)">
+      共 ${data.total_models} 个模型 · 聚合为 ${data.total_groups} 组 ·
+      其中 <b>${multi}</b> 组可在多个平台间调度</span>`;
+  }
+
+  const countEl = $("#modelSearchCount");
+  if (countEl) {
+    if (term || platformFilter) {
+      countEl.textContent = `${items.length} 个结果`;
+      countEl.hidden = false;
+    } else {
+      countEl.hidden = true;
+    }
+  }
+  const clearBtn = $("#modelSearchClear");
+  if (clearBtn) clearBtn.hidden = !term;
+
+  if (!items.length) {
+    body.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center"
+      style="color:var(--fg-subtle)">${
+        term || platformFilter ? `没有匹配「${esc(term || platformFilter)}」的跨平台模型`
+          : "没有跨平台的同名模型"}</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = items.map(item => {
+    const platforms = item.platforms || [];
+    // 每个平台 chip 都要能看该平台模型的详情：描述、上下文/能力、倍率、显示名。
+    // 之前只有聚合行有描述，平台明细里只有一个 model_id，鼠标移上去什么也没有。
+    const chips = platforms.map(p => {
+      const desc = (p.description || "").trim();
+      const tip = `${p.platform_label || p.platform} · ${p.model_id}`;
+      const note = (p.note || "").trim();
+      const meta = [
+        desc,
+        p.display_name && p.display_name !== p.model_id ? `显示名：${p.display_name}` : "",
+        p.multiplier != null ? (Number(p.multiplier) === 0 ? "倍率：免费" : `倍率：×${p.multiplier}`) : "",
+        note ? `备注：${note}` : "",
+        p.enabled === false ? "状态：已禁用" : "",
+      ].filter(Boolean).join("\n");
+      return `<span class="inline-flex items-center gap-1 mr-2 mb-1"
+         style="font-size:10px;padding:1px 6px;border-radius:9999px;
+                background:var(--surface-2);border:1px solid var(--line)"
+         data-tooltip="${esc(tip)}"
+         data-tooltip-description="${esc(meta)}">
+        <b>${esc(p.platform_label || p.platform)}</b>
+        <code style="opacity:.7">${esc(p.model_id)}</code>
+        ${p.multiplier != null ? `<span style="opacity:.6">×${p.multiplier}</span>` : ""}
+      </span>`;
+    }).join("");
+    const mult = item.min_multiplier == null ? "—"
+      : (item.min_multiplier === 0 ? "FREE" : "×" + item.min_multiplier);
+    const desc = (platforms.find(p => p.description) || {}).description || "";
+    return `<tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3">
+        <div class="text-xs font-medium">${esc(item.name)}</div>
+        ${desc ? `<div class="text-[11px] mt-1"
+          style="color:var(--fg-subtle);max-width:520px">${esc(desc).slice(0, 120)}</div>` : ""}
+      </td>
+      <td class="px-4 py-3 text-xs tnum">${item.platform_count}</td>
+      <td class="px-4 py-3 text-xs tnum">${mult}</td>
+      <td class="px-4 py-3 text-xs">${item.free_any
+        ? '<span style="color:var(--success,#33587F)">有</span>' : "—"}</td>
+      <td class="px-4 py-3">${chips}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadModels(){
+  syncAggregateSwitch();
+  // 聚合视图：一行 = 一个跨平台模型（悬停看各平台明细）
+  if (modelAggregateOn()) {
+    return await renderAggregatedModels();
+  }
+
+  // 平台过滤条跟随**全局平台切换**：切到 Trae 时默认只看 Trae 的模型。
+  //
+  // 之前在模型面板里记一个独立的 `_modelPlatformFilter`（默认空 = 全部），
+  // 于是「切到 Trae 平台的模型配置」实际显示的是 111 个全平台模型的并集，
+  // WorkBuddy 的倍率/繁忙标就混在 Trae 的行里 —— 看起来像是两套口径串了。
+  // 用户需要的是「当前平台的模型」，要跨平台比较再点「全部」。
+  const curSpec = window.WBPlatform ? window.WBPlatform.spec() : null;
+  const curStorage = ((curSpec && curSpec.storage_platform)
+                      || (window.WBPlatform ? window.WBPlatform.current().platform : "")
+                      || "").toLowerCase();
+  if (curStorage && _modelPlatformFilter === "") _modelPlatformFilter = curStorage;
+  syncModelDisplayControls();
+  const r = await api("/api/models/configs"); if(!r.ok) return;
+  const d = await r.json();
+  try {
+    const display = await api('/api/models/display');
+    if (display.ok) applyModelDisplay(await display.json());
+  } catch (_) {}
+  loadModelHealth();
+  _modelData = d.items || [];
+  _modelOfficialTotal = d.official_total || 0;
+  // 恢复上次停留的页码与排序（浏览器刷新 / 操作后保持）
+  try { _modelPage = parseInt(localStorage.getItem("wb_model_page") || "1") || 1; } catch(e) {}
+  try {
+    const s = localStorage.getItem("wb_model_sort");
+    if(s === 'default' || MODEL_SORT_FIELDS.some(field=>s===field+'_asc'||s===field+'_desc')) _modelSort = s;
+  } catch(e) {}
+  updateModelSortIcon();
+  renderModelPage(_modelPage);
+  loadModelBusy().finally(loadModelDescriptions);
+}
+function clearModelSearch() {
+  const input = $("#modelSearch");
+  if (input) { input.value = ""; input.focus(); }
+  // 清除之后必须**重新取数**：聚合视图的数据是接口现算的，
+  // 只重绘会沿用上一次的过滤条件。
+  loadModels();
+}
+
+/** 模型列表内的平台过滤（芯片）。空 = 全部平台。 */
+function renderModelPlatformFilter() {
+  const host = $("#modelPlatformFilter");
+  if (!host) return;
+  const groups = {};
+  (_modelData || []).forEach(m => {
+    const key = m.platform || "workbuddy";
+    groups[key] = (groups[key] || 0) + 1;
+  });
+  const keys = Object.keys(groups);
+  if (keys.length <= 1) { host.innerHTML = ""; return; }  // 只有一个平台就不必显示
+  const chip = (value, label, count) =>
+    `<button type="button" class="model-platform-chip${_modelPlatformFilter === value ? " active" : ""}" data-platform-filter="${esc(value)}">${esc(label)}<span>${count}</span></button>`;
+  const totalAll = keys.reduce((sum, key) => sum + groups[key], 0);
+  host.innerHTML = chip("", "全部", totalAll) + keys.map(key => {
+    const sample = (_modelData || []).find(m => (m.platform || "workbuddy") === key) || {};
+    return chip(key, sample.platform_label || key, groups[key]);
+  }).join("");
+}
+
+function renderModelPage(p) {
+  // 聚合视图下表格由 renderAggregatedModels 渲染：搜索/清空必须交给它，
+  // 否则只是往隐藏的明细表里写数据，看起来就是「搜索没反应」。
+  if (typeof modelAggregateOn === "function" && modelAggregateOn()) {
+    renderAggregatedModels();
+    return;
+  }
+  const term = (_modelTerm = ($("#modelSearch") ? $("#modelSearch").value : "").trim().toLowerCase());
+  // 清除按钮只在有输入时出现
+  const clearBtn = $("#modelSearchClear");
+  if (clearBtn) clearBtn.hidden = !term;
+
+  // 官方同显：仅显示官方前端当前可见的模型；关闭开关时全量展示并以标签区分
+  const officialHide = _modelDisplay.official_only !== false;
+  const officialBase = officialHide ? _modelData.filter(m => m.official_visible !== false) : _modelData;
+  const officialHidden = _modelData.length - officialBase.length;
+
+  // 平台：账号池/统计面板会跟着平台切换，模型配置**保持全量**（公共表），
+  // 但这里提供一个只看某个平台的过滤开关，避免平台一多就分不清。
+  //
+  // ⚠️ 后端返回的 `platform` 是**对外 id**（`trae-cn` / `trae-intl` / `qoder-intl`），
+  // 而 `_modelPlatformFilter` 存的是**落库平台**（`trae` / `qoder`）——
+  // 两者字符串不相等，直接用 `===` 比会把 Trae 的 50 条模型全滤掉，
+  // 表现是「切到 Trae，模型配置一条都不显示」（2026-10-31 实测确认）。
+  // 这里同时认：落库平台命中，或它的区级 id（storage + '-'）命中。
+  const platformFilter = (_modelPlatformFilter || "").toLowerCase();
+  const matchesPlatform = (m) => {
+    if (!platformFilter) return true;
+    const p = String(m.platform || "workbuddy").toLowerCase();
+    if (p === platformFilter) return true;
+    // trae -> trae-cn / trae-intl / qoder -> qoder-intl
+    if (p.startsWith(platformFilter + "-")) return true;
+    // 反向兜底：过滤条上是区级 id（历史 localStorage 值），模型却按落库平台标
+    if (platformFilter.startsWith(p + "-")) return true;
+    return false;
+  };
+  const platformBase = officialBase.filter(matchesPlatform);
+
+  // 搜索匹配范围要比"ID + 备注"宽：
+  //   · 厂商/别名（写 "gpt"、"豆包"、"qwen" 应该能找到对应模型）
+  //   · 平台名（写 "trae" 能筛出该平台的全部模型）
+  //   · reasoning 能力标签等元数据
+  const hit = (m) => {
+    if (!term) return true;
+    const iconKey = modelIconKey(m.model_id || "");
+    const haystack = [
+      m.model_id, m.note, m.description, m.platform, m.platform_label,
+      m.level, m.model_type,
+      iconKey,
+      (m.tags || []).join(" "),
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (haystack.includes(term)) return true;
+    // 厂商中文名也要能搜（豆包 / 通义 / 混元 …）
+    const zh = { doubao: ["豆包"], qwen: ["通义", "千问"], hunyuan: ["混元"],
+                 kimi: ["月之暗面"], glm: ["智谱"], stepfun: ["阶跃"] }[iconKey];
+    return !!zh && zh.some(name => name.includes(term) || term.includes(name));
+  };
+
+  const filtered = term ? platformBase.filter(hit) : platformBase;
+  const data = sortModelData(filtered);
+  const total = data.length, totalPages = Math.max(1, Math.ceil(total / PS));
+  p = Math.min(Math.max(1, p), totalPages);
+  _modelPage = p;  // 记住当前页，供后续操作 / 刷新恢复
+  try { localStorage.setItem("wb_model_page", String(p)); } catch(e) {}
+
+  // 结果计数：搜完不知道剩几个是很糟的体验
+  const countEl = $("#modelSearchCount");
+  if (countEl) {
+    if (term || platformFilter) {
+      countEl.textContent = `${total} 个结果`;
+      countEl.hidden = false;
+    } else {
+      countEl.hidden = true;
+    }
+  }
+  renderModelPlatformFilter();
+
+  const slice = data.slice((p - 1) * PS, p * PS);
+  $("#modelBody").innerHTML = slice.map(modelRow).join("") ||
+    `<tr><td colspan="8" class="px-4 py-8 text-center text-slate-400">${
+      term ? `没有匹配「${esc(term)}」的模型` : "还没有模型配置，点击「从后端同步模型」拉取可用模型列表"
+    }</td></tr>`;
+  const officialNote = officialHidden > 0
+    ? `<span class="model-official-note" data-tooltip="官方客户端前端当前不显示这些模型（不在 cli agent 名单内）。关闭「官方同显」可查看它们">已按官方同显隐藏 ${officialHidden} 个旧模型</span>` : '';
+  $("#modelPager").innerHTML = officialNote + pagerHtml(total, p, totalPages, "renderModelPage");
+}
+async function syncModels(){
+  // 按当前平台同步：不传 platform 会同步全部平台（慢，且日志里混在一起）。
+  // 传了之后 Postgres/MySQL 只写这一个平台，结果里的 `platforms` 明细
+  // 也能直接看出「哪个平台拿到几个、哪个平台为什么没拿到」。
+  const spec = window.WBPlatform ? window.WBPlatform.spec() : null;
+  const storage = ((spec && spec.storage_platform) || "").toLowerCase();
+  toast(storage ? `正在同步 ${spec.label || storage} 的模型...` : "正在同步全部平台的模型...", "ok");
+  try{
+    const qs = storage ? `?platform=${encodeURIComponent(storage)}` : "";
+    const r = await api("/api/models/sync" + qs, {method:"POST"});
+    const d = await r.json();
+    if(!r.ok){ toast(`同步失败: ${d.detail||""}`,"err"); return; }
+    const per = (d.platforms && Object.keys(d.platforms).length)
+      ? Object.keys(d.platforms).map(k => `${k} +${d.platforms[k].added}`).join(" / ") : "";
+    const probs = (d.problems && Object.keys(d.problems).length)
+      ? `；未取到：${Object.keys(d.problems).join("、")}` : "";
+    toast(`同步完成: 新增 ${d.added} 个，更新 ${d.updated} 个，共 ${d.total_in_db} 个`
+          + (per ? `（${per}）` : "") + probs,
+          (d.problems && Object.keys(d.problems).length) ? "err" : "ok");
+    if (d.problems && Object.keys(d.problems).length) console.warn("模型同步未取到的平台", d.problems);
+    loadModels();
+    // API Keys 页顶部的「可用模型」来自 /api/models/aggregate，
+    // 不跟着同步刷新就会一直停在页面打开时那份（只有同步新平台时才明显，
+    // 因为老平台的模型早就列过了）。2026-10-31 实测反馈。
+    loadShareInfo();
+  } catch(e){ toast("同步异常: "+e.message,"err"); }
+}
+async function toggleModel(id, enabled){
+  const r = await api("/api/models/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled})});
+  toast(r.ok?(enabled?"已启用":"已禁用"):"操作失败", r.ok?"ok":"err");
+  if(r.ok) loadModels();
+}
+async function deleteModelConfig(id){ if(!await uiConfirm({message:"确认移除该模型配置？移除后该模型将被过滤。", title:"移除模型配置"}))return; const r=await api("/api/models/"+id,{method:"DELETE"}); toast(r.ok?"已移除":"失败",r.ok?"ok":"err"); if(r.ok) loadModels(); }
+async function enableAllModels(enabled){
+  if (_modelBatchBusy) return;
+  if (!await uiConfirm({title:enabled?'全部启用模型':'全部禁用模型', message:enabled?'启用全部系统模型？':'禁用后所有系统模型将无法被调用。继续？', danger:!enabled})) return;
+  _modelBatchBusy = true;
+  try {
+  const r = await api("/api/models/batch-toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled,level:"system"})});
+  const d = await r.json().catch(()=>({}));
+  toast(`${enabled?'启用':'禁用'}了 ${d.updated||0} 个模型`, r.ok?"ok":"err");
+  if(r.ok) loadModels();
+  } catch(e) { toast(e.message, 'err'); }
+  finally { _modelBatchBusy = false; }
+}
+
+async function speedTestModel(modelId, btn){
+  if(_modelProbeBusy || (btn && btn.disabled)) return;
+  _modelProbeBusy = true;
+  const old = btn ? btn.innerHTML : "";
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="wb-icon wb-ic-spin"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>'; }
+  try{
+    const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId})});
+    const d = await r.json();
+    if(!r.ok){ toast(`测速失败(${modelId}): ${esc(d.detail||"")}`,"err"); return; }
+    _modelProbes[modelId] = d;
+    await loadModelHealth();
+    const ttft = d.ttft_ms!=null ? d.ttft_ms+"ms" : "—";
+    const sp = d.speed_tps!=null ? d.speed_tps+" t/s" : "—";
+    const comp = d.completion_tokens!=null ? d.completion_tokens : (d.total_tokens??0);
+    const prompt = d.prompt_tokens!=null ? d.prompt_tokens : "—";
+    toast(`<b>${esc(modelId)}</b> 测速：首字 ${ttft} · 提示 ${prompt} / 补全 ${comp} tok · ${sp}` + (d.account?` · 账号 ${esc(d.account)}`:""), "ok");
+  }catch(e){ toast("测速异常: "+e.message,"err"); }
+  finally{ _modelProbeBusy = false; if(btn){ btn.disabled=false; btn.innerHTML = old; } }
+}
+
+/* ==================== 线上同步设置 ==================== */
+function toggleSecret(){ const i=$("#syncSecret"); if(i) i.type = i.type==="password"?"text":"password"; }
+async function loadSyncConfig(){
+  const r = await api("/api/sync/config"); if(!r.ok) return; const d = await r.json();
+  if($("#syncUrl")) $("#syncUrl").value = d.remote_url || "";
+  if($("#syncSecret")) $("#syncSecret").value = d.secret || "";
+  $("#syncStatus").innerHTML = `当前：远程 URL ${d.remote_url ? '<span class="text-emerald-600">已配置</span>' : '<span class="text-slate-400">未配置</span>'} · 密钥 ${d.secret ? '已生成'+(d.is_auto_generated?'（基于本机特征自动生成）':'（自定义）') : '<span class="text-slate-400">未设置</span>'}<span id="syncDirty" class="ml-2 text-amber-500 hidden">· <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg></span> 有未保存改动</span>`;
+  _bindSyncDirty();
+}
+async function saveSyncConfig(){
+  const body = { remote_url: $("#syncUrl").value.trim(), secret: $("#syncSecret").value };
+  const r = await api("/api/sync/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  toast(r.ok?"已保存同步配置":"保存失败", r.ok?"ok":"err");
+  if(r.ok){
+    _syncMarkClean();
+    loadSyncConfig();
+  }
+}
+function _syncMarkDirty(){
+  // 用户改了表单里任意字段 -> 露出「有未保存改动」标记
+  $("#syncDirty")?.classList.remove("hidden");
+}
+function _syncMarkClean(){
+  $("#syncDirty")?.classList.add("hidden");
+}
+function _bindSyncDirty(){
+  const u=$("#syncUrl"), s=$("#syncSecret");
+  if(u && !u.dataset.syncDirtyBound){ u.addEventListener("input", _syncMarkDirty); u.dataset.syncDirtyBound="1"; }
+  if(s && !s.dataset.syncDirtyBound){ s.addEventListener("input", _syncMarkDirty); s.dataset.syncDirtyBound="1"; }
+}
+async function regenSecret(){
+  if(!await uiConfirm({kind:"warn", danger:false, title:"重新生成同步密钥",
+      message:"确认重新生成同步密钥？生成后需同步到线上实例才能继续接收。", okText:"重新生成"})) return;
+  const secret = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,"0")).join("");
+  if($("#syncSecret")) $("#syncSecret").value = secret;
+  toast("已生成新密钥，记得点「保存配置」");
+}
+async function pushToOnline(){
+  if(!await uiConfirm({kind:"warn", danger:false, title:"推送到线上",
+      message:"确认把本地账号与模型配置推送到配置的线上地址？", okText:"推送"})) return;
+  toast("正在推送...","ok");
+  try{
+    // 把当前输入框里未保存的最新值先带过去，避免漏点「保存配置」导致 DB 没数据
+    const body = {
+      remote_url: $("#syncUrl").value.trim(),
+      secret: $("#syncSecret").value,
+    };
+    const r = await api("/api/sync/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok){ $("#syncStatus").innerHTML = `<span class="text-red-500">推送失败: ${esc(d.detail||"")}</span>`; toast("推送失败","err"); return; }
+    const rr = d.remote_result || {};
+    const acc = (rr.accounts||{}); const md = (rr.models||{});
+    const cp = rr.client_profile;
+    // 客户端参数的应用结果（线上是否成功钉住同步过去的 UA/版本号）
+    let cpTxt = "";
+    if(cp && typeof cp === "object"){
+      cpTxt = cp.applied
+        ? ` · 客户端参数 <span class="text-emerald-600">已同步 ${(cp.fields||[]).length} 项</span>`
+        : `<span class="text-amber-600"> · 客户端参数未同步${cp.errors?.length?"（"+esc(cp.errors.join("；"))+"）":""}</span>`;
+    } else if(d.client_profile === false){
+      cpTxt = ` · <span class="text-amber-600">客户端参数为空</span>`;
+    }
+    $("#syncStatus").innerHTML = `<span class="text-emerald-600">推送成功</span> · 账号 +${acc.added||0}/~${acc.updated||0} · 模型 +${md.added||0}/~${md.updated||0}${cpTxt}`;
+    toast("已推送到线上");
+    // 推送成功后清理脏标记，并刷新显示（DB 现在已与当前值一致）
+    _syncMarkClean();
+    loadSyncConfig();
+  }catch(e){ toast("推送异常: "+e.message,"err"); }
+}
+
+/* ==================== 客户端兼容参数（UA / 版本号 / 请求头） ====================
+   这些值用于对齐客户端协议中可验证的版本与请求头格式。它们可以：
+     1. 现场探测（本机装了 WorkBuddy 就能读到真实版本号/风控配置）
+     2. 在后台手动改（改完立即生效，不必重启进程）
+     3. 随「同步到线上」一起推给线上实例
+   线上服务器没装客户端、探测不到东西，所以它必须用 saved 策略钉住同步过去的值。
+*/
+let _clientProfile = null;
+
+// 输入框分组定义：键 -> [标签, 类型, 说明]
+const _CP_FIELDS = [
+  ["desktop_version", "桌面端版本", "text", "X-IDE-Version 与 UA 都用它"],
+  ["cli_version",     "内嵌 CLI 版本", "text", "UA 第三段"],
+  ["ide_name",        "IDE 名称", "text", "X-IDE-Name"],
+  ["ide_type",        "IDE 类型", "text", "X-IDE-Type"],
+  ["product",         "产品头(X-Product)", "text", "官方取部署形态 deploymentType（WorkBuddy 为 SaaS），不是产品名"],
+  ["application_name", "UA 产品名", "text", "UA 前后两段（官方取 applicationName）"],
+  ["turing_channel_id", "风控 channelId", "int", "天御 SDK 渠道号"],
+  ["turing_product_name", "风控产品名", "text", "天御 SDK productName"],
+  ["commit",          "commit", "text", "安装包提交号"],
+  ["release_date_ms", "发布日期(ms)", "int", "安装包构建时间戳"],
+  ["node_version",    "内嵌 Node 版本", "text", "X-Stainless-Runtime-Version（装了客户端会自动探测精确值）"],
+  ["stainless_package_version", "SDK 版本", "text", "X-Stainless-Package-Version（官方内嵌 stainless SDK）"],
+];
+const _CP_FP_FIELDS = [
+  ["fp_product",   "指纹 product", "text", "遥测里的产品形态（官方为 SaaS），与请求头 X-Product 不同"],
+  ["ext_name",     "扩展名", "text", "extName"],
+  ["os",           "操作系统", "text", "官方 Windows 端为 win32"],
+  ["arch",         "架构", "text", "x64 / arm64"],
+  ["os_version",   "系统版本", "text", "osVersion"],
+  ["cpu_cores",    "CPU 核数", "int", ""],
+  ["memory_size",  "内存(GB)", "int", ""],
+  ["timezone",     "时区", "text", ""],
+  ["report_delay", "上报延迟(ms)", "int", ""],
+];
+
+function _cpInput(id, label, type, hint, val, srcBadge){
+  const it = type === "int" ? "number" : "text";
+  return `<label class="block mb-2">
+      <span class="block text-xs text-slate-500 mb-1">${esc(label)}${srcBadge||""}${hint?` <span class="text-slate-300">· ${esc(hint)}</span>`:""}</span>
+      <input id="${id}" type="${it}" value="${val===undefined||val===null?"":esc(String(val))}"
+             class="w-full border rounded-lg px-3 py-1.5 text-sm font-mono" />
+    </label>`;
+}
+
+// 来源徽标：把「安装包实测 / 本机系统 / 已保存 / 环境变量 / 兜底默认」标成彩色小标签，
+// 让一眼能分清哪些是官方客户端实测值、哪些仍是协议兼容参考值（不是实测）。
+function _cpSourceBadge(s){
+  const t = String(s||"");
+  let label = "", cls = "";
+  if(t.startsWith("环境变量")){ label = "环境变量"; cls = "text-amber-600 border-amber-300"; }
+  else if(t.includes("安装包")){ label = "安装包实测"; cls = "text-emerald-600 border-emerald-300"; }
+  else if(t.includes("本机系统")){ label = "本机系统"; cls = "text-emerald-600 border-emerald-300"; }
+  else if(t === "已保存"){ label = "已保存"; cls = "text-sky-600 border-sky-300"; }
+  else if(t === "内置兜底"){ label = "兜底默认"; cls = "text-slate-400 border-slate-300"; }
+  else if(t){ label = "现场探测"; cls = "text-emerald-600 border-emerald-300"; }
+  return label
+    ? `<span class="inline-block align-middle ml-1 px-1.5 py-0.5 border rounded text-[10px] leading-none ${cls}" data-tooltip="来源：${esc(t)}">${label}</span>`
+    : "";
+}
+
+/* ==========================================================================
+   预警管理
+   --------------------------------------------------------------------------
+   哨兵负责「发现」，这里负责「叫醒人」。没有这一步，连坐封号只会在
+   面板里静静躺着，等有人偶然打开控制台才被发现。
+
+   配置存在数据库 + 同步覆盖环境变量（见 alerts_router.bootstrap），
+   所以改完立刻生效、重启也不丢。
+   ========================================================================== */
+let _alertChannels = [];
+
+/** 「清除」只打标记，真正清空在保存时发 `__clear__` —— 否则一进页面就清。 */
+let _smtpCompactClear = false;
+function alertsClearCompact() {
+  _smtpCompactClear = true;
+  const el = $("#smtpCompact");
+  if (el) {
+    el.value = "";
+    el.placeholder = "保存后即清空已存授权码";
+  }
+}
+
+/** 渠道类型下拉（站内组件版，只初始化一次）。 */
+function initAlertTypeSelect() {
+  if (_uiSelectMap.has("alertNewType")) return;
+  const host = $("#alertNewTypeHost");
+  if (!host) return;
+  host.outerHTML = uiSelectHTML("alertNewType", {
+    value: "feishu",
+    options: [
+      { value: "feishu", label: "飞书群机器人" },
+      { value: "qqbot", label: "QQ 机器人" },
+      { value: "email", label: "邮件（SMTP）" },
+    ],
+    // 切换类型要**看得见变化**：原来只是下拉换了字，输入框与说明都没动，
+    // 用户不知道邮件该填什么、SMTP 在哪配。
+    onChange: (value) => applyAlertChannelType(value, true),
+  });
+  applyAlertChannelType("feishu", false);
+}
+
+/** 按渠道类型切换目标输入框的占位/说明，并高亮对应配置区。 */
+function applyAlertChannelType(type, scroll) {
+  const input = $("#alertNewTarget");
+  const hint = $("#alertTargetHint");
+  const smtpCard = $("#smtpQuickCard");
+  const isEmail = type === "email";
+  if (input) {
+    input.placeholder = isEmail ? "收件邮箱，例如 me@qq.com（多个用英文逗号分隔）"
+      : (type === "qqbot" ? "Webhook 地址，末尾加 ?group=群号" : "Webhook 地址，例如 https://open.feishu.cn/open-apis/bot/v2/hook/…");
+  }
+  if (hint) {
+    hint.innerHTML = isEmail
+      ? `<b>邮件渠道需要两步</b>：① 这里填收件邮箱；② 下方「SMTP（邮件渠道）」填 <code>qqSMTP:授权码</code>（QQ 邮箱一条就够，服务器/端口自动推导）。`
+      : (type === "qqbot"
+          ? "填写 QQ 群机器人地址，并在末尾加 <code>?group=群号</code>。"
+          : "填写飞书群「自定义机器人」的 Webhook 地址。");
+  }
+  if (smtpCard) smtpCard.classList.toggle("is-highlight", isEmail);
+  if (isEmail && scroll && smtpCard) {
+    try { smtpCard.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+  }
+}
+
+async function loadAlerts() {
+  initAlertTypeSelect();
+  try {
+    const r = await api("/api/alerts/config");
+    if (!r.ok) return;
+    const d = await r.json();
+    const cfg = d.config || {};
+    _alertChannels = (cfg.channels || []).slice();
+
+    $("#alertEnabled").checked = cfg.enabled !== false;
+    $("#alertCooldown").value = cfg.cooldown || 600;
+    $("#smtpHost").value = cfg.smtp_host || "";
+    $("#smtpPort").value = cfg.smtp_port || 465;
+    $("#smtpUser").value = cfg.smtp_user || "";
+    $("#smtpPassword").value = "";
+    $("#smtpPassword").placeholder = cfg.has_password ? "已设置（留空不修改）" : "未设置";
+    $("#smtpFrom").value = cfg.smtp_from || "";
+    $("#smtpStarttls").checked = cfg.smtp_starttls !== false;
+    // 一条式 QQ 授权码：掩码串只当占位符，不回填内容（否则一保存就被覆盖成星号）
+    const compact = $("#smtpCompact");
+    if (compact) {
+      compact.value = "";
+      compact.placeholder = cfg.has_smtp
+        ? "已设置 qqSMTP:（留空不修改，可重新粘贴覆盖）"
+        : "qqSMTP:授权码  或  qqSMTP:你的邮箱@qq.com:授权码";
+    }
+    if ($("#smtpMailTo")) $("#smtpMailTo").value = cfg.mail_to || "";
+    renderSmtpHealth(d.smtp);
+    renderAlertChannels(d.labels || {});
+  } catch (e) {
+    toast("预警配置加载失败：" + e.message, "err");
+  }
+}
+
+/** 邮件链路体检：缺哪一步直接写在输入框下面（QQ 授权码反查不到账号）。 */
+function renderSmtpHealth(smtp) {
+  const host = $("#smtpStatus");
+  if (!host) return;
+  if (!smtp) { host.textContent = ""; host.removeAttribute("data-state"); return; }
+  if (smtp.ready) {
+    host.dataset.state = "ok";
+    host.innerHTML = `<span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>`
+      + `邮件链路就绪：${esc(smtp.from || smtp.user)} → ${esc(smtp.mail_to || "渠道收件人")}`
+      + `（${esc(smtp.host)}:${smtp.port}${smtp.ssl ? " SSL" : ""}）`;
+    return;
+  }
+  host.dataset.state = "warn";
+  const missing = (smtp.missing || []).filter(Boolean);
+  host.innerHTML = `<span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg></span>`
+    + `还差：${missing.map(esc).join("、")}`
+    + `　提示：QQ 邮箱填 <code>qqSMTP:授权码</code> 即可推出服务器与端口，`
+    + `但授权码属于哪个邮箱无法反查，请把「收件邮箱」填上（同账号即自寄）。`;
+}
+
+function renderAlertChannels(labels) {  const host = $("#alertChannels");
+  if (!host) return;
+  if (!_alertChannels.length) {
+    host.innerHTML = `<p class="sentinel-empty">还没有配置通知渠道。风控告警只会记录在面板里。</p>`;
+    return;
+  }
+  host.innerHTML = _alertChannels.map((c, index) => `
+    <div class="alert-channel-item">
+      <span class="alert-channel-type">${esc(labels[c.type] || c.type)}</span>
+      <span class="alert-channel-target" data-tooltip="${esc(c.target)}">${esc(c.target)}</span>
+      <button type="button" class="console-btn quiet" onclick="alertsRemoveChannel(${index})">移除</button>
+    </div>`).join("");
+}
+
+function alertsAddChannel() {
+  const type = uiSelectValue("alertNewType") || "feishu";
+  const target = ($("#alertNewTarget").value || "").trim();
+  if (!target) { toast("请填写地址", "err"); return; }
+  if (type !== "email" && !/^https?:\/\//i.test(target)) {
+    toast("Webhook 地址需以 http(s):// 开头", "err");
+    return;
+  }
+  // 同一渠道同一地址不重复加（否则测试时会连发两条）
+  if (_alertChannels.some(c => c.type === type && c.target === target)) {
+    toast("该渠道已存在");
+    return;
+  }
+  _alertChannels.push({ type, target });
+  $("#alertNewTarget").value = "";
+  renderAlertChannels(_alertLabelMap());
+}
+
+function alertsRemoveChannel(index) {
+  _alertChannels.splice(index, 1);
+  renderAlertChannels(_alertLabelMap());
+}
+
+/** 已加载过的标签表；没加载到时退化成类型名。 */
+function _alertLabelMap() {
+  const map = {};
+  const state = _uiSelectMap.get("alertNewType");
+  (state && state.options ? state.options : []).forEach(o => {
+    map[String(o.value)] = String(o.label);
+  });
+  return map;
+}
+
+async function alertsSave(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const body = {
+      enabled: $("#alertEnabled").checked,
+      cooldown: Number($("#alertCooldown").value) || 600,
+      channels: _alertChannels,
+      smtp_host: $("#smtpHost").value.trim(),
+      smtp_port: Number($("#smtpPort").value) || 465,
+      smtp_user: $("#smtpUser").value.trim(),
+      // 空串 = 不修改；掩码串不能当真密码写回
+      smtp_password: $("#smtpPassword").value,
+      smtp_from: $("#smtpFrom").value.trim(),
+      smtp_starttls: $("#smtpStarttls").checked,
+      // 一条式 QQ 授权码 + 默认收件邮箱
+      smtp: _smtpCompactClear ? "__clear__" : ($("#smtpCompact")?.value || "").trim(),
+      mail_to: ($("#smtpMailTo")?.value || "").trim(),
+    };
+    const r = await api("/api/alerts/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { _smtpCompactClear = false; toast("预警配置已保存"); loadAlerts(); }
+    else toast("保存失败", "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function alertsSendTest(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/alerts/test", { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    const results = d.results || [];
+    if (!results.length) {
+      toast("没有配置任何渠道，先添加一个", "err");
+      return;
+    }
+    // 逐路展示成败：只说「发送失败」没法定位是 SMTP 还是 webhook
+    const lines = results.map(item => {
+      const ok = item.ok ? "✓" : "✗";
+      return `${ok} ${item.type} → ${item.target}${item.ok ? "" : "：" + (item.error || "")}`;
+    });
+    openModal(`<h3>测试发送结果</h3><pre class="alert-test-result">${esc(lines.join("\n"))}</pre>`, "max-w-2xl");
+  } catch (e) {
+    toast("测试失败：" + e.message, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+//: 客户端参数页当前的平台（落库名）
+var _clientPlatform = "";
+
+/** 平台清单缓存（`/api/platforms` 的 items） */
+var _clientPlatformSpecs = null;
+
+async function clientPlatformSpecs(force) {
+  if (!force && Array.isArray(_clientPlatformSpecs)) return _clientPlatformSpecs;
+  try {
+    const r = await api("/api/platforms");
+    const { ok, data } = await safeJson(r);
+    if (ok && data && Array.isArray(data.items)) {
+      _clientPlatformSpecs = data.items;
+    }
+  } catch (error) {
+    // 拿不到就只显示当前平台
+  }
+  if (!_clientPlatformSpecs) {
+    const one = (window.WBPlatform && window.WBPlatform.spec)
+      ? window.WBPlatform.spec() : null;
+    _clientPlatformSpecs = one ? [one] : [];
+  }
+  return _clientPlatformSpecs;
+}
+
+/** 当前选中的客户端参数平台。 */
+function clientPlatform() {
+  if (!_clientPlatform) {
+    const spec = (window.WBPlatform && window.WBPlatform.spec)
+      ? window.WBPlatform.spec() : null;
+    _clientPlatform = (spec && spec.storage_platform) || "workbuddy";
+  }
+  return _clientPlatform;
+}
+
+/** 渲染平台切换 chip。 */
+async function renderClientPlatformBar() {
+  const host = document.querySelector("#clientPlatformBar");
+  if (!host) return;
+  const specs = await clientPlatformSpecs();
+  const seen = new Set();
+  const chips = [];
+  for (const spec of specs) {
+    const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+    if (!storage || seen.has(storage)) continue;
+    seen.add(storage);
+    const on = storage === clientPlatform();
+    chips.push(`<button type="button"
+      class="console-btn ${on ? "primary" : "quiet"}"
+      onclick="selectClientPlatform(${jsv(storage)})"
+      aria-pressed="${on ? "true" : "false"}">${esc(spec.label || storage)}</button>`);
+  }
+  host.innerHTML = `<span class="text-xs" style="color:var(--fg-subtle)">平台</span>`
+    + chips.join("");
+}
+
+/** 切到某个平台（WorkBuddy 走原 loadClientProfile，其它走探测）。 */
+async function selectClientPlatform(storage) {
+  _clientPlatform = String(storage || "").toLowerCase() || "workbuddy";
+  await renderClientPlatformBar();
+  await detectClient();
+}
+
+/**
+ * 扫描位置卡片：各平台的目录 / 凭据 / 上游地址。
+ *
+ * 所有平台都显示这一块。没有数据时显示「—」，
+ * 让用户知道「这块能力存在但本机没有」，而不是整块消失。
+ */
+function renderClientScanBody(data, storage) {
+  const body = document.querySelector("#clientProbeBody");
+  if (!body) return;
+  const detected = (data && data.detected) || {};
+  const dirs = (data && data.dirs) || detected.data_dirs || [];
+  const items = detected.items || [];
+  const pick = (obj, keys) => {
+    for (const key of keys) {
+      const value = obj && obj[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+    return "";
+  };
+  const dash = '<span style="color:var(--fg-subtle)">—</span>';
+
+  const rows = items.map(it => {
+    const where = pick(it, ["source", "data_dir", "dir", "path", "account_id"]);
+    const who = pick(it, ["session", "uid_hint", "uid", "phone", "account_id"]);
+    const flag = it.has_plain_credential ? "明文" : "加密";
+    return `<li style="padding:3px 0">
+      <span class="text-[10px]" style="color:var(--fg-subtle)">[${esc(flag)}]</span>
+      <code>${esc(String(where))}</code>
+      ${who ? `<span style="color:var(--fg-muted)"> ${esc(String(who))}</span>` : ""}
+    </li>`;
+  }).join("");
+
+  // 状态描述要区分三种情况，不能一律「未检测到」：
+  //   1. 有目录 + 有凭据  -> 已检测到，可导入
+  //   2. 有目录 + 无凭据  -> 目录在，但这里不放凭据（WorkBuddy 的凭据在别处）
+  //   3. 没有目录         -> 客户端没装
+  let stateText;
+  if (dirs.length && items.length) {
+    stateText = `<b style="color:var(--success,#33587F)">已检测到客户端</b>`;
+  } else if (dirs.length) {
+    stateText = `<b style="color:var(--success,#33587F)">已找到客户端目录</b>`
+      + `<span style="color:var(--fg-subtle)"> · 这些目录里没有凭据文件</span>`;
+  } else if (data && data.has_client) {
+    stateText = `<b style="color:var(--success,#33587F)">已探测到参数</b>`
+      + `<span style="color:var(--fg-subtle)"> · 本机没有该客户端的数据目录</span>`;
+  } else {
+    stateText = `<span style="color:var(--fg-subtle)">未检测到客户端</span>`;
+  }
+
+  body.innerHTML = `
+    <div class="mb-2">
+      ${stateText}
+      <span style="color:var(--fg-subtle)">（${dirs.length} 个扫描目录${items.length ? `，${items.length} 个凭据位置` : ""}）</span>
+    </div>
+    <div class="mb-2">
+      <div style="color:var(--fg-subtle);margin-bottom:2px">扫描目录</div>
+      ${dirs.length
+        ? `<ul class="scan-dir-list">${dirs.map(d => `<li><code class="wrap-anywhere">${esc(String(d))}</code></li>`).join("")}</ul>`
+        : `<div>${dash}</div>`}
+    </div>
+    <div class="mb-2">
+      <div style="color:var(--fg-subtle);margin-bottom:2px">凭据位置</div>
+      ${rows || `<div>${dash}</div>`}
+    </div>
+    ${detected.base_url
+      ? `<div style="color:var(--fg-subtle)">上游地址：<code>${esc(String(detected.base_url))}</code></div>`
+      : ""}
+    ${detected.hint
+      ? `<div class="mt-2" style="color:var(--fg-subtle)">${esc(detected.hint)}</div>`
+      : ""}
+    ${(data && data.errors || []).length
+      ? `<div class="mt-2" style="color:var(--danger)">${esc((data.errors || []).join("；"))}</div>`
+      : ""}`;
+}
+
+/**
+ * 非 WorkBuddy 平台：用**与原版相同的「标签 + 值」骨架**填字段。
+ *
+ * 要求：「布局板块一样，哪怕确实没有数据探测不出来」。
+ * 所以这里的 DOM 结构与 `_cpInput` 渲染的一致（同样的小标签 + 只读框），
+ * 只是值来自探测结果，缺失显示「—」。
+ */
+function renderClientPlatformFields(data, storage) {
+  const detected = (data && data.detected) || {};
+  const dash = "";
+
+  // ① 提示条（与 WorkBuddy 同结构：策略 / 客户端 / 字段数）
+  const hint = document.querySelector("#clientHint");
+  if (hint) {
+    const has = Boolean(data && data.has_client);
+    const dirs = (data && data.dirs) || detected.data_dirs || [];
+    hint.innerHTML = `
+      <div class="flex flex-wrap gap-x-6 gap-y-1">
+        <span>平台：<b>${esc(storage)}</b></span>
+        <span>本机客户端：${has
+          ? '<b class="text-emerald-600">已探测到</b>'
+          : '<b class="text-slate-400">未探测到</b>'}</span>
+        <span>扫描目录：<b>${dirs.length}</b></span>
+        <span>探测字段：<b>${Object.keys(detected).length}</b></span>
+      </div>
+      <div class="mt-2 text-slate-400">该平台的参数由客户端自身管理，
+        这里只做只读探测；没有的字段显示「—」。</div>`;
+  }
+
+  // ② 运行时诊断：有就显示，没有给说明
+  renderClientRuntimeDiagnostics((data && data.runtime_diagnostics) || null);
+
+  // ③ UA：与原版同一个框，没值显示「—」
+  const ua = document.querySelector("#clientUa");
+  if (ua) {
+    const value = (data && data.ua) || detected.ua || detected.user_agent || "";
+    ua.textContent = value || "—";
+  }
+
+  // ④ 版本与归属 / 桌面指纹 / 风控头：同一套 label+value 骨架
+  const fieldRow = (label, value, hintText) => `
+    <div style="margin-bottom:10px">
+      <div class="text-xs" style="color:var(--fg-subtle);margin-bottom:3px">
+        ${esc(label)}${hintText ? ` <span style="opacity:.6">· ${esc(hintText)}</span>` : ""}
+      </div>
+      <div class="cp-input text-xs" style="border:1px solid var(--line);
+           border-radius:8px;padding:6px 10px;font-family:ui-monospace,monospace">
+        ${value === "" || value === undefined || value === null
+          ? '<span style="color:var(--fg-subtle)">—</span>'
+          : esc(String(value)).slice(0, 200)}
+      </div>
+    </div>`;
+
+  const versionKeys = ["platform", "version", "desktop_version", "cli_version",
+                       "os", "arch", "os_version", "machine_id", "app_status",
+                       "live_user_data_dir"];
+  const fields = document.querySelector("#clientFields");
+  if (fields) {
+    fields.innerHTML = versionKeys.map(key =>
+      fieldRow(key, detected[key] !== undefined ? detected[key] : "")).join("");
+  }
+
+  const fpKeys = ["storage", "desktop_installed", "model_count", "realm",
+                  "can_import", "config_root", "accounts_found"];
+  const fp = document.querySelector("#clientFpFields");
+  if (fp) {
+    fp.innerHTML = fpKeys.map(key =>
+      fieldRow(key, detected[key] !== undefined ? detected[key] : "")).join("");
+  }
+
+  const headers = document.querySelector("#clientHeaders");
+  if (headers) {
+    const extra = detected.headers || detected.request_headers || null;
+    headers.innerHTML = extra
+      ? fieldRow("headers", JSON.stringify(extra))
+      : fieldRow("headers", "");
+  }
+
+  const sources = document.querySelector("#clientSources");
+  if (sources) {
+    const origins = (data && data.detected_origins) || {};
+    const entries = Object.entries(origins);
+    sources.innerHTML = entries.length
+      ? entries.map(([key, value]) =>
+          `<div>${esc(key)} ← ${esc(String(value))}</div>`).join("")
+      : '<span style="color:var(--fg-subtle)">—</span>';
+  }
+
+  const status = document.querySelector("#clientStatus");
+  if (status) {
+    status.textContent = "该平台没有可写入的客户端参数（只读探测）";
+  }
+}
+
+async function loadClientProfile(){
+  const r = await api("/api/client-profile");
+  if(!r.ok){
+    // 404 = 运行中的后端还是旧代码（新增接口需重启服务）。
+    // 静态页是即改即生效的，所以很容易出现「页面有新面板、接口还没有」的组合，
+    // 这里明确提示，否则用户只会看到一个空白面板。
+    if($("#clientHint")) $("#clientHint").innerHTML = r.status === 404
+      ? `<span class="text-amber-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>后端尚未加载客户端参数接口（HTTP 404）。请重启服务后刷新本页。</span>`
+      : `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+    return;
+  }
+  const d = await r.json(); _clientProfile = d;
+  const eff = d.effective || {}, sav = d.saved || {}, det = d.detected || {};
+  const src = d.sources || {};
+
+  renderClientRuntimeDiagnostics(d.runtime_diagnostics);
+
+  // 生效中的 UA
+  if($("#clientUa")) $("#clientUa").textContent = eff.user_agent || "（未知）";
+
+  // 提示条：说明当前策略与「本机是否装了客户端」
+  const hasClient = !!d.has_client;
+  const mode = d.source === "saved" ? "钉住已保存值" : "优先现场探测";
+  if($("#clientHint")) $("#clientHint").innerHTML = `
+    <div class="flex flex-wrap gap-x-6 gap-y-1">
+      <span>取值策略：<b class="${d.source==="saved"?"text-amber-600":"text-emerald-600"}">${esc(mode)}</b></span>
+      <span>本机客户端：${hasClient
+        ? `<b class="text-emerald-600">已探测到</b>（${Object.keys(det).length} 项）`
+        : `<b class="text-slate-400">未探测到</b>`}</span>
+      <span>已保存字段：<b>${Object.keys(sav).length}</b></span>
+    </div>
+    <div class="mt-2 text-slate-400">${
+      hasClient
+        ? "本机装了客户端：版本号/风控配置从安装包读取，OS/硬件/时区按本机系统实测（与官方客户端取值公式一致）；改动版本后无需重启进程即刻生效。"
+        : "本机未探测到客户端（线上服务器属正常）。线上实例请用「钉住已保存值」，否则会退化成内置兜底版本号。"
+    }</div>
+    ${d.source!=="saved" && !hasClient
+      ? `<div class="mt-1 text-amber-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>建议切换到「钉住已保存值」，否则本机探测不到时会用兜底值。</div>`
+      : ""}`;
+
+  // 字段：显示生效值；标签旁的彩色徽标标出来源（悬停可见完整来源说明）
+  const render = (defs, mount) => {
+    const el = $(mount); if(!el) return;
+    el.innerHTML = defs.map(([k,label,type,hint]) => {
+      const v = eff[k] !== undefined ? eff[k] : "";
+      const s = src[k] || "";
+      return `<div data-tooltip="来源：${esc(s)}">${_cpInput("cp_"+k, label, type,
+        hint || "", v, _cpSourceBadge(s))}</div>`;
+    }).join("");
+  };
+  render(_CP_FIELDS, "#clientFields");
+  render(_CP_FP_FIELDS, "#clientFpFields");
+
+  // 可选客户端头：档案与保存值合并后的结果，仅用于查看/明确支持的业务
+  const hs = eff.headers || {};
+  const hEl = $("#clientHeaders");
+  if(hEl){
+    hEl.innerHTML = Object.keys(hs).sort().map((k,i) => `
+      <div class="flex gap-2 mb-2 items-center cp-hrow">
+        <input class="cp-hk w-1/3 border rounded-lg px-2 py-1 text-xs font-mono" value="${esc(k)}" />
+        <input class="cp-hv flex-1 border rounded-lg px-2 py-1 text-xs font-mono" value="${esc(String(hs[k]))}" />
+        <button onclick="this.parentNode.remove()" class="px-2 py-1 rounded border text-xs text-red-500" data-tooltip="删除"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span></button>
+      </div>`).join("") +
+      `<button onclick="_cpAddHeader()" class="text-xs px-2 py-1 rounded border hover:bg-slate-50 mt-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span>添加请求头</button>`;
+  }
+
+  // 来源表（排障）：按来源类别着色
+  const sEl = $("#clientSources");
+  if(sEl){
+    const srcCls = v => String(v).startsWith("环境变量") ? "text-amber-600"
+      : String(v) === "内置兜底" ? "text-slate-400"
+      : String(v) === "已保存" ? "text-sky-600"
+      : (String(v).includes("安装包") || String(v).includes("本机系统")) ? "text-emerald-600"
+      : "text-slate-600";
+    sEl.innerHTML = Object.keys(src).sort()
+      .map(k => `<div><span class="text-slate-400">${esc(k)}</span> <span class="${srcCls(src[k])}">${esc(src[k])}</span></div>`)
+      .join("");
+  }
+
+  // ---- 平台切换 + 扫描位置（新增，不动上面的渲染）----
+  renderClientPlatformBar();
+  renderClientScanBody(d, "workbuddy");
+}
+
+function renderClientRuntimeDiagnostics(diag){
+  const el = $("#clientRuntimeDiagnostics");
+  if(!el) return;
+  const d = diag || {};
+  const tok = d.device_token || {};
+  const tokenOk = tok.available === true;
+  const tokenClass = tokenOk ? "text-emerald-600" : "text-amber-600";
+  const tokenText = tokenOk ? "原生 SDK 令牌可用（本机实测）" :
+    (!tok.checked ? "尚无 SDK 令牌缓存" :
+      (tok.cached_failure ? "原生 SDK 暂不可用（已有失败缓存）" : "原生 SDK 令牌不可用"));
+  const boolText = v => v ? "可用" : "不可用";
+  const groups = d.header_groups || {};
+  // 每组头的来源：档案值标明探测/保存来源；账号会话头来自当前凭据。
+  const groupOrigin = {
+    client_profile: "档案值（探测/保存/兜底，见上方字段徽标）",
+    sdk_stainless: "SDK 资料（仅在明确使用该 SDK 的业务中适用）",
+    account_session: "账号凭据/会话字段",
+    request_trace: "调用方明确提供的关联字段",
+  };
+  const groupHtml = Object.keys(groups).sort().map(name => {
+    const headers = Array.isArray(groups[name]) ? groups[name] : [];
+    return `<div class="mb-1"><span class="text-slate-400">${esc(name)}</span>`+
+      (groupOrigin[name]?` <span class="text-[10px] text-slate-400">〔${esc(groupOrigin[name])}〕</span>`:"")+
+      `· <span class="font-mono">${esc(headers.join(", "))}</span></div>`;
+  }).join("");
+  el.innerHTML = `<div class="flex flex-wrap gap-x-6 gap-y-1 mb-2">`+
+    `<span>运行平台：<b class="font-mono">${esc(d.platform || "—")}</b></span>`+
+    `<span>设备令牌：<b class="${tokenClass}">${esc(tokenText)}</b></span>`+
+    `<span>Node：<b>${esc(boolText(tok.node_available))}</b></span>`+
+    `<span>Native helper：<b>${esc(boolText(tok.helper_available))}</b></span>`+
+    `</div>`+
+    `<div class="text-slate-400 mb-1">请求头字段组（部分字段按请求上下文动态生成）：</div>`+
+    `<div class="font-mono break-all">${groupHtml || "—"}</div>`+
+    `<div class="mt-2 text-slate-400">服务器没有官方原生 SDK 时会明确显示不可用；不要手工填写或伪造设备令牌。客户端参数区的值只用于对齐协议中可验证的版本与请求头；账号身份、会话令牌和链路头由请求运行时生成，不代表官方客户端的实测值。</div>`;
+}
+
+function _cpAddHeader(){
+  const el = $("#clientHeaders"); if(!el) return;
+  const row = document.createElement("div");
+  row.className = "flex gap-2 mb-2 items-center cp-hrow";
+  row.innerHTML = `<input class="cp-hk w-1/3 border rounded-lg px-2 py-1 text-xs font-mono" placeholder="Header-Name" />
+    <input class="cp-hv flex-1 border rounded-lg px-2 py-1 text-xs font-mono" placeholder="值" />
+    <button onclick="this.parentNode.remove()" class="px-2 py-1 rounded border text-xs text-red-500"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span></button>`;
+  el.insertBefore(row, el.lastElementChild);
+  row.querySelector(".cp-hk").focus();
+}
+
+function _cpCollect(){
+  const p = {};
+  _CP_FIELDS.concat(_CP_FP_FIELDS).forEach(([k,,type]) => {
+    const el = $("#cp_"+k); if(!el) return;
+    const raw = (el.value||"").trim();
+    if(raw === "") return;                 // 留空 = 不改这一项
+    p[k] = type === "int" ? (parseInt(raw,10) || 0) : raw;
+  });
+  const hs = {};
+  document.querySelectorAll("#clientHeaders .cp-hrow").forEach(row => {
+    const k = row.querySelector(".cp-hk").value.trim();
+    const v = row.querySelector(".cp-hv").value.trim();
+    if(k) hs[k] = v;
+  });
+  if(Object.keys(hs).length) p.headers = hs;
+  return p;
+}
+
+async function saveClientProfile(){
+  const profile = _cpCollect();
+  if(!Object.keys(profile).length){ toast("没有要保存的改动","err"); return; }
+  const r = await api("/api/client-profile",{method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile, merge:true})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("保存失败: "+(d.detail||""),"err"); return; }
+  toast("已保存，新值立即生效");
+  if(d.errors?.length) console.warn("客户端参数提示:", d.errors);
+  loadClientProfile();
+}
+
+async function resetClientProfile(){
+  if(!await uiConfirm({kind:"warn", danger:true, title:"重置客户端参数",
+      message:"清空后台保存的值，回到「优先现场探测 + 内置兜底」。确认重置？", okText:"重置"})) return;
+  const r = await api("/api/client-profile/reset",{method:"POST"});
+  if(r.ok){ toast("已重置"); loadClientProfile(); } else toast("重置失败","err");
+}
+
+// ===== 客户端参数：平台切换 + 全平台探测 =====
+//
+// 各平台的「客户端参数」完全不是一回事：
+//   WorkBuddy  UA / 版本号 / 风控头 / 桌面指纹（要伪装成官方桌面端）
+//   Trae       客户端数据目录 + 登录态
+//   Qoder      auth.v1.dat（加密）+ 数据目录
+//   Loomy      auth-session.json（明文）+ 运行配置
+//
+// 所以不能塞进同一个表单 —— WorkBuddy 那套保留，其它平台展示
+// 「探测结果」（目录 / 账号 / 提示），而不是伪造成同类参数。
+
+async function initClientPanel() {
+  await renderClientPlatformBar();
+  // 统一布局：所有平台都走 detectClient（内部按 storage 选接口）
+  await detectClient();
+}
+
+
+/** 探测当前平台的客户端（不保存）。 */
+/**
+ * 把某平台的探测结果渲染成 HTML。
+ *
+ * 各平台字段差异很大，用 pick() 兼容：
+ *   Loomy  config_root / items[].source / session / phone / base_url
+ *   Qoder  data_dirs / cli_dirs / accounts_found / catalogs
+ *   Trae   storage / desktop_installed / model_count
+ */
+function clientProbeHtml(data) {
+  const detected = (data && data.detected) || {};
+  const dirs = (data && data.dirs) || detected.data_dirs || [];
+  const items = detected.items || [];
+  const pick = (obj, keys) => {
+    for (const key of keys) {
+      const value = obj && obj[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+    return "";
+  };
+
+  const rows = items.map(it => {
+    const where = pick(it, ["source", "data_dir", "dir", "path", "account_id"]);
+    const who = pick(it, ["session", "uid_hint", "uid", "phone", "account_id"]);
+    const flag = it.has_plain_credential ? "明文" : "加密";
+    return `<li style="padding:3px 0">
+      <span class="text-[10px]" style="color:var(--fg-subtle)">[${esc(flag)}]</span>
+      <code>${esc(String(where))}</code>
+      ${who ? `<span style="color:var(--fg-muted)"> ${esc(String(who))}</span>` : ""}
+    </li>`;
+  }).join("");
+
+  return `
+    <p class="mb-2">
+      ${data.has_client
+        ? '<span style="color:var(--success,#33587F)">已检测到客户端</span>'
+        : '<span style="color:var(--fg-muted)">未检测到客户端</span>'}
+      <span class="text-[11px]" style="color:var(--fg-subtle)">（${dirs.length} 个扫描目录${items.length ? `，${items.length} 个凭据位置` : ""}）</span>
+    </p>
+    ${dirs.length ? `<div class="mb-2">
+      <span class="text-[11px]" style="color:var(--fg-subtle)">扫描目录</span>
+      <ul style="max-height:160px;overflow:auto">${dirs.map(d => `<li><code>${esc(String(d))}</code></li>`).join("")}</ul>
+    </div>` : `<p class="text-[11px]" style="color:var(--fg-subtle)">扫描目录：—</p>`}
+    ${rows ? `<div>
+      <span class="text-[11px]" style="color:var(--fg-subtle)">凭据位置</span>
+      <ul style="max-height:200px;overflow:auto">${rows}</ul>
+    </div>` : `<p class="text-[11px]" style="color:var(--fg-subtle)">凭据位置：—</p>`}
+    ${detected.hint ? `<p class="mt-2 text-[11px]" style="color:var(--fg-subtle)">${esc(detected.hint)}</p>` : ""}
+    ${(data.errors || []).length ? `<p class="mt-2" style="color:var(--danger)">${esc((data.errors || []).join("；"))}</p>` : ""}`;
+}
+
+/**
+ * 按平台填充「统一布局」的各个板块。
+ *
+ * 所有平台共用同一套 DOM（状态 / 运行时诊断 / UA / 版本与归属 /
+ * 桌面指纹 / 风控头 / 取值来源 / 扫描位置）。
+ * **没有数据的字段显示「—」而不是隐藏整块** ——
+ * 隐藏会让切平台时布局跳变，用户也看不出「这个平台缺什么」。
+ */
+
+// ===== 平台网关：调度可视化 =====
+//
+// 拓扑：Key -> 网关 -> 各平台
+// 粒子飞向谁，由 `/api/gateway/order` 的真实顺序决定 —— 不是假动画。
+var _gwTopology = null;
+var _gwTrafficTimer = null;
+
+/** 初始化（或重建）拓扑。 */
+// ===== 风控哨兵：实时流量可视化 =====
+var _wbtSentinelTopology = null;
+var _wbtSentinelTimer = null;
+var _wbtSentinelSeen = new Set();
+//: 增量游标：只对「这个时间点之后」的请求发射粒子
+var _wbtSentinelBaseline = 0;
+
+/** 初始化哨兵拓扑（请求 -> 哨兵 -> 各平台）。 */
+async function sentinelInitTraffic(force) {
+  const host = document.querySelector("#sentinelTraffic");
+  if (!host || !window.WBTraffic) return;
+  if (_wbtSentinelTopology && !force) {
+    _wbtSentinelTopology.redraw();
+    return;
+  }
+  if (_wbtSentinelTopology) _wbtSentinelTopology.destroy();
+
+  const platforms = await gwTrafficPlatforms();
+  const nodes = [
+    { id: "req", label: "客户端请求", sub: "最近 1 小时", side: "left" },
+    { id: "sentry", label: "风控哨兵", sub: "检测中", side: "center" },
+  ];
+  platforms.forEach(item => {
+    const parts = splitPlatformLabel(item.label || item.platform);
+    nodes.push({
+      id: "s-" + item.platform,
+      label: parts.name || item.platform,
+      sub: item.disabled ? "已禁用"
+        : [parts.region, item.accounts + " 个账号"].filter(Boolean).join(" · "),
+      side: "right",
+    });
+  });
+  const links = [{ from: "req", to: "sentry", kind: "main" }];
+  platforms.forEach(item => {
+    links.push({ from: "sentry", to: "s-" + item.platform, kind: "branch" });
+  });
+
+  _wbtSentinelTopology = new window.WBTraffic.Topology(host, { nodes, links });
+  // 哨兵拓扑的两个虚拟节点也要有图标：
+  //   req    —— 客户端请求（终端窗口）
+  //   sentry —— 风控哨兵（雷达扫描，和侧栏图标同一意象）
+  // 之前这两个节点只有文字，左边空一块，看起来像图标丢了。
+  _wbtSentinelTopology.setNodeIcon("req",
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" '
+    + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="2.5" y="4" width="19" height="13" rx="2.2"/>'
+    + '<path d="M8.5 20.5h7"/><path d="M12 17.5v3"/></svg>');
+  _wbtSentinelTopology.setNodeIcon("sentry",
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" '
+    + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3a9 9 0 1 0 9 9"/>'
+    + '<path d="M12 7.5A4.5 4.5 0 1 0 16.5 12"/>'
+    + '<path d="M12 12l6.4-6.4"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/>'
+    + '</svg>');
+  fillTrafficNodeIcons(_wbtSentinelTopology, "s-");
+  await sentinelPollLogs();
+  if (_wbtSentinelTimer) clearInterval(_wbtSentinelTimer);
+  _wbtSentinelTimer = setInterval(sentinelPollLogs, 2000);
+}
+
+/** 标题里的平台标识（复用于粒子归因）。 */
+function sentinelPlatformLabel(platform) {
+  const node = _wbtSentinelTopology && _wbtSentinelTopology.node("s-" + platform);
+  if (!node) return platform;
+  return (node.querySelector(".wbt-node-label") || {}).textContent || platform;
+}
+
+function sentinelToneOf(item) {
+  const status = Number(item.status || 0);
+  // **先看 HTTP 状态**：2xx/3xx 一定是成功的。
+  //
+  // 之前只看 `outcome` 白名单 `("completed","ok")`，而流式请求正常结束
+  // 时会记成 `interrupted`（客户端断开/流式收尾），于是 200 被染成红色。
+  // 状态码是最硬的证据，它说成功就是成功。
+  if (status >= 500) return "danger";
+  if (status >= 400) return "warn";
+  if (status >= 200 && status < 400) {
+    // 2xx 但要能看出「真的失败」的情况：超时且无状态码
+    if (item.outcome === "timeout" && !status) return "danger";
+    return "ok";
+  }
+  // 没有状态码（连接层失败）：才轮到 outcome / error 说话
+  if (item.outcome === "timeout") return "danger";
+  const kind = String(item.error || "").trim().toLowerCase();
+  if (kind && kind !== "success" && kind !== "ok" && kind !== "none" && kind !== "0") return "danger";
+  // 无状态码但 outcome 明确成功
+  if (!status && !kind) return "ok";
+  return "warn";
+}
+
+function sentinelToneColor(tone) {
+  return tone === "ok" ? "#3E6A99" : tone === "warn" ? "#f59e0b" : "#ef4444";
+}
+
+function sentinelClock(ts) {
+  if (!ts) return "—";
+  const date = new Date(Number(ts) * 1000);
+  return String(date.getHours()).padStart(2, "0") + ":" +
+    String(date.getMinutes()).padStart(2, "0") + ":" +
+    String(date.getSeconds()).padStart(2, "0");
+}
+
+/**
+ * 今日概况 KPI：4 个格子，跟着同一个轮询渲染。
+ *
+ * 为什么不做成图表：左栏已经有拓扑动画，再加曲线会抢注意力；
+ * 这里要回答的是「今天到底稳不稳」——请求量、成功率、失败数、覆盖平台。
+ */
+function renderSentinelKpi(data) {
+  const host = document.querySelector("#sentinelKpi");
+  if (!host) return;
+  const rows = (data && data.platforms) || [];
+  const totals = (data && data.totals) || {};
+  const requests = Number(totals.requests || 0);
+  const ok = Number(totals.ok || 0);
+  const failed = Number(totals.error || 0) + Number(totals.timeout || 0);
+  const active = rows.filter(row => Number(row.requests || 0) > 0).length;
+  const totalPlatforms = rows.length;
+  const rate = requests ? (ok / requests * 100) : 100;
+  // 失败最多的平台：出现批次级问题时，第一眼就知道先看谁
+  const worst = rows
+    .map(row => ({
+      label: row.label || row.platform,
+      bad: Number(row.error || 0) + Number(row.timeout || 0),
+      total: Number(row.requests || 0),
+    }))
+    .filter(item => item.bad > 0)
+    .sort((a, b) => b.bad - a.bad)[0];
+  const tone = rate >= 98 ? "ok" : rate >= 90 ? "warn" : "danger";
+  const cells = [
+    { label: "今日请求", value: fmtNum(requests), sub: `${active}/${totalPlatforms} 个平台有流量` },
+    { label: "成功率", value: rate.toFixed(1) + "%", sub: `成功 ${fmtNum(ok)} 次`, tone },
+    { label: "失败 / 超时", value: fmtNum(failed), sub: worst ? `最多：${worst.label} ${worst.bad} 次` : "暂无失败", tone: failed ? "danger" : "ok" },
+    { label: "当前存储", value: data && data.storage === "redis" ? "Redis" : "内存", sub: "跨进程共享" },
+  ];
+  host.innerHTML = cells.map(cell => `
+    <div class="sentinel-kpi-cell${cell.tone ? " tone-" + cell.tone : ""}">
+      <span class="sentinel-kpi-label">${esc(cell.label)}</span>
+      <b class="sentinel-kpi-value">${esc(cell.value)}</b>
+      <span class="sentinel-kpi-sub">${esc(cell.sub)}</span>
+    </div>`).join("");
+  const hint = document.querySelector("#sentinelKpiHint");
+  if (hint) {
+    hint.textContent = `今日累计 · ${data && data.storage === "redis" ? "Redis" : "内存"} · 每 2 秒刷新`;
+  }
+}
+
+/**
+ * 平台健康条：每个平台一行「名称 + 成功率条 + 请求/失败」。
+ *
+ * 用条而不是数字，是因为「90% 和 60% 差多少」看图比看数字快；
+ * 颜色跟 KPI 一致：>=98% 绿、>=90% 黄、其余红。
+ */
+function renderSentinelBars(data) {
+  const host = document.querySelector("#sentinelPlatformBars");
+  if (!host) return;
+  const rows = ((data && data.platforms) || [])
+    .filter(row => Number(row.requests || 0) > 0)
+    .sort((a, b) => Number(b.requests || 0) - Number(a.requests || 0));
+  if (!rows.length) {
+    host.innerHTML = '<p class="sentinel-empty" style="padding:6px 2px">今天还没有请求。</p>';
+    return;
+  }
+  // 绿红**共用一条**：绿色=成功占比、红色=失败/超时占比，长度按真实比例分配。
+  // 之前只画一根单色条（按成功率上色），于是要么全绿要么全红，
+  // 看不出「100 次里挂了 40 次」这种信息。
+  host.innerHTML = rows.map(row => {
+    const requests = Number(row.requests || 0);
+    const ok = Number(row.ok || 0);
+    const failed = Math.max(0, requests - ok);
+    const okPct = requests ? (ok / requests * 100) : 0;
+    const badPct = 100 - okPct;
+    const rate = okPct;
+    const tone = rate >= 98 ? "ok" : rate >= 90 ? "warn" : "danger";
+    return `<div class="sentinel-bar-row" data-tooltip="${esc(row.label || row.platform)} · 成功 ${ok} / 失败 ${failed}">
+      <span class="sentinel-bar-name">${esc((row.label || row.platform).replace(/\s*(国内版|国际版)/, ""))}</span>
+      <span class="sentinel-bar-track">
+        <i class="bar-ok" style="width:${okPct.toFixed(2)}%"></i>
+        <i class="bar-bad" style="width:${badPct.toFixed(2)}%"></i>
+      </span>
+      <span class="sentinel-bar-value tone-${tone}">${rate.toFixed(1)}%</span>
+      <span class="sentinel-bar-sub">${fmtNum(requests)} 次${failed ? ` · ${failed} 失败` : ""}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderSentinelTraffic(data) {
+  renderSentinelKpi(data);
+  renderSentinelBars(data);
+  const counts = document.querySelector("#sentinelTrafficCounts");
+  const recent = document.querySelector("#sentinelRecentResults");
+  const storage = document.querySelector("#sentinelTrafficStorage");
+  const rows = (data && data.platforms) || [];
+  if (storage) {
+    storage.textContent = "今日累计 · " + (data.storage === "redis" ? "Redis" : "内存") +
+      " · 每 2 秒刷新";
+  }
+  if (counts) {
+    counts.innerHTML = rows.map(row => {
+      const total = Number(row.requests || 0);
+      const failed = Number(row.error || 0) + Number(row.timeout || 0);
+      return `<div class="live-platform-count" data-tooltip="${esc(row.label || row.platform)} · 今日请求">
+        <span>${esc((row.label || row.platform).replace(/\s*国内版|\s*国际版/, ""))}</span>
+        <span><b>${total}</b>${failed ? ` <em>${failed} 失败</em>` : ""}</span>
+      </div>`;
+    }).join("") || '<p class="sentinel-empty" style="padding:8px 2px">暂无请求</p>';
+  }
+  if (recent) {
+    const items = ((data && data.recent) || []).slice(0, 40);
+    recent.innerHTML = items.length ? items.map(item => {
+      const tone = sentinelToneOf(item);
+      const status = Number(item.status || 0);
+      // running：请求**正在进行**（开始时就落一条，结束时被正式记录覆盖）。
+      // 之前面板只在请求结束后才有数据，跑 30 秒的任务前 28 秒什么都看不到。
+      const label = item.outcome === "running" ? "进行中"
+        : item.outcome === "timeout" ? "超时"
+        : status ? String(status) : (item.outcome || "—");
+      const runningCls = item.outcome === "running" ? " live-request-running" : "";
+      return `<div class="live-request-row${runningCls}">
+        <span class="live-request-time">${sentinelClock(item.ts)}</span>
+        <span class="live-request-model" data-tooltip="${esc(item.error || item.path || "")}">${esc(item.model || item.path || "—")}</span>
+        <span class="live-request-platform">${esc(item.platform || "—")}</span>
+        <span class="live-request-status ${tone}">${esc(label)}</span>
+      </div>`;
+    }).join("") : '<p class="sentinel-empty" style="padding:8px 2px">最近没有请求。</p>';
+  }
+}
+
+/** 实时流量：轮询「每个平台今日累计 + 最近请求」，含超时 / 503 / 报错。 */
+async function sentinelPollLogs() {
+  if (!_wbtSentinelTopology) return;
+  const hint = document.querySelector("#sentinelTrafficHint");
+  let data = null;
+  try {
+    const r = await api("/api/sentinel/traffic?window=3600");
+    const { ok, data: payload } = await safeJson(r);
+    if (!ok) return;
+    data = payload;
+  } catch (error) {
+    return;
+  }
+  renderSentinelTraffic(data);
+  const items = (data && data.recent) || [];
+  if (!_wbtSentinelBaseline) {
+    // 首次：只建基线，不重放历史（否则一进页面就喷几百个粒子）
+    _wbtSentinelBaseline = Math.max(0, ...items.map(it => Number(it.ts) || 0));
+    if (hint) hint.textContent = items.length
+      ? `实时监听中（今日 ${data.totals ? data.totals.requests : 0} 个请求）`
+      : "等待第一个请求…";
+    return;
+  }
+  const fresh = items.filter(item => {
+    const ts = Number(item.ts) || 0;
+    if (ts <= _wbtSentinelBaseline) return false;
+    const key = ts + "|" + (item.platform || "") + "|" + (item.path || "");
+    if (_wbtSentinelSeen.has(key)) return false;
+    _wbtSentinelSeen.add(key);
+    return true;
+  }).sort((a, b) => Number(a.ts) - Number(b.ts)).slice(-6);
+  if (!fresh.length) return;
+  _wbtSentinelBaseline = Math.max(_wbtSentinelBaseline,
+    ...fresh.map(item => Number(item.ts) || 0));
+  if (_wbtSentinelSeen.size > 800) {
+    _wbtSentinelSeen = new Set([..._wbtSentinelSeen].slice(-300));
+  }
+  if (hint) hint.textContent = `刚收到 ${fresh.length} 个新请求`;
+  fresh.forEach((item, index) => {
+    const tone = sentinelToneOf(item);
+    const color = sentinelToneColor(tone);
+    const platform = String(item.platform || "").toLowerCase();
+    setTimeout(() => {
+      _wbtSentinelTopology.fire("req", "sentry", { duration: 420, color: color, tone: tone });
+      setTimeout(() => {
+        const nodeId = "s-" + platform;
+        if (_wbtSentinelTopology.node(nodeId)) {
+          _wbtSentinelTopology.fire("sentry", nodeId, { duration: 520, color: color, tone: tone });
+          _wbtSentinelTopology.pulse(nodeId, tone === "ok" ? "" : "danger");
+        } else {
+          _wbtSentinelTopology.pulse("sentry", tone === "ok" ? "" : "danger");
+        }
+      }, 400);
+    }, index * 200);
+  });
+}
+
+/** 停止轮询（离开面板时调）。 */
+function sentinelStopTraffic() {
+  if (_wbtSentinelTimer) {
+    clearInterval(_wbtSentinelTimer);
+    _wbtSentinelTimer = null;
+  }
+}
+
+async function gwInitTraffic(force) {
+  const host = document.querySelector("#gwTraffic");
+  if (!host || !window.WBTraffic) return;
+  if (_gwTopology && !force) {
+    _gwTopology.redraw();
+    return;
+  }
+  if (_gwTopology) _gwTopology.destroy();
+
+  const platforms = await gwTrafficPlatforms();
+  const nodes = [
+    { id: "key", label: "API Key", sub: "调用方", side: "left" },
+    { id: "gateway", label: "平台网关", sub: "鉴权 · 路由", side: "center" },
+  ];
+  platforms.forEach(item => {
+    const parts = splitPlatformLabel(item.label || item.platform);
+    nodes.push({
+      id: "p-" + item.platform,
+      label: parts.name || item.platform,
+      sub: item.disabled ? "已禁用"
+        : [parts.region, item.accounts + " 个账号"].filter(Boolean).join(" · "),
+      side: "right",
+      tone: item.disabled ? "muted" : "",
+    });
+  });
+
+  const links = [
+    { from: "key", to: "gateway", kind: "main" },
+  ];
+  platforms.forEach(item => {
+    links.push({ from: "gateway", to: "p-" + item.platform, kind: "branch" });
+  });
+
+  _gwTopology = new window.WBTraffic.Topology(host, { nodes, links });
+  // 填平台 logo（platform-icons.js 提供的 SVG）
+  gwFillNodeIcons();
+  // 首帧后再高亮，确保路径已画
+  setTimeout(() => gwHighlightFirst(), 260);
+}
+
+/**
+ * 给拓扑节点填图标。
+ *
+ * 平台 logo 用 `platform-icons.js` 的 `WBPlatformIcons.get(id)`；
+ * key / gateway 这两个虚拟节点用内联 SVG。
+ */
+function gwFillNodeIcons() {
+  if (!_gwTopology) return;
+  const icons = window.WBPlatformIcons;
+  // 虚拟节点
+  const keySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    + 'stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9"/>'
+    + '<path d="M17 6l3 3"/><path d="M14 9l3 3"/></svg>';
+  const gateSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    + 'stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/>'
+    + '<rect x="14" y="3" width="7" height="7" rx="1"/>'
+    + '<rect x="3" y="14" width="7" height="7" rx="1"/>'
+    + '<path d="M17.5 14v7M14 17.5h7"/></svg>';
+  _gwTopology.setNodeIcon("key", keySvg);
+  _gwTopology.setNodeIcon("gateway", gateSvg);
+
+  // 平台节点
+  fillTrafficNodeIcons(_gwTopology, "p-");
+}
+
+/**
+ * 给任意拓扑的平台节点填 logo。
+ *
+ * 网关用 `p-<platform>`、哨兵用 `s-<platform>`；两边共用同一份
+ * `platform-icons.js`，缺图时用首字母兜底（不让节点空着）。
+ */
+function fillTrafficNodeIcons(topology, prefix) {
+  if (!topology) return;
+  const icons = window.WBPlatformIcons;
+  const nodes = topology.nodes || {};
+  Object.keys(nodes).forEach(id => {
+    if (!id.startsWith(prefix)) return;
+    const platformId = id.slice(prefix.length);
+    let svg = "";
+    if (icons && typeof icons.get === "function") {
+      svg = icons.get(platformId) || "";
+    }
+    if (!svg) {
+      const el = nodes[id];
+      const label = (el.querySelector(".wbt-node-label") || {}).textContent || "";
+      svg = `<span style="font-size:15px;font-weight:700;opacity:.65">${
+        esc(label.trim().charAt(0).toUpperCase() || "?")}</span>`;
+    }
+    topology.setNodeIcon(id, svg);
+  });
+}
+
+/**
+ * 拆出「产品名 + 区域」。
+ *
+ * 平台标签是「Qoder 中国版」这种「产品 + 区」的组合。拓扑节点是 2 列窄卡，
+ * 整串塞进标题会被截成「Qoder 中…」（实测），所以标题只留产品名，
+ * 区域挪到副标题 —— 一眼仍然知道是哪个区，字也不会被截断。
+ */
+function splitPlatformLabel(label) {
+  const text = String(label || "").trim();
+  const matched = text.match(/^(.*?)[\s·]+(国内版|国际版|中国版|海外版|CN|INTL)$/i);
+  if (!matched) return { name: text, region: "" };
+  return { name: matched[1].trim(), region: matched[2].trim() };
+}
+
+/** 平台清单（含账号数 / 禁用状态）。 */
+async function gwTrafficPlatforms() {  try {
+    const r = await api("/api/gateway/order");
+    const { ok, data } = await safeJson(r);
+    const pool = (ok && data && (data.pool || data.items)) || [];
+    if (pool.length) return pool;
+  } catch (error) {
+    // 落到下面的兜底
+  }
+  // 兜底：用平台列表（没有顺序信息）
+  const specs = await clientPlatformSpecs();
+  return specs.map(spec => ({
+    platform: spec.id,
+    label: spec.label,
+    accounts: 0,
+    disabled: false,
+  }));
+}
+
+/** 按当前策略顺序，高亮第一个可用平台并发射粒子。 */
+async function gwHighlightFirst() {
+  if (!_gwTopology) return;
+  const platforms = await gwTrafficPlatforms();
+  if (!platforms.length) return;
+  const first = platforms[0];
+  _gwTopology.setActiveNode("p-" + first.platform);
+  _gwTopology.setActiveLink("gateway", "p-" + first.platform);
+  _gwTopology.setSub("gateway", "当前选：" + (first.label || first.platform));
+  _gwTopology.fire("key", "gateway", { duration: 520 });
+  setTimeout(() => {
+    _gwTopology.fire("gateway", "p-" + first.platform, { duration: 620 });
+  }, 480);
+}
+
+/** 模拟一批请求：按策略顺序轮流发粒子（体现「分摊」）。 */
+async function gwTrafficBurst() {
+  if (!_gwTopology) {
+    await gwInitTraffic(true);
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+  if (!_gwTopology) return;
+  const platforms = await gwTrafficPlatforms();
+  if (!platforms.length) {
+    toast("没有可调度的平台", "err");
+    return;
+  }
+  const count = 5;
+  for (let index = 0; index < count; index += 1) {
+    // 按策略顺序取（round_robin / random 时顺序本身就是策略结果）
+    const target = platforms[index % platforms.length];
+    const delay = index * 160;
+    setTimeout(() => {
+      _gwTopology.fire("key", "gateway", { duration: 500 });
+      setTimeout(() => {
+        _gwTopology.fire("gateway", "p-" + target.platform, { duration: 600 });
+        _gwTopology.setSub("gateway", "本次 → " + (target.label || target.platform));
+      }, 460);
+    }, delay);
+  }
+  toast(`模拟 ${count} 个请求，按当前策略分散到 ${Math.min(count, platforms.length)} 个平台`);
+}
+
+/**
+ * 切换策略后**只更新高亮**，不重建节点。
+ *
+ * 原来调 `gwInitTraffic(true)` 会 `innerHTML=""` 清空重画 ——
+ * 节点短暂消失 + 容器高度变化 = 页面抽搐。
+ * 现在只改 class 和文案。
+ */
+async function gwOnStrategyChanged() {
+  if (!_gwTopology) {
+    await gwInitTraffic(true);
+    return;
+  }
+  const platforms = await gwTrafficPlatforms();
+  if (!platforms.length) return;
+  const first = platforms[0];
+  // 更新每个节点的「顺序」副标题
+  const patches = {};
+  platforms.forEach((item, index) => {
+    patches["p-" + item.platform] = {
+      sub: `${index + 1}. ${item.accounts} 个账号`,
+      active: index === 0,
+    };
+  });
+  _gwTopology.updateNodes(patches);
+  _gwTopology.setActiveLink("gateway", "p-" + first.platform);
+  _gwTopology.setSub("gateway", "当前选：" + (first.label || first.platform));
+  _gwTopology.fire("key", "gateway", { duration: 480 });
+  setTimeout(() => {
+    _gwTopology.fire("gateway", "p-" + first.platform, { duration: 560 });
+  }, 440);
+}
+
+async function saveGwSpread(checked) {
+  const r = await api("/api/gateway/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spread_unbound: Boolean(checked) }),
+  });
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast("保存失败：" + ((data && data.detail) || r.status), "err");
+    return;
+  }
+  toast(checked
+    ? "已开启：无头请求会按策略分摊到各平台"
+    : "已关闭：无头请求走默认平台");
+  if (typeof loadGatewayConfig === "function") loadGatewayConfig();
+}
+
+async function detectAllClients() {
+  toast("正在探测所有平台…");
+  const r = await api("/api/client-profile/detect-all", { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast("探测失败：" + ((data && data.detail) || r.status), "err");
+    return;
+  }
+  const items = (data && data.items) || [];
+  const rows = items.map(item => {
+    const dirs = item.dirs || [];
+    const values = item.values || {};
+    const detected = item.detected || {};
+    const has = item.has_client
+      || dirs.length > 0
+      || Object.keys(values).length > 0
+      || Boolean(detected.config_root)
+      || Boolean((detected.items || []).length);
+    const detail = item.kind === "workbuddy"
+      ? Object.entries(values).slice(0, 4).map(([k, v]) =>
+          `${esc(k)}=<code>${esc(String(v)).slice(0, 40)}</code>`).join("<br>")
+      : [
+          detected.config_root ? `目录 <code>${esc(String(detected.config_root))}</code>` : "",
+          detected.base_url ? `上游 <code>${esc(String(detected.base_url))}</code>` : "",
+          dirs.length ? `${dirs.length} 个扫描目录` : "",
+          (detected.items || []).length ? `${detected.items.length} 个凭据位置` : "",
+        ].filter(Boolean).join("<br>");
+    return `<tr class="border-t">
+      <td class="text-xs">${esc(item.label || item.platform)}</td>
+      <td class="text-xs">${has
+        ? '<span style="color:var(--success,#33587F)">已检测</span>'
+        : '<span style="color:var(--fg-subtle)">未检测到</span>'}</td>
+      <td class="text-[11px]">${detail || '<span style="color:var(--fg-subtle)">—</span>'}</td>
+    </tr>`;
+  }).join("");
+
+  openModal(`<h3 class="font-semibold text-lg mb-2">全平台客户端探测</h3>
+    <p class="text-xs mb-2" style="color:var(--fg-muted)">
+      共 ${items.length} 个平台。缺客户端的平台不影响其它平台。
+    </p>
+    <table class="w-full text-sm">
+      <thead><tr class="text-[11px]" style="color:var(--fg-subtle)">
+        <th class="text-left">平台</th><th class="text-left">状态</th>
+        <th class="text-left">探测到</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="flex justify-end mt-4">
+      <button onclick="closeModal()" class="console-btn quiet">关闭</button>
+    </div>`, "max-w-3xl");
+}
+
+async function detectClient(){
+  const storage = clientPlatform() || "workbuddy";
+  const body = document.querySelector("#clientProbeBody");
+  if (body) body.innerHTML = '<span class="text-slate-400">正在探测…</span>';
+
+  // WorkBuddy 走原接口（返回 effective / saved / detected 全套）
+  if (storage === "workbuddy") {
+    if (typeof loadClientProfile === "function") {
+      await loadClientProfile();
+      return;
+    }
+  }
+
+  // 其它平台：只探目录/凭据，用**同一套字段骨架**填值
+  let response;
+  try {
+    response = await api(
+      `/api/client-profile/detect?platform=${encodeURIComponent(storage)}`,
+      { method: "POST" });
+  } catch (error) {
+    if (body) {
+      body.innerHTML = `<p style="color:var(--danger)">探测请求失败：${esc(String(error).slice(0, 140))}</p>`;
+    }
+    return;
+  }
+  const parsed = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (body) {
+      body.innerHTML = `<p style="color:var(--danger)">探测失败：${esc(parsed.detail || response.status)}</p>`;
+    }
+    return;
+  }
+  renderClientScanBody(parsed, storage);
+  renderClientPlatformFields(parsed, storage);
+}
+
+async function toggleClientSource(){
+  const cur = _clientProfile?.source || "auto";
+  const next = cur === "saved" ? "auto" : "saved";
+  const isSaved = next === "saved";
+  if(!await uiConfirm({kind:"warn", danger:false,
+      title:isSaved?"切换为「钉住已保存值」":"切换为「优先现场探测」",
+      message:isSaved
+        ? "保存的值将优先于现场探测。线上实例应选这个（它探测不到客户端）。"
+        : "现场探测的值将优先于保存值。本机装了客户端时用它，版本升级后会自动跟上。",
+      okText:"切换"})) return;
+  const r = await api("/api/client-profile",{method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile:{}, source:next, merge:true})});
+  if(r.ok){ toast("已切换为 "+(isSaved?"钉住已保存值":"优先现场探测")); loadClientProfile(); }
+  else toast("切换失败","err");
+}
+
+/* ==================== 逆向产物（开发/测试工具） ====================
+   从本机客户端 app.asar 解出源码。全量实测 2242 个文件 / 225MB / 约 14 秒，
+   所以走后台任务 + 轮询进度，避免请求挂死、界面「点了没反应」。
+   生产环境用 ADMIN_DEV_TOOLS=0 整体关闭（接口 404，本区域自动隐藏）。
+*/
+
+
+
+function _fmtBytes(n){
+  n = Number(n)||0;
+  if(n < 1024) return n + " B";
+  if(n < 1024*1024) return (n/1024).toFixed(1) + " KB";
+  if(n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + " MB";
+  return (n/1024/1024/1024).toFixed(2) + " GB";
+}
+function _fmtTime(ts){
+  if(!ts) return "—";
+  // 不写死 locale：浏览器语言是 en-US 时会渲染成 10/31/2026, 10:10:32 PM，
+  // 和全站其他「2026-10-31 22:10」对不上，而且要二次换算时区。
+  try {
+    const d = new Date(Number(ts) * 1000);
+    const p = n => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  } catch(e){ return "—"; }
+}
+
+async function loadAppSource(){
+  const r = await api("/api/app-source/status");
+  if(!r.ok){
+    // 404 = 该功能被 ADMIN_DEV_TOOLS=0 关闭；整块隐藏，不给用户看死按钮
+    if(r.status === 404){ $("#appSourceBlock")?.classList.add("hidden"); return; }
+    if($("#appSourceStatus")) $("#appSourceStatus").innerHTML =
+      `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+    return;
+  }
+  const d = await r.json();
+  if(!d.dev_tools){ $("#appSourceBlock")?.classList.add("hidden"); return; }
+  $("#appSourceBlock")?.classList.remove("hidden");
+  _appSource = d;
+
+  const st = d.source_stat || {};
+  if($("#installDirInput")) $("#installDirInput").value = d.install_dir || "";
+  if($("#sourceDirInput")) $("#sourceDirInput").value = d.source_dir || "";
+
+  const ok = !!d.install_dir;
+  $("#appSourceStatus").innerHTML = `
+    <div class="grid md:grid-cols-2 gap-x-6 gap-y-1">
+      <div>安装目录：${ok
+        ? `<b class="text-emerald-600">${esc(d.install_dir)}</b>`
+        : `<b class="text-amber-600">未找到</b>`}</div>
+      <div>app.asar：${d.asar
+        ? `<span class="text-slate-600">${_fmtBytes(d.asar_size)}</span>`
+        : `<span class="text-slate-400">无</span>`}</div>
+      <div>产物目录：<span class="text-slate-600">${esc(d.source_dir||"")}</span></div>
+      <div>产物状态：${st.files
+        ? `<b class="text-emerald-600">已产出</b> · ${st.files} 个文件 · ${_fmtBytes(st.bytes)}
+           ${st.extracted_at?` · ${_fmtTime(st.extracted_at)}`:""}`
+        : `<span class="text-slate-400">尚未产出</span>`}</div>
+    </div>
+    <div class="mt-1 text-slate-400">
+      路径来源 — 安装目录：${esc(d.paths_config?.sources?.install_dir||"—")}
+      · 产物目录：${esc(d.paths_config?.sources?.source_dir||"—")}
+      · 解包环境：Python ${esc(d.python||"")}${d.node?` / Node ${esc(d.node)}（非必需）`:""}
+    </div>
+    ${!ok ? `<div class="mt-1 text-amber-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+      未找到客户端安装目录。请在下方手动填入安装路径（例如 D:\\WorkBuddy），
+      或把安装盘符加进 <code>WORKBUDDY_DRIVES</code>。</div>` : ""}`;
+
+  if(st.files) $("#unpackBtn").innerHTML = '<span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>补齐产物';
+  else $("#unpackBtn").innerHTML = '<span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22v-9"/><path d="M15.17 2.21a1.67 1.67 0 0 1 1.63 0L21 4.57a1.93 1.93 0 0 1 0 3.36L8.82 14.79a1.655 1.655 0 0 1-1.64 0L3 12.43a1.93 1.93 0 0 1 0-3.36z"/><path d="M20 13v3.87a2.06 2.06 0 0 1-1.11 1.83l-6 3.08a1.93 1.93 0 0 1-1.78 0l-6-3.08A2.06 2.06 0 0 1 4 16.87V13"/><path d="M21 12.43a1.93 1.93 0 0 0 0-3.36L8.83 2.2a1.64 1.64 0 0 0-1.63 0L3 4.57a1.93 1.93 0 0 0 0 3.36l12.18 6.86a1.636 1.636 0 0 0 1.63 0z"/></svg></span>一键拆包';
+}
+
+async function detectInstall(){
+  toast("正在扫描本机安装目录...","ok");
+  const r = await api("/api/app-source/detect",{method:"POST"});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("扫描失败","err"); return; }
+  await loadAppSource();
+  toast(d.install_dir ? "已找到安装目录" : "未找到安装目录，请手动指定",
+        d.install_dir ? "ok" : "err");
+}
+
+async function locateInstall(){
+  const v = ($("#installDirInput")?.value || "").trim();
+  if(!v){ toast("请先填写安装目录","err"); return; }
+  const r = await api("/api/app-source/locate",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({install_dir:v, save:true})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("校验失败: "+(d.detail||""),"err"); $("#appSourceMsg").innerHTML =
+    `<span class="text-red-500">${esc(d.detail||"")}</span>`; return; }
+  // 回填规范化后的路径：用户填的是 resources/ 或 app.asar 时能看到被纠正成什么
+  const v2 = d.validated || {};
+  $("#appSourceMsg").innerHTML = `<span class="text-emerald-600">已保存并立即生效</span>
+    <div class="text-xs text-slate-400 mt-1">安装目录规范化为 <code>${esc(v2.install_dir||"")}</code>
+    （你填的是 <code>${esc(v2.input||"")}</code>）</div>`;
+  toast("安装目录已更新");
+  await loadAppSource();
+}
+
+async function locateSourceDir(){
+  const v = ($("#sourceDirInput")?.value || "").trim();
+  if(!v){ toast("请填写产物输出目录","err"); return; }
+  const r = await api("/api/app-source/locate",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({source_dir:v, save:true})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("设置失败: "+(d.detail||""),"err"); return; }
+  toast("输出目录已更新");
+  await loadAppSource();
+}
+
+async function unpackPlan(){
+  const r = await api("/api/app-source/unpack/plan",{method:"POST"});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("预检失败: "+(d.detail||""),"err"); return; }
+  const p = d.plan||{}, e = d.existing||{};
+  $("#appSourceMsg").innerHTML = `
+    <div class="card p-3 bg-slate-50">
+      <div class="text-xs">本次将处理 <b>${p.files||0}</b> 个文件、约 <b>${_fmtBytes(p.bytes)}</b>；
+        其中 <b>${p.unpacked||0}</b> 个来自 <code>app.asar.unpacked</code>。</div>
+      <div class="text-xs mt-1">输出到 <code>${esc(d.dest||"")}</code></div>
+      ${e.files ? `<div class="text-xs mt-1 text-slate-400">已存在 ${e.files} 个文件（${_fmtBytes(e.bytes)}），
+        拆包会<b>跳过已存在文件</b>、只补缺失的。</div>` : ""}
+      ${p.missing ? `<div class="text-xs mt-1 text-amber-600">${p.missing} 个 unpacked 文件在磁盘上缺失，无法抽取。</div>` : ""}
+    </div>`;
+  // 顺带把预检结果作为确认框内容，让用户对「写 225MB」有预期
+  if(await uiConfirm({kind:"info", danger:false, title:"确认拆包",
+      message:`将写入约 ${_fmtBytes(p.bytes)}（${p.files} 个文件）到\n${d.dest}\n\n已存在的文件会被跳过。继续？`,
+      okText:"开始拆包"})){
+    doUnpack();
+  }
+}
+
+async function doUnpack(){
+  const btn = $("#unpackBtn");
+  if(btn) btn.disabled = true;
+  const r = await api("/api/app-source/unpack",{method:"POST",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify({})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){
+    if(btn) btn.disabled = false;
+    toast("拆包失败: "+(d.detail||""),"err"); return;
+  }
+  if(d.already_running) toast("已有拆包任务在运行");
+  else toast("已开始拆包");
+  $("#unpackProgress")?.classList.remove("hidden");
+  _pollUnpack();
+}
+
+function _pollUnpack(){
+  if(_unpackTimer) clearInterval(_unpackTimer);
+  const tick = async () => {
+    const r = await api("/api/app-source/unpack/progress");
+    if(!r.ok) return;
+    const d = await r.json();
+    if(!d.exists){ _stopUnpackPoll(); return; }
+    const pct = d.total ? Math.floor((d.done||0)/d.total*100) : 0;
+    if($("#unpackBar")) $("#unpackBar").style.width = pct + "%";
+    if($("#unpackPct")) $("#unpackPct").textContent = pct + "%";
+    if($("#unpackPhase")) $("#unpackPhase").textContent =
+      d.status === "running" ? (d.phase||"进行中") : (d.status === "finished" ? "完成" : "失败");
+    if($("#unpackDetail")) $("#unpackDetail").textContent =
+      `${d.done||0}/${d.total||0}  ${d.current||""}`;
+
+    if(d.status !== "running"){
+      _stopUnpackPoll();
+      const btn = $("#unpackBtn"); if(btn) btn.disabled = false;
+      const res = d.result || {};
+      if(d.status === "failed"){
+        toast("拆包失败","err");
+        $("#appSourceMsg").innerHTML = `<span class="text-red-500">失败：${esc(d.error||"")}</span>`;
+      } else {
+        toast("拆包完成");
+        $("#appSourceMsg").innerHTML = `<span class="text-emerald-600">拆包完成</span>
+          <div class="text-xs text-slate-400 mt-1">
+            新增 ${res.written||0} 个文件（${_fmtBytes(res.bytes)}）·
+            跳过已存在 ${res.skipped_exists||0} 个 ·
+            缺失 ${res.skipped_missing||0} 个
+            ${res.dest?`<br>输出目录：<code>${esc(res.dest)}</code>`:""}
+          </div>`;
+      }
+      await loadAppSource();
+    }
+  };
+  tick();
+  _unpackTimer = setInterval(tick, 700);
+}
+function _stopUnpackPoll(){
+  if(_unpackTimer){ clearInterval(_unpackTimer); _unpackTimer = null; }
+}
+
+async function removeSource(){
+  if(!await uiConfirm({kind:"warn", danger:true, title:"删除逆向产物",
+      message:"删除已解出的源码目录？只删本工具产出的那个目录（不含 .extracted 标记或名字不是 app_source 时会拒绝）。",
+      okText:"删除"})) return;
+  const r = await api("/api/app-source/remove",{method:"POST"});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ toast("删除失败: "+(d.detail||""),"err"); return; }
+  toast(d.removed ? "已删除" : "目录不存在");
+  $("#srcSearchResult").innerHTML = "";
+  await loadAppSource();
+}
+
+async function searchSource(){
+  const q = ($("#srcSearchInput")?.value || "").trim();
+  if(!q){ toast("请输入关键字","err"); return; }
+  const el = $("#srcSearchResult");
+  el.innerHTML = '<span class="text-slate-400">检索中...</span>';
+  const r = await api(`/api/app-source/search?q=${encodeURIComponent(q)}&limit=50`);
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok){ el.innerHTML = `<span class="text-red-500">${esc(d.detail||"检索失败")}</span>`; return; }
+  if(!d.ok){ el.innerHTML = `<span class="text-amber-600">${esc(d.reason||"")}</span>`; return; }
+  if(!d.hits?.length){
+    el.innerHTML = `<span class="text-slate-400">未找到「${esc(q)}」（已扫描 ${d.scanned||0} 个文件）</span>`;
+    return;
+  }
+  el.innerHTML = `<div class="text-slate-400 mb-1">${d.hits.length} 处命中（已扫描 ${d.scanned} 个文件）</div>` +
+    d.hits.map(h => `<div class="mb-1 border-b border-slate-100 pb-1">
+        <span class="text-sky-600">${esc(h.file)}:${h.line}</span>
+        <div class="text-slate-500 break-all">${esc(h.text)}</div>
+      </div>`).join("");
+}
+
+/* ==================== 设置 ==================== */
+async function changePassword(){
+  const oldP=$("#oldPwd").value, np=$("#newPwd").value, np2=$("#newPwd2").value;
+  if(np.length<6){ toast("新密码至少6位","err"); return; }
+  if(np!==np2){ toast("两次输入不一致","err"); return; }
+  const r=await api("/api/admin/password",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({old_password:oldP,new_password:np})});
+  if(r.ok){ toast("密码已修改，下次登录生效（后台设置优先于 .env）"); $("#oldPwd").value=$("#newPwd").value=$("#newPwd2").value=""; }
+  else { const d=await r.json().catch(()=>({})); toast("修改失败: "+(d.detail||""),"err"); }
+}
+
+/* ==================== 定时任务 ==================== */
+let _schedules = [];
+
+const _scheduleRequests = new Set();
+
+// 任务类型 -> 人话名称。结果里有 summary 就用它，这样每个任务都统一可读。
+// keepalive_tokens 是既有任务（保活）但两张表都漏了它，显得像"未知任务"。
+const TASK_LABELS = {
+  daily_checkin: "签到领取积分",
+  refresh_balances: "刷新平台总积分",
+  refresh_credits: "更新积分到期快照",
+  sync_models: "同步模型列表",
+  refresh_growth_tasks: "更新成长任务列表",
+  run_growth_tasks: "自动做成长任务",
+  run_growth_plan: "WorkBuddy 成长计划巡检",
+  keepalive_tokens: "token 保活刷新",
+};
+
+function scheduleResultSummary(s){
+  const raw = s.last_result || "";
+  if(!raw) return '<span class="text-slate-400">尚未运行</span>';
+  let obj = null;
+  try { obj = JSON.parse(raw); } catch(e) {}
+  // 解析失败：多半是历史数据（旧版会截断 JSON）。如实说明，别假装是数据。
+  if(!obj) {
+    return `<span class="text-amber-600" data-tooltip="历史结果格式已不可解析">
+      <span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>历史结果（旧格式，点详情查看）</span>`;
+  }
+  if(obj.error) return `<span class="text-red-500">失败：${esc(String(obj.error))}</span>`;
+  if(obj.skipped) return `<span class="text-slate-500">已跳过：${esc(String(obj.skipped))}</span>`;
+
+  // 后端已经给出人话摘要 —— 优先用它，避免前后端两套口径不一致
+  if(obj.summary){
+    const bad = (obj.detail||[]).filter(x=>!x.ok).length;
+    const cls = bad ? "text-amber-700" : "text-slate-600";
+    const elapsed = obj.elapsed_s ? `<span class="text-slate-400 ml-1">${obj.elapsed_s}s</span>` : "";
+    // 摘要按纯文本渲染（表格单元格不解析 markdown）。老版本摘要里带 `**强调**`，
+    // 历史数据仍然存在库里，这里统一次掉，别让页面露出星号。
+    return `<span class="${cls}">${esc(String(obj.summary).replace(/\*\*/g, ""))}</span>${elapsed}`;
+  }
+
+  // 兜底：老数据没有 summary 时，按类型拼
+  let parts = [];
+  if(s.task === "daily_checkin"){
+    if(obj.claimed) parts.push(`新领 ${obj.claimed}`);
+    if(obj.credit) parts.push(`<span class="text-amber-600 font-medium">+${obj.credit} 积分</span>`);
+    parts.push(`已领 ${obj.skipped_already||0}`);
+    if(obj.failed) parts.push(`<span class="text-red-500">失败 ${obj.failed}</span>`);
+  } else if(s.task === "refresh_balances"){
+    parts.push(`刷新 ${obj.refreshed||0}`);
+    if(obj.failed) parts.push(`<span class="text-red-500">失败 ${obj.failed}</span>`);
+  } else if(s.task === "sync_models"){
+    parts.push(`新增 ${obj.added||0}`);
+    parts.push(`更新 ${obj.updated||0}`);
+    parts.push(`共 ${obj.total_in_db||0}`);
+  } else if(s.task === "refresh_growth_tasks"){
+    parts.push(`任务 ${obj.total||0}`);
+    parts.push(`可自动 ${obj.actionable||0}`);
+  } else if(s.task === "run_growth_tasks"){
+    parts.push(`账号 ${obj.accounts||0}`);
+    if(obj.tasks_done) parts.push(`完成 ${obj.tasks_done}`);
+    if(obj.credit) parts.push(`<span class="text-amber-600 font-medium">+${obj.credit} 积分</span>`);
+    if(obj.energy) parts.push(`+${obj.energy} 能量`);
+    if(!obj.tasks_done) parts.push("无待做");
+  } else if(s.task === "keepalive_tokens"){
+    parts.push(`成功 ${obj.alive||0}/${obj.total||0}`);
+    if(obj.disabled) parts.push(`<span class="text-red-500">禁用 ${obj.disabled}</span>`);
+  } else {
+    parts.push(esc(raw.slice(0,120)));
+  }
+  const fmt = obj.elapsed_s ? `<span class="text-slate-400 ml-1">${obj.elapsed_s}s</span>` : "";
+  return `<span class="text-slate-600">${parts.join(" · ")}</span>${fmt}`;
+}
+
+// 详情弹窗：把 JSON 变成「概览 + 逐账号表格 + 原因」，而不是一坨 JSON
+function showScheduleResult(id){
+  const s = (_schedules||[]).find(x => x.id === id);
+  if(!s) return;
+  const raw = s.last_result || "";
+  let obj = null;
+  try { obj = JSON.parse(raw); } catch(e) {}
+
+  const title = esc(TASK_LABELS[s.task] || s.name || "任务");
+  const head = `<h3 class="font-bold mb-3"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></span>
+      上次运行结果 — ${esc(s.name)}</h3>`;
+
+  if(!obj){
+    // 旧格式：给出原文，并说明为什么不能结构化展示
+    openModal(`${head}
+      <p class="text-xs text-amber-600 mb-2">该结果由旧版本写入（JSON 被截断，无法解析），
+      仅能显示原文；下次运行后即为可读格式。</p>
+      <pre class="text-xs bg-slate-50 rounded-lg p-3 overflow-auto max-h-[60vh] whitespace-pre-wrap">${esc(raw||"（无）")}</pre>
+      <div class="flex justify-end mt-3"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+    return;
+  }
+
+  // 概览行：把标量字段挑出来展示（跳过 detail/errors 这类复杂字段）
+  const skip = new Set(["detail","errors","failed_accounts","task"]);
+  const kv = Object.entries(obj).filter(([k,v]) =>
+      !skip.has(k) && (typeof v !== "object" || v === null));
+  const ovHtml = kv.length ? `<div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
+      ${kv.map(([k,v]) => `<div class="bg-slate-50 rounded-lg px-3 py-2">
+        <div class="text-[11px] text-slate-400">${esc(k)}</div>
+        <div class="text-sm font-medium text-slate-700">${esc(String(v))}</div>
+      </div>`).join("")}
+    </div>` : "";
+
+  // 摘要单独突出显示
+  const sumHtml = obj.summary
+    ? `<div class="mb-3 text-sm bg-emerald-50 text-emerald-800 rounded-lg px-3 py-2">
+         ${esc(String(obj.summary))}</div>` : "";
+
+  // 逐账号明细表（签到/成长任务最关键的信息）
+  let detailHtml = "";
+  if(Array.isArray(obj.detail) && obj.detail.length){
+    const rows = obj.detail.map(d => {
+      const ok = d.ok;
+      const icon = ok
+        ? '<span class="wb-icon text-emerald-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>'
+        : '<span class="wb-icon text-red-500"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>';
+      const credit = d.credit ? `<span class="text-amber-600 font-medium">+${d.credit}</span>` : "—";
+      return `<tr class="border-t">
+        <td class="py-1.5 pr-2">${icon}</td>
+        <td class="py-1.5 pr-3 text-slate-700">${esc(String(d.account ?? d.account_id ?? ""))}</td>
+        <td class="py-1.5 pr-3">${credit}</td>
+        <td class="py-1.5 text-slate-600">${esc(String(d.reason ?? ""))}</td>
+      </tr>`;
+    }).join("");
+    const trunc = obj.detail_truncated
+      ? `<p class="text-[11px] text-slate-400 mt-1">明细过长，仅显示前 ${obj.detail.length} 条。</p>` : "";
+    detailHtml = `<div class="mb-2">
+      <div class="text-xs font-semibold text-slate-500 mb-1">逐账号结果</div>
+      <div class="max-h-64 overflow-auto rounded-lg border">
+        <table class="w-full text-xs"><tbody>${rows}</tbody></table>
+      </div>${trunc}</div>`;
+  }
+
+  // 失败账号名单（成长任务用它，没有 detail 时也有信息）
+  let failHtml = "";
+  if(Array.isArray(obj.failed_accounts) && obj.failed_accounts.length && !detailHtml){
+    failHtml = `<div class="mb-2 text-xs"><span class="text-slate-500">失败账号：</span>
+      <span class="text-red-500">${obj.failed_accounts.map(esc).join("、")}</span></div>`;
+  }
+  let errHtml = "";
+  if(Array.isArray(obj.errors) && obj.errors.length){
+    errHtml = `<details class="mb-2"><summary class="text-xs text-slate-500 cursor-pointer">
+      错误明细（${obj.errors.length}）</summary>
+      <pre class="text-[11px] bg-slate-50 rounded-lg p-2 mt-1 overflow-auto max-h-40 whitespace-pre-wrap">${esc(obj.errors.join("\n"))}</pre>
+      </details>`;
+  }
+
+  // 原始 JSON 收进折叠区：需要时才看，不占主视觉
+  const rawHtml = `<details class="mt-2"><summary class="text-xs text-slate-400 cursor-pointer">原始 JSON</summary>
+      <pre class="text-[11px] bg-slate-50 rounded-lg p-2 mt-1 overflow-auto max-h-40 whitespace-pre-wrap">${esc(JSON.stringify(obj,null,2))}</pre>
+    </details>`;
+
+  openModal(`${head}${sumHtml}${ovHtml}${detailHtml}${failHtml}${errHtml}${rawHtml}
+    <div class="flex justify-end mt-3"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+}
+async function loadSchedules(){
+  const r = await api("/api/schedules"); if(!r.ok) return; const d = await r.json();
+  const previous = new Map(_schedules.map(row => [row.id, row.last_result]));
+  const all = d.items||[];
+  // 平台作用域：任务本身带 `platform`（落库平台）。切到 Trae 时，
+  // WorkBuddy 的签到/成长任务**不该出现在列表里** —— 点了也只会得到
+  // 「该任务不作用于当前平台」，让人以为按钮坏了。
+  // 定时任务**不跟随平台切换**：各平台的签到/保活都要能一眼看到并管理。
+  // 之前按当前平台过滤，切到 WorkBuddy 时 Qoder/Loomy 的任务整批消失，
+  // 用户以为「其它平台的保活/签到没进定时任务」。
+  _schedules = all.slice().sort((a, b) => {
+    const pa = String(a.platform || ""), pb = String(b.platform || "");
+    return pa === pb ? (a.id - b.id) : pa.localeCompare(pb);
+  });
+  const hidden = 0;
+  if (_schedules.some(row => previous.has(row.id) && previous.get(row.id) !== row.last_result)) loadAccounts();
+  clearTimeout(_schedulePollTimer);
+  if(_schedules.some(s => { try { return JSON.parse(s.last_result||"{}").running; } catch(e) { return false; } })){
+    _schedulePollTimer = setTimeout(() => loadSchedules(), 4000);
+  }
+  $("#scheduleBody").innerHTML = (_schedules).map(s => `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3 whitespace-nowrap">${esc(s.display_name || s.name)}
+        <div class="text-[11px] text-slate-400">${esc(s.platform_label || s.platform || "WorkBuddy")}</div></td>
+      <td class="px-4 py-3 text-slate-500 whitespace-nowrap">${esc(s.task_label)}</td>
+      <td class="px-4 py-3 text-slate-500">${esc(s.cycle_label || ('每 '+s.interval_minutes+' 分钟'))}</td>
+      <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap">${fmtTime(s.next_run_at)}</td>
+      <td class="px-4 py-3 text-xs align-top">
+        <div class="flex items-start gap-1">
+          <span class="flex-1 min-w-0">${scheduleResultSummary(s)}</span>
+          <button onclick="showScheduleResult(${s.id})" class="shrink-0 text-sky-600 hover:text-sky-800" data-tooltip="查看完整结果"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/></svg></span></button>
+        </div>
+        ${s.stop_after?`<div class="text-rose-400 mt-0.5">停止于 ${fmtTime(s.stop_after)}</div>`:''}
+      </td>
+      <td class="px-4 py-3 col-status">${s.enabled?'<span class="badge bg-emerald-100 text-emerald-700">启用</span>':'<span class="badge bg-slate-100 text-slate-500">禁用</span>'}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        <button onclick="runSchedule(${s.id})" class="text-emerald-600 hover:text-emerald-800 mr-1" data-tooltip="立即运行"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span></button>
+        <button onclick="toggleSchedule(${s.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" data-tooltip="启停"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg></span></button>
+        <button onclick="editSchedule(${s.id})" class="text-slate-500 hover:text-slate-800 mr-1" data-tooltip="编辑"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg></span></button>
+        <button onclick="delSchedule(${s.id})" class="text-red-500 hover:text-red-700" data-tooltip="删除定时任务" data-tooltip-description="删除后该任务不再执行，历史执行结果保留在日志里。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+      </td>
+    </tr>`).join("") || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">${
+      hidden > 0
+        ? `当前平台没有定时任务（另有 ${hidden} 个属于其它平台，切回对应平台可查看）`
+        : "还没有定时任务"}</td></tr>`;
+}
+async function runSchedule(id){
+  if(_scheduleRequests.has(id)) return;
+  _scheduleRequests.add(id);
+  toast("正在启动任务...","ok");
+  try {
+    const r=await api("/api/schedules/"+id+"/run",{method:"POST"});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){
+      toast("运行失败: "+(d.detail||r.status),"err");
+      return;
+    }
+    const result = d.result || {};
+    if(result.running){ toast("任务在后台执行，结果会自动刷新","ok"); }
+    else {
+      // ⚠️ 只提示「运行完成」是**没有反馈**的：签到到底是「领到了 100 积分」
+      // 还是「今天已领过」还是「全部失败」，用户完全看不出来 ——
+      // 这正是「点了没反应」的直接原因。这里必须把后端的结果摘要如实展示。
+      const text = scheduleResultText(result);
+      toast(text.message, result.failed > 0 ? "err" : "ok");
+      // 有逐账号明细时同时弹窗，便于逐个核对（签到/成长任务最关键）
+      if ((result.detail || []).length) {
+        openModal(`<h3>${esc(text.title)}</h3>
+          <p class="trae-modal-note">${esc(text.message)}</p>
+          ${scheduleDetailTable(result.detail)}`, "max-w-3xl");
+      }
+    }
+    await loadSchedules();
+    await loadAccounts();
+  } finally { _scheduleRequests.delete(id); }
+}
+
+/**
+ * 把任务结果翻译成一句人话。
+ *
+ * 不同任务的 result 字段完全不同（签到看 claimed/skipped_already，
+ * 刷新看 ok/fail），所以按「有没有这些字段」分派，而不是按任务名 ——
+ * 任务名会改名/新增，字段才是稳定契约。
+ */
+function scheduleResultText(result) {
+  if (result.claimed !== undefined || result.skipped_already !== undefined) {
+    const claimed = Number(result.claimed || 0);
+    const already = Number(result.skipped_already || 0);
+    const failed = Number(result.failed || 0);
+    const credit = Number(result.credit || 0);
+    const bits = [];
+    if (claimed) bits.push(`领取 ${claimed} 个` + (credit ? `（+${credit} 积分）` : ""));
+    if (already) bits.push(`${already} 个今日已领过`);
+    if (failed) bits.push(`${failed} 个失败`);
+    return {
+      title: "签到结果",
+      message: bits.length ? bits.join(" · ") : "没有可签到的账号",
+    };
+  }
+  if (result.deferred) {
+    return { title: "任务已顺延", message: result.summary || "出口保护期间顺延，稍后自动重试" };
+  }
+  if (result.ok !== undefined) {
+    const ok = Number(result.ok || 0);
+    const fail = Number(result.fail || 0);
+    return {
+      title: "任务完成",
+      message: result.summary || `成功 ${ok} 个` + (fail ? ` · 失败 ${fail} 个` : ""),
+    };
+  }
+  return { title: "任务完成", message: result.summary || "运行完成" };
+}
+
+/** 逐账号明细表（签到 / 成长任务 / 刷新余额共用）。 */
+function scheduleDetailTable(detail) {
+  const rows = (detail || []).map(item => `<tr>
+    <td class="sentinel-acc">#${esc(String(item.account_id ?? ""))}</td>
+    <td>${esc(item.account || "-")}</td>
+    <td>${item.ok
+      ? `<span class="trae-chip ok">${esc(item.status || "成功")}</span>`
+      : `<span class="trae-chip warn">${esc(item.status || "失败")}</span>`}</td>
+    <td>${item.credit ? "+" + esc(String(item.credit)) : "—"}</td>
+    <td class="sentinel-detail">${esc(item.reason || item.error || "")}</td>
+  </tr>`).join("");
+  return `<div class="sentinel-table-wrap"><table class="tbl">
+    <thead><tr><th>账号</th><th>名称</th><th>结果</th><th>积分</th><th>说明</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+async function toggleSchedule(id){ await api("/api/schedules/"+id+"/toggle",{method:"POST"}); loadSchedules(); }
+async function delSchedule(id){ if(!await uiConfirm({message:"确认删除该任务？", title:"删除定时任务"}))return; const r=await api("/api/schedules/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"失败",r.ok?"ok":"err"); if(r.ok) loadSchedules(); }
+function scheduleTimingHTML(data){
+  const timing = data.timing || {mode:'preset', time:'09:00', weekdays:[0], monthday:1};
+  const modes = [['preset','系统预设'],['interval','固定间隔'],['daily','每天'],['weekly','每周'],['monthly','每月']];
+  const minutes = data.interval_minutes || 60;
+  const unit = [10080,1440,60,1].find(value => minutes % value === 0);
+  return `<div class="schedule-field"><label id="scCycleLabel">执行周期</label>
+    ${uiSelectHTML('scCycle', {value:timing.mode, options:modes.map(([value,label])=>({value,label})), onChange:onScheduleCycleChange})}</div>
+    <div id="scIntervalWrap" ${['preset','interval'].includes(timing.mode)?'':'hidden'}>
+      <div class="schedule-field"><label for="scIv">执行间隔</label><div class="schedule-interval"><input aria-label="执行间隔" id="scIv" type="number" min="1" max="5256000" value="${minutes/unit}">
+      ${uiSelectHTML('scUnit', {value:String(unit), options:[[1,'分钟'],[60,'小时'],[1440,'天'],[10080,'周']].map(([value,label])=>({value:String(value),label}))})}</div></div>
+    </div>
+    <div id="scCalendarWrap" ${['daily','weekly','monthly'].includes(timing.mode)?'':'hidden'}>
+      <div class="schedule-field"><label for="scTimeButton">执行时间 <span class="schedule-zone">北京时间 · UTC+8</span></label>
+      <input id="scTime" aria-label="执行时间" data-timezone="北京时间 · UTC+8" type="time" value="${esc(timing.time||'09:00')}"></div>
+      <div id="scWeekWrap" class="schedule-field" ${timing.mode==='weekly'?'':'hidden'}><span id="scWeekLabel">执行日</span><div class="schedule-weekdays" role="group" aria-labelledby="scWeekLabel">${[...'一二三四五六日'].map((day,i)=>`<label class="schedule-weekday"><input type="checkbox" name="scWeekday" value="${i}" ${(timing.weekdays||[0]).includes(i)?'checked':''}><span>周${day}</span></label>`).join('')}</div></div>
+      <div id="scMonthWrap" class="schedule-field" ${timing.mode==='monthly'?'':'hidden'}><label for="scMonthday">每月几号</label><input id="scMonthday" aria-describedby="scMonthHint" type="number" min="1" max="31" value="${Number(timing.monthday)||1}"><p id="scMonthHint" class="schedule-hint">当月没有该日期时，在当月最后一天执行。</p></div>
+    </div>
+    <p id="scPresetHint" class="schedule-hint" ${timing.mode==='preset'?'':'hidden'}>沿用系统现有间隔；token 保活沿用系统配置的整点时间。选择其他周期可自定义。</p>`;
+}
+function onScheduleCycleChange(){
+  window.WBDateTimePicker?.close();
+  const mode = uiSelectValue('scCycle');
+  $('#scIntervalWrap').hidden = !['preset','interval'].includes(mode);
+  $('#scCalendarWrap').hidden = !['daily','weekly','monthly'].includes(mode);
+  $('#scWeekWrap').hidden = mode !== 'weekly';
+  $('#scMonthWrap').hidden = mode !== 'monthly';
+  $('#scPresetHint').hidden = mode !== 'preset';
+}
+function scheduleForm(title, data){
+  data = data || {};
+  const taskOpts = _taskOptions();
+  const saVal = (data.stop_after||"").slice(0,16); // 适配 <input type="datetime-local">
+  const isCheckin = data.task==="daily_checkin";
+  openModal(`
+    <div class="schedule-form">
+    <header class="schedule-form-head"><span class="schedule-form-icon"><i class="fa-regular fa-clock" aria-hidden="true"></i></span><div><h3>${title}</h3><p>设置任务内容与执行周期</p></div></header>
+    <div class="schedule-field"><label for="scName">任务名称 <span class="schedule-zone">可选</span></label>
+    <input id="scName" placeholder="留空按执行周期自动命名" value="${esc(data.display_name && data.display_name!==data.name ? '' : (data.name||''))}" /></div>
+    <div class="schedule-field"><label id="scTaskLabel">任务类型</label>
+    ${uiSelectHTML("scTask", { value: String(data.task || (tasks[0] && tasks[0][0]) || ""),
+        options: taskOpts, onChange: () => onTaskChange() })}</div>
+    ${scheduleTimingHTML(data)}
+    <details class="schedule-help"><summary><i class="fa-regular fa-circle-question" aria-hidden="true"></i>成长计划执行说明</summary><p>成长计划建议每 60 分钟巡检：逐账号补每日活跃、签到、领取旅行礼物、兑换连登奖励并使用免费抽奖次数。每天最多一次成功活跃对话；每日最多开启一批盲盒（5个以内，消耗已有能量）、抽奖5次。进度持久化，重复运行会跳过已完成项。</p></details>
+    <div id="scStopWrap" class="${isCheckin?'':'hidden'}">
+      <div class="schedule-field"><label for="scStopButton">停止领取时间 <span class="schedule-zone">可选 · 本地时间</span></label>
+      <input id="scStop" aria-label="停止领取时间" type="datetime-local" value="${saVal}" />
+      <p class="schedule-hint">到达该时间后停止自动领取。留空不限制，活动结束会自动停止。</p></div>
+    </div>
+    <div class="schedule-enabled"><div><label for="scEnabled">启用任务</label><p>按设置的周期自动执行</p></div><label class="schedule-switch"><input id="scEnabled" type="checkbox" role="switch" aria-label="启用任务" ${data.enabled?'checked':''} /><span></span></label></div>
+    <footer class="schedule-form-actions">
+      <button type="button" onclick="closeModal()" class="console-btn">取消</button>
+      <button type="button" onclick="submitSchedule(${data.id||0})" class="console-btn primary">保存任务</button>
+    </footer></div>`, 'max-w-lg');
+  WBDateTimePicker.attach('scTime');
+  WBDateTimePicker.attach('scStop');
+  initScheduleSelects();
+}
+function initScheduleSelects(){
+  initUISelects([['scTask','任务类型'],['scCycle','执行周期'],['scUnit','间隔单位']]);
+}
+function initUISelects(entries){
+  for(const [id,label] of entries){
+    const select = document.getElementById(id), trigger = select.querySelector('.ui-select-btn');
+    trigger.tabIndex = 0; trigger.setAttribute('role','combobox');
+    trigger.setAttribute('aria-label',label); trigger.setAttribute('aria-haspopup','listbox');
+    trigger.setAttribute('aria-expanded','false'); trigger.setAttribute('aria-controls',id+'Options');
+    const panel = select.querySelector('.ui-select-panel');
+    panel.id = id+'Options'; panel.setAttribute('role','listbox'); panel.setAttribute('aria-label',label);
+    select.querySelectorAll('.ui-select-opt').forEach((option,index)=>{
+      option.id = id+'Option'+index; option.setAttribute('role','option');
+      option.setAttribute('aria-selected',String(option.classList.contains('sel')));
+    });
+    select.addEventListener('keydown',event=>{
+      const options = [...select.querySelectorAll('.ui-select-opt')];
+      const keys = ['ArrowDown','ArrowUp','Home','End','Enter',' ','Escape','Tab'];
+      if(!keys.includes(event.key)) return;
+      if(!options.length) return;
+      const opened = select.classList.contains('open');
+      if(event.key==='Tab'){ select.classList.remove('open'); return; }
+      if(event.key==='Escape'){
+        if(opened){event.preventDefault();event.stopPropagation();select.classList.remove('open');}
+        return;
+      }
+      event.preventDefault();
+      if(!opened){uiSelectToggle(id); if(event.key==='Enter'||event.key===' ') return;}
+      let index = options.findIndex(option=>option.id===trigger.getAttribute('aria-activedescendant'));
+      if(index<0) index = Math.max(0,options.findIndex(option=>option.classList.contains('sel')));
+      if(event.key==='Enter'||event.key===' '){ uiSelectPick(id,options[index].dataset.value); return; }
+      if(event.key==='Home') index=0;
+      else if(event.key==='End') index=options.length-1;
+      else index=(index+(event.key==='ArrowDown'?1:-1)+options.length)%options.length;
+      options.forEach((option,i)=>option.classList.toggle('active',i===index));
+      trigger.setAttribute('aria-activedescendant',options[index].id);
+      options[index].scrollIntoView({block:'nearest'});
+    });
+    new MutationObserver(()=>{
+      trigger.setAttribute('aria-expanded',String(select.classList.contains('open')));
+      if(!select.classList.contains('open')){
+        trigger.removeAttribute('aria-activedescendant');
+        select.querySelectorAll('.ui-select-opt').forEach(option=>{option.classList.remove('active'); option.setAttribute('aria-selected',String(option.classList.contains('sel')));});
+      }
+    }).observe(select,{attributes:true,attributeFilter:['class']});
+  }
+}
+/** 可选任务清单（含各平台专属任务），来自 /api/schedules/tasks。 */
+let _taskCatalog = [];
+let _taskCatalogAt = 0;
+async function loadTaskCatalog(force) {
+  if (!force && _taskCatalog.length && Date.now() - _taskCatalogAt < 60000) return _taskCatalog;
+  try {
+    const { ok, data } = await safeJson(await api("/api/schedules/tasks"));
+    if (ok && Array.isArray(data.items)) {
+      _taskCatalog = data.items;
+      _taskCatalogAt = Date.now();
+    }
+  } catch (e) { /* 失败就用内置兜底 */ }
+  return _taskCatalog;
+}
+
+/** 任务名 -> 平台（创建时必须带上，否则平台任务会被当成默认平台的任务）。 */
+function taskPlatformOf(task) {
+  const hit = _taskCatalog.find(item => item.value === task);
+  return hit ? (hit.platform || "") : "";
+}
+
+function onTaskChange(){
+  window.WBDateTimePicker?.close();
+  const v = uiSelectValue("scTask");
+  const wrap = document.getElementById("scStopWrap");
+  // 所有平台的签到任务都以 `_checkin` / `daily_checkin` 结尾
+  const isCheckin = /(^|_)checkin$/.test(String(v || "")) || v === "daily_checkin";
+  if(wrap) wrap.classList.toggle("hidden", !isCheckin);
+}
+
+/** 任务下拉的选项：内置 + 各平台专属（带平台后缀，避免同名歧义）。 */
+function _taskOptions() {
+  if (_taskCatalog.length) {
+    return _taskCatalog.map(item => ({
+      value: item.value,
+      // 任务名已经带了平台后缀（「签到领取积分（Trae 国内版）」），
+      // 这里不再重复拼，保持下拉短一些。
+      label: item.label,
+    }));
+  }
+  return Object.entries(TASK_LABELS).map(([value, label]) => ({ value, label }));
+}
+async function openAddSchedule(){ await loadTaskCatalog(); scheduleForm("新建定时任务", {enabled:1, interval_minutes:60, task:"refresh_balances"}); }
+async function editSchedule(id){ await loadTaskCatalog(); const s=_schedules.find(x=>x.id===id); if(!s) return; scheduleForm("编辑定时任务", s); }
+async function submitSchedule(id){
+  const stopRaw = ($("#scStop") ? $("#scStop").value : "").trim();
+  const pickedTask = uiSelectValue("scTask");
+  const body = { name:$("#scName").value, task:pickedTask,
+    // 平台专属任务必须带 platform：后端按它找 gateway 的 runner
+    platform: taskPlatformOf(pickedTask) || undefined,
+    interval_minutes:Number($("#scIv").value)*Number(uiSelectValue("scUnit")), enabled:$("#scEnabled").checked?1:0, stop_after: stopRaw || null,
+    timing:{mode:uiSelectValue("scCycle"), time:$("#scTime").value || '09:00', monthday:Number($("#scMonthday").value), weekdays:[...document.querySelectorAll('[name=scWeekday]:checked')].map(el=>Number(el.value))} };
+  if(!body.timing.weekdays.length && body.timing.mode === 'weekly'){ toast('请至少选择一周中的一天','err'); return; }
+  if(!body.timing.weekdays.length) body.timing.weekdays = [0];
+  if(body.timing.mode === 'monthly' && !$('#scMonthday').reportValidity()) return;
+  if(body.timing.mode !== 'monthly') body.timing.monthday = 1;
+  if(!Number.isInteger(body.interval_minutes) || body.interval_minutes < 1 || body.interval_minutes > 5256000){
+    if(['preset','interval'].includes(body.timing.mode)){ toast('请输入有效的执行间隔','err'); return; }
+    body.interval_minutes = 60;
+  }
+  let r;
+  if(id){ r = await api("/api/schedules/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
+  else { r = await api("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
+  if(r.ok){ closeModal(); loadSchedules(); toast("已保存"); }
+  else { const d=await r.json().catch(()=>({})); toast("保存失败: "+(d.detail||""),"err"); }
+}
+
+/* ==========================================================================
+   用量日志（服务端分页 + 按账号查询）
+   --------------------------------------------------------------------------
+   本次的三处改进（都对应原来真实的「慢 / 查不到」问题）：
+
+   1. **按账号下拉**：只列「窗口内真的产生过请求」的账号，并带上请求数与
+      最近使用时间。原来是一个自由文本框 + datalist，用户选中一个从没被
+      用过的号会筛出空结果，以为功能坏了。
+   2. **名称模糊匹配不再丢记录**：后端已改成返回完整 id 集合
+      （原来 `.scalar()` 只取第一条），前端这次也把筛选值从「名称文本」
+      换成「账号 id」，避免重名再一次造成歧义。
+   3. **快速翻页**：日志量大时 `COUNT(*)` 本身就是一次完整索引扫描。
+      关掉总数统计后，走 keyset 游标（`before_id`）翻页 ——
+      `WHERE id < N ORDER BY id DESC LIMIT n` 只走主键索引，
+      不再有 `OFFSET 100000` 那种「先扫掉十万行再丢弃」的开销。
+   ========================================================================== */
+let _logPage = 1, _logPageSize = 20;
+let _logOpts = { accounts: [] };
+let _logBeforeId = null;      // 当前页兼容游标
+let _logCursors = new Map([[1, null]]); // page -> before_id，支持快速模式返回上一页
+let _logSelReady = false;
+let _logLoadSeq = 0;
+let _logListController = null, _logAccountController = null, _logAccountSeq = 0;
+let _logAccountsPromise = null, _logAccountsAt = 0, _logAccountsDays = null;
+const _logTotals = new Map();
+
+let _logSummaryDirty = true, _logSummaryAt = 0, _logSummaryBusy = false, _logSummarySeq = 0;
+let _logSummaryController = null, _logSummarySignature = '';
+const _logFolded = {summary:false};
+/** 折叠/展开「按账号汇总」卡片（「请求动态」已下线，只剩这一张）。 */
+function applyLogCard(name) {
+  const box = $('#logSummary');
+  const button = $('#logSummaryToggle');
+  if (box) box.hidden = _logFolded[name];
+  if (button) {
+    button.setAttribute('aria-expanded', String(!_logFolded[name]));
+    button.querySelector('[data-fold-label]').textContent = _logFolded[name] ? '展开 ▾' : '收起 ▴';
+  }
+}
+function toggleLogCard(name) {
+  if (!(name in _logFolded)) return;
+  _logFolded[name] = !_logFolded[name];
+  try { localStorage.setItem('wb_log_fold_'+name, String(_logFolded[name])); } catch(e) {}
+  applyLogCard(name);
+  if (!_logFolded[name]) loadLogSummary();
+}
+function logFilterSignature() {
+  return JSON.stringify(['logModel','logKey','logIp','logStart','logEnd'].map(id=>$('#'+id)?.value || '').concat([
+    uiSelectValue('logResult'), uiSelectValue('logDaysSel'), uiSelectValue('logAccountSel')
+  ]));
+}
+
+/**
+ * 用量表实时刷新：只探一个主键，变了才重拉首页。
+ *
+ * 「请求动态」面板**已下线**（设计决定）：风控哨兵那边有更完整的实时
+ * 视图（拓扑 + 每平台计数 + 明细 + 进行中），这里再推一份是纯重复查询。
+ * 移除后省掉：一条 SSE 长连接、每 0.5 秒一次的全量采样、
+ * 以及整张表格的重复渲染。
+ *
+ * 保留的只有这个轻量探针：`include_history=false` 时后端只执行
+ * `SELECT id ORDER BY id DESC LIMIT 1`，比原来的采样轻一个量级。
+ */
+
+const _LOG_USAGE_POLL_MS = 5000;
+
+function scheduleLogUsagePoll() {
+  if (_logUsagePollTimer) clearTimeout(_logUsagePollTimer);
+  _logUsagePollTimer = setTimeout(pollLogUsageRevision, _LOG_USAGE_POLL_MS);
+}
+
+// ===== 用量日志页：请求动态（实时区）=====
+//
+// 数据源与风控哨兵相同（/api/sentinel/status 的 traffic 段），不新增后端查询。
+// 只有日志页处于激活状态时才轮询 —— 切走立即停，不留后台空转。
+
+
+
+function stopLogLive() {
+  if (_logLiveSource) {
+    try { _logLiveSource.close(); } catch (e) { /* 已关闭 */ }
+    _logLiveSource = null;
+  }
+}
+
+/** 用 registry 式的合并：按 rid 覆盖，按 ts 倒序保留最近 12 条。 */
+function _logLiveMerge(changed, removed) {
+  (removed || []).forEach(rid => _logLiveRows.delete(String(rid)));
+  (changed || []).forEach(row => {
+    const rid = String(row.rid || "");
+    if (rid) _logLiveRows.set(rid, row);
+  });
+  const all = Array.from(_logLiveRows.values());
+  all.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  if (all.length > 40) {
+    all.slice(40).forEach(r => _logLiveRows.delete(String(r.rid || "")));
+  }
+  return all.slice(0, 12);
+}
+
+function _logLiveRender(rows, running) {
+  const hint = $("#logLiveHint");
+  if (hint) {
+    hint.textContent = running > 0
+      ? "进行中 " + running + " 个 · 实时推送"
+      : "实时推送 · 最近 1 小时 " + _logLiveRows.size + " 条";
+  }
+  const host = $("#logLiveRecent");
+  if (host) {
+    host.innerHTML = rows.length
+      ? rows.map(_logLiveRow).join("")
+      : '<p class="sentinel-empty" style="padding:10px 2px">最近 1 小时还没有请求</p>';
+  }
+}
+
+function _logLiveRenderPlatforms(platforms) {
+  const counts = $("#logLivePlatforms");
+  if (!counts || !platforms) return;
+  counts.innerHTML = platforms.map(row => {
+    const total = Number(row.requests || 0);
+    const failed = Number(row.error || 0) + Number(row.timeout || 0);
+    // 结构：左「平台名」+ 右「数字 [失败N]」。
+    // **失败数必须是独立一块**，不能和总数挤在同一段文本里 ——
+    // 之前写成 `29 11 失败`，两者之间只有一个空格，窄屏下会连成一片。
+    return `<div class="live-platform-count" data-tooltip="${esc(row.label || row.platform)} · 最近 1 小时">
+      <span class="lpc-name">${esc(String(row.label || row.platform).replace(/\s*(国内版|国际版|中国版)/, ""))}</span>
+      <span class="lpc-values">
+        <b class="lpc-total">${total}</b>
+        ${failed ? `<em class="lpc-fail" data-tooltip="失败（错误 + 超时）">${failed} 失败</em>` : ""}
+      </span>
+    </div>`;
+  }).join("");
+}
+
+/** 一条实时请求的单行渲染。
+ *
+ *  刻意复用哨兵的 `live-request-*` 类与 `sentinelToneOf()` / `sentinelClock()`：
+ *  同一个数据源就该长一个样，用户在两个面板之间切换时不用重新认。
+ *
+ *  ## 列（7 列，与 CSS 的 `.live-request-row.with-duration` 网格对应）
+ *
+ *      时间 | Key | 客户端 IP | 模型 | 平台 | 耗时 | 状态
+ *
+ *  ## 阶段（stage）
+ *
+ *  服务端 `traffic_stats` 会推进 stage：
+ *      接收 -> 排队 -> 转发上游 -> 回传中 -> 完成
+ *  面板据此显示「当前卡在哪一步」，而不是只有「进行中/成功」两态。
+ *  拿不到 stage 的老数据按 outcome 兜底。
+ */
+function _logLiveRow(item) {
+  const tone = sentinelToneOf(item);
+  const status = Number(item.status || 0);
+  const running = item.outcome === "running";
+  // 阶段文案：优先用服务端给的 stage，没有就按 outcome 推
+  const STAGE_TEXT = {
+    received: "已接收",
+    waiting: "排队选号",
+    upstream: "转发上游",
+    streaming: "回传中",
+    done: "",
+  };
+  const stage = String(item.stage || "");
+  let label;
+  if (running) {
+    label = STAGE_TEXT[stage] || "进行中";
+  } else if (item.outcome === "timeout") {
+    label = "超时";
+  } else {
+    label = status ? String(status) : (item.outcome || "—");
+  }
+  // 字段名以 traffic_stats.snapshot() 为准：elapsed_ms（毫秒，浮点）。
+  const ms = Number(item.elapsed_ms || item.latency_ms || item.latency || 0);
+  const runningCls = running ? " live-request-running" : "";
+  // 进行中的请求：`elapsed_ms` 由 mark_stage 每次推进时刷新，
+  // 所以这里能显示「已跑了多久」，比一直显示「…」有用得多。
+  const msText = ms > 0 ? fmtDuration(ms) : (running ? "…" : "—");
+  const keyLabel = String(item.key_label || "").trim();
+  const ip = String(item.client_ip || "").trim();
+  // 平台：请求刚进来时还选不出平台（选路在后面），
+  // 这时显示「选路中」比显示 `unknown` 清楚 —— 后者看着像统计错了。
+  const platformText = String(item.platform || "").trim();
+  const platformLabel = (platformText && platformText !== "unknown")
+    ? platformText : (running ? "选路中" : "—");
+  return `<div class="live-request-row with-duration${runningCls}">
+    <span class="live-request-time">${sentinelClock(item.ts)}</span>
+    <span class="live-request-key" title="${esc(keyLabel)}">${keyLabel ? esc(keyLabel) : "—"}</span>
+    <span class="live-request-ip tnum" title="${esc(ip)}">${ip ? esc(ip) : "—"}</span>
+    <span class="live-request-model" data-tooltip="${esc(item.error || item.path || "")}">${esc(item.model || item.path || "—")}</span>
+    <span class="live-request-platform">${esc(platformLabel)}</span>
+    <span class="live-request-ms">${esc(msText)}</span>
+    <span class="live-request-status ${tone}">${esc(label)}</span>
+  </div>`;
+}
+
+/**
+ * 日志页实时区：**SSE 长连接**，不再轮询。
+ *
+ * 轮询的两个代价：没有请求时也在持续打接口（多开标签页更明显），
+ * 以及事件落在两次轮询之间时要等下一拍。SSE 用一条长连接，
+ * 服务端只在内容变化时推一帧，空闲时几乎零流量。
+ *
+ * 兼容性兜底：`EventSource` 不可用（极老的 WebView）时退回 3 秒轮询，
+ * 而不是让区域直接空着。
+ */
+function startLogLive() {
+  stopLogLive();
+  _logLiveRows = new Map();
+  const host = $("#logLiveRecent");
+  if (host) host.innerHTML = '<p class="sentinel-empty" style="padding:10px 2px">正在连接实时通道…</p>';
+
+  if (typeof EventSource === "undefined" || !TOKEN) {
+    // 兜底：没有 EventSource 就退回轮询（频率低于原来，减少空转）
+    let timer = null;
+    const tick = async () => {
+      if (document.hidden || document.documentElement.dataset.activeTab !== "logs") {
+        timer = setTimeout(tick, 3000); return;
+      }
+      try {
+        const r = await api("/api/sentinel/traffic?window=3600");
+        const { ok, data } = await safeJson(r);
+        if (ok && data) {
+          _logLiveMerge(data.recent || [], []);
+          _logLiveRenderPlatforms(data.platforms || []);
+          _logLiveRender(_logLiveMerge([], []), Number(data.running || 0));
+        }
+      } catch (e) { /* 下一拍再试 */ }
+      timer = setTimeout(tick, 3000);
+    };
+    tick();
+    _logLiveSource = { close: () => clearTimeout(timer) };
+    return;
+  }
+
+  const url = "/api/sentinel/traffic/stream?window=3600";
+  const source = new EventSource(url);
+  _logLiveSource = source;
+
+  source.onmessage = (event) => {
+    let payload;
+    try { payload = JSON.parse(event.data); } catch (e) { return; }
+    if (payload.type === "snapshot") {
+      _logLiveRows = new Map();
+      (payload.recent || []).forEach(r => {
+        if (r.rid) _logLiveRows.set(String(r.rid), r);
+      });
+      _logLiveRenderPlatforms(payload.platforms || []);
+      _logLiveRender(_logLiveMerge([], []), Number(payload.running || 0));
+    } else {
+      const rows = _logLiveMerge(payload.changed || [], payload.removed || []);
+      if (payload.platforms) _logLiveRenderPlatforms(payload.platforms);
+      _logLiveRender(rows, Number(payload.running || 0));
+    }
+  };
+
+  source.onerror = () => {
+    const hint = $("#logLiveHint");
+    if (hint) hint.textContent = "实时通道断开，正在重连…";
+    // EventSource 自带重连；连续失败时它自己会放弃，这里不做额外处理
+  };
+}
+
+/* 「用量日志」表格的实时更新：**SSE 推送，不再轮询**。
+ *
+ * 原来的实现是每 5 秒 `api('/api/logs/requests')` 探一次 `usage_revision`，
+ * 而且刷新条件写死 `_logPage === 1` —— 翻到第 2 页之后表格就再也不动了，
+ * 用户只能手动刷新整个页面。上方「请求动态」早就是 SSE，两个区域行为不一致，
+ * 观感上就是「上面实时、下面不实时」。
+ *
+ * 现在：服务端 `/api/logs/usage/stream` 只在有新行时推一帧，
+ * 前端收到就重拉**当前页**（保留页码与筛选），空闲时零流量。
+ */
+
+function startLogUsageStream() {
+  stopLogUsageStream();
+  if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+  if (typeof EventSource === 'undefined') {
+    // 极老 WebView 没有 EventSource：退回 8 秒轮询，至少不会完全静止
+    const tick = async () => {
+      _logUsagePollTimer = null;
+      if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+      try {
+        const r = await api('/api/logs/requests?include_history=false');
+        const { ok, data } = await safeJson(r);
+        if (ok && data && data.usage_revision != null
+            && _logUsageRevision !== null
+            && data.usage_revision !== _logUsageRevision) {
+          _logUsageRevision = data.usage_revision;
+          refreshLogTable();
+        }
+      } catch (e) { /* 下一拍再试 */ }
+      _logUsagePollTimer = setTimeout(tick, 8000);
+    };
+    tick();
+    return;
+  }
+  const open = async () => {
+    let ticket = '';
+    try {
+      const r = await api('/api/logs/requests/ticket');
+      const { ok, data } = await safeJson(r);
+      if (ok) ticket = (data && data.ticket) || '';
+    } catch (e) { /* 拿不到票就用普通 cookie 会话 */ }
+    const qs = ticket ? ('?ticket=' + encodeURIComponent(ticket)) : '';
+    let src;
+    try {
+      src = new EventSource('/api/logs/usage/stream' + qs);
+    } catch (e) {
+      return;
+    }
+    _logUsageSource = src;
+    src.addEventListener('usage', event => {
+      let rev = null;
+      try { rev = JSON.parse(event.data).usage_revision; } catch (e) { /* ignore */ }
+      if (rev != null) _logUsageRevision = rev;
+      refreshLogTable();
+    });
+    src.addEventListener('reauth', () => {
+      // 连接到期：换票重连（不重建整页）
+      try { src.close(); } catch (e) { /* ignore */ }
+      _logUsageSource = null;
+      clearTimeout(_logUsageReconnect);
+      _logUsageReconnect = setTimeout(open, 500);
+    });
+    src.onerror = () => {
+      // EventSource 自己会重连；这里只在彻底关闭时补一次
+      if (src.readyState === 2) {
+        clearTimeout(_logUsageReconnect);
+        _logUsageReconnect = setTimeout(open, 3000);
+      }
+    };
+  };
+  open();
+}
+
+function stopLogUsageStream() {
+  clearTimeout(_logUsageReconnect);
+  _logUsageReconnect = null;
+  if (_logUsageSource) {
+    try { _logUsageSource.close(); } catch (e) { /* ignore */ }
+    _logUsageSource = null;
+  }
+  if (_logUsagePollTimer) {
+    clearTimeout(_logUsagePollTimer);
+    _logUsagePollTimer = null;
+  }
+}
+
+/** 有新日志时重拉表格：**保持当前页码与筛选**，不跳回第 1 页。 */
+function refreshLogTable() {
+  if (!_logSelReady || _logUsageBusy) return;
+  _logUsageBusy = true;
+  Promise.resolve(loadLogs(_logPage || 1, true))
+    .finally(() => { _logUsageBusy = false; });
+  if (!_logFolded.summary && Date.now() - _logSummaryAt >= 30000) {
+    loadLogSummary(true);
+  }
+}
+
+function startLogActivity() {
+  if (document.documentElement.dataset.activeTab !== 'logs' || !TOKEN) return;
+  // 两条独立 SSE：上方「请求动态」、下方「用量日志表格」
+  startLogUsageStream();
+  startLogLive();
+}
+
+/** 离开日志页时停掉实时区，避免后台空转。 */
+function stopLogActivity() {
+  stopLogUsageStream();
+  stopLogLive();
+}
+
+
+/** 只渲染一次：账号与时间范围两个下拉。 */
+function initLogSelects() {
+  if (_logSelReady) return;
+  fillLogFilterOptions();
+  const daysBox = $("#logDaysSel");
+  if (daysBox) daysBox.outerHTML = uiSelectHTML("logDaysSel", {
+    value: "today",
+    options: [
+      { value: "today", label: "今日（自然日）" },
+      { value: "1", label: "近 1 天" }, { value: "3", label: "近 3 天" },
+      { value: "7", label: "近 7 天" }, { value: "30", label: "近 30 天" },
+      { value: "0", label: "不限时间" },
+    ],
+    onChange: () => {
+      _logBeforeId = null; _logCursors = new Map([[1, null]]);
+      loadLogAccounts(true).catch(() => {}); loadLogs(1);
+    },
+  });
+  const resultBox = $("#logResult");
+  if (resultBox) resultBox.outerHTML = uiSelectHTML("logResult", {
+    value: "",
+    options: [
+      { value: "", label: "全部结果" },
+      { value: "error", label: "仅错误" },
+      { value: "success", label: "仅成功" },
+    ],
+    onChange: () => loadLogs(1),
+  });
+  const accountBox = $("#logAccountSel");
+  if (accountBox && !_uiSelectMap.has("logAccountSel")) accountBox.outerHTML = uiSelectHTML("logAccountSel", {
+    value: "", options: [{ value: "", label: "账号选项加载中…" }], onChange: () => loadLogs(1),
+  });
+  // 平台筛选：默认「全部平台」（= 全网关共享口径）。选项来自 /api/platforms，
+  // 值用落库平台名（trae / qoder / loomy…），与 usage_logs.platform 对齐。
+  const platformBox = $("#logPlatformSel");
+  if (platformBox && !_uiSelectMap.has("logPlatformSel")) {
+    platformBox.outerHTML = uiSelectHTML("logPlatformSel", {
+      value: "", options: [{ value: "", label: "全部平台" }], onChange: () => loadLogs(1),
+    });
+    fillLogPlatformOptions().catch(() => {});
+  }
+  _logSelReady = true;
+}
+
+/** 平台下拉选项：一次拉全平台清单，之后不再重复请求。 */
+let _logPlatformLoaded = false;
+//: 落库平台名 -> 展示名（筛选提示与表格徽标共用）
+let _logPlatformLabels = {};
+async function fillLogPlatformOptions(force) {
+  if (_logPlatformLoaded && !force) return;
+  let items = [];
+  try {
+    const r = await api("/api/platforms");
+    const { ok, data } = await safeJson(r);
+    if (ok && data && Array.isArray(data.items)) items = data.items;
+  } catch (e) { return; }
+  if (!items.length) return;
+  _logPlatformLoaded = true;
+  // 同一个 storage 平台只留一项（trae-cn/trae-intl 存的是同一个 trae）
+  const seen = new Set();
+  const options = [{ value: "", label: "全部平台" }];
+  items.forEach(item => {
+    const storage = String(item.storage_platform || item.id || "").toLowerCase();
+    if (!storage || seen.has(storage)) return;
+    seen.add(storage);
+    options.push({ value: storage, label: item.label || storage });
+    _logPlatformLabels[storage] = item.label || storage;
+  });
+  const cur = uiSelectValue("logPlatformSel") || "";
+  const box = $("#logPlatformSel");
+  if (box) box.outerHTML = uiSelectHTML("logPlatformSel", {
+    value: options.some(o => o.value === cur) ? cur : "",
+    options,
+    onChange: () => loadLogs(1),
+  });
+}
+
+/** 按账号下拉：选项来自 /api/logs/accounts（窗口内有记录的账号）。 */
+function loadLogAccounts(force = false) {
+  const rawDays = uiSelectValue("logDaysSel") || "1";
+  const days = rawDays === "0" ? 0 : (parseInt(rawDays, 10) || 1);
+  if (_logAccountsPromise && _logAccountsDays === days) return _logAccountsPromise;
+  if (!force && _logAccountsDays === days && Date.now() - _logAccountsAt < 5000) return Promise.resolve();
+  if (_logAccountController) _logAccountController.abort();
+  const seq = ++_logAccountSeq;
+  const controller = new AbortController();
+  _logAccountController = controller;
+  _logAccountsDays = days;
+  const task = (async () => {
+  let items = [];
+  try {
+    const r = await api(`/api/logs/accounts?days=${days}&compact=true`, {signal:controller.signal});
+    const { ok, data } = await safeJson(r);
+    if (ok) items = data.items || [];
+  } catch (e) { if (e && e.name === 'AbortError') return; /* 选项拉取失败不阻塞列表 */ }
+  if (seq !== _logAccountSeq) return;
+  _logOpts.accounts = items;
+
+  const cur = uiSelectValue("logAccountSel") || "";
+  const vals = items.map(x => String(x.id));
+  const keep = (cur && vals.includes(cur)) ? cur : "";
+  const box = $("#logAccountSel");
+  if (box) {
+    box.outerHTML = uiSelectHTML("logAccountSel", {
+      value: keep,
+      options: [{ value: "", label: `全部账号（${items.length} 个有记录）` }].concat(
+        items.map(x => ({
+          value: String(x.id),
+          // 选项里直接带上「请求数 · 积分」，让用户**选之前**就知道值不值得点
+          label: x.requests == null ? x.name : `${x.name} · ${x.requests} 次 · ${fmtCredit(x.credits)} 积分`,
+        }))),
+      onChange: () => loadLogs(1),
+    });
+  }
+  })();
+  _logAccountsPromise = task.finally(() => {
+    if (seq === _logAccountSeq) {
+      _logAccountController = null;
+      _logAccountsPromise = null;
+      _logAccountsAt = Date.now();
+    }
+  });
+  return _logAccountsPromise;
+}
+
+/** 日志表当前列数：选了具体平台时「平台」列隐藏，占位格要跟着减一。 */
+function _logColCount() {
+  return (uiSelectValue("logPlatformSel") || "") ? 10 : 11;
+}
+
+/** 平台列显隐：只在「全部平台」口径下显示，筛成单平台后自动收起。 */
+function syncLogPlatformColumn() {
+  const table = document.querySelector(".log-table");
+  if (!table) return;
+  table.classList.toggle("hide-platform", Boolean(uiSelectValue("logPlatformSel") || ""));
+}
+
+/** 当前筛选 → query string，并生成一句人话提示。 */
+function _logQuery() {
+  const daysRaw = uiSelectValue("logDaysSel") || "today";
+  const isToday = daysRaw === "today";
+  const days = parseInt(daysRaw, 10) || 0;
+  const accountId = uiSelectValue("logAccountSel") || "";
+  const platform = uiSelectValue("logPlatformSel") || "";
+  const model = ($("#logModel") ? $("#logModel").value : "").trim();
+  const key = ($("#logKey") ? $("#logKey").value : "").trim();
+  const ip = ($("#logIp") ? $("#logIp").value : "").trim();
+  const start = ($("#logStart") ? $("#logStart").value : "").trim();
+  const end = ($("#logEnd") ? $("#logEnd").value : "").trim();
+  const fast = $("#logFastMode") ? $("#logFastMode").checked : false;
+
+  const p = new URLSearchParams({ page: _logPage, page_size: _logPageSize });
+  const result = uiSelectValue("logResult") || "";
+  if (result) p.set("result", result);
+  if (platform) p.set("platform", platform);
+  if (accountId) p.set("account_id", accountId);
+  if (model) p.set("model", model);
+  if (key) p.set("key", key);
+  if (ip) p.set("client_ip", ip);
+  // 时间范围：显式日期优先，「今日」= 北京时间 00:00 起的自然日（与账号池
+  // 「今日已用」同一口径），否则按「近 N 天」滚动窗口（0 = 不限）
+  if (start) p.set("start", start + " 00:00:00");
+  else if (isToday) {
+    const t = new Date(Date.now() + 8 * 3600000);
+    const cnMidnight = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - 8 * 3600000;
+    p.set("start", new Date(cnMidnight).toISOString());
+  }
+  else if (days > 0) {
+    const d0 = new Date(Date.now() - days * 86400000);
+    p.set("start", d0.toISOString());
+  }
+  if (end) p.set("end", end + " 23:59:59");
+  if (fast) {
+    p.set("with_total", "false");
+    const cursor = _logCursors.get(_logPage);
+    if (cursor) p.set("before_id", cursor);
+  }
+
+  const acc = (_logOpts.accounts || []).find(x => String(x.id) === accountId);
+  const conds = [];
+  if (platform) conds.push(`平台=${_logPlatformLabels[platform] || platform}`);
+  if (acc) conds.push(`账号=${acc.name}`);
+  if (model) conds.push(`模型=${model}`);
+  if (key) conds.push(`Key=${key}`);
+  if (ip) conds.push(`IP=${ip}`);
+  if (start || end) conds.push(`日期=${start || "…"}~${end || "…"}`);
+  else if (isToday) conds.push("今日（自然日）");
+  else if (days > 0) conds.push(`近 ${days} 天`);
+  if (fast) conds.push("快速翻页");
+  return { qs: p.toString(), conds };
+}
+
+async function loadLogs(page, silent = false) {
+  const loadSeq = ++_logLoadSeq;
+  if (_logListController) _logListController.abort();
+  const controller = new AbortController();
+  _logListController = controller;
+  initLogSelects();
+  if (!_logSelReady) return;
+  syncLogPlatformColumn();
+  _logPage = Math.max(1, Number(page) || 1);
+  if (_logPage === 1) {
+    _logBeforeId = null;
+    _logCursors = new Map([[1, null]]);
+  }
+  // 账号选项是辅助筛选，不能阻塞日志首屏。它在后台更新下拉，列表先按当前条件返回。
+  if (!_logOpts.accounts.length && !_logAccountsPromise) loadLogAccounts().catch(() => {});
+  if (loadSeq !== _logLoadSeq) return;
+
+  const { qs, conds } = _logQuery();
+  const filterSignature = logFilterSignature();
+  const revision = _logUsageRevision;
+  const params = new URLSearchParams(qs);
+  const fast = Boolean($("#logFastMode") && $("#logFastMode").checked);
+  const cachedStats = !fast ? _logTotals.get(filterSignature) : null;
+  const useCachedStats = cachedStats && Date.now() - cachedStats.at < 5000;
+  if (silent || fast || useCachedStats) params.set('with_total', 'false');
+  const hint = $("#logFilterHint");
+  if (hint) {
+    if (conds.length) {
+      hint.classList.remove("hidden");
+      hint.innerHTML = `<span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg></span>已筛选：${esc(conds.join("，"))}`;
+    } else hint.classList.add("hidden");
+  }
+
+  const body = $("#logBody");
+  if (body && !silent) body.innerHTML = `<tr><td colspan="${_logColCount()}" class="px-4 py-8 text-center" style="color:var(--fg-subtle)">加载中...</td></tr>`;
+  let d;
+  try {
+    const r = await api("/api/logs?" + params, {signal:controller.signal});
+    const { ok, data } = await safeJson(r);
+    if (loadSeq !== _logLoadSeq || filterSignature !== logFilterSignature()) return;
+    if (!ok) {
+      if (body && !silent) body.innerHTML = `<tr><td colspan="${_logColCount()}" class="px-4 py-8 text-center text-red-500">加载失败：${esc(data.detail || "")}</td></tr>`;
+      return;
+    }
+    d = data;
+    if (d.total != null && d.stats && !fast) {
+      _logTotals.set(filterSignature, {at:Date.now(), total:d.total, stats:d.stats});
+      if (_logTotals.size > 32) _logTotals.delete(_logTotals.keys().next().value);
+    } else if (useCachedStats) {
+      // **实时刷新也必须保住总数**。
+      //
+      // 静默刷新（每 5 秒探到新记录才触发）走的是 `with_total=false`
+      // —— 不重算总数是为了快，但以前这里只在 `!silent` 时把缓存的总数补回来，
+      // 于是每一次实时刷新都会让分页条从「共 N 条 · 1 2 3 …」退化成
+      // 「第 1 页 / 已到末尾」：用户看到的就是「分页没了、数据不全」。
+      // 缓存里有 5 秒内的总数，补回来即可，不必再查库。
+      d.total = cachedStats.total;
+      d.stats = cachedStats.stats;
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    if (loadSeq !== _logLoadSeq) return;
+    if (body && !silent) body.innerHTML = `<tr><td colspan="${_logColCount()}" class="px-4 py-8 text-center text-red-500">加载异常：${esc(String(e && e.message || e))}</td></tr>`;
+    return;
+  } finally {
+    if (loadSeq === _logLoadSeq) _logListController = null;
+  }
+  fillLogFilterOptions();
+  const stats = d.stats;
+  if (revision === _logUsageRevision) _logUsageDirty = false;
+  _logUsageAt = Date.now();
+  $('#logStats').textContent = stats ? `当前筛选 · 共 ${stats.total} 次 · 成功 ${stats.success} 次 · 错误 ${stats.error} 次` : silent ? '用量记录已实时更新 · 总数统计请点击查询' : '快速翻页未统计总数';
+  if (_logPage === 1 && !silent) { loadLogSummary(); }
+
+  const total = d.total;              // null = 本次未统计
+  const totalPages = total != null
+    ? Math.max(1, Math.ceil(total / _logPageSize))
+    : (d.has_more ? _logPage + 1 : _logPage);
+  // 游标推进：保存每一页的起点，快速模式才能稳定地前后翻页。
+  if (fast) {
+    _logBeforeId = d.next_before_id || null;
+    if (d.next_before_id) _logCursors.set(_logPage + 1, d.next_before_id);
+  }
+
+  _logLastItems = d.items || [];
+  _logLastConds = conds;
+  $("#logBody").innerHTML = _logLastItems.map(logRow).join("") ||
+    `<tr><td colspan="${_logColCount()}"><div class="empty">${
+      conds.length ? "当前筛选条件下没有记录，试试放宽时间范围或清除筛选" : "还没有请求记录（代理产生调用后这里会出现）"
+    }</div></td></tr>`;
+
+  $("#logPager").innerHTML = total != null
+    ? pagerHtml(total, _logPage, totalPages, "loadLogs")
+    : `<span>${fast ? "快速翻页模式（未统计总数）· " : ""}第 ${_logPage} 页${
+        d.has_more ? "" : " · 已到末尾"}</span>
+       <span class="flex gap-1">
+         <button class="pg-btn px-2 py-1 rounded border text-xs ${_logPage<=1?'opacity-40 pointer-events-none':''} hover:bg-slate-50" onclick="loadLogs(${_logPage-1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></span></button>
+         <button class="pg-btn px-2 py-1 rounded border text-xs ${d.has_more?'':'opacity-40 pointer-events-none'} hover:bg-slate-50" onclick="loadLogs(${_logPage+1})"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span></button>
+       </span>`;
+}
+
+/** 单条日志行（抽出来便于与汇总区共用配色）。 */
+/** 命中率能否显示：上游给了缓存字段、且有输入 token。
+ *
+ * 「上游没给」和「命中率为 0」是两件事 —— 前者显示 —，后者才显示 0.00%。
+ * 各处表格统一用这个判定，避免有的地方显示 0、有的地方显示 —。
+ */
+function cacheRateOf(row) {
+  const pt = Number((row && row.prompt_tokens) || 0);
+  const raw = row ? row.cached_tokens : undefined;
+  const has = raw !== null && raw !== undefined;
+  if (!pt || !has) return null;
+  return Math.min(100, Number(raw || 0) / pt * 100);
+}
+
+function hitRateHtml(l) {
+  // 命中率 = 缓存命中 token / 输入(prompt) token。
+  //
+  // **三种情况都显示 “—”，不要显示 0%**：
+  //   1. 没有输入 token（老记录 / 非推断请求）—— 分母不存在；
+  //   2. 上游根本没回缓存字段（`cached_tokens` 是 null，不是 0）；
+  //   3. 记录里压根没有这个字段（历史行）。
+  //
+  // 为什么 2 必须区分：Trae 这类上游**不返回缓存统计**，之前被渲染成
+  // 「0.00%」，用户以为「缓存没命中」。而「上游没给」和「命中率为零」
+  // 是两件事 —— 前者应该显示未知（—），后者才是真的 0。
+  // 区分依据：`cached_tokens` 为 null/undefined 表示上游没给；
+  // 显式给了 0 才认为是真的没命中（此时显示 0.00% 是诚实的）。
+  const pt = Number(l.prompt_tokens || 0);
+  const rawCached = l.cached_tokens;
+  const hasCacheField = rawCached !== null && rawCached !== undefined;
+  if (!pt) return `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
+  if (!hasCacheField) {
+    return `<div class="leading-tight tnum"
+      data-tooltip="缓存命中未知"
+      data-tooltip-description="该平台上游没有返回缓存统计（不是命中率为 0）">
+      <span class="text-xs" style="color:var(--fg-subtle)">—</span>
+    </div>`;
+  }
+  const ct = Number(rawCached || 0);
+  const pct = Math.min(100, ct / pt * 100);
+  const tone = pct >= 60 ? "var(--ok)" : pct >= 30 ? "#d97706" : "var(--fg-subtle)";
+  return `<div class="leading-tight tnum" data-tooltip="缓存命中 ${fmtK(ct)} / 输入 ${fmtK(pt)}">
+    <span class="text-xs font-medium" style="color:${tone}">${pct.toFixed(2)}%</span>
+    <div class="pkg-track" style="width:44px;margin:2px 0 0"><i style="width:${Math.max(pct,2).toFixed(1)}%;background:${tone}"></i></div>
+  </div>`;
+}
+/**
+ * 日志里的平台徽标。
+ *
+ * 日志面板展示**全部平台**的请求，必须标出每条走的是哪个上游 ——
+ * 否则同一个模型名（`deepseek-v3`）出现在两个平台下时无法区分，
+ * 而两者的计费口径与排障路径完全不同。
+ *
+ * 空平台（孤儿日志）显示灰色「未知」，不要假装是某个平台。
+ */
+function platformBadge(platform) {
+  const raw = String(platform || "").toLowerCase();
+  if (!raw) {
+    return '<span class="log-platform unknown" data-tooltip="历史日志未记录平台"'
+      + ' data-tooltip-description="这条记录写入时还没有平台字段，或对应的账号已被删除">未知</span>';
+  }
+  // 展示名优先用「日志筛选」里那份落库平台 -> 展示名映射（来自 /api/platforms），
+  // 这样新增平台（Loomy / Qoder）不用再回来改这张表。
+  // 兜底只保留几个老平台名：接口没回来时也不至于显示裸 id。
+  const LABELS = {
+    workbuddy: "WorkBuddy",
+    trae: "Trae",
+    "trae-cn": "Trae 国内版",
+    "trae-intl": "Trae 国际版",
+    qoder: "Qoder",
+    loomy: "Loomy",
+  };
+  const label = _logPlatformLabels[raw] || LABELS[raw] || raw;
+  return `<span class="log-platform ${esc(raw)}">${esc(label)}</span>`;
+}
+
+/* --------------------------------------------------------------------------
+   模型 id -> 展示名映射（日志表用）
+   --------------------------------------------------------------------------
+   Qoder 的用法日志里 `model` 列存的是**平台内部 id**（dfmodel / kmodel），
+   直接显示出来谁也看不懂，而且「dfmodel 到底是 DeepSeek 还是什么」只能靠记。
+   这里用一次 `/api/models/aggregate` 建 {model_id: 聚合展示名}，
+   表格显示展示名、tooltip 保留原始 id。 */
+let _modelLabelMap = {};
+let _modelLabelAt = 0;
+let _modelLabelPromise = null;
+async function loadModelLabelMap(force) {
+  if (!force && Date.now() - _modelLabelAt < 60000) return _modelLabelMap;
+  if (_modelLabelPromise) return _modelLabelPromise;
+  _modelLabelPromise = (async () => {
+    try {
+      const { ok, data } = await safeJson(await api("/api/models/aggregate"));
+      if (!ok) return _modelLabelMap;
+      const map = {};
+      for (const group of data.items || []) {
+        for (const entry of group.platforms || []) {
+          const id = String(entry.model_id || "");
+          if (id && group.name) map[id] = group.name;
+        }
+      }
+      _modelLabelMap = map;
+      _modelLabelAt = Date.now();
+    } catch (e) {
+      // 拿不到就照旧显示原始 id
+    } finally {
+      _modelLabelPromise = null;
+    }
+    return _modelLabelMap;
+  })();
+  return _modelLabelPromise;
+}
+
+/** 日志里的模型显示名：优先映射到聚合展示名。 */
+function modelLabelOf(model) {
+  const raw = String(model || "");
+  return _modelLabelMap[raw] || raw;
+}
+
+//: 当前页数据（模型展示名映射到手后要重画，避免再打一次接口）
+let _logLastItems = [];
+let _logLastConds = [];
+function renderLogRows() {
+  const body = $("#logBody");
+  if (!body) return;
+  body.innerHTML = _logLastItems.map(logRow).join("") ||
+    `<tr><td colspan="${_logColCount()}"><div class="empty">${
+      (_logLastConds || []).length ? "当前筛选条件下没有记录，试试放宽时间范围或清除筛选"
+        : "还没有请求记录（代理产生调用后这里会出现）"
+    }</div></td></tr>`;
+}
+
+/** 用途列的可读短名。
+ *
+ * 原始值是网关写进去的 `X-Agent-Purpose`（`qoder-completions` /
+ * `loomy-chat` / `anthropic`…）。整串塞进 74px 的列只能显示
+ * 「qoder-completi…」，既占地方又没信息量 —— 平台那一列已经写了是谁，
+ * 这里只保留「什么接口」。tooltip 仍然给完整值。
+ */
+function useCaseLabel(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "—";
+  const stripped = raw.replace(/^(qoder|loomy|trae|wb|workbuddy|anthropic|openai)[-_]?/i, "");
+  const key = stripped.toLowerCase();
+  const NAMES = {
+    "chat": "对话", "completions": "补全", "messages": "消息",
+    "responses": "响应", "embeddings": "向量", "images": "图片",
+    "videos": "视频", "audio": "语音", "moderation": "审核",
+    "chat-completions": "对话", "messages/count_tokens": "计数",
+  };
+  return NAMES[key] || NAMES[stripped] || stripped || raw;
+}
+
+function logRow(l) {
+  const tokenHtml = (l.prompt_tokens!=null || l.completion_tokens!=null)
+    ? `<div class="leading-tight text-[11px] tnum">
+         <div><span class="wb-icon text-emerald-500 text-[10px]"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg></span> ${fmtK(l.prompt_tokens||0)}
+              <span class="wb-icon text-amber-500 text-[10px] ml-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></span> ${fmtK(l.completion_tokens||0)}</div>
+         <div style="color:var(--fg-subtle)"><span class="wb-icon text-[9px] mr-0.5"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12v-2"/><path d="M12 18v-2"/><path d="M16 12v-2"/><path d="M16 18v-2"/><path d="M2 11h1.5"/><path d="M20 18v-2"/><path d="M20.5 11H22"/><path d="M4 18v-2"/><path d="M8 12v-2"/><path d="M8 18v-2"/><rect x="2" y="6" width="20" height="10" rx="2"/></svg></span> ${fmtK(l.cached_tokens||0)}</div>
+       </div>`
+    : `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
+  const credHtml = l.credits>0
+    ? `<span class="text-emerald-600 font-semibold tnum">${Number(l.credits).toFixed(4)}</span>`
+    : `<span style="color:var(--fg-subtle)">—</span>`;
+  const ttfbColor = ms => ms==null ? 'var(--fg-subtle)' : ms<=3000 ? 'var(--ok)' : ms<=8000 ? '#d97706' : ms<=20000 ? 'var(--warn)' : 'var(--danger)';
+  const totalColor = ms => ms==null ? 'var(--fg-subtle)' : ms<=15000 ? 'var(--ok)' : ms<=30000 ? '#d97706' : ms<=60000 ? 'var(--warn)' : 'var(--danger)';
+  const latencyBar = ms => ms==null ? 0 : Math.min(100, Math.max(4, Math.log10(ms/100+1)*22)).toFixed(1);
+  const latS = l.latency_ms!=null ? fmtDuration(l.latency_ms) : '—';
+  const ttfbS = l.ttfb_ms!=null ? fmtDuration(l.ttfb_ms) : '—';
+
+  // 计算 TPS（Tokens Per Second）—— **必须与 DSH / 后端 bench_router 同口径**。
+  //
+  // 原来这里错得很离谱，同一请求算出 2208 / 3854 这种物理不可能的值：
+  //   1. 分子用了 `prompt_tokens + completion_tokens` —— prompt 经常上千，
+  //      而它根本不是「生成的量」，直接把 TPS 放大一个数量级；
+  //   2. 分母用了整段 `latency_ms`，把首包等待（往往 1~3 秒）也算进
+  //      「生成耗时」，方向反了：等待越久 TPS 越"低"，但实际生成很快；
+  //   3. 没有任何边界保护。
+  //
+  // 正确口径（与 `bench_router` 完全一致）：
+  //   tps = completion_tokens / (decodeMs / 1000)
+  //   decodeMs = latency_ms - ttfb_ms      ← 纯解码段，不含首包等待
+  //
+  // 边界：decodeMs < 300ms 视为没有有效分段（那几毫秒是网络抖动，
+  // 上游一次性爆发时就是这种形态，算出来没有参考价值），
+  // 上限 300 tok/s —— 线上实测：真实出字速度 30~200 tok/s，超过这个数
+  // 一定是「整包突发」（上游把整段答案一次吐完，窗口只剩网络 RTT）。
+  // 显示「—」比显示一个假的高值诚实 —— 用户拿它跟客户端对不上就是这里。
+  const _outTok = Number(l.completion_tokens || 0);
+  const _decodeMs = Number(l.latency_ms || 0) - Number(l.ttfb_ms || 0);
+  let tpsValue = null;
+  if (_outTok > 0 && _decodeMs >= 300) {
+    const _raw = _outTok / (_decodeMs / 1000);
+    if (_raw > 0 && _raw <= 300) tpsValue = _raw.toFixed(1);
+  }
+
+  // 耗时单元格：三行（首响应 / 总 / TPS）必须**左对齐成一条竖线**。
+  //
+  // 原来用 Tailwind 的 `w-7` 给标签固定宽度 —— 但 `w-7` 不在预编译子集里，
+  // 实际宽度为 0，于是「首响应 / 总 / TPS」三行的数值起点各不相同，
+  // 整列看起来是乱的。改成独立的 grid + 自定义标签列宽，不依赖 Tailwind。
+  const latencyHtml = l.ttfb_ms!=null || l.latency_ms!=null
+    ? `<div class="latency-cell tnum">
+         <div class="latency-row">
+           <span class="latency-label" data-tooltip="从收到请求到首次转发正文、思考或工具增量；最终答案可能更晚出现">首响应</span>
+           <span class="font-medium" style="color:${ttfbColor(l.ttfb_ms)}">${ttfbS}</span>
+         </div>
+         <div class="latency-row">
+           <span class="latency-label">总</span>
+           <div class="pkg-track" style="width:44px;margin:0;flex:0 0 44px"><i style="width:${latencyBar(l.latency_ms)}%;background:${totalColor(l.latency_ms)}"></i></div>
+           <span class="font-medium" style="color:${totalColor(l.latency_ms)}">${latS}</span>
+         </div>
+         ${tpsValue ? `<div class="latency-row" data-tooltip="吞吐量 (Token/秒)">
+           <span class="latency-label">TPS</span>
+           <span class="font-medium" style="color:var(--brand)">${tpsValue}</span>
+         </div>` : ''}
+       </div>`
+    : `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
+  const ok = !l.error_kind || l.error_kind === 'success';
+  const statusHtml = ok
+    ? `<span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-600 text-xs" data-tooltip="成功"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span></span>`
+    : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700" data-tooltip="${esc(l.error_kind||'')}">${esc((l.error_kind||'失败').slice(0,6))}</span>`;
+  return `<tr data-tooltip="IP: ${esc(l.client_ip||'—')} | Seq: ${l.seq||'—'}">
+    <td class="text-xs whitespace-nowrap tnum" style="color:var(--fg-subtle)" data-tooltip="${esc(fmtTime(l.created_at))}">${esc(fmtTime(l.created_at).slice(5))}</td>
+    <td class="text-xs font-mono">${WBUsage.ipCell(l.client_ip)}</td>
+    <td class="text-xs font-mono" data-tooltip="${esc(l.key_name)}">${esc((l.key_name||'').slice(0,10))}</td>
+    <td class="text-xs">${platformBadge(l.platform)}</td>
+    <td class="text-xs" data-tooltip="${esc(l.account_name)}">${esc((l.account_name||'').slice(0,14))}</td>
+    <td class="font-mono text-[11px] whitespace-nowrap" data-tooltip="${esc(l.model)}" data-tooltip-description="${esc(modelLabelOf(l.model) !== (l.model||'') ? '平台内部模型 ID：' + (l.model||'') : '')}">${esc(modelLabelOf(l.model).slice(0, 26))}<small class="block mt-1" style="color:var(--fg-muted)" data-tooltip="客户端请求的思考强度；空值表示请求未指定或历史日志未记录">思考：${esc(l.reasoning_effort || '默认 / 未记录')}</small></td>
+    <td>${tokenHtml}</td>
+    <td>${hitRateHtml(l)}</td>
+    <td class="text-xs text-right">${credHtml}</td>
+    <td>${latencyHtml}</td>
+    <td class="text-xs" style="color:var(--fg-muted)" data-tooltip="${esc(l.use_case || '—')}" data-tooltip-description="透传给上游的 X-Agent-Purpose">${esc(useCaseLabel(l.use_case))}</td>
+    <td><button type="button" class="console-btn quiet" onclick="openUsageDetail(${Number(l.id)})" data-tooltip="查看调用详情">${statusHtml} 详情</button></td>
+  </tr>`;
+}
+
+function renderMobileRuntime(d) {
+  if (!d || (!d.android_runtime && !d.event_loop_stalls?.length && !(d.event_loop_lag_ms >= 1000))) return '';
+  const a = d.android_runtime;
+  return `<div class="limit-note"><p><b>手机服务运行状态</b></p>
+    <p>事件循环最大延迟：${((d.event_loop_lag_ms || 0)/1000).toFixed(3)} 秒${d.event_loop_lag_ms >= 1000 ? '（本地处理曾停顿，不能仅凭此判定为上游超时）' : ''}</p>
+    ${a ? `<p>${esc(a.manufacturer || '')} ${esc(a.device_model || '')} · Android SDK ${Number(a.android_sdk) || '—'} · 服务代次 ${Number(a.service_revision) || '—'}</p>
+    <p>电池优化：${a.battery_unrestricted ? '已允许不受限制' : '未豁免'} · 后台限制：${a.background_restricted ? '已限制' : '系统未报告限制'} · 屏幕：${a.interactive ? '亮屏' : '息屏'}</p>
+    <p>省电模式：${a.power_save ? '开启' : '关闭'} · 系统休眠：${a.device_idle ? '是' : '否'} · CPU 保活：${a.wake_lock ? '持有' : '未持有'}</p>
+    <p>网络：${a.wifi ? 'Wi-Fi' : a.cellular ? '移动网络' : a.network_available ? '其他网络' : '未连接'} · 系统联网校验：${a.network_validated ? '通过' : '未通过'}</p>` : ''}
+    ${(d.event_loop_stalls || []).map(s => `<details><summary>停顿采样：${(Number(s.paused_ms)/1000).toFixed(3)} 秒 · 期间进程 CPU ${(Number(s.process_cpu_ms)/1000).toFixed(3)} 秒</summary><pre class="whitespace-pre-wrap break-all">${esc((s.stack || []).join('\n'))}</pre></details>`).join('')}</div>`;
+}
+
+let _usageDetailSeq = 0;
+async function openUsageDetail(id) {
+  WBUsage.closeDetail();
+  const seq = ++_usageDetailSeq;
+  openModal('<p id="usageDetailLoading">正在读取调用详情…</p>', 'max-w-3xl');
+  try {
+    const response = await api('/api/logs/' + Number(id));
+    const {ok, data} = await safeJson(response);
+    if (seq !== _usageDetailSeq || !$('#usageDetailLoading') || $('#modal').classList.contains('hidden')) return;
+    if (!ok) { closeModal(); toast(data.detail || '读取详情失败', 'err'); return; }
+    const d = data.diagnostic;
+    const json = d ? JSON.stringify(d, null, 2) : '这条历史记录没有保存请求详情，无法恢复当时的上游响应。';
+    openModal(`<h3 class="font-semibold text-lg mb-3">调用详情 · ${esc(data.model)}</h3>
+      <p>账号：${esc(data.account_name)} · 网关分类：${esc(data.error_kind || '未记录')}</p>
+      <p>客户端 IP：<span class="font-mono">${esc(data.client_ip || '未记录')}</span></p>
+      ${WBUsage.payloadHtml(data)}
+      ${d?.gateway_error ? `<div class="limit-note"><p>网关本地拒绝（未请求上游）：</p><pre class="whitespace-pre-wrap break-all">${esc(d.gateway_error)}</pre></div>` : ""}
+      ${d?.diagnostic_truncated ? '<p class="limit-note">诊断内容过长，部分消息已截断。</p>' : ''}
+      ${renderMobileRuntime(d)}
+      ${d ? `<p>请求编号：${esc(d.id || '—')} · 网关 HTTP：${Number(d.status) || '记账时尚未发送响应头'}</p><p>网关处理结果：${Number(d.gateway_result_status) || '—'}${d.status === 200 && d.error_kind && d.error_kind !== 'success' ? '（响应头已发送 200，随后处理失败）' : ''}</p>
+      ${(d.account_policy_events || []).map(e => `<div class="limit-note"><p>账号 #${Number(e.account_id)} · ${esc(e.model || '')} · 网关分类：${esc(e.kind)}</p><p>上游 HTTP：${Number(e.http_status) || '未收到 HTTP 响应'} · 上游 code：${esc(e.upstream_code ?? '未提供')}</p><p>上游 msg：${esc(e.upstream_message ?? '未提供')}</p>${e.message_truncated || e.raw_truncated ? '<p>消息过长，以下内容已截断。</p>' : ''}${e.upstream_raw != null ? `<p>上游响应原文（凭据脱敏）：</p><pre class="whitespace-pre-wrap break-all">${esc(e.upstream_raw)}</pre>` : ''}</div>`).join('')}
+      ${(d.network_errors || []).map(e => `<div class="limit-note"><p>本地网络异常 · 账号 #${Number(e.account_id) || '—'} · ${esc(e.phase || '')}</p><pre class="whitespace-pre-wrap break-all">${esc(e.message)}</pre><p>${e.http_status ? '已收到上游 HTTP ' + Number(e.http_status) + '，随后传输中断。' : '未收到响应，没有可展示的上游 HTTP / code / msg。'}</p></div>`).join('')}
+      ${d.connection_recoveries ? `<p>已尝试新连接恢复：${Number(d.connection_recoveries)} 次</p>` : ''}` : ''}
+      <details class="mt-3"><summary>完整诊断 JSON</summary><pre class="whitespace-pre-wrap break-all text-xs">${esc(json)}</pre></details>
+      <textarea id="usageDiagnosticText" hidden></textarea><div class="flex gap-2 mt-3"><button class="console-btn quiet" onclick="copyText('#usageDiagnosticText')">复制摘要</button><button class="console-btn quiet" onclick="WBUsage.download()">下载完整 JSONL</button><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`, 'max-w-3xl');
+    document.getElementById('usageDiagnosticText').value = JSON.stringify(data, null, 2);
+  } catch (error) { if (seq === _usageDetailSeq && $('#usageDetailLoading')) { closeModal(); toast('读取详情失败', 'err'); } }
+}
+
+/** 按账号汇总表：回答「这个号用了多少」，不用翻几十页去数。 */
+async function loadLogSummary(silent = false) {
+  const box = $("#logSummary");
+  const hint = $("#logSummaryHint");
+  if (!box || _logFolded.summary || (silent && _logSummaryBusy)) return;
+  const filterSignature = logFilterSignature();
+  if (!_logSummaryDirty && filterSignature === _logSummarySignature && Date.now() - _logSummaryAt < 30000) return;
+  const seq = ++_logSummarySeq;
+  const usageRevision = _logUsageRevision;
+  if (_logSummaryController) _logSummaryController.abort();
+  const controller = new AbortController();
+  _logSummaryController = controller;
+  _logSummaryBusy = true;
+  const parsedDays = parseInt(uiSelectValue("logDaysSel") || "1", 10);
+  const days = Number.isFinite(parsedDays) ? parsedDays : 1;
+  const accountId = uiSelectValue("logAccountSel") || "";
+  if (!silent) box.innerHTML = `<div class="fs-12 py-3" style="color:var(--fg-subtle)">加载中...</div>`;
+  try {
+    const filters = new URLSearchParams(_logQuery().qs);
+    ['page','page_size','before_id','with_total'].forEach(k => filters.delete(k));
+    // 「今日」模式保留 _logQuery 注入的自然日起点（start 存在时后端忽略 days），
+    // 其余情况沿用旧行为：删掉 start，交给后端按 days 滚动窗口算。
+    const explicitStart = Boolean($('#logStart')?.value);
+    const todayMode = (uiSelectValue("logDaysSel") || "") === "today";
+    if (!explicitStart && !todayMode) filters.delete('start');
+    filters.set('days', explicitStart ? '0' : String(days));
+    const r = await api('/api/logs/summary?' + filters, {signal:controller.signal});
+    const { ok, data } = await safeJson(r);
+    if (seq !== _logSummarySeq || filterSignature !== logFilterSignature() || _logFolded.summary) return;
+    if (!ok) { box.innerHTML = `<div class="empty">加载失败：${esc(data.detail || "")}</div>`; return; }
+    const items = data.items || [];
+    if (usageRevision === _logUsageRevision) _logSummaryDirty = false;
+    _logSummarySignature = filterSignature;
+    _logSummaryAt = Date.now();
+    if (hint) hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests} · ${fmtCredit(data.total_credits)} 积分${data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : ""}`;
+    if (!items.length) { box.innerHTML = `<div class="empty">该时间范围内没有账号产生请求。</div>`; return; }
+    const maxC = Math.max(1, ...items.map(x => x.credits));
+    box.innerHTML = `<table class="tbl" style="min-width:820px">
+      <thead><tr>
+        <th>账号</th><th class="text-right">请求数</th><th class="text-right">失败</th>
+        <th class="text-right">积分</th><th class="text-right">Token</th><th class="text-right">命中率</th>
+        <th class="text-right">平均耗时</th><th>最近使用</th><th style="width:120px">积分占比</th>
+      </tr></thead><tbody>${items.map(x => `
+        <tr>
+          <td class="font-medium">${esc(x.account_name)}</td>
+          <td class="text-right tnum">${fmtNum(x.requests)}</td>
+          <td class="text-right tnum" style="color:${x.failed_requests > 0 ? 'var(--danger)' : 'var(--fg-subtle)'}">${x.failed_requests}</td>
+          <td class="text-right tnum font-medium" style="color:var(--warn)">${fmtCredit(x.credits)}</td>
+          <td class="text-right tnum" style="color:var(--fg-muted)">${fmtK(x.total_tokens)}</td>
+          <td class="text-right tnum font-medium" style="color:${cacheRateOf(x) == null ? 'var(--fg-subtle)' : (cacheRateOf(x) >= 60 ? 'var(--ok)' : cacheRateOf(x) >= 30 ? '#d97706' : 'var(--fg-subtle)')}" data-tooltip="${cacheRateOf(x) == null ? '缓存命中未知' : '缓存命中 ' + fmtK(x.cached_tokens||0) + ' / 输入 ' + fmtK(x.prompt_tokens||0)}" data-tooltip-description="${cacheRateOf(x) == null ? '该平台上游没有返回缓存统计（不是命中率为 0）' : ''}">${cacheRateOf(x) == null ? '—' : cacheRateOf(x).toFixed(2) + '%'}</td>
+          <td class="text-right tnum" style="color:var(--fg-muted)">${x.avg_latency_ms ? (x.avg_latency_ms/1000).toFixed(2)+'s' : '—'}</td>
+          <td class="text-xs" style="color:var(--fg-subtle)">${fmtTime(x.last_used_at, false)}</td>
+          <td><div class="pkg-track" style="margin:0"><i style="width:${Math.max(2, x.credits/maxC*100)}%"></i></div></td>
+        </tr>`).join("")}</tbody></table>`;
+  } catch (e) {
+    if (!(e && e.name === 'AbortError') && !silent && seq === _logSummarySeq) box.innerHTML = `<div class="empty">加载异常：${esc(String(e && e.message || e))}</div>`;
+  } finally {
+    if (seq === _logSummarySeq) {
+      _logSummaryBusy = false;
+      _logSummaryController = null;
+    }
+  }
+}
+
+function resetLogFilters() {
+  WBFilterCombobox.close();
+  // Reset all controls first, then issue one list request below. Notifying
+  // each select here would briefly start the same query two extra times.
+  uiSelectSet("logAccountSel", "", false);
+  uiSelectSet("logPlatformSel", "", false);
+  uiSelectSet("logDaysSel", "today", false);
+  ["logModel", "logKey", "logIp", "logStart", "logEnd"].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = "";
+  });
+  uiSelectSet("logResult", "", false);
+  const f = $("#logFastMode"); if (f) f.checked = false;
+  _logBeforeId = null; _logCursors = new Map([[1, null]]);
+  loadLogAccounts(true).catch(() => {}); loadLogs(1);
+}
+
+/** 进入日志面板时恢复折叠状态，后台只做轻量增量检查。 */
+function openLogsPanel() {
+  WBUsage.captureStatus();
+  stopLogActivity();
+  _logUsageRevision = null;
+  _logUsageDirty = false;
+  for (const name of Object.keys(_logFolded)) {
+    try { _logFolded[name] = localStorage.getItem('wb_log_fold_'+name) === 'true'; } catch(e) {}
+    applyLogCard(name);
+  }
+  // 折叠状态是持久化的，所以这里不能再无条件拉一次：
+  // applyLogCard('activity') 已按折叠状态决定连不连推送。
+  startLogActivity();
+  _logBeforeId = null; _logCursors = new Map([[1, null]]);
+  // 模型展示名映射（dfmodel -> DeepSeek-V4.1-Flash）：拿到后重画一次表体
+  loadModelLabelMap().then(() => renderLogRows()).catch(() => {});
+  loadLogAccounts().catch(() => {}); loadLogs(1);
+}
+
+function fillLogFilterOptions(){
+  WBFilterCombobox.attach('logModel', _modelData.map(m => m.model_id));
+  WBFilterCombobox.attach('logKey', _keyData.map(k => k.name));
+}
+
+async function exportLogs(diagnostics = false){
+  const daysRaw = uiSelectValue("logDaysSel") || "today";
+  const days = parseInt(daysRaw, 10) || 0;
+  const accountId = uiSelectValue("logAccountSel") || "";
+  const model = ($("#logModel") ? $("#logModel").value : "").trim();
+  const key = ($("#logKey") ? $("#logKey").value : "").trim();
+  const ip = ($("#logIp") ? $("#logIp").value : "").trim();
+  const start = ($("#logStart") ? $("#logStart").value : "").trim();
+  const end = ($("#logEnd") ? $("#logEnd").value : "").trim();
+  const params = [];
+  if(accountId) params.push("account_id=" + encodeURIComponent(accountId));
+  if(model) params.push("model=" + encodeURIComponent(model));
+  if(key) params.push("key=" + encodeURIComponent(key));
+  if(ip) params.push("client_ip=" + encodeURIComponent(ip));
+  if(start) params.push("start=" + encodeURIComponent(start + " 00:00:00"));
+  else if(daysRaw === "today") {
+    const t = new Date(Date.now() + 8 * 3600000);
+    const iso = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - 8 * 3600000)
+      .toISOString().slice(0,19).replace("T"," ");
+    params.push("start=" + encodeURIComponent(iso));
+  }
+  else if(days > 0) params.push("start=" + encodeURIComponent(
+    new Date(Date.now() - days*86400000).toISOString().slice(0,19).replace("T"," ")));
+  if(end) params.push("end=" + encodeURIComponent(end + " 23:59:59"));
+  const result = uiSelectValue('logResult') || '';
+  if (result) params.push('result=' + encodeURIComponent(result));
+  if (diagnostics) params.push('diagnostics=true&limit=1000');
+  const qs = params.length ? ("?" + params.join("&")) : "";
+  toast("正在导出 CSV...", "ok");
+  try {
+    const r = await api("/api/logs/export" + qs, { method: "GET" });
+    if(!r.ok){ toast("导出失败", "err"); return; }
+    await downloadText('usage_logs.csv', await r.text(), 'text/csv');
+    toast("已导出 usage_logs.csv");
+  } catch(e){ toast("导出异常: " + e.message, "err"); }
+}
+
+/* ==================== 分组管理 ==================== */
+let _groupData = [];
+
+async function loadGroups() {
+  try {
+    const r = await api("/api/groups");
+    const { ok, data: d } = await safeJson(r);
+    if (!ok) { toast("加载分组失败: " + (d.detail || ""), "err"); return; }
+    _groupData = d.items || [];
+    renderGroups();
+  } catch (e) { toast("加载分组异常: " + e.message, "err"); }
+}
+
+function renderGroups() {
+  const body = $("#groupBody");
+  if (!body) return;
+  if (!_groupData.length) {
+    body.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-slate-400">还没有分组，点「新建分组」创建</td></tr>`;
+    return;
+  }
+  body.innerHTML = _groupData.map(g => {
+    // 有效模型数 < 模型数 说明组内有模型被禁用了，提示一下
+    const stale = g.effective_count < g.model_count;
+    return `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3 font-medium">${esc(g.name)}</td>
+      <td class="px-4 py-3 text-right tnum">
+        ${g.model_count} 个
+        ${stale ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700" data-tooltip="部分模型已被禁用，实际可用 ${g.effective_count} 个">${g.effective_count} 可用</span>` : ""}
+      </td>
+      <td class="px-4 py-3 text-right tnum">${g.key_count > 0 ? `<span class="text-wb font-medium">${g.key_count}</span>` : `<span class="text-slate-300">0</span>`}</td>
+      <td class="px-4 py-3 text-slate-500 text-xs">${esc(g.note || "-")}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        <button onclick="openGroupEditor(${g.id})" class="text-blue-600 hover:text-blue-700 mr-3" data-tooltip="编辑"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg></span></button>
+        <button onclick="deleteGroup(${g.id}, ${jsv(g.name)})" class="text-red-500 hover:text-red-600" data-tooltip="删除"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+/* 新建 / 编辑分组：多选模型列表 */
+let _geModels = [];   // 全部模型配置（可选池）
+let _geSelected = new Set();
+let _geEditId = 0;
+
+async function openGroupEditor(gid) {
+  _geEditId = gid || 0;
+  // 拉全部模型配置作为候选（只列启用的，禁用模型选进来没意义）
+  try {
+    const r = await api("/api/models/configs");
+    const { ok, data: d } = await safeJson(r);
+    if (!ok) { toast("加载模型列表失败", "err"); return; }
+    _geModels = (d.items || []).filter(m => m.enabled);
+  } catch (e) { toast("加载模型列表异常: " + e.message, "err"); return; }
+
+  let g = null;
+  if (_geEditId) {
+    g = _groupData.find(x => x.id === _geEditId);
+    if (!g) { toast("分组不存在", "err"); return; }
+  }
+  _geSelected = new Set(g ? (g.models || []) : []);
+
+  openModal(`
+    <h3 class="font-bold mb-1"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></svg></span> ${_geEditId ? "编辑分组" : "新建分组"}</h3>
+    <p class="text-xs text-slate-400 mb-3">选择该分组允许使用的模型，并起一个名字。</p>
+    <div class="grid gap-3">
+      <div>
+        <label class="text-xs text-slate-500">分组名称 <span class="text-red-500">*</span></label>
+        <input id="geName" class="w-full border rounded-lg px-3 py-2 text-sm mt-1" placeholder="例如：便宜模型组"
+               value="${g ? esc(g.name) : ""}" />
+      </div>
+      <div>
+        <label class="text-xs text-slate-500">备注</label>
+        <input id="geNote" class="w-full border rounded-lg px-3 py-2 text-sm mt-1" placeholder="可选"
+               value="${g ? esc(g.note || "") : ""}" />
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-xs text-slate-500">模型列表 <span class="text-red-500">*</span>（已选 <span id="geCount">0</span> 个）</label>
+          <div class="flex gap-2 text-xs">
+            <button onclick="geSelectAll(true)" class="text-wb hover:underline">全选</button>
+            <button onclick="geSelectAll(false)" class="text-slate-400 hover:underline">清空</button>
+          </div>
+        </div>
+        <input id="geFilter" oninput="renderGeModels()" placeholder="搜索模型 ID" class="w-full border rounded-lg px-3 py-1.5 text-sm mb-2" />
+        <div id="geModelList" class="border rounded-lg max-h-64 overflow-auto p-2 grid gap-1"></div>
+      </div>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button onclick="saveGroup()" class="px-3 py-1.5 rounded-lg btn-primary text-sm">保存</button>
+    </div>`);
+  renderGeModels();
+}
+
+function renderGeModels() {
+  const box = $("#geModelList");
+  if (!box) return;
+  const term = (($("#geFilter") || {}).value || "").trim().toLowerCase();
+  // 搜索同时匹配「平台名 + model_id」，否则搜 loomy 找不到
+  const list = _geModels.filter(m => {
+    if (!term) return true;
+    return String(m.model_id || "").toLowerCase().includes(term)
+        || String(m.platform_label || "").toLowerCase().includes(term)
+        || String(m.platform || "").toLowerCase().includes(term);
+  });
+  if (!list.length) { box.innerHTML = `<div class="text-xs text-slate-400 p-2">无匹配模型</div>`; }
+  else {
+    // **必须显示平台标签**：`dfmodel` 在 Qoder 国内版和国际版都存在，
+    // 只写 model_id 根本分不清勾的是哪个平台。
+    // 按平台分段：169 条平铺看不出结构，加小标题后一眼能扫到某平台
+    const grouped = {};
+    for (const m of list) (grouped[m.platform_label || m.platform || "其他"] ||= []).push(m);
+    box.innerHTML = Object.keys(grouped).sort().map(gname => {
+      const rows = grouped[gname].map(m => {
+      const label = m.platform_label || m.platform || "";
+      const realmTag = m.realm
+        ? `<span class="text-[10px] px-1.5 py-0.5 rounded" style="background:var(--surface-2);color:var(--fg-subtle)">${esc(m.realm === "intl" ? "国际" : "国内")}</span>`
+        : "";
+      return `
+      <label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 cursor-pointer text-sm">
+        <input type="checkbox" ${_geSelected.has(m.model_id) ? "checked" : ""}
+               onchange="geToggle(${jsv(m.model_id)}, this.checked)" />
+        <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0 w-[86px] truncate"
+              style="background:var(--surface-2);color:var(--fg-muted)"
+              data-tooltip="${esc(label)}">${esc(label)}</span>
+        ${realmTag}
+        <span class="font-mono text-xs">${esc(m.model_id)}</span>
+        ${m.is_free ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">免费</span>`
+                    : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">x${m.credit_multiplier}</span>`}
+      </label>`;
+      }).join("");
+      return `<div class="ge-group">
+        <div class="ge-group-head">${esc(gname)} <span>${rows ? grouped[gname].length : 0} 个</span></div>
+        ${rows}
+      </div>`;
+    }).join("");
+  }
+  const c = $("#geCount"); if (c) c.textContent = _geSelected.size;
+}
+
+function geToggle(mid, on) {
+  if (on) _geSelected.add(mid); else _geSelected.delete(mid);
+  const c = $("#geCount"); if (c) c.textContent = _geSelected.size;
+}
+function geSelectAll(on) {
+  // 全选只作用于当前筛选结果，避免误勾到看不见的模型
+  const term = (($("#geFilter") || {}).value || "").trim().toLowerCase();
+  const list = _geModels.filter(m => !term || (m.model_id || "").toLowerCase().includes(term));
+  for (const m of list) { if (on) _geSelected.add(m.model_id); else _geSelected.delete(m.model_id); }
+  renderGeModels();
+}
+
+async function saveGroup() {
+  const name = ($("#geName").value || "").trim();
+  if (!name) { toast("请填写分组名称", "err"); return; }
+  if (!_geSelected.size) { toast("请至少选择一个模型", "err"); return; }
+  const payload = { name, note: ($("#geNote").value || "").trim(), models: [..._geSelected] };
+  try {
+    const r = await api(_geEditId ? `/api/groups/${_geEditId}` : "/api/groups", {
+      method: _geEditId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const { ok, data: d } = await safeJson(r);
+    if (!ok) { toast("保存失败: " + (d.detail || "未知错误"), "err"); return; }
+    closeModal();
+    toast(_geEditId ? "分组已更新" : `分组「${name}」已创建`);
+    loadGroups();
+  } catch (e) { toast("保存异常: " + e.message, "err"); }
+}
+
+async function deleteGroup(gid, name) {
+  if (!await uiConfirm({title:"删除分组",
+      message:`确认删除分组「${name}」？\n绑定了该分组的 Key 会自动变为「不限制模型」`})) return;
+  try {
+    const r = await api(`/api/groups/${gid}`, { method: "DELETE" });
+    const { ok, data: d } = await safeJson(r);
+    if (!ok) { toast("删除失败: " + (d.detail || ""), "err"); return; }
+    toast(d.unbound_keys > 0 ? `已删除分组，${d.unbound_keys} 个 Key 已自动解除限制` : "分组已删除");
+    loadGroups(); loadKeys();
+  } catch (e) { toast("删除异常: " + e.message, "err"); }
+}
+
+/* ==================== 使用记录统计 ==================== */
+const _PIE_COLORS = ["#3b82f6","#22c55e","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#ec4899","#84cc16"];
+
+function fmtNum(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(Math.round(n));
+}
+
+/** 千分位整数（**不缩写**）：表格里的积分/余额用这个。
+ *
+ * 为什么不复用 `fmtNum`：它会把 4118 缩成 "4.1K"，而概览显示 "4,118" ——
+ * 同一个数在两处长得不一样（issue #4 的反馈）。
+ * 表格列宽足够，用千分位更易读，也不会因为单位切换而左右跳。
+ */
+function fmtInt(n) {
+  const v = Math.round(Number(n) || 0);
+  return v.toLocaleString('zh-CN');
+}
+/* 注意：`fmtCredit` 定义在上面（组件区），**不要在这里再定义一次** ——
+ * 之前这里有一份 `return n.toFixed(2)` 的重复实现，因为声明在后，
+ * 直接把上面那版覆盖掉，于是「积分不保留小数」的改动完全没生效。
+ * 函数声明会提升，同名后者胜出，属于最难察觉的一类覆盖。 */
+
+/* 纯 SVG 环形图 + 图例表格（不引第三方图表库，保持单文件零依赖）
+ * tooltip：原生 <title> 有 ~1s 延迟且样式不可控，故自绘跟随鼠标的浮层。
+ */
+function donutChart(rows, valueKey, opts) {
+  const options = opts || {};
+  const items = (rows || []).filter(r => (r.requests || 0) > 0 || (r[valueKey] || 0) > 0);
+  if (!items.length) return `<div class="text-xs text-slate-400 py-8 text-center">暂无数据</div>`;
+
+  const total = items.reduce((s, r) => s + (r[valueKey] || 0), 0);
+  const countsOnly = items.every(r => r.credits === undefined);
+  // 平台列：只有「全部平台」口径才显示 —— 已经按平台筛过时，
+  // 每一行都写着同一个平台名，纯噪音。调用方通过 showPlatform 控制。
+  const showPlatform = options.showPlatform !== false &&
+    items.some(r => r.platform_label);
+  const platformTag = r => (showPlatform && r.platform_label)
+    ? `<span class="usage-legend-platform">${esc(r.platform_label)}</span>` : "";
+  const R = 60, SW = 26, C = 2 * Math.PI * R;
+  let offset = 0;
+  const arcs = items.map((r, i) => {
+    if (!(r[valueKey] > 0)) return '';
+    const frac = (r[valueKey] || 0) / total;
+    const len = frac * C;
+    const pct = (frac * 100).toFixed(1);
+    const tip = `<b>${esc(r.label)}</b>${showPlatform && r.platform_label ? ' · ' + esc(r.platform_label) : ''}<br>${valueKey === 'requests' ? '请求 '+fmtNum(r.requests) : '积分 '+fmtCredit(r.credits)}（${pct}%）${countsOnly ? '' : '<br>请求 '+fmtNum(r.requests)+' · Token '+fmtNum(r.tokens)}`;
+    const seg = `<circle class="chart-hit" cx="80" cy="80" r="${R}" fill="none"
+        stroke="${_PIE_COLORS[i % _PIE_COLORS.length]}" stroke-width="${SW}"
+        stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-offset}"
+        transform="rotate(-90 80 80)"
+        onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()"></circle>`;
+    offset += len;
+    return seg;
+  }).join("");
+
+  const legend = items.map((r, i) => {
+    const frac = total ? ((r[valueKey] || 0) / total * 100).toFixed(1) : "0.0";
+    return `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="donut-legend-name">
+        <span class="donut-legend-dot" style="background:${_PIE_COLORS[i % _PIE_COLORS.length]}"></span>
+        <span class="donut-legend-body">
+          <span class="donut-legend-text">${esc(r.label)}</span>${platformTag(r)}
+        </span>
+      </td>
+      <td class="donut-legend-num">${fmtNum(r.requests)}</td>
+      ${countsOnly ? '' : `<td class="donut-legend-num">${fmtNum(r.tokens)}</td>`}
+      <td class="donut-legend-num donut-legend-pct">${frac}%</td>
+      ${countsOnly ? '' : `<td class="donut-legend-num donut-legend-credit">${fmtCredit(r.credits)}</td>`}
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="flex items-center gap-3 donut-legend">
+      <svg viewBox="0 0 160 160" class="w-32 h-32 shrink-0">${arcs}</svg>
+      <div class="flex-1 min-w-0 max-h-56 overflow-auto">
+        <table class="donut-legend-table">
+          <colgroup>
+            <col class="donut-col-name"><col class="donut-col-num">
+            ${countsOnly ? '' : '<col class="donut-col-num">'}
+            <col class="donut-col-pct">
+            ${countsOnly ? '' : '<col class="donut-col-num">'}
+          </colgroup>
+          <thead><tr class="text-[10px] text-slate-400">
+            <th class="text-left font-normal pb-1">名称</th>
+            <th class="text-right font-normal pb-1">请求</th>
+            ${countsOnly ? '' : '<th class="text-right font-normal pb-1">Token</th>'}
+            <th class="text-right font-normal pb-1">占比</th>
+            ${countsOnly ? '' : '<th class="text-right font-normal pb-1">积分</th>'}
+          </tr></thead>
+          <tbody>${legend}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+/* Token 趋势：输入/输出 双折线 + 面积；每个数据点可 hover 看当点明细 */
+function trendChart(rows) {
+  if (!rows || !rows.length) return `<div class="text-xs text-slate-400 py-8 text-center">暂无数据</div>`;
+  const W = 560, H = 200, PAD = 34;
+  const n = rows.length;
+  const maxV = Math.max(1, ...rows.map(r => Math.max(r.prompt_tokens, r.completion_tokens)));
+  const x = i => PAD + (n === 1 ? (W - PAD * 2) / 2 : (i * (W - PAD * 2)) / (n - 1));
+  const y = v => H - PAD - (v / maxV) * (H - PAD * 2);
+
+  const line = (key, color) => {
+    const pts = rows.map((r, i) => `${x(i)},${y(r[key])}`).join(" ");
+    const area = `${PAD},${H - PAD} ${pts} ${x(n - 1)},${H - PAD}`;
+    return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" pointer-events="none"></polyline>
+            <polygon points="${area}" fill="${color}" opacity="0.10" pointer-events="none"></polygon>`;
+  };
+
+  const grid = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const v = maxV * f, yy = y(v);
+    return `<line x1="${PAD}" y1="${yy}" x2="${W - PAD}" y2="${yy}" stroke="#e2e8f0" stroke-width="1" pointer-events="none"></line>
+            <text x="${PAD - 6}" y="${yy + 3}" text-anchor="end" font-size="9" fill="#94a3b8" pointer-events="none">${fmtNum(v)}</text>`;
+  }).join("");
+
+  const step = Math.max(1, Math.ceil(n / 6));
+  const xlabels = rows.map((r, i) => (i % step === 0 || i === n - 1)
+    ? `<text x="${x(i)}" y="${H - PAD + 14}" text-anchor="middle" font-size="9" fill="#94a3b8" pointer-events="none">${esc(String(r.bucket).slice(5))}</text>`
+    : "").join("");
+
+  // 每个点画一个透明的较大命中圆，便于悬停
+  const hits = rows.map((r, i) => {
+    const tip = `<b>${esc(r.bucket)}</b><br>输入 ${fmtNum(r.prompt_tokens)} · 输出 ${fmtNum(r.completion_tokens)}<br>请求 ${fmtNum(r.requests)} · 积分 ${fmtCredit(r.credits)}`;
+    const cx = x(i);
+    const dots = `
+      <circle cx="${cx}" cy="${y(r.prompt_tokens)}" r="2.5" fill="#3b82f6" pointer-events="none"></circle>
+      <circle cx="${cx}" cy="${y(r.completion_tokens)}" r="2.5" fill="#22c55e" pointer-events="none"></circle>`;
+    return `<g class="chart-hit" onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()">
+      ${dots}
+      <circle cx="${cx}" cy="${H / 2}" r="${Math.max(8, (W - PAD * 2) / Math.max(1, n) / 2)}" fill="transparent"></circle>
+    </g>`;
+  }).join("");
+
+  return `
+    <div>
+      <div class="flex gap-3 text-xs mb-1">
+        <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5" style="background:#3b82f6"></span> 输入</span>
+        <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5" style="background:#22c55e"></span> 输出</span>
+      </div>
+      <svg viewBox="0 0 ${W} ${H}" class="w-full">
+        ${grid}
+        ${line("prompt_tokens", "#3b82f6")}
+        ${line("completion_tokens", "#22c55e")}
+        ${hits}
+        ${xlabels}
+      </svg>
+    </div>`;
+}
+
+/* 使用记录工具栏的下拉：首次进入时渲染一次；
+ * Key/模型/端点三个筛选下拉的选项来自「窗口内真实出现过的值」。 */
+let _usageSelReady = false;
+let _usageFilterReady = false;
+let _usageLoadGeneration = 0;
+// 筛选下拉的选项缓存。声明必须在使用它的 _usageQuery / loadUsageFilterOptions
+// **之前**：虽是顶层 let（会被提升到 TDZ），但函数可能在任何位置被调用，
+// 声明靠后容易踩「Cannot access before initialization」。放前面最省心。
+let _usageOpts = { keys: [], models: [], use_cases: [], accounts: [], platforms: [] };
+
+function initUsageSelects() {
+  if (_usageSelReady) return;
+  _usageSelReady = true;
+  const platformBox = $("#usagePlatformSel");
+  if (platformBox) platformBox.outerHTML = uiSelectHTML("usagePlatformSel", {
+    value: "",
+    options: [{ value: "", label: "全部平台（全网关）" }],
+    onChange: () => loadUsageStats(),
+  });
+  const daysBox = $("#usageDaysSel");
+  if (daysBox) daysBox.outerHTML = uiSelectHTML("usageDaysSel", {
+    // 默认今日（自然日）+ 按小时：最常见的诉求是「今天怎么样」，
+    // 与账号池「今日已用」同口径；要看滚动窗口（含昨日流量）选「近 N 天」
+    value: "today",
+    options: [
+      { value: "today", label: "今日（自然日）" },
+      { value: "1", label: "近 1 天" },
+      { value: "3", label: "近 3 天" },
+      { value: "7", label: "近 7 天" },
+      { value: "14", label: "近 14 天" },
+      { value: "30", label: "近 30 天" },
+      { value: "90", label: "近 90 天" },
+      { value: "custom", label: "自定义日期" },
+    ],
+    onChange: async value => {
+      if (value === "custom") return;
+      for (const id of ["usageStart", "usageEnd"]) { $("#" + id).value = ""; window.WBDateTimePicker?.sync(id); }
+      _usageFilterReady = false;
+      await loadUsageFilterOptions(); loadUsageStats();
+    },
+  });
+  const gBox = $("#usageGrainSel");
+  if (gBox) gBox.outerHTML = uiSelectHTML("usageGrainSel", {
+    value: "hour",
+    options: [
+      { value: "hour", label: "按小时" },
+      { value: "day", label: "按天" },
+    ],
+    onChange: () => loadUsageStats(),
+  });
+  for (const id of ["usageStart", "usageEnd"]) {
+    $("#" + id).addEventListener("change", () => {
+      _usageFilterReady = false;
+      if ($("#usageStart").value || $("#usageEnd").value) uiSelectSet("usageDaysSel", "custom");
+      else uiSelectSet("usageDaysSel", "today");
+    });
+  }
+}
+
+function _usageDatesValid() {
+  const start = $("#usageStart").value, end = $("#usageEnd").value;
+  return !start || !end || start <= end;
+}
+function _usageTimeParams() {
+  const start = $("#usageStart").value, end = $("#usageEnd").value;
+  const params = new URLSearchParams();
+  if (start || end) {
+    if (start) params.set("start", new Date(start + "T00:00:00").toISOString());
+    if (end) params.set("end", new Date(end + "T23:59:59.999").toISOString());
+  } else if (uiSelectValue("usageDaysSel") === "today") {
+    // 今日 = 北京时间 00:00 起的自然日（与账号池「今日已用」同口径）
+    const t = new Date(Date.now() + 8 * 3600000);
+    const cnMidnight = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - 8 * 3600000;
+    params.set("start", new Date(cnMidnight).toISOString());
+  } else params.set("days", String(Number(uiSelectValue("usageDaysSel")) || 1));
+  return params;
+}
+async function applyUsageDates() {
+  if (!_usageDatesValid()) return toast("开始日期不能晚于结束日期", "err");
+  _usageFilterReady = false;
+  await loadUsageFilterOptions();
+  await loadUsageStats();
+}
+
+// 渲染 Key/模型/端点筛选下拉。
+// 选项只列窗口内真实出现过的值 —— 否则下拉里塞满从没用过的模型，
+// 选中后筛出空结果，用户会以为"功能坏了"。
+async function loadUsageFilterOptions() {
+  if (!_usageDatesValid()) return;
+  const windowQuery = _usageTimeParams().toString();
+  let opts = { models: [], use_cases: [], keys: [] };
+  try {
+    const r = await api('/api/stats/usage/options?' + windowQuery);
+    const { ok, data } = await safeJson(r);
+    if (ok) opts = data || opts;
+  } catch (e) { /* 选项拉取失败不阻塞统计展示 */ }
+  if (windowQuery !== _usageTimeParams().toString()) return;
+  _usageOpts = opts;
+
+  // 保留当前选择；但若该值本次不在选项里（换了时间窗后消失），
+  // 必须回落到"全部"，否则会出现「标签写着全部、实际仍在筛选」的假象。
+  const keep = (id, val, list) =>
+    (val && list.some(x => String(x) === val)) ? val : "";
+
+  const curKey = uiSelectValue("usageKeySel") || "";
+  const curModel = uiSelectValue("usageModelSel") || "";
+  const curCase = uiSelectValue("usageCaseSel") || "";
+  const curAccount = uiSelectValue("usageAccountSel") || "";
+  const keyVals = (opts.keys || []).map(k => String(k.id));
+
+  // 平台筛选：选项 = 窗口内真有数据的平台（+ 历史未记录平台）。
+  // `value` 用落库平台名（trae / qoder / loomy…），后端按它收窄。
+  const pBox = $("#usagePlatformSel");
+  if (pBox) {
+    const curPlatform = uiSelectValue("usagePlatformSel") || "";
+    const platformVals = (opts.platforms || []).map(p => String(p.value || ""));
+    pBox.outerHTML = uiSelectHTML("usagePlatformSel", {
+      value: platformVals.includes(curPlatform) ? curPlatform : "",
+      options: [{ value: "", label: "全部平台（全网关）" }].concat(
+        (opts.platforms || []).map(p => ({
+          value: String(p.value || ""),
+          label: `${p.label}${p.requests ? ` · ${p.requests} 次` : ""}`,
+        }))),
+      onChange: () => loadUsageStats(),
+    });
+  }
+  const keyBox = $("#usageKeySel");
+  if (keyBox) {
+    keyBox.outerHTML = uiSelectHTML("usageKeySel", {
+      value: keep("usageKeySel", curKey, keyVals),
+      options: [{ value: "", label: "全部 Key" }].concat(
+        (opts.keys || []).map(k => ({ value: String(k.id), label: k.name || ("#" + k.id) }))),
+      onChange: () => loadUsageStats(),
+    });
+  }
+  const mBox = $("#usageModelSel");
+  if (mBox) {
+    // 选项现在是 {value,label}：value 是落库 id，label 是展示名
+    // （Qoder 的 dfmodel 显示成 DeepSeek-V4.1-Flash）。兼容旧的字符串形式。
+    const modelOpts = (opts.models || []).map(m =>
+      (typeof m === "string") ? { value: m, label: m }
+        : { value: String(m.value || m.model || ""), label: m.label || m.value || "" });
+    mBox.outerHTML = uiSelectHTML("usageModelSel", {
+      value: keep("usageModelSel", curModel, modelOpts.map(o => o.value)),
+      options: [{ value: "", label: "全部模型" }].concat(modelOpts),
+      onChange: () => loadUsageStats(),
+    });
+  }
+  const aBox = $("#usageAccountSel");
+  if (aBox) aBox.outerHTML = uiSelectHTML("usageAccountSel", {
+    value: keep("usageAccountSel", curAccount, (opts.accounts || []).map(a => String(a.id))),
+    options: [{value:"", label:"全部账号"}].concat((opts.accounts || []).map(a => ({value:String(a.id), label:`${a.name} · #${a.id}`}))),
+    onChange: () => loadUsageStats(),
+  });
+  const cBox = $("#usageCaseSel");
+  if (cBox) {
+    cBox.outerHTML = uiSelectHTML("usageCaseSel", {
+      value: keep("usageCaseSel", curCase, opts.use_cases || []),
+      options: [{ value: "", label: "全部端点" }].concat(
+        (opts.use_cases || []).map(c => ({ value: c, label: c }))),
+      onChange: () => loadUsageStats(),
+    });
+  }
+  _usageFilterReady = true;
+}
+
+/** 平台分布条 → 下钻：把下拉同步成该平台再重查（下拉与筛选必须同源）。 */
+function setUsagePlatform(value) {
+  uiSelectSet("usagePlatformSel", value || "", false);
+  loadUsageStats();
+}
+
+function resetUsageFilters() {  // 必须走 uiSelectSet：下拉的真实状态在 _uiSelectMap 里，
+  // 直接改 DOM 的 dataset 只会让标签变了、筛选值还在。
+  uiSelectSet("usageKeySel", "", false);
+  uiSelectSet("usageModelSel", "", false);
+  uiSelectSet("usageCaseSel", "", false);
+  uiSelectSet("usageAccountSel", "", false);
+  uiSelectSet("usagePlatformSel", "", false);
+  uiSelectSet("usageDaysSel", "today", false);
+  for (const id of ["usageStart", "usageEnd"]) { $("#" + id).value = ""; window.WBDateTimePicker?.sync(id); }
+  _usageFilterReady = false;
+  loadUsageStats();
+}
+
+/* 当前筛选条件 -> query string，并生成一句人话提示 */
+function _usageQuery() {
+  const grain = uiSelectValue("usageGrainSel") || "hour";
+  const key = uiSelectValue("usageKeySel") || "";
+  const model = uiSelectValue("usageModelSel") || "";
+  const cs = uiSelectValue("usageCaseSel") || "";
+  const account = uiSelectValue("usageAccountSel") || "";
+  const platform = uiSelectValue("usagePlatformSel") || "";
+  const qs = _usageTimeParams();
+  qs.set("granularity", grain);
+  if (key) qs.set("key_id", key);
+  if (model) qs.set("model", model);
+  if (cs) qs.set("use_case", cs);
+  if (account) qs.set("account_id", account);
+  if (platform) qs.set("platform", platform);
+
+  const keyName = ((_usageOpts.keys || []).find(k => String(k.id) === key) || {}).name || key;
+  const conds = [];
+  const start = $("#usageStart").value, end = $("#usageEnd").value;
+  const daysMode = uiSelectValue("usageDaysSel") || "today";
+  if (start || end) conds.push("日期=" + (start || "…") + " ~ " + (end || "…"));
+  else if (daysMode === "today") conds.push("今日（自然日）");
+  else if (daysMode !== "custom" && Number(daysMode) > 0) conds.push(`近 ${daysMode} 天（滚动）`);
+  if (key) conds.push(`Key=${keyName}`);
+  if (model) conds.push(`模型=${model}`);
+  if (cs) conds.push(`端点=${cs}`);
+  if (account) conds.push(`账号=${(_usageOpts.accounts || []).find(a=>String(a.id)===account)?.name || account}`);
+  if (platform) conds.push(`平台=${(_usageOpts.platforms || []).find(p=>String(p.value)===platform)?.label || platform}`);
+  return { qs: qs.toString(), conds };
+}
+
+// 空结果说明：区分「本来就没量」和「被筛选条件筛没了」，
+// 后者要提示清除筛选，否则用户会以为数据丢了。
+function _usageEmpty(conds) {
+  const tip = conds.length
+    ? `当前筛选条件（${esc(conds.join("，"))}）下没有记录，试试放宽时间范围或
+       <a href="javascript:resetUsageFilters()" class="text-emerald-600 underline">清除筛选</a>`
+    : "该时间范围内没有任何请求记录";
+  return `<div class="text-sm text-slate-400 py-8 text-center">${tip}</div>`;
+}
+
+async function loadUsageStats() {  initUsageSelects();
+  const generation = ++_usageLoadGeneration;
+  if (!_usageDatesValid()) return toast("开始日期不能晚于结束日期", "err");
+  if (!_usageFilterReady) await loadUsageFilterOptions();
+  if (generation !== _usageLoadGeneration) return;
+
+  const { qs, conds } = _usageQuery();
+  const ov = $("#usageOverview");
+  const hint = $("#usageFilterHint");
+  if (ov) ov.innerHTML = `<div class="col-span-4 text-sm text-slate-400">加载中...</div>`;
+  if (hint) {
+    if (conds.length) {
+      hint.classList.remove("hidden");
+      hint.innerHTML = `<span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg></span>已筛选：${esc(conds.join("，"))}（下方所有图表与卡片均限于此条件）`;
+    } else {
+      hint.classList.add("hidden");
+    }
+  }
+  try {
+    const r = await api(`/api/stats/usage?${qs}`);
+    const { ok, data: d } = await safeJson(r);
+    if (generation !== _usageLoadGeneration) return;
+    if (!ok) { if (ov) ov.innerHTML = `<div class="col-span-4 text-sm text-red-500">加载失败: ${esc(d.detail || "")}</div>`; return; }
+
+    const o = d.overview || {};
+    const accountBox = $('#usageAccountModels');
+    accountBox.classList.toggle('hidden', !d.filters?.account_id);
+    const limitLabels = {model_daily:'日限额', model_rate:'模型限流', model_queue:'排队限制'};
+    const sourceLabels = {upstream:'上游返回', estimated:'估算', queue_retry:'上游重试时间', backoff:'本地退避'};
+    accountBox.innerHTML = `<h3 class="text-sm font-semibold mb-2">所选账号 · 模型用量与限额</h3><p class="text-xs text-slate-400 mb-3">用量为所选日期内经过本网关的记录；限额为当前观测状态，上游未提供总额度和剩余额度时不推算。</p>
+      <div class="overflow-x-auto"><table class="tbl min-w"><thead><tr><th>模型</th><th class="text-right">请求 / 成功 / 失败</th><th class="text-right">Token</th><th class="text-right">积分</th><th>当前限制</th><th>恢复时间</th></tr></thead><tbody>${(d.account_models||[]).map(m=>`<tr><td class="font-mono text-xs">${fmtEmpty(m.model)}</td><td class="text-right">${fmtNum(m.requests)} / ${fmtNum(m.successes)} / ${fmtNum(m.failures)}</td><td class="text-right">${fmtNum(m.tokens)}</td><td class="text-right">${fmtCredit(m.credits)}</td><td>${m.limit ? `${esc(limitLabels[m.limit.kind]||m.limit.kind)}${m.limit.upstream_code ? ' · '+esc(m.limit.upstream_code) : ''}` : FMT_EMPTY}</td><td>${m.limit ? `${fmtTime(m.limit.until)} · ${esc(sourceLabels[m.limit.reset_source]||m.limit.reset_source)}` : FMT_EMPTY}</td></tr>`).join('') || '<tr><td colspan="6">当前筛选下无模型用量或限制记录</td></tr>'}</tbody></table></div>`;
+    $('#usageAccountChart').innerHTML = (d.by_account || []).length ? donutChart(d.by_account, 'requests') : _usageEmpty(conds);
+    $('#usageResultChart').innerHTML = (d.by_result || []).length ? donutChart(d.by_result, 'requests') : _usageEmpty(conds);
+    const failTip = o.failed_requests ? `（含失败 ${fmtNum(o.failed_requests)}）` : "";
+    if (ov) ov.innerHTML = `
+      ${card("总请求数", fmtNum(o.requests) + failTip, "fa-paper-plane", "text-indigo-600")}
+      ${card("总 Token", fmtNum(o.total_tokens), "fa-cube", "text-amber-600")}
+      ${card("总消费", fmtCredit(o.credits), "fa-coins", "text-emerald-600")}
+      ${card("平均耗时", o.avg_latency_ms ? fmtDuration(o.avg_latency_ms) : FMT_EMPTY, "fa-stopwatch", "text-violet-600")}`;
+
+    // 平台分布条：全部平台口径下展示每家贡献（请求 / 积分），点了直接下钻。
+    // 已选平台时整块隐藏，避免「筛了 loomy 还满屏平台名」的噪音。
+    const strip = $("#usagePlatformStrip");
+    if (strip) {
+      const rows = (d.platforms || []).filter(p => p.requests > 0);
+      if (d.platform && rows.length <= 1) {
+        strip.classList.add("hidden");
+        strip.innerHTML = "";
+      } else if (rows.length) {
+        strip.classList.remove("hidden");
+        strip.innerHTML = `<span class="usage-platform-strip-label">平台分布</span>` +
+          rows.map(p => `<button type="button" class="usage-platform-chip${p.value === d.platform ? " active" : ""}"
+              data-usage-platform="${esc(p.value)}"
+              onclick="setUsagePlatform(${jsv(p.value)})"
+              data-tooltip="${esc(p.label)} · 点击只看该平台">
+              <b>${esc(p.label)}</b>
+              <span>${fmtNum(p.requests)} 次</span>
+              <i>${fmtCredit(p.credits)} 积分</i>
+            </button>`).join("");
+      } else {
+        strip.classList.add("hidden");
+        strip.innerHTML = "";
+      }
+    }
+
+    // 空结果时明确说明，而不是留一片空白让人以为没加载出来
+    const empty = !(d.trend || []).length;
+    if (empty) {
+      $("#usageModelChart").innerHTML = _usageEmpty(conds);
+      $("#usageKeyChart").innerHTML = _usageEmpty(conds);
+      $("#usageEndpointChart").innerHTML = _usageEmpty(conds);
+      $("#usageTrendChart").innerHTML = _usageEmpty(conds);
+      return;
+    }
+
+    for (const [id, rows] of [['usageModelChart', d.by_model], ['usageKeyChart', d.by_key], ['usageEndpointChart', d.by_endpoint]]) {
+      const metric = (rows || []).some(r => r.credits > 0) ? 'credits' : 'requests';
+      const chart = $('#' + id);
+      chart.previousElementSibling.querySelector('span').textContent = metric === 'credits' ? '按积分' : '按成功请求数';
+      // 模型分布带平台名（同模型在不同平台是两笔账）；已按平台筛选时隐藏。
+      chart.innerHTML = donutChart(rows, metric, {
+        showPlatform: id === 'usageModelChart' && !d.platform,
+      });
+    }
+    $("#usageTrendChart").innerHTML = trendChart(d.trend);
+  } catch (e) {
+    if (generation !== _usageLoadGeneration) return;
+    if (ov) ov.innerHTML = `<div class="col-span-4 text-sm text-red-500">加载异常: ${esc(e.message)}</div>`;
+  }
+}
+
+/* ==================== 自研确认框（替换原生 confirm）====================
+ * 原生 confirm 有三大问题：样式无法控制、阻塞主线程、移动端样式丑陋。
+ * 这里用 Promise 化实现：await uiConfirm({...}) 返回 true/false。
+ * 用法：if (!await uiConfirm({ title, message, danger:true })) return;
+ */
+
+
+
+/* ==================== 手风琴（details）开合动画 ====================   原生 details 开合是瞬间跳变。这里接管 summary 的点击：把 summary 之外的
+   内容包进 .acc-body（只包一次），用 height + opacity 过渡实现展开/收起，
+   动画结束后交还给原生 open 状态（键盘/无障碍行为不变）。 */
+(function () {
+  function accWrap(d) {
+    let w = d.querySelector(":scope > .acc-body");
+    if (!w) {
+      w = document.createElement("div");
+      w.className = "acc-body";
+      [...d.children].forEach(c => { if (c.tagName !== "SUMMARY") w.appendChild(c); });
+      d.appendChild(w);
+    }
+    return w;
+  }
+  document.addEventListener("click", (e) => {
+    const sum = e.target.closest && e.target.closest("summary");
+    if (!sum) return;
+    const d = sum.closest("details");
+    if (!d || d.hasAttribute("data-no-anim")) return;
+    e.preventDefault();
+    if (d.classList.contains("animating")) return;
+    const wrap = accWrap(d);
+    d.classList.add("animating");
+    const D = 230;
+    if (d.open) {
+      const h = wrap.scrollHeight;
+      wrap.style.height = h + "px";
+      void wrap.offsetWidth;
+      wrap.style.height = "0px";
+      wrap.style.opacity = "0";
+      setTimeout(() => {
+        d.open = false;
+        wrap.style.height = ""; wrap.style.opacity = "";
+        d.classList.remove("animating");
+      }, D);
+    } else {
+      d.open = true;
+      const h = wrap.scrollHeight;
+      wrap.style.height = "0px"; wrap.style.opacity = "0";
+      void wrap.offsetWidth;
+      wrap.style.height = h + "px";
+      wrap.style.opacity = "1";
+      setTimeout(() => {
+        wrap.style.height = ""; wrap.style.opacity = "";
+        d.classList.remove("animating");
+      }, D);
+    }
+  }, true);
+})();
+
+// 点击空白处收起所有下拉（带上收动画）
+document.addEventListener("click", () => {
+  document.querySelectorAll(".ui-select.open").forEach(x => uiSelectClose(x));
+});
+
+
+/* ==================== 图表 tooltip ==================== */
+function _ensureTip() {
+  let t = $("#chartTip");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "chartTip";
+    t.role = 'tooltip';
+    t.addEventListener('pointerenter', () => clearTimeout(_chartTipTimer));
+    t.addEventListener('pointerleave', hideTip);
+    document.body.appendChild(t);
+  }
+  return t;
+}
+
+function showTip(ev, html) {
+  clearTimeout(_chartTipTimer);
+  const t = _ensureTip();
+  t.innerHTML = html;
+  t.style.display = "block";
+  const r = t.getBoundingClientRect();
+  t.style.left = Math.max(8, Math.min(innerWidth - r.width - 8, ev.clientX - r.width / 2)) + 'px';
+  t.style.top = Math.max(8, Math.min(innerHeight - r.height - 8, ev.clientY > r.height + 16 ? ev.clientY - r.height - 12 : ev.clientY + 12)) + 'px';
+}
+function dismissChartTip() {
+  clearTimeout(_chartTipTimer);
+  const t = $("#chartTip");
+  if (t) t.style.display = "none";
+}
+function hideTip() {
+  clearTimeout(_chartTipTimer);
+  _chartTipTimer = setTimeout(() => {
+    const t = $('#chartTip'), selection = getSelection();
+    if (t?.matches(':hover') || selection && !selection.isCollapsed && t?.contains(selection.anchorNode)) return;
+    dismissChartTip();
+  }, 300);
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#chartTip, .chart-hit')) dismissChartTip();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') dismissChartTip(); });
+document.addEventListener('scroll', e => { if (!$('#chartTip')?.contains(e.target)) dismissChartTip(); }, true);
+window.addEventListener('resize', dismissChartTip);
+
+// 启动时的会话恢复：**cookie 优先**。
+//
+// 这里修的是「刷新页面会闪一下登录卡片」——哪怕这次刷新本来就已经登录着。
+// 根因是原来的门禁只看 `localStorage` 里的 token：token 过期（默认 24h）但
+// 服务端的 HttpOnly 会话 Cookie 仍然有效时，代码会先 `logout()` 把 token 删掉，
+// 于是整页刷新后先渲染出登录表单，再被 `/api/login/session` 救回来。
+//
+// 现在的顺序：
+//   1. 先请求 `/api/accounts`：带 token 走，没有 token 就靠 Cookie 走（同源于
+//      这个页面，Cookie 一定带上）。
+//   2. 成功 → 直接进应用，登录卡片在整个过程中都不会显示。
+//   3. 401/403 → 说明**两边都**没凭据，才去清 token 并留在登录页。
+//   4. 其它状态 / 网络异常 → 先进应用由各面板自行提示（与原来一致）。
+//
+// 本地壳（桌面 / 安卓 WebView）本来就走桥接换非过期凭据，不进入这段逻辑：
+// 它们的登录卡片由 desktop.css 隐藏，`localBoot` 负责显示连接状态。
+const _localConsoleShell = Boolean(window.pywebview?.api || window.WBAndroid?.sessionToken
+  || new URLSearchParams(location.search).has("desktop"));
+if (!_localConsoleShell) {
+  const _booted = () => !document.getElementById("app").classList.contains("hidden");
+  api("/api/accounts").then(r => {
+    if (r.ok) { if (!_booted()) enterApp(); return; }
+    if (r.status === 401 || r.status === 403) {
+      // token 和 Cookie **都**失效才会走到这里（`require_admin` 两个都认）。
+      // 删掉本地 token 让页面回到干净状态，再刷新由服务端下发登录壳页。
+      if (TOKEN) logout();
+      else showLoginCard();
+      return;
+    }
+    // 其它状态：先进应用，由各面板自己提示错误
+    if (!_booted()) enterApp();
+    toast("部分数据加载失败（HTTP " + r.status + "），可稍后重试", "err");
+  }).catch(e => {
+    // 网络异常也不清 token，允许用户手动重试
+    if (!_booted()) enterApp();
+    toast("网络异常：" + (e && e.message ? e.message : e), "err");
+  });
+} else { /* 显示登录 */ }
