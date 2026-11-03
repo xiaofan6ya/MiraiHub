@@ -1,0 +1,1 @@
+if(new URLSearchParams(location.search).get('desktop')==='1') document.documentElement.classList.add('desktop-mode');
