@@ -9,6 +9,7 @@
 | `build_desktop.py` | 构建 Windows EXE；建议通过根目录 `build.bat` 统一构建 |
 | `build_android.py` | 暂存安卓端源码并构建 APK；可用 `--prepare-only` 仅生成暂存目录 |
 | `check_runtime.py` | 使用临时空数据库检查服务启动及批量参数校验；安卓构建自动在固定依赖环境中运行 |
+| `check_setup_flow.py` | 用临时空库检查首次创建管理员账号的准入范围、fail-closed 与登录/改密联动 |
 | `daemon.ps1` | Windows 服务启动、状态检查、停止与守护 |
 | `watchdog.sh` | Linux HTTP 探活与异常重启，支持通过 `WB_*` 环境变量配置路径、用户和端口 |
 | `export_credential_key.py` | 从本机官方客户端生成私有凭证加解密配置，供服务器配置使用 |

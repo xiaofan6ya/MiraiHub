@@ -13,18 +13,17 @@ from pydantic import BaseModel, Field
 from admin.config import settings
 from admin.db import SessionLocal, get_db, init_db, wait_database_ready
 from sqlalchemy.orm import Session
-from admin.models import SystemSetting
 from admin.routers import (accounts, credits, groups,
                            growth, keys, login as login_router, logs, models,
                            proxy, schedules, stats, sync)
+from admin.routers import setup as setup_router
+from admin import admin_account
 from admin.ratelimit import (client_ip_from_request, clear_failures,
                              is_locked, record_failure)
 from admin.security import (
     create_admin_token,
-    hash_password,
     require_admin,
     verify_admin_token,
-    verify_password,
 )
 from admin.gateway_limits import GatewayAdmissionMiddleware
 from admin.ip_access import IPBlockMiddleware
@@ -306,6 +305,8 @@ if os.getenv("WORKBUDDY_ANDROID") != "1":
     app.include_router(app_source.router)
 app.include_router(login_router.router)
 app.include_router(releases.router)
+# 首次初始化引导（未配置管理员账号时公开可用，见 admin/routers/setup.py 的准入说明）
+app.include_router(setup_router.router)
 # 自助上传页（无需后台登录态）：复刻 WorkBuddy 手机号登录页，
 # 让「发给朋友」这一诉求成立 —— 对方不需要知道后台口令。
 app.include_router(login_router.public_router)
@@ -326,16 +327,6 @@ def _startup():
     except Exception:
         logger.exception("手机号登录会话回收线程启动失败（不影响其它功能）")
 
-    # 未配置登录凭据时给出醒目告警：此时后台登录一律 503，不会退化成空口令
-    if not settings.ADMIN_USERNAME or not settings.ADMIN_PASSWORD:
-        logger.warning(
-            "未配置 ADMIN_USERNAME / ADMIN_PASSWORD，后台登录已禁用；"
-            "请在 .env 中设置后重启（不再提供 admin/admin123 这类默认口令）"
-        )
-    else:
-        if settings.ADMIN_USERNAME == "admin" and settings.ADMIN_PASSWORD == "admin123":
-            logger.warning("仍在使用 admin/admin123 弱口令，且服务可能监听 0.0.0.0，请尽快更换")
-
     # 数据库不可用（例如 MySQL 被 OOM 杀掉正在重启）时**不能**让启动失败：
     # 这里抛异常会让 uvicorn 直接退出进程，nginx 侧变成 502，且需要人工重启。
     # 改为重试 + 降级启动，进程保持存活，数据库恢复后自动可用。
@@ -347,6 +338,24 @@ def _startup():
             logger.exception("建表/迁移失败，服务继续启动（数据库可用后重启即可）")
     else:
         logger.error("数据库当前不可用，服务以降级模式启动：请求将返回 503，恢复后自动自愈")
+
+    # 凭据判定必须放在建表**之后**：账号覆盖值存在 system_settings 表里，
+    # 在表还不存在时读取会失败 —— 那样启动日志会误报「尚未创建管理员账号」。
+    # 未配置时后台登录一律 503，不会退化成空口令；页面会引导用户创建（本机默认允许）。
+    try:
+        account = admin_account.state(force=True)
+    except Exception:
+        account = {"configured": False, "source": "", "username": ""}
+        logger.exception("读取管理员账号状态失败（登录仍会按未配置处理）")
+    if not account["configured"]:
+        logger.warning(
+            "尚未创建管理员账号：访问 /admin 会引导创建（本机默认可创建；"
+            "远程需 ADMIN_SETUP_ALLOW_REMOTE=1）；也可以改用 .env 的 "
+            "ADMIN_USERNAME / ADMIN_PASSWORD"
+        )
+    elif account["source"] == "env" and account["username"] == "admin" \
+            and os.getenv("ADMIN_PASSWORD", "") == "admin123":
+        logger.warning("仍在使用 admin/admin123 弱口令，且服务可能监听 0.0.0.0，请尽快更换")
 
     # 装配流量治理运行态：在途租约上限、会话粘性路由（含后台 GC 线程）。
     # 这些是纯进程内存状态，**不需要数据库**，所以放在 db_ok 判定之外 ——
@@ -409,50 +418,6 @@ def _startup():
             logger.exception("恢复登录后自动任务失败（不影响服务启动）")
 
 
-def _get_stored_hash() -> str:
-    """读取生效的密码哈希。
-
-    `ADMIN_PASSWORD` 只负责首次初始化；一旦后台保存过新密码，数据库里的
-    `admin_password` 覆盖值优先。这样 exe/apk 和带 .env 的部署都能直接在
-    后台改密码，不会在下一次校验时又被环境变量改回去。
-
-    返回空串表示「未配置登录凭据」——此时 login 一律拒绝，绝不允许空口令登录。
-    """
-    # 未配置密码：直接拒绝，且不往库里写任何东西
-    if not settings.ADMIN_PASSWORD:
-        return ""
-
-    db = None
-    try:
-        db = SessionLocal()
-        row = db.query(SystemSetting).filter(SystemSetting.key == "admin_password").first()
-
-        # 后台修改是持久化覆盖值，优先于 .env。环境变量仅在首次没有覆盖时播种。
-        if row and row.value:
-            val = row.value
-            if not val.startswith("pbkdf2$"):
-                val = hash_password(val)  # 兼容旧版明文配置，读取时迁移
-                row.value = val
-                db.commit()
-            return val
-    finally:
-        if db is not None:
-            db.close()
-    # 无记录：用配置密码并持久化哈希
-    h = hash_password(settings.ADMIN_PASSWORD)
-    db = None
-    try:
-        db = SessionLocal()
-        db.add(SystemSetting(key="admin_password", value=h))
-        db.commit()
-    except Exception:
-        pass
-    finally:
-        if db is not None:
-            db.close()
-    return h
-
-
 def _login_fingerprint(request) -> str | None:
     """汇总客户端上报的设备/浏览器指纹，作为登录限流的第三维度。
 
@@ -484,13 +449,16 @@ def login(
             detail=f"登录尝试过于频繁，请 {wait} 秒后再试",
             headers={"Retry-After": str(wait)},
         )
-    # 未配置凭据时直接拒绝（不能退化成「空口令可登录」）
-    if not settings.ADMIN_USERNAME or not settings.ADMIN_PASSWORD:
+    # 未配置凭据时返回结构化 503：前端据此跳到 /setup 引导创建账号，
+    # 而不是把用户按在登录框上反复试错（本地壳尤其如此 —— 他们没有 .env）。
+    account = admin_account.state()
+    if not account["configured"]:
         raise HTTPException(
             status_code=503,
-            detail="后台未配置登录凭据，请在 .env 中设置 ADMIN_USERNAME 与 ADMIN_PASSWORD 后重启",
+            detail={"message": "尚未创建管理员账号，请先完成初始化",
+                    "code": "setup_required", "needs_setup": True},
         )
-    if username != settings.ADMIN_USERNAME or not verify_password(password, _get_stored_hash()):
+    if username != account["username"] or not admin_account.verify_admin_password(password):
         # 三个维度各自计数：成对键锁「这个 IP × 这个用户名」，
         # IP 全局键兜住换用户名撒网，指纹键兜住换 IP 共用指纹。
         record_failure(ip, username, fingerprint)
@@ -541,20 +509,22 @@ class PasswordChangeIn(BaseModel):
 
 @app.patch("/api/admin/password")
 def change_password(body: PasswordChangeIn, _: bool = Depends(require_admin)):
-    if not verify_password(body.old_password, _get_stored_hash()):
+    account = admin_account.state()
+    if not account["configured"]:
+        raise HTTPException(status_code=400, detail="尚未创建管理员账号，请先完成初始化")
+    if account["source"] == "env":
+        # env 优先：这里写入的覆盖值会被环境变量遮住，改了也等于没改。
+        # 与其让一次「看似成功」的修改在下次登录时失效，不如直接说明白。
+        raise HTTPException(
+            status_code=400,
+            detail="当前登录凭据来自环境变量（ADMIN_USERNAME / ADMIN_PASSWORD），"
+                   "请在 .env 中修改后重启；清空这两项可改用页面创建的账号",
+        )
+    if not admin_account.verify_admin_password(body.old_password):
         raise HTTPException(status_code=403, detail="当前密码不正确")
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码长度不能少于 6 位")
-    db = SessionLocal()
-    try:
-        row = db.query(SystemSetting).filter(SystemSetting.key == "admin_password").first()
-        if row:
-            row.value = hash_password(body.new_password)
-        else:
-            db.add(SystemSetting(key="admin_password", value=hash_password(body.new_password)))
-        db.commit()
-    finally:
-        db.close()
+    admin_account.update_password(body.new_password)
     return {"ok": True}
 
 

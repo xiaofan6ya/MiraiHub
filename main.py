@@ -27,7 +27,7 @@
 环境变量（可选，覆盖默认；部署务必设置）:
   ADMIN_PORT / ADMIN_HOST
   ADMIN_JWT_SECRET  : 生产务必覆盖为 >=32 字节随机串（默认是弱密钥，会报警）
-  ADMIN_USERNAME / ADMIN_PASSWORD     : 后台登录凭据（**必填**，无默认值；未配置则登录 503）
+  ADMIN_USERNAME / ADMIN_PASSWORD     : 后台登录凭据（可留空：首次访问 /admin 引导创建）
   CONVERTER_DESENSITIZE / CONVERTER_LOG : 内嵌网关的脱敏开关与日志路径
 """
 from __future__ import annotations
@@ -765,8 +765,10 @@ def main() -> None:
     if not secret or secret.startswith("workbuddy-admin-jwt-secret-please-change"):
         _log("⚠️  未设置强 ADMIN_JWT_SECRET，将使用默认弱密钥 —— 部署请务必通过环境变量覆盖！")
     if not os.getenv("ADMIN_PASSWORD", "") or not os.getenv("ADMIN_USERNAME", ""):
-        _log("⚠️  未配置 ADMIN_USERNAME / ADMIN_PASSWORD，后台登录将返回 503。")
-        _log("    请在 .env 中设置这两项后重启（已不再提供 admin/admin123 默认口令）。")
+        # 不再当作错误：首次打开后台会引导创建管理员账号（桌面 EXE / 安卓 APK 全靠这条路）。
+        _log("ℹ️  未在 .env 中配置 ADMIN_USERNAME / ADMIN_PASSWORD："
+             "首次访问 /admin 会引导创建管理员账号。")
+        _log("    如需从远程完成创建，临时设置 ADMIN_SETUP_ALLOW_REMOTE=1（创建后改回 0）。")
 
     procs: list[tuple[str, subprocess.Popen]] = []
     # 子进程日志文件句柄：必须持有引用，否则被 GC 回收会把子进程的 stdout 关掉

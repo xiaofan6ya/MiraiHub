@@ -20,7 +20,14 @@ _lock = threading.Lock()
 
 
 def load_config(path: Path) -> dict:
-    """Repair launcher metadata only; never discard the account database."""
+    """Repair launcher metadata only; never discard the account database.
+
+    **不再自动生成管理员口令。** 以前这里补一个 ``secrets.token_urlsafe(32)``
+    当 ``password``，于是手机上永远「已配置」一个用户不知道的密码：
+    只能在应用内免登录，想用同一 Wi-Fi 的电脑浏览器登录管理台就无从下手。
+    现在缺失即留空，服务会引导用户到 ``/setup`` 创建管理员账号。
+    旧 config.json 里已有的 ``username`` / ``password`` 原样保留。
+    """
     from desktop.common import atomic_json
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -31,11 +38,10 @@ def load_config(path: Path) -> dict:
             backup = path.with_name(f"config.invalid-{time.time_ns()}.json")
             path.replace(backup)
         config = {}
-    defaults = {"username": "mobile", "password": secrets.token_urlsafe(32),
-                "jwt_secret": secrets.token_urlsafe(48)}
-    for key, value in defaults.items():
-        if not isinstance(config.get(key), str) or not config[key].strip():
-            config[key] = value
+    # jwt_secret 缺失会让所有已签发令牌失效，所以仍然自动补齐；
+    # 管理员凭据则留空由页面创建（见 admin/routers/setup.py）。
+    if not isinstance(config.get("jwt_secret"), str) or not config["jwt_secret"].strip():
+        config["jwt_secret"] = secrets.token_urlsafe(48)
     try:
         port = int(config.get("port", 8790))
     except (TypeError, ValueError):
@@ -92,11 +98,17 @@ def start(directory: str, progress=None) -> str:
         path = base / "config.json"
         config = load_config(path)
         nonce = secrets.token_urlsafe(32)
-        os.environ.update({"WORKBUDDY_ANDROID": "1", "WB_DESKTOP_BOOT": nonce,
-                           "ADMIN_DATABASE_URL": "sqlite:///" + (base / "workbuddy.db").as_posix(),
-                           "ADMIN_GATEWAY_LIMIT_BACKEND": "memory", "ADMIN_HOST": "0.0.0.0",
-                           "ADMIN_USERNAME": config["username"], "ADMIN_PASSWORD": config["password"],
-                           "ADMIN_JWT_SECRET": config["jwt_secret"], "ADMIN_DEV_TOOLS": "0"})
+        env = {"WORKBUDDY_ANDROID": "1", "WB_DESKTOP_BOOT": nonce,
+               "ADMIN_DATABASE_URL": "sqlite:///" + (base / "workbuddy.db").as_posix(),
+               "ADMIN_GATEWAY_LIMIT_BACKEND": "memory", "ADMIN_HOST": "0.0.0.0",
+               "ADMIN_JWT_SECRET": config["jwt_secret"], "ADMIN_DEV_TOOLS": "0"}
+        # 管理员凭据只在旧配置里存在时才注入；留空表示「未初始化」，
+        # 由页面引导创建（桌面端同理，见 desktop/app.py 的 configure_environment）。
+        for key, name in (("username", "ADMIN_USERNAME"), ("password", "ADMIN_PASSWORD")):
+            value = config.get(key)
+            if isinstance(value, str) and value:
+                env[name] = value
+        os.environ.update(env)
         logs = base / "logs"
         logs.mkdir(exist_ok=True)
         handler = RotatingFileHandler(logs / "mobile.log", maxBytes=4*1048576, backupCount=3, encoding="utf-8")
@@ -108,9 +120,14 @@ def start(directory: str, progress=None) -> str:
         from admin.config import settings
         # Python modules survive an in-app service restart. If launcher metadata
         # was repaired, align the shared auth settings before issuing its JWT.
-        settings.ADMIN_USERNAME = config["username"]
-        settings.ADMIN_PASSWORD = config["password"]
+        # 空串表示「管理员账号尚未创建」，由 /setup 引导写入（见 admin/admin_account.py）。
+        settings.ADMIN_USERNAME = str(config.get("username") or "")
+        settings.ADMIN_PASSWORD = str(config.get("password") or "")
         settings.JWT_SECRET = config["jwt_secret"]
+        # 管理员账号尚未创建时，本机壳的令牌仍然要能签发（local_shell 放行），
+        # 否则用户进不了引导页 —— 那是唯一能创建账号的地方。
+        from admin import admin_account
+        admin_account.invalidate()
         from admin.server import app
         stage("正在绑定本地 API 端口")
         sock = socket.socket()
@@ -206,6 +223,8 @@ def session_token() -> str:
 
 def _issue_token() -> str:
     import jwt
+    from admin.admin_account import effective_username
     from admin.config import settings
-    return jwt.encode({"sub": settings.ADMIN_USERNAME, "local_shell": True},
+    # sub 只是展示用名字：管理员账号还没创建时是空串，靠 local_shell 放行。
+    return jwt.encode({"sub": effective_username(), "local_shell": True},
                       settings.JWT_SECRET, algorithm="HS256")

@@ -53,7 +53,8 @@ def clean_display_name(value, fallback: str = "") -> str:
 
 def create_admin_token() -> str:
     exp = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS)
-    return jwt.encode({"sub": settings.ADMIN_USERNAME, "exp": exp},
+    from admin.admin_account import effective_username
+    return jwt.encode({"sub": effective_username(), "exp": exp},
                       settings.JWT_SECRET, algorithm="HS256")
 
 
@@ -63,10 +64,16 @@ def verify_admin_token(token: str | None):
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
         local_runtime = os.getenv("WORKBUDDY_DESKTOP") == "1" or os.getenv("WORKBUDDY_ANDROID") == "1"
-        if "exp" not in payload and not (local_runtime and payload.get("local_shell") is True):
+        local_shell = local_runtime and payload.get("local_shell") is True
+        if "exp" not in payload and not local_shell:
             raise HTTPException(status_code=401, detail="无效令牌")
-        if payload.get("sub") != settings.ADMIN_USERNAME:
-            raise HTTPException(status_code=401, detail="无效令牌")
+        if not local_shell:
+            # 本地壳令牌由本机进程用自己的密钥签发，`sub` 只是展示用名字：
+            # 未初始化管理员时它是空串，硬比对会把本机免登录通道打断。
+            from admin.admin_account import effective_username
+            expected = effective_username()
+            if not expected or payload.get("sub") != expected:
+                raise HTTPException(status_code=401, detail="无效令牌")
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="无效令牌")
 

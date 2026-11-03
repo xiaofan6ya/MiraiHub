@@ -11,6 +11,7 @@ import { makeTheme } from './theme'
 
 // 全部页面按路由懒加载（React.lazy + 动态 import）
 const LoginPage = lazy(() => import('./pages/LoginPage'))
+const SetupPage = lazy(() => import('./pages/SetupPage'))
 const OverviewPage = lazy(() => import('./pages/OverviewPage'))
 const SentinelPage = lazy(() => import('./pages/SentinelPage'))
 const PlatformsPage = lazy(() => import('./pages/PlatformsPage'))
@@ -53,8 +54,11 @@ function PageFallback() {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { authed, ready } = useAuth()
+  const { authed, ready, needsSetup } = useAuth()
   if (!ready) return <PageFallback />
+  // 没有管理员账号时先引导创建：本地壳（桌面/安卓）本来就没有可用密码，
+  // 让它停在登录页只会卡死 —— 那里是唯一能创建账号的入口。
+  if (needsSetup) return <Navigate to="/setup" replace />
   if (!authed) return <Navigate to="/login" replace />
   return <>{children}</>
 }
@@ -67,6 +71,15 @@ function AppRoutes() {
         element={
           <Suspense fallback={<PageFallback />}>
             <LoginPage />
+          </Suspense>
+        }
+      />
+      {/* 首次初始化（无管理员账号时）：不需要登录态，创建成功后直接进控制台 */}
+      <Route
+        path="/setup"
+        element={
+          <Suspense fallback={<PageFallback />}>
+            <SetupPage />
           </Suspense>
         }
       />

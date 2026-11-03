@@ -104,6 +104,7 @@ desktop/assets/*.ico
 desktop/assets/*.png
 
 !scripts/check_runtime.py
+!scripts/check_setup_flow.py
 !scripts/upgrade_gate.py
 !scripts/upgrade_control.py
 !scripts/check_maintenance.py

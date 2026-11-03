@@ -200,23 +200,35 @@ def save_port(base: Path, config: dict, port: int) -> None:
 
 
 def configure_environment(base: Path) -> dict:
+    """准备数据目录环境。
+
+    **不再生成随机 ADMIN_PASSWORD。** 旧实现把 `secrets.token_urlsafe(32)` 写进
+    config.json 再塞进环境变量，于是本机永远「已配置」一个用户不知道的口令：
+    壳内靠桥接令牌免登录，局域网的浏览器却无从登录，改密码还得先知道旧密码。
+    现在留空表示「未配置」，服务会把访问者引导到 `/setup` 创建管理员账号
+    （见 admin/routers/setup.py）。`username` / `password` 若在旧 config.json
+    里存在，仍原样沿用，避免已有部署被改回「未初始化」。
+    """
     file = base / "config.json"
     if file.is_file():
         config = json.loads(file.read_text(encoding="utf-8"))
     else:
-        config = {"port": 8790, "username": "desktop", "password": secrets.token_urlsafe(32),
-                  "jwt_secret": secrets.token_urlsafe(48)}
+        config = {"port": 8790, "jwt_secret": secrets.token_urlsafe(48)}
         atomic_json(file, config)
     if "converter_api_key" not in config:
         config["converter_api_key"] = "wb-" + secrets.token_urlsafe(32)
         atomic_json(file, config)
-    os.environ.update({"WORKBUDDY_DESKTOP": "1", "WORKBUDDY_DESKTOP_DATA": str(base),
-                       "ADMIN_DATABASE_URL": "sqlite:///" + (base / "workbuddy.db").as_posix(),
-                       "ADMIN_GATEWAY_LIMIT_BACKEND": "memory", "ADMIN_HOST": "0.0.0.0",
-                       "ADMIN_USERNAME": config["username"], "ADMIN_PASSWORD": config["password"],
-                       "ADMIN_JWT_SECRET": config["jwt_secret"], "PYTHONUTF8": "1",
-                       "CONVERTER_API_KEY": config["converter_api_key"],
-                       "CONVERTER_LOG": str(base / "logs/converter.log")})
+    env = {"WORKBUDDY_DESKTOP": "1", "WORKBUDDY_DESKTOP_DATA": str(base),
+           "ADMIN_DATABASE_URL": "sqlite:///" + (base / "workbuddy.db").as_posix(),
+           "ADMIN_GATEWAY_LIMIT_BACKEND": "memory", "ADMIN_HOST": "0.0.0.0",
+           "ADMIN_JWT_SECRET": config["jwt_secret"], "PYTHONUTF8": "1",
+           "CONVERTER_API_KEY": config["converter_api_key"],
+           "CONVERTER_LOG": str(base / "logs/converter.log")}
+    for key, name in (("username", "ADMIN_USERNAME"), ("password", "ADMIN_PASSWORD")):
+        value = config.get(key)
+        if isinstance(value, str) and value:
+            env[name] = value
+    os.environ.update(env)
     configure_node(base)
     os.chdir(base)
     return config
@@ -422,13 +434,25 @@ class DesktopAPI:
                 report += "\n本地服务日志末尾（凭据脱敏）：\n" + source.read(8192).decode("utf-8", errors="replace")
         return {"report": safe_error_text(report)}
 
+    def _shell_subject(self) -> str:
+        """本机令牌的 ``sub``：config.json 里的用户名，未初始化时为空串。
+
+        本地壳令牌靠 ``local_shell`` 标记放行，`sub` 只是展示用名字
+        （见 admin/security.py 的 verify_admin_token），所以「还没创建管理员
+        账号」不该妨碍用户进入控制台完成创建 —— 令牌里带空 sub 也能用。
+
+        页面创建的管理员用户名在数据库里，本进程（GUI 启动器）不查库：
+        真正确认身份的是后端进程，它比对的是生效值。
+        """
+        return str(self.config.get("username") or "")
+
     def desktop_login(self):
         if not self._is_local_console_url():
             raise RuntimeError("只允许本地桌面界面登录")
         from datetime import datetime, timedelta, timezone
         import jwt
         # Local ownership authenticates the shell; no password form or login request.
-        token = jwt.encode({"sub": self.config["username"], "local_shell": True},
+        token = jwt.encode({"sub": self._shell_subject(), "local_shell": True},
                            self.config["jwt_secret"], algorithm="HS256")
         return {"token": token}
 
@@ -718,7 +742,7 @@ class DesktopAPI:
             return {"error": "服务未就绪"}
         from datetime import datetime, timedelta, timezone
         import jwt
-        token = jwt.encode({"sub": self.config["username"], "local_shell": True},
+        token = jwt.encode({"sub": self._shell_subject(), "local_shell": True},
                            self.config["jwt_secret"], algorithm="HS256")
         url = f"http://127.0.0.1:{port}/admin?token={token}"
         webbrowser.open(url)

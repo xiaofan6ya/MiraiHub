@@ -29,6 +29,8 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
 export interface ApiError extends Error {
   status?: number
   data?: unknown
+  /** 后端返回的错误码（如 setup_required） */
+  code?: string
 }
 
 export interface ApiInit extends Omit<RequestInit, 'body' | 'headers'> {
@@ -57,6 +59,7 @@ async function extractError(resp: Response): Promise<ApiError> {
     data = text || undefined
   }
   let msg = ''
+  let code = ''
   if (data && typeof data === 'object') {
     const d = data as Record<string, any>
     if (Array.isArray(d?.detail)) {
@@ -66,8 +69,14 @@ async function extractError(resp: Response): Promise<ApiError> {
         .slice(0, 5)
         .map((e) => `${(e.loc ?? []).slice(1).join('.') || '参数'}：${e.msg ?? ''}`)
       msg = head.join('；') + (items.length > 5 ? `（共 ${items.length} 项）` : '')
+    } else if (d?.detail && typeof d.detail === 'object') {
+      // 结构化 detail（例如 503 {"message": "...", "code": "setup_required"}）
+      const detail = d.detail as Record<string, any>
+      msg = detail.message || detail.msg || ''
+      code = typeof detail.code === 'string' ? detail.code : ''
     } else {
       msg = d?.error?.message || (typeof d?.detail === 'string' ? d.detail : '') || d?.message || ''
+      code = typeof d?.code === 'string' ? d.code : ''
     }
   } else if (typeof data === 'string' && data) {
     msg = data.length < 300 ? data : ''
@@ -75,6 +84,7 @@ async function extractError(resp: Response): Promise<ApiError> {
   const err = new Error(msg || `请求失败（HTTP ${resp.status}）`) as ApiError
   err.status = resp.status
   err.data = data
+  if (code) err.code = code
   return err
 }
 

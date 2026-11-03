@@ -1,18 +1,24 @@
-import { App as AntdApp, Avatar, Button, Card, Flex, Form, Input, Typography } from 'antd'
+import { App as AntdApp, Alert, Avatar, Button, Card, Flex, Form, Input, Typography } from 'antd'
 import { LockOutlined, MoonOutlined, SunOutlined, UserOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useThemeMode } from '../context/ThemeContext'
 import { ensureLocalSession, isDesktopMode } from '../bridges/native'
-import { setToken } from '../api/client'
+import { setToken, type ApiError } from '../api/client'
 
 export default function LoginPage() {
-  const { authed, ready, login } = useAuth()
+  const { authed, ready, needsSetup, login } = useAuth()
   const { mode, toggle } = useThemeMode()
   const { message } = AntdApp.useApp()
   const navigate = useNavigate()
   const [submitting, setSubmitting] = useState(false)
+
+  // 还没有管理员账号：登录一定失败，直接切到创建引导。
+  // 本地壳（桌面/安卓）没有 .env，这是唯一能创建账号的路径。
+  useEffect(() => {
+    if (ready && needsSetup) navigate('/setup', { replace: true })
+  }, [ready, needsSetup, navigate])
 
   // 桌面/安卓本地壳：无需登录表单，直接走桥换取本地 token
   useEffect(() => {
@@ -35,7 +41,14 @@ export default function LoginPage() {
       message.success('登录成功')
       navigate('/overview', { replace: true })
     } catch (e) {
-      message.error((e as Error).message || '登录失败')
+      const err = e as ApiError
+      if (err.code === 'setup_required' || err.status === 503) {
+        // 后端明确说「还没创建管理员账号」：交给上面的 effect 跳引导。
+        message.info('尚未创建管理员账号，正在跳转创建引导')
+        navigate('/setup', { replace: true })
+        return
+      }
+      message.error(err.message || '登录失败')
     } finally {
       setSubmitting(false)
     }
@@ -57,6 +70,20 @@ export default function LoginPage() {
           </Typography.Title>
           <Typography.Text type="secondary">一个 API Key，调用多家上游</Typography.Text>
         </Flex>
+        {needsSetup && (
+          <Alert
+            type="info"
+            showIcon
+            title="还没有管理员账号"
+            description="首次使用请先创建账号，之后用该账号登录。"
+            action={
+              <Button size="small" type="primary" onClick={() => navigate('/setup')}>
+                去创建
+              </Button>
+            }
+            style={{ marginBottom: 14 }}
+          />
+        )}
         <Form layout="vertical" onFinish={onFinish} autoComplete="off">
           <Form.Item name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
             <Input prefix={<UserOutlined />} placeholder="管理用户名" autoFocus />

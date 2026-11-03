@@ -174,7 +174,8 @@ python admin/platform/skill/scripts/verify_platform.py  # 接入后验收
 从 [Releases](https://github.com/xiaofan6ya/MiraiHub/releases) 下载
 `miraihub-<version>-windows-x64.exe`，双击运行。
 
-首次启动会自动创建数据目录、生成管理员密码，并打开工作台。
+首次启动会自动创建数据目录并打开工作台；首次打开后台会引导你创建管理员账号
+（桌面版不要求密码即可进入本机工作台，创建账号是为了能从其他设备的浏览器登录）。
 
 ### 方式二：源码运行
 
@@ -182,7 +183,7 @@ python admin/platform/skill/scripts/verify_platform.py  # 接入后验收
 git clone https://github.com/xiaofan6ya/MiraiHub.git
 cd MiraiHub
 pip install -r requirements.txt
-cp .env.example .env        # 至少设置 ADMIN_PASSWORD
+cp .env.example .env        # 可留空账号密码：首次打开后台会引导创建
 python main.py
 ```
 
@@ -193,6 +194,22 @@ python main.py
 
 > 数据与日志默认在项目目录下的 `data/` 与 `logs/`。
 > 数据库支持 SQLite（默认）与 MySQL（`ADMIN_DATABASE_URL`）。
+
+### 首次使用：创建管理员账号
+
+管理员账号有两种来源，**环境变量优先**：
+
+1. **在 `.env` 里写死** `ADMIN_USERNAME` / `ADMIN_PASSWORD`（服务器部署推荐）。
+   只要这两项配置完整，登录就以它们为准 —— 即使页面上创建过账号。
+2. **留空，由页面引导创建** —— 首次打开 `/admin` 自动进入「创建管理员账号」页。
+   桌面 EXE 与安卓 APK 走的就是这条路：它们没有可编辑的 `.env`，
+   创建后即可用该账号从局域网内的浏览器登录管理后台。
+
+创建入口默认**只对本机（回环地址）开放**；未初始化又需要从远程创建时，
+临时设置 `ADMIN_SETUP_ALLOW_REMOTE=1`，创建完成后改回 `0`。
+账号一旦创建，该入口永久关闭（重复创建返回 409）。
+页面创建的账号可在「设置 → 账号安全」修改密码；
+env 部署则直接改 `.env` 后重启（页面改密码对 env 来源不生效）。
 
 ---
 
@@ -303,7 +320,8 @@ MiraiHub/
 |---|---|---|
 | `ADMIN_HOST` / `ADMIN_PORT` | `0.0.0.0` / `8790` | 监听地址 |
 | `ADMIN_DATABASE_URL` | `sqlite:///data/miraihub.db` | 数据库；MySQL 用 `mysql+pymysql://...` |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | 管理后台账号 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | 管理后台账号；留空则由页面引导创建 |
+| `ADMIN_SETUP_ALLOW_REMOTE` | `0` | 是否允许从非本机完成首次初始化 |
 | `ADMIN_JWT_SECRET` | 自动生成 | 会话签名密钥 |
 | `ADMIN_GATEWAY_REQUEST_TIMEOUT` | `300` | 单请求端到端硬上限（秒） |
 | `ADMIN_STREAM_IDLE_TIMEOUT` | `300` | 上游读空闲上限，**必须 ≥ 总时限** |

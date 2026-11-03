@@ -196,6 +196,8 @@ export default function SettingsPage() {
           <Card size="small" style={{ height: '100%' }} title="账号安全">
             <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
               定期更换管理密码可降低爆破风险；修改后当前会话保持登录，新会话需用新密码。
+              若后台凭据来自 .env（ADMIN_USERNAME / ADMIN_PASSWORD），请直接修改 .env
+              后重启 —— 环境变量优先，此处修改对它不生效。
             </Typography.Paragraph>
             <Button type="primary" icon={<LockOutlined />} onClick={() => setPwdOpen(true)}>
               修改登录密码
