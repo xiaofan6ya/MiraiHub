@@ -14,6 +14,10 @@
        JS 在凭据确实失效时会移除这个类，登录表单照常出现。 */
     html.console-authed #login{display:none!important}
   </style>
+  <!-- 浏览器端自检上报：**必须是第一个 <script>**，才能在其他脚本执行/出错之前
+       注册 window error 捕获，拿到真实的 filename:line:col。它会把自己看到的
+       错误来源、脚本资源状态、注入痕迹 POST 回 /api/client-diag/report。 -->
+  <script src="/admin/assets/boot-diag.js?v=20261103-diag1"></script>
   <script src="/admin/assets/theme.js?v=20261031-r2"></script>
   <script src="/admin/assets/filter-combobox.js?v=20261102-ui1"></script>
   <!--

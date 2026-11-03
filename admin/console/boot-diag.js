@@ -1,0 +1,280 @@
+/* 浏览器端自检上报（在 <head> 里第一个执行，早于任何业务脚本）。
+
+   背景：控制台在开发机上用真实浏览器反复验证都正常（0 个 pageerror、26 个脚本
+   全部加载、函数齐全），但使用者那边持续出现
+       Uncaught SyntaxError: Unexpected end of input (at /admin?tab=xxx:1:19)
+   并且按钮整片失灵。这个位置（第 1 行第 19 列）只有一种来源：一段**没有 src 的
+   脚本**在解析到 EOF 时失败 —— 而控制台自身 0 个内联脚本，所以它来自页面之外
+   （浏览器扩展 / 安全软件网页防护 / 加速器 / 桌面壳注入的 native bridge）。
+   这类注入大多走 MAIN world，不在 DOM 里留 <script> 节点，页面内看不见。
+
+   本文件因此负责"取证"而不是"修复"：
+     1) 抢在最早注册 window error 捕获，拿到真实的 filename/lineno/colno/stack
+     2) MutationObserver 盯着 documentElement，记录所有后来出现的 <script>（含被删除的）
+     3) 对比 window 全局属性前后差异，抓 MAIN world 注入留下的痕迹
+     4) 用 performance resource timing 列出每个脚本的 HTTP 状态与字节数
+     5) 一次性 POST 到 /api/client-diag/report，落到服务端 logs/client-diag.jsonl
+   UI 只在真出问题时弹一条红条（附带可复制的完整报告），正常情况下完全静默。 */
+(function () {
+  "use strict";
+
+  var BUILD = "20261103-diag1";
+  var ENDPOINT = "/api/client-diag/report";
+  var rec = {
+    build: BUILD,
+    at: "",
+    url: location.href,
+    referrer: document.referrer || "",
+    ua: navigator.userAgent,
+    errors: [],
+    injected: [],
+    globals: [],
+    assets: [],
+    blocked: [],
+    doc: {},
+    fns: {},
+    sent: false
+  };
+
+  var _warned = false;
+
+  function safe(fn) {
+    try { return fn(); } catch (e) { return null; }
+  }
+
+  function pushErr(o) {
+    if (rec.errors.length < 40) rec.errors.push(o);
+  }
+
+  function isFatalSyntax(o) {
+    return /Unexpected end of input|Unexpected token|Invalid or unexpected token/i
+      .test(o.msg || "");
+  }
+
+  // ---- 1) 最早的错误捕获 ------------------------------------------------
+  window.addEventListener("error", function (e) {
+    var t = e.target || {};
+    var tag = (t.tagName || "").toUpperCase();
+    var resourceFail = !e.message && (tag === "SCRIPT" || tag === "LINK" || tag === "IMG");
+    var o = {
+      k: resourceFail ? "resource" : "js",
+      msg: (e.message || "").slice(0, 400),
+      file: e.filename || "",
+      line: e.lineno || 0,
+      col: e.colno || 0,
+      tag: tag,
+      src: (t.src || t.href || "").slice(0, 400),
+      stack: ((e.error && e.error.stack) || "").slice(0, 900),
+      at: Math.round(performance.now())
+    };
+    pushErr(o);
+    if (!resourceFail && isFatalSyntax(o)) showFatal(o);
+    schedule();
+  }, true);
+
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason || {};
+    pushErr({
+      k: "reject",
+      msg: String((r && r.message) || r).slice(0, 400),
+      stack: String((r && r.stack) || "").slice(0, 900),
+      at: Math.round(performance.now())
+    });
+    schedule();
+  });
+
+  // ---- 2) <script> 节点的增删（扩展/代理最常见的注入方式）----------------
+  var _mo = safe(function () {
+    var mo = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var m = muts[i];
+        logNodes(m.addedNodes, "added");
+        logNodes(m.removedNodes, "removed");
+      }
+    });
+    function logNodes(list, how) {
+      if (!list) return;
+      for (var j = 0; j < list.length; j++) {
+        var n = list[j];
+        if (!n || n.nodeType !== 1 || String(n.tagName).toUpperCase() !== "SCRIPT") continue;
+        // 我们自己的 26 个脚本都是同源 src（parser 插入时也会触发这里的 added）。
+        // 只记「没有 src」或「跨源」的 —— 那才是外部注入的特征。
+        var src = n.src || "";
+        if (src && src.indexOf(location.origin) === 0) continue;
+        if (rec.injected.length < 20) {
+          rec.injected.push({
+            how: how,
+            src: src.slice(0, 300),
+            len: (n.textContent || "").length,
+            head: (n.textContent || "").replace(/\s+/g, " ").slice(0, 200),
+            at: Math.round(performance.now())
+          });
+        }
+        schedule();
+      }
+    }
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    return mo;
+  });
+
+  // ---- 3) 全局属性快照：MAIN world 注入会留下新键 ------------------------
+  var _globals0 = safe(function () {
+    return Object.getOwnPropertyNames(window);
+  }) || [];
+
+  // ---- 4) 收集 + 上报 ---------------------------------------------------
+  function collect() {
+    rec.at = new Date().toISOString();
+    rec.doc = safe(function () {
+      var html = document.documentElement ? document.documentElement.outerHTML : "";
+      return {
+        chars: html.length,
+        lines: html.split("\n").length,
+        complete: !!document.getElementById("wb-page-end"),
+        scripts: document.scripts.length,
+        inline: Array.prototype.filter.call(document.scripts, function (s) { return !s.src; })
+          .map(function (s) { return (s.textContent || "").slice(0, 200); }),
+        readyState: document.readyState,
+        viewport: innerWidth + "x" + innerHeight,
+        dpr: devicePixelRatio
+      };
+    });
+    rec.fns = safe(function () {
+      var keys = ["openPhoneLogin", "openUpload", "openExport", "scanLocal", "loadAccounts",
+        "activateTab", "loadPlatforms", "WBDesktop", "WBTheme", "WBPlatform"];
+      var out = {};
+      keys.forEach(function (k) { out[k] = typeof window[k]; });
+      return out;
+    });
+    rec.assets = safe(function () {
+      return performance.getEntriesByType("resource")
+        .filter(function (e) { return /\.(js|css)(\?|$)/.test(e.name); })
+        .map(function (e) {
+          return {
+            n: e.name.replace(location.origin, "").slice(0, 120),
+            status: e.responseStatus || 0,
+            transfer: e.transferSize,
+            body: e.encodedBodySize,
+            decoded: e.decodedBodySize,
+            ms: Math.round(e.duration)
+          };
+        });
+    }) || [];
+    rec.globals = safe(function () {
+      var now = Object.getOwnPropertyNames(window);
+      var add = [];
+      for (var i = 0; i < now.length; i++) {
+        if (_globals0.indexOf(now[i]) === -1 && add.length < 40) add.push(now[i]);
+      }
+      return add;
+    }) || [];
+    // 「按钮点了没反应」最常见的原因是有一个看不见的层盖在上面（残留的
+    // modal 遮罩、扩展注入的浮层…）。逐个取按钮中心点做命中测试，
+    // 命中的不是按钮自己就记下来 —— 这比让使用者描述现象准得多。
+    rec.blocked = safe(function () {
+      var out = [];
+      var all = document.querySelectorAll("button,[onclick]");
+      for (var i = 0; i < all.length && out.length < 10; i++) {
+        var el = all[i];
+        var r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        if (r.bottom < 0 || r.top > innerHeight) continue;
+        var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (!top || top === el || el.contains(top) || top.contains(el)) continue;
+        out.push({
+          btn: (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 24),
+          cover: String(top.tagName || "") + "#" + (top.id || "") + "." + String(top.className || "").slice(0, 60)
+        });
+      }
+      return out;
+    }) || [];
+  }
+
+  function send() {
+    collect();
+    if (rec.blocked && rec.blocked.length) {
+      try {
+        console.warn("[WB] 有按钮被其它层盖住（点了会没反应）：", rec.blocked);
+      } catch (e) { /* ignore */ }
+    }
+    var body;
+    try { body = JSON.stringify(rec); } catch (e) { return; }
+    if (body.length > 60000) body = body.slice(0, 60000);
+    rec.sent = true;
+    try {
+      var blob = new Blob([body], { type: "application/json" });
+      if (navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, blob)) return;
+    } catch (e) { /* 落到 fetch */ }
+    try {
+      fetch(ENDPOINT, {
+        method: "POST", body: body, keepalive: true,
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (e) { /* 服务端没这个端点也无所谓，UI 上照样能看到 */ }
+  }
+
+  var _t = null;
+  function schedule() {
+    if (_t) return;
+    _t = setTimeout(function () { _t = null; send(); }, 1200);
+  }
+
+  // ---- 5) 只有 SyntaxError 才打扰用户 -----------------------------------
+  function showFatal(o) {
+    if (_warned) return;
+    _warned = true;
+    function render() {
+      if (document.getElementById("wbBootWarn")) return;
+      var host = document.createElement("div");
+      host.id = "wbBootWarn";
+      host.setAttribute("role", "alert");
+      host.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;"
+        + "padding:12px 16px;background:#7f1d1d;color:#fff;font:13px/1.6 system-ui,sans-serif;"
+        + "display:flex;gap:12px;align-items:center;flex-wrap:wrap;box-shadow:0 -6px 20px rgba(0,0,0,.25)";
+      var span = document.createElement("span");
+      span.style.cssText = "flex:1 1 420px;min-width:0";
+      var b = document.createElement("b");
+      b.textContent = "页面里有外部脚本报错（不是控制台自己的代码）";
+      span.appendChild(b);
+      var code = document.createElement("code");
+      code.style.cssText = "display:block;margin-top:4px;font-size:11px;opacity:.9;"
+        + "white-space:pre-wrap;word-break:break-all";
+      code.textContent = (o.file || "(无来源，说明是页面外注入的脚本)")
+        + ":" + o.line + ":" + o.col + "  " + o.msg;
+      span.appendChild(code);
+
+      var copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "复制诊断信息";
+      copy.style.cssText = "padding:6px 12px;border-radius:8px;border:0;background:#fff;"
+        + "color:#7f1d1d;font-weight:600;cursor:pointer";
+      copy.onclick = function () {
+        collect();
+        var txt = JSON.stringify(rec, null, 1);
+        safe(function () {
+          if (navigator.clipboard) navigator.clipboard.writeText(txt);
+        });
+        copy.textContent = "已复制";
+      };
+
+      var rel = document.createElement("button");
+      rel.type = "button";
+      rel.textContent = "强制刷新";
+      rel.style.cssText = "padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.6);"
+        + "background:transparent;color:#fff;font-weight:600;cursor:pointer";
+      rel.onclick = function () { location.reload(); };
+
+      host.appendChild(span);
+      host.appendChild(copy);
+      host.appendChild(rel);
+      (document.body || document.documentElement).appendChild(host);
+    }
+    if (document.body) render(); else document.addEventListener("DOMContentLoaded", render);
+  }
+
+  // ---- 6) 两个时间点上报：load 后（早期注入）与 8s 后（延迟注入）---------
+  window.addEventListener("load", function () {
+    setTimeout(send, 1000);
+    setTimeout(function () { if (!rec.errors.length && !rec.injected.length) send(); }, 8000);
+  });
+})();

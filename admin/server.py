@@ -239,6 +239,11 @@ app.include_router(growth_center.router)
 app.include_router(ip_management.router)
 from admin.routers import client_profile
 app.include_router(client_profile.router)
+# 浏览器端自检上报：控制台把 pageerror / 资源状态 / 注入痕迹 POST 回来，
+# 落 logs/client-diag.jsonl。用于定位「页面结构完全正常、使用者那边却报
+# SyntaxError 且按钮失灵」这类只在其本机环境复现的问题。
+from admin.routers import client_diag
+app.include_router(client_diag.router)
 # 多平台：平台元信息（控制台切换模块的唯一数据源）+ Trae 专属管理接口。
 from admin.platform.router import router as platforms_router
 app.include_router(platforms_router)
