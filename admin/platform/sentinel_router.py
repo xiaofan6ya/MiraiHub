@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -31,6 +32,8 @@ from admin.db import get_db
 from admin.models import SystemSetting
 from admin.platform import registry
 from admin.security import require_admin
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sentinel", tags=["sentinel"])
 

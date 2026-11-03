@@ -1,6 +1,7 @@
 """账号管理：列表 / 新增 / 批量上传 / 扫描本机 / 导入本机 / 刷新余额 / 启用禁用 / 删除 / 注入本机客户端。"""
 import glob
 import json
+import logging
 import os
 import shutil
 from datetime import datetime, timezone, timedelta
@@ -21,6 +22,8 @@ from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, Usa
 from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+
+_logger = logging.getLogger(__name__)
 
 
 class AccountIn(BaseModel):

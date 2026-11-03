@@ -1194,8 +1194,7 @@ def _catalog_for_platform(db, storage: str) -> dict:
                 db.rollback()
             last_error = "%s: %s" % (type(error).__name__, str(error)[:140])
     return {"models": [], "official": [], "platform": storage,
-            "reason": str(last_error or "该平台没有可用账号接手")[:200],
-            "tried": tried}
+            "reason": str(last_error or "该平台没有可用账号接手")[:200]}
 
 
 def _catalog_platforms(db) -> list[str]:
