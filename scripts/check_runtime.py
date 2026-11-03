@@ -38,7 +38,8 @@ def main():
             with TestClient(app) as client:
                 assert client.get('/api/app/version').status_code == 200
                 assert client.get('/admin').status_code == 200
-                assert client.get('/static/join.html').status_code == 200
+                # 自助注册入口 fail-closed：空库没有凭证时，/join 必须与「页面不存在」一致
+                assert client.get('/join').status_code == 404
                 assert client.post('/v1/audio/transcriptions').status_code == 401
                 from zoneinfo import ZoneInfo
                 assert str(ZoneInfo('Asia/Shanghai')) == 'Asia/Shanghai'
@@ -59,6 +60,8 @@ def main():
                 assert client.post('/api/accounts/999999/health-check',
                                    headers=headers).status_code == 404
                 assert client.get('/api/benefits/compensation', headers=headers).status_code == 404
+                # 旧 /static 挂载已随前端重构（9dbfc80）下线，任何 /static 路径都应 404
+                assert client.get('/static/join.html').status_code == 404
                 assert client.get('/static/index.html').status_code == 404
                 assert client.get('/api/accounts', headers=headers).status_code == 200
             print(f'Runtime startup and batch validation passed: FastAPI {fastapi.__version__}, '
