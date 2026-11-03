@@ -32,6 +32,7 @@ import time
 from starlette.responses import JSONResponse, StreamingResponse
 
 from admin.platform import shared
+from admin.platform import protocol_bridge as bridge
 from admin.platform.qoder.core import client
 from admin.platform.qoder.services import accounts as qoder_accounts
 from admin.platform.qoder.services import chat as qoder_chat
@@ -394,7 +395,8 @@ async def chat_completions(request):
                       started=started)
 
         return StreamingResponse(
-            generator(), media_type="text/event-stream",
+            bridge.with_pings(generator(), ping=bridge.CHAT_PING),
+            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     finally:
         db.close()
@@ -409,49 +411,25 @@ def _sse_error(exc: client.UpstreamError) -> bytes:
 # ---------------------------------------------------------------------------
 # /v1/messages（Anthropic）
 # ---------------------------------------------------------------------------
-def _anthropic_event(name: str, data: dict) -> bytes:
-    return ("event: %s\ndata: %s\n\n"
-            % (name, json.dumps(data, ensure_ascii=False))).encode()
-
-
-def _stop_reason_of(finish: str | None) -> str:
-    return {"length": "max_tokens", "tool_calls": "tool_use",
-            "stop": "end_turn"}.get(str(finish or ""), "end_turn")
-
-
-def _anthropic_usage_of(usage: dict) -> dict:
-    """OpenAI usage → Anthropic usage（含缓存读取/写入两个单列字段）。
-
-    少了 `cache_read_input_tokens`，Claude Code 这类客户端的「缓存命中」
-    就恒显示 0，而网关侧账目是对的 —— 必须整份透出。
-    """
-    try:
-        from upstream_compat import anthropic_usage_from
-
-        out = anthropic_usage_from(usage)
-        if out is not None:
-            return out
-    except Exception:  # noqa: BLE001
-        pass
-    return {"input_tokens": int((usage or {}).get("prompt_tokens") or 0),
-            "output_tokens": int((usage or {}).get("completion_tokens") or 0),
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0}
-
-
 async def messages(request):
-    # 计时起点：`_bill` 依赖它算总耗时，缺了会抛
-    # `name 'started' is not defined` → 客户端看到 502。
+    """Anthropic 协议（**转换收敛到 protocol_bridge，修复工具调用丢失**）。
+
+    ## 历史坑（本次修复）
+
+    旧实现 `normalized = dict(body)` 把 **Anthropic body 原样**塞给上游
+    （上游是 OpenAI 形态）：`tools`/`tool_use`/`tool_result` 全部无效，
+    工具循环从第二轮起就断；响应方向也只翻 text，没有 tool_use 块。
+
+    现在请求经 `bridge.anthropic_to_openai` 全量映射，流式经
+    `bridge.anthropic_stream_relay`（tool_use 块 + thinking 块 +
+    空闲心跳 + 上游错误显式 error 事件）。
+    """
     started = time.perf_counter()
     from admin.db import SessionLocal
 
     body = await _body_of(request)
     realm = _realm(request)
-    normalized = dict(body)
-    system = body.get("system")
-    if system:
-        prefix = [{"role": "system", "content": system}]
-        normalized["messages"] = prefix + list(body.get("messages") or [])
+    normalized = bridge.anthropic_to_openai(body)
 
     db = SessionLocal()
     try:
@@ -463,6 +441,8 @@ async def messages(request):
             raise
         except client.UpstreamError as exc:
             return _fail(exc)
+
+        model_name = str(plan.get("model_name") or body.get("model") or "")
 
         if not body.get("stream"):
             try:
@@ -483,112 +463,42 @@ async def messages(request):
                 db.rollback()
             _bill(key, account, result.get("model") or plan.get("model_name", ""),
                   result.get("usage") or {}, request=request, started=started)
-            text = result["choices"][0]["message"].get("content") or ""
-            return JSONResponse({
-                "id": "msg_" + result["id"].split("-", 1)[-1],
-                "type": "message",
-                "role": "assistant",
-                "model": result["model"],
-                "content": [{"type": "text", "text": text}],
-                "stop_reason": _stop_reason_of(
-                    result["choices"][0].get("finish_reason")),
-                "usage": {
-                    "input_tokens": (result.get("usage") or {}).get("prompt_tokens", 0),
-                    "output_tokens": (result.get("usage") or {}).get("completion_tokens", 0),
-                },
-            })
+            return JSONResponse(bridge.openai_to_anthropic(result, model_name))
 
         usage_holder: dict = {}
 
         def generator():
             try:
-                yield from _stream_anthropic(plan, usage_holder)
+                yield from qoder_chat.stream_openai(plan, want_usage=True,
+                                                    holder=usage_holder)
+            except client.UpstreamError as exc:
+                yield _sse_error(exc)
             finally:
                 shared.release(account)
                 _bill(key, account, plan.get("model_name", ""),
                       usage_holder.get("usage") or {}, request=request,
                       started=started)
 
-        return StreamingResponse(
-            generator(), media_type="text/event-stream",
+        inner = StreamingResponse(
+            bridge.with_pings(generator(), ping=bridge.CHAT_PING),
+            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return bridge.anthropic_stream_relay(inner, model_name, prefix="qoder")
     finally:
         db.close()
 
 
-def _stream_anthropic(plan: dict, holder: dict | None = None):
-    import uuid
-
-    holder = holder if isinstance(holder, dict) else {}
-    msg_id = "msg_" + uuid.uuid4().hex[:24]
-    model_name = plan["model_name"]
-    yield _anthropic_event("message_start", {
-        "type": "message_start",
-        "message": {"id": msg_id, "type": "message", "role": "assistant",
-                    "model": model_name,
-                    "content": [], "stop_reason": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}},
-    })
-    yield _anthropic_event("content_block_start", {
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "text", "text": ""}})
-
-    usage: dict = {}
-    try:
-        for inner in client.iter_chat_stream(
-                plan["token"], plan["realm"], uid=plan["uid"],
-                body=plan["upstream"], name=plan["name"],
-                email=plan["email"], machine_id=plan["machine_id"],
-                account_id=plan.get("account_id", 0)):
-            choices = inner.get("choices") or []
-            if choices:
-                delta = (choices[0] or {}).get("delta") or {}
-                if delta.get("content"):
-                    yield _anthropic_event("content_block_delta", {
-                        "type": "content_block_delta", "index": 0,
-                        "delta": {"type": "text_delta",
-                                  "text": str(delta["content"])}})
-                if delta.get("reasoning_content"):
-                    yield _anthropic_event("content_block_delta", {
-                        "type": "content_block_delta", "index": 0,
-                        "delta": {"type": "thinking_delta",
-                                  "thinking": str(delta["reasoning_content"])}})
-                finish = (choices[0] or {}).get("finish_reason")
-                if finish:
-                    yield _anthropic_event("content_block_stop", {
-                        "type": "content_block_stop", "index": 0})
-                    yield _anthropic_event("message_delta", {
-                        "type": "message_delta",
-                        "delta": {"stop_reason": _stop_reason_of(finish)},
-                        "usage": _anthropic_usage_of(usage)})
-            frame_usage = inner.get("usage")
-            if isinstance(frame_usage, dict) and frame_usage:
-                usage = frame_usage
-    except client.UpstreamError as exc:
-        yield _anthropic_event("error", {
-            "type": "error",
-            "error": {"type": exc.kind, "message": exc.message}})
-        return
-    finally:
-        holder["usage"] = usage
-    yield _anthropic_event("message_stop", {"type": "message_stop"})
-
-
-# ---------------------------------------------------------------------------
-# /v1/responses
-# ---------------------------------------------------------------------------
 async def responses(request):
-    # 同上
+    """OpenAI Responses 协议（**转换收敛到 protocol_bridge**）。
+
+    旧实现不发 function_call 输出项、流式没有
+    `response.function_call_arguments.delta`、输入不认
+    `function_call` / `function_call_output` 项。桥里全部修正。
+    """
     started = time.perf_counter()
     body = await _body_of(request)
     realm = _realm(request)
-    normalized = dict(body)
-    raw_input = body.get("input")
-    if isinstance(raw_input, str):
-        normalized["messages"] = [{"role": "user", "content": raw_input}]
-    elif isinstance(raw_input, list):
-        normalized["messages"] = raw_input
-    normalized.setdefault("max_tokens", body.get("max_output_tokens"))
+    normalized = bridge.responses_to_openai(body)
 
     from admin.db import SessionLocal
 
@@ -602,6 +512,8 @@ async def responses(request):
             raise
         except client.UpstreamError as exc:
             return _fail(exc)
+
+        model_name = str(plan.get("model_name") or body.get("model") or "")
 
         if not body.get("stream"):
             try:
@@ -622,96 +534,29 @@ async def responses(request):
                 db.rollback()
             _bill(key, account, result.get("model") or plan.get("model_name", ""),
                   result.get("usage") or {}, request=request, started=started)
-            text = result["choices"][0]["message"].get("content") or ""
-            return JSONResponse({
-                "id": "resp_" + result["id"].split("-", 1)[-1],
-                "object": "response",
-                "model": result["model"],
-                "output": [{"type": "message", "role": "assistant",
-                            "content": [{"type": "output_text", "text": text}]}],
-                "usage": result.get("usage"),
-            })
+            return JSONResponse(bridge.openai_to_responses(result, model_name))
 
         usage_holder: dict = {}
 
         def generator():
             try:
-                yield from _stream_responses(plan, usage_holder)
+                yield from qoder_chat.stream_openai(plan, want_usage=True,
+                                                    holder=usage_holder)
+            except client.UpstreamError as exc:
+                yield _sse_error(exc)
             finally:
                 shared.release(account)
                 _bill(key, account, plan.get("model_name", ""),
                       usage_holder.get("usage") or {}, request=request,
                       started=started)
 
-        return StreamingResponse(
-            generator(), media_type="text/event-stream",
+        inner = StreamingResponse(
+            bridge.with_pings(generator(), ping=bridge.CHAT_PING),
+            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return bridge.responses_stream_relay(inner, model_name, prefix="qoder")
     finally:
         db.close()
-
-
-def _stream_responses(plan: dict, holder: dict | None = None):
-    import uuid
-
-    holder = holder if isinstance(holder, dict) else {}
-    resp_id = "resp_" + uuid.uuid4().hex[:24]
-    model_name = plan["model_name"]
-
-    def event(name: str, data: dict) -> bytes:
-        return ("event: %s\ndata: %s\n\n"
-                % (name, json.dumps(data, ensure_ascii=False))).encode()
-
-    yield event("response.created", {
-        "type": "response.created",
-        "response": {"id": resp_id, "object": "response", "model": model_name,
-                     "status": "in_progress", "output": []}})
-
-    usage: dict = {}
-    finish = "stop"
-    try:
-        for inner in client.iter_chat_stream(
-                plan["token"], plan["realm"], uid=plan["uid"],
-                body=plan["upstream"], name=plan["name"],
-                email=plan["email"], machine_id=plan["machine_id"],
-                account_id=plan.get("account_id", 0)):
-            choices = inner.get("choices") or []
-            if choices:
-                choice = choices[0] or {}
-                delta = choice.get("delta") or {}
-                if delta.get("content"):
-                    yield event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "item_id": resp_id, "output_index": 0,
-                        "content_index": 0, "delta": str(delta["content"])})
-                if delta.get("reasoning_content"):
-                    yield event("response.reasoning_summary_text.delta", {
-                        "type": "response.reasoning_summary_text.delta",
-                        "item_id": resp_id, "output_index": 0,
-                        "summary_index": 0,
-                        "delta": str(delta["reasoning_content"])})
-                if choice.get("finish_reason"):
-                    finish = str(choice["finish_reason"])
-            frame_usage = inner.get("usage")
-            if isinstance(frame_usage, dict) and frame_usage:
-                usage = frame_usage
-    except client.UpstreamError as exc:
-        yield event("response.failed", {
-            "type": "response.failed",
-            "response": {"id": resp_id, "status": "failed",
-                         "error": {"code": exc.kind, "message": exc.message}}})
-        return
-    finally:
-        holder["usage"] = usage
-
-    yield event("response.completed", {
-        "type": "response.completed",
-        "response": {"id": resp_id, "object": "response", "model": model_name,
-                     "status": "completed",
-                     "incomplete_details": None if finish == "stop" else {"reason": finish},
-                     "usage": {
-                         "input_tokens": int(usage.get("prompt_tokens") or 0),
-                         "output_tokens": int(usage.get("completion_tokens") or 0),
-                         "total_tokens": int(usage.get("total_tokens") or 0)}}})
 
 
 async def count_tokens(request):

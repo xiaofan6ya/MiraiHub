@@ -29,6 +29,7 @@ from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, StreamingResponse
 
 from admin.platform import shared
+from admin.platform import protocol_bridge as bridge
 from admin.platform.raccoon.core import client
 from admin.platform.raccoon.services import accounts as raccoon_accounts
 
@@ -429,6 +430,12 @@ async def _forward_stream(body: dict, request):
     """
     from admin.db import SessionLocal
 
+    # **强制要 usage 尾帧**：客户端没带 `stream_options.include_usage` 时
+    # 上游不发 usage —— 记账与客户端「消耗积分」全是 0。
+    if body.get("stream") and not isinstance(
+            (body.get("stream_options") or {}).get("include_usage"), bool):
+        body = {**body, "stream_options": {"include_usage": True}}
+
     realm = _realm(request)
     db = SessionLocal()
     account = None
@@ -609,7 +616,11 @@ async def _forward_stream(body: dict, request):
             cleanup()
 
     return StreamingResponse(
-        generator(), media_type="text/event-stream",
+        # **空闲心跳**：上游排队/限流/慢思考时整条流可能几十秒无字节，
+        # 每 8 秒一帧 `: ping` 注释（SSE 规范，所有解析器忽略），
+        # 把「链路活着」变成客户端可见的事实。
+        bridge.with_pings(generator(), ping=bridge.CHAT_PING),
+        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         # 兜底：客户端断开 / task 被取消时，Starlette 仍会跑 background
         background=BackgroundTask(cleanup))
@@ -729,288 +740,17 @@ def _relay_stream(upstream, holder: dict):
         yield b"data: [DONE]\n\n"
 
 
-def _anthropic_tools_to_openai(raw) -> list[dict]:
-    """Anthropic `tools` → OpenAI `tools`。
-
-    Anthropic 的形状是扁平定义：
-
-        {"name": "read", "description": "...", "input_schema": {...}}
-
-    OpenAI 是嵌在 `function` 里、且键名是 `parameters`：
-
-        {"type": "function", "function": {"name": ..., "parameters": {...}}}
-
-    漏掉这个转换的后果**不是报错，而是工具彻底发不出去**：
-    上游永远不回 tool_calls，走 /v1/messages 的客户端（Claude Code 等）
-    任务直接卡死。响应方向的 `_anthropic_tool_blocks()` 一直是完整的，
-    只有请求方向漏了 —— 典型的单向遗漏。
-    """
-    out: list[dict] = []
-    if not isinstance(raw, list):
-        return out
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        schema = item.get("input_schema")
-        if not isinstance(schema, dict):
-            schema = {"type": "object", "properties": {}}
-        fn: dict = {"name": name, "parameters": schema}
-        desc = item.get("description")
-        if isinstance(desc, str) and desc.strip():
-            fn["description"] = desc
-        out.append({"type": "function", "function": fn})
-    return out
-
-
-def _anthropic_tool_choice_to_openai(raw):
-    """Anthropic `tool_choice` → OpenAI `tool_choice`。"""
-    if not isinstance(raw, dict):
-        return None
-    kind = str(raw.get("type") or "").strip().lower()
-    if kind == "auto":
-        return "auto"
-    if kind == "any":
-        return "required"
-    if kind == "none":
-        return "none"
-    if kind == "tool" and raw.get("name"):
-        return {"type": "function", "function": {"name": raw["name"]}}
-    return None
-
-
-def _anthropic_to_openai(body: dict) -> dict:
-    """Anthropic 请求体 → OpenAI 请求体（含工具双向映射）。"""
-    messages: list[dict] = []
-    system = body.get("system")
-    if isinstance(system, str) and system.strip():
-        messages.append({"role": "system", "content": system})
-    elif isinstance(system, list):
-        text = "".join(str(b.get("text") or "") for b in system
-                       if isinstance(b, dict))
-        if text.strip():
-            messages.append({"role": "system", "content": text})
-
-    for item in body.get("messages") or []:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip().lower()
-        content = item.get("content")
-
-        if isinstance(content, list):
-            texts: list[str] = []
-            tool_uses: list[dict] = []
-            tool_results: list[dict] = []
-            for block in content:
-                if not isinstance(block, dict):
-                    if isinstance(block, str):
-                        texts.append(block)
-                    continue
-                btype = str(block.get("type") or "")
-                if btype == "text":
-                    texts.append(str(block.get("text") or ""))
-                elif btype == "tool_use":
-                    # assistant 发起的工具调用 → OpenAI tool_calls
-                    tool_uses.append({
-                        "id": block.get("id") or "call_%d" % len(tool_uses),
-                        "type": "function",
-                        "function": {
-                            "name": str(block.get("name") or "unknown"),
-                            "arguments": json.dumps(block.get("input") or {},
-                                                    ensure_ascii=False),
-                        },
-                    })
-                elif btype == "tool_result":
-                    # tool_result 在 Anthropic 里是**user 消息内的块**，
-                    # 到 OpenAI 必须拆成独立的 `role=tool` 消息，
-                    # 否则上游看不到结果、会重复调同一个工具。
-                    raw_c = block.get("content")
-                    if isinstance(raw_c, list):
-                        txt = "".join(str(b.get("text") or "") for b in raw_c
-                                      if isinstance(b, dict))
-                    else:
-                        txt = "" if raw_c is None else str(raw_c)
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": block.get("tool_use_id") or "",
-                        "content": txt,
-                    })
-            text = "".join(texts)
-            if tool_results and role == "user":
-                # 工具结果先作为独立 tool 消息发出
-                if text.strip():
-                    messages.append({"role": "user", "content": text})
-                messages.extend(tool_results)
-                continue
-            if tool_uses:
-                msg: dict = {"role": "assistant"}
-                msg["content"] = text if text.strip() else None
-                msg["tool_calls"] = tool_uses
-                messages.append(msg)
-                continue
-            if text.strip():
-                messages.append({"role": role or "user", "content": text})
-            continue
-
-        if role and content is not None:
-            messages.append({"role": role, "content": content})
-
-    out = {"model": body.get("model"), "messages": messages,
-           "max_tokens": body.get("max_tokens") or 4096}
-    for key in ("temperature", "top_p", "stream", "stop_sequences",
-                "metadata", "top_k"):
-        if key in body:
-            mapped = "stop" if key == "stop_sequences" else key
-            out[mapped] = body[key]
-
-    # ---- 工具：请求方向必须映射，否则客户端发不出工具 ----
-    tools = _anthropic_tools_to_openai(body.get("tools"))
-    if tools:
-        out["tools"] = tools
-    choice = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
-    if choice is not None:
-        out["tool_choice"] = choice
-    return out
-
-
-def _anthropic_usage_of(usage) -> dict:
-    """OpenAI usage → Anthropic usage。
-
-    ## 为什么不能硬编码 `cache_read_input_tokens = 0`
-
-    Anthropic 协议把缓存命中的输入 token 单独列在
-    `cache_read_input_tokens`，Claude Code 等客户端据此显示「缓存读取」。
-    硬编码 0 有两个后果：
-
-      1. 客户端命中率恒为 0，用户以为缓存没生效（其实生效了）；
-      2. 输入量被放大 —— 实测同一份 usage，loomy 给
-         `input=300, cache_read=900`，硬编码版给 `input=1200,
-         cache_read=0`：总量对得上，语义全错。
-
-    优先走 `upstream_compat.anthropic_usage_from()`（与 loomy 同源），
-    拿不到再手工拆。
-    """
-    try:
-        from upstream_compat import anthropic_usage_from
-
-        out = anthropic_usage_from(usage)
-        if out is not None:
-            return out
-    except Exception:  # noqa: BLE001 - 兼容层缺失时退回手工实现
-        pass
-    u = usage if isinstance(usage, dict) else {}
-    prompt = int(u.get("prompt_tokens") or 0)
-    details = u.get("prompt_tokens_details")
-    cached = int(
-        u.get("cache_read_input_tokens")
-        or u.get("cached_tokens")
-        or (details.get("cached_tokens") if isinstance(details, dict) else 0)
-        or 0)
-    # OpenAI 的 `prompt_tokens` **含**缓存命中部分；Anthropic 的
-    # `input_tokens` 是未命中的那部分。不拆开就会把输入量放大。
-    fresh = max(prompt - cached, 0) if cached else prompt
-    return {"input_tokens": fresh,
-            "output_tokens": int(u.get("completion_tokens") or 0),
-            "cache_read_input_tokens": cached,
-            "cache_creation_input_tokens": 0}
-
-
-def _anthropic_tool_blocks(message: dict) -> list[dict]:
-    """OpenAI `tool_calls` → Anthropic `tool_use` 内容块。
-
-    只翻 `stop_reason="tool_use"` 却不给内容块是不行的：客户端会看到
-    「要调工具」但一个调用都没有，任务直接卡住。
-    """
-    blocks: list[dict] = []
-    calls = message.get("tool_calls")
-    if not isinstance(calls, list):
-        return blocks
-    for call in calls:
-        if not isinstance(call, dict):
-            continue
-        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
-        args = fn.get("arguments")
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args.strip() else {}
-            except ValueError:
-                args = {"_raw": args}
-        blocks.append({
-            "type": "tool_use",
-            "id": call.get("id") or "call_%d" % len(blocks),
-            "name": fn.get("name") or "unknown",
-            "input": args if isinstance(args, dict) else {},
-        })
-    return blocks
-
-
-def _openai_to_anthropic(result: dict, model: str) -> dict:
-    result = result if isinstance(result, dict) else {}
-    choices = result.get("choices")
-    choice = choices[0] if isinstance(choices, list) and choices else {}
-    choice = choice if isinstance(choice, dict) else {}
-    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-    text = str(message.get("content") or "")
-    usage = result.get("usage") or {}
-    tool_blocks = _anthropic_tool_blocks(message)
-    stop = {"length": "max_tokens", "tool_calls": "tool_use"}.get(
-        str(choice.get("finish_reason") or ""), "end_turn")
-    # 没有 tool_use 块时不能声称要调工具 —— 客户端会一直等
-    if stop == "tool_use" and not tool_blocks:
-        stop = "end_turn"
-    content: list[dict] = []
-    if text:
-        content.append({"type": "text", "text": text})
-    content.extend(tool_blocks)
-    return {
-        "id": "msg_" + str(result.get("id") or "")[:24],
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": content,
-        "stop_reason": stop,
-        "usage": _anthropic_usage_of(usage),
-    }
-
-
-def _openai_to_responses(result: dict, model: str) -> dict:
-    result = result if isinstance(result, dict) else {}
-    choices = result.get("choices")
-    choice = choices[0] if isinstance(choices, list) and choices else {}
-    choice = choice if isinstance(choice, dict) else {}
-    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-    text = str(message.get("content") or "")
-    usage = result.get("usage") or {}
-    output = []
-    if text:
-        output.append({"type": "message",
-                       "id": "msg_" + str(result.get("id") or "")[:20],
-                       "role": "assistant",
-                       "content": [{"type": "output_text", "text": text}]})
-    # 推理摘要：loomy 有这项（`gateway.py:975`），漏了客户端看不到思考过程
-    reasoning = str(message.get("reasoning_content") or "")
-    usage = usage if isinstance(usage, dict) else {}
-    return {
-        "id": "resp_" + str(result.get("id") or "")[:20],
-        "object": "response",
-        "created_at": int(result.get("created") or 0),
-        "model": model or result.get("model") or "",
-        "status": "completed" if choice.get("finish_reason") == "stop" else "incomplete",
-        "output": output,
-        "output_text": text,
-        "reasoning_summary": reasoning[:2000] if reasoning else "",
-        "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                  "output_tokens": int(usage.get("completion_tokens") or 0),
-                  "total_tokens": int(usage.get("total_tokens") or 0)},
-    }
-
-
 async def messages(request):
-    """Anthropic 协议。"""
+    """Anthropic 协议（**转换整段收敛到 protocol_bridge**）。
+
+    请求方向 / 非流式响应方向原本就是完整的；本次把**流式方向**换成
+    `bridge.anthropic_stream_relay` —— 旧中继把 `delta.tool_calls`
+    静默丢掉、stop_reason 恒 `end_turn`、思考链混进正文、上游错误帧
+    被吞。桥里全部修正：tool_use 块 + input_json_delta + thinking 块
+    + 空闲心跳 + error 事件。
+    """
     body = await _body_of(request)
-    normalized = _anthropic_to_openai(body)
+    normalized = bridge.anthropic_to_openai(body)
     model = str(body.get("model") or "")
     if not body.get("stream"):
         normalized["stream"] = False
@@ -1021,93 +761,11 @@ async def messages(request):
             payload = json.loads(response.body)
         except Exception:  # noqa: BLE001
             return response
-        return JSONResponse(_openai_to_anthropic(payload, model))
-    return await _forward_stream_anthropic(normalized, request, model)
-
-
-async def _forward_stream_anthropic(body: dict, request, model: str):
-    """上游 OpenAI 流 → Anthropic 事件流。"""
-    inner = await _forward_stream(body, request)
+        return JSONResponse(bridge.openai_to_anthropic(payload, model))
+    inner = await _forward_stream(normalized, request)
     if getattr(inner, "status_code", 200) >= 400:
         return inner
-
-    async def relay():
-        msg_id = "msg_raccoon_" + str(int(time.time() * 1000))
-        started = False
-        finished = False
-        usage_seen: dict = {}
-
-        def close_events():
-            """content_block_stop + message_delta + message_stop 三帧收尾。"""
-            return [
-                ("data: %s\n\n" % json.dumps(
-                    {"type": "content_block_stop", "index": 0},
-                    ensure_ascii=False)).encode(),
-                ("data: %s\n\n" % json.dumps(
-                    {"type": "message_delta",
-                     "delta": {"stop_reason": "end_turn"},
-                     "usage": _anthropic_usage_of(usage_seen)},
-                    ensure_ascii=False)).encode(),
-                ("data: %s\n\n" % json.dumps(
-                    {"type": "message_stop"}, ensure_ascii=False)).encode(),
-            ]
-
-        async for frame in inner.body_iterator:
-            text = frame.decode("utf-8", "replace") if isinstance(frame, bytes) else str(frame)
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload in ("", "[DONE]"):
-                    continue
-                try:
-                    chunk = json.loads(payload)
-                except ValueError:
-                    continue
-                if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
-                    usage_seen = chunk["usage"]
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                piece = delta.get("content") or delta.get("reasoning_content") or ""
-                if not piece:
-                    if choice.get("finish_reason") and started and not finished:
-                        finished = True
-                        for ev in close_events():
-                            yield ev
-                    continue
-                if not started:
-                    started = True
-                    yield ("data: %s\n\n" % json.dumps(
-                        {"type": "message_start",
-                         "message": {"id": msg_id, "type": "message",
-                                     "role": "assistant", "model": model,
-                                     "content": [], "stop_reason": None,
-                                     "usage": {"input_tokens": 0, "output_tokens": 0}}},
-                        ensure_ascii=False)).encode()
-                    yield ("data: %s\n\n" % json.dumps(
-                        {"type": "content_block_start", "index": 0,
-                         "content_block": {"type": "text", "text": ""}},
-                        ensure_ascii=False)).encode()
-                yield ("data: %s\n\n" % json.dumps(
-                    {"type": "content_block_delta", "index": 0,
-                     "delta": {"type": "text_delta", "text": piece}},
-                    ensure_ascii=False)).encode()
-
-        # ⚠️ 收尾不能只挂在 `finish_reason` 上。
-        #
-        # 实测（2026-11-03）：上游某些模型/截断场景**不发 finish_reason**
-        # 就结束流。旧写法把三帧收尾全塞在 finish_reason 分支里，于是
-        # 客户端只收到 message_start + 若干 delta、**永远等不到 message_stop**，
-        # 表现为「回答完了但界面一直转圈」，只能超时。
-        # 这里保证：只要开过头，流结束时一定补齐收尾。
-        if started and not finished:
-            for ev in close_events():
-                yield ev
-
-    return StreamingResponse(
-        relay(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return bridge.anthropic_stream_relay(inner, model, prefix="raccoon")
 
 
 async def count_tokens(request):
@@ -1126,67 +784,14 @@ async def count_tokens(request):
 
 
 async def responses(request):
-    """OpenAI Responses 协议 → chat.completions。
+    """OpenAI Responses 协议（**转换整段收敛到 protocol_bridge**）。
 
-    ## 白名单 + 值映射（不是简单剔字段）
-
-    Responses 协议和 chat.completions 的差别不只是「字段名不同」，
-    有些是**结构不同**，光把键名加进白名单没用：
-
-        instructions        → 必须转成 `role=system` 的消息（见下）
-        max_output_tokens   → max_tokens
-        reasoning: {effort} → reasoning_effort（扁平）
-        text: {format}      → response_format（形状不同）
-
-    ## ⚠️ `instructions` 必须显式转成 system 消息
-
-    它是 Responses 里的 system prompt。实测（2026-11-03）白名单版本
-    真正发到上游的 body 是：
-
-        CLIENT  : instructions / input / max_output_tokens / reasoning / ...
-        UPSTREAM: max_tokens / messages / model / stream / ...
-
-    `instructions` 被静默丢掉 —— 所有带 system prompt 的调用退化成
-    裸用户消息，角色与格式约束全部失效，**而且不报错**。
-    这类「静默降级」比 400 更难发现，必须在入口就转成消息。
+    旧实现不发 function_call 输出项、流式没有
+    `response.function_call_arguments.delta`、`length` 截断被报成
+    `completed`。桥里全部修正。
     """
     body = await _body_of(request)
-    # 只挑 chat 认识的字段，其余丢弃（上游不认识会 400 或静默忽略）。
-    _CHAT_KEYS = ("model", "temperature", "top_p", "stream", "stop",
-                  "presence_penalty", "frequency_penalty", "seed",
-                  "response_format", "tool_choice", "tools", "user",
-                  # 下面这些是 chat.completions 的标准参数，白名单最容易漏：
-                  # `n`（多候选）、`logprobs`/`top_logprobs`（对数概率）、
-                  # `logit_bias`（token 偏置）、`parallel_tool_calls`
-                  # （一次是否可返回多个工具调用）、`service_tier`。
-                  # 漏掉不会报错，只会**静默改变上游行为** ——
-                  # 比如 `n=3` 只回 1 个候选，客户端以为模型不支持多候选。
-                  "n", "logprobs", "top_logprobs", "logit_bias",
-                  "parallel_tool_calls", "service_tier",
-                  "stream_options", "reasoning_effort")
-    normalized = {k: body[k] for k in _CHAT_KEYS if k in body}
-
-    # reasoning.effort → reasoning_effort（结构不同，必须取值）
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict) and reasoning.get("effort"):
-        normalized.setdefault("reasoning_effort", reasoning["effort"])
-    # text.format → response_format（结构不同，必须取值）
-    text_cfg = body.get("text")
-    if isinstance(text_cfg, dict) and isinstance(text_cfg.get("format"), dict):
-        normalized.setdefault("response_format", text_cfg["format"])
-
-    raw_input = body.get("input")
-    messages: list[dict] = []
-    # ⚠️ instructions 是 system prompt，必须先放进 messages
-    instructions = body.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        messages.append({"role": "system", "content": instructions})
-    if isinstance(raw_input, str):
-        messages.append({"role": "user", "content": raw_input})
-    elif isinstance(raw_input, list):
-        messages.extend(raw_input)
-    normalized["messages"] = messages
-    normalized.setdefault("max_tokens", body.get("max_output_tokens") or 4096)
+    normalized = bridge.responses_to_openai(body)
     model = str(body.get("model") or "")
     if not body.get("stream"):
         normalized["stream"] = False
@@ -1197,58 +802,11 @@ async def responses(request):
             payload = json.loads(response.body)
         except Exception:  # noqa: BLE001
             return response
-        return JSONResponse(_openai_to_responses(payload, model))
-    return await _forward_stream_responses(normalized, request, model)
-
-
-async def _forward_stream_responses(body: dict, request, model: str):
-    inner = await _forward_stream(body, request)
+        return JSONResponse(bridge.openai_to_responses(payload, model))
+    inner = await _forward_stream(normalized, request)
     if getattr(inner, "status_code", 200) >= 400:
         return inner
-
-    async def relay():
-        resp_id = "resp_raccoon_" + str(int(time.time() * 1000))
-        started = False
-        async for frame in inner.body_iterator:
-            text = frame.decode("utf-8", "replace") if isinstance(frame, bytes) else str(frame)
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload in ("", "[DONE]"):
-                    continue
-                try:
-                    chunk = json.loads(payload)
-                except ValueError:
-                    continue
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                piece = delta.get("content") or delta.get("reasoning_content") or ""
-                if not piece:
-                    if choice.get("finish_reason") and started:
-                        yield ("data: %s\n\n" % json.dumps(
-                            {"type": "response.completed",
-                             "response": {"id": resp_id, "object": "response",
-                                          "status": "completed", "model": model}},
-                            ensure_ascii=False)).encode()
-                    continue
-                if not started:
-                    started = True
-                    yield ("data: %s\n\n" % json.dumps(
-                        {"type": "response.created",
-                         "response": {"id": resp_id, "object": "response",
-                                      "status": "in_progress", "model": model,
-                                      "output": []}},
-                        ensure_ascii=False)).encode()
-                yield ("data: %s\n\n" % json.dumps(
-                    {"type": "response.output_text.delta", "item_id": resp_id,
-                     "output_index": 0, "content_index": 0, "delta": piece},
-                    ensure_ascii=False)).encode()
-
-    return StreamingResponse(
-        relay(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return bridge.responses_stream_relay(inner, model, prefix="raccoon")
 
 
 async def list_models(request):

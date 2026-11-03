@@ -83,6 +83,33 @@ def points_headers(token: str) -> dict:
     return {"token": token, "Accept": "application/json"}
 
 
+def chat_headers(token: str, version: str = "1.0.0") -> dict:
+    """chat 链路的完整请求头：鉴权 + **归因头**。
+
+    官方客户端（`utils/request-headers.js`）对每个模型请求都注入
+    `ChatId` / `MsgId` / `TurnId` / `InvokeOrigin` / `X-Loomy-Request-Purpose`。
+    服务端靠它们做计费归因 —— 源码注释原话：缺了这些头的子代理请求
+    「连 ChatId 都没有」，积分归属会失败。
+
+    网关没有真实会话结构，但每次请求生成稳定的一组 ID，让上游归因
+    至少落在「一个合法的会话」上，而不是空值（空值上游可能降级处理
+    或限流）。每轮对话一组新 ID，与官方「一轮一 Turn」语义一致。
+    """
+    import uuid as _uuid
+
+    headers = auth_headers(token, version)
+    chat_id = "gwchat-" + _uuid.uuid4().hex[:16]
+    msg_id = "gwmsg-" + _uuid.uuid4().hex[:16]
+    headers.update({
+        "ChatId": chat_id,
+        "MsgId": msg_id,
+        "TurnId": msg_id,
+        "InvokeOrigin": "user",
+        "X-Loomy-Request-Purpose": "chat.message",
+    })
+    return headers
+
+
 def base_of(realm: str) -> str:
     """上游 base_url。
 

@@ -336,10 +336,11 @@ def is_thinking_hungry(model_id: str) -> bool:
 
 def chat_completions(token: str, realm: str, body: dict, *,
                      account_id: int = 0, timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """对话（非流式）。"""
+    """对话（非流式）。走 `chat_headers`（含归因头）。"""
     return _request(endpoints.base_of(realm) + endpoints.CHAT_PATH,
                     method="POST", body=body, token=token,
-                    timeout=timeout, account_id=account_id, realm=realm)
+                    timeout=timeout, account_id=account_id, realm=realm,
+                    headers=endpoints.chat_headers(token))
 
 
 def chat_stream(token: str, realm: str, body: dict, *,
@@ -364,7 +365,9 @@ def chat_stream(token: str, realm: str, body: dict, *,
     url = endpoints.base_of(realm) + endpoints.CHAT_PATH
     data = json.dumps(body, ensure_ascii=False).encode()
     req = urllib.request.Request(url, data=data, method="POST")
-    for key, value in endpoints.auth_headers(token).items():
+    # 归因头（ChatId/MsgId/TurnId/X-Loomy-Request-Purpose）与鉴权头一起带 ——
+    # 官方客户端每个模型请求都注入，缺了上游计费归因失败
+    for key, value in endpoints.chat_headers(token).items():
         req.add_header(str(key), str(value))
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
