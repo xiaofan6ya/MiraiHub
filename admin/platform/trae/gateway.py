@@ -446,8 +446,8 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
 
     def _solo_args_delta(slot) -> str:
         """把缓冲里还没发出去的参数片段发成增量帧。"""
-        piece = slot["buf"][slot["flushed"]:]
-        slot["flushed"] = len(slot["buf"])
+        piece = slot.get("buf", "")[slot.get("flushed", 0):]
+        slot["flushed"] = len(slot.get("buf", ""))
         if target == "messages":
             return "data: %s\n\n" % _json.dumps(
                 {"type": "content_block_delta", "index": slot["block"],
@@ -465,16 +465,16 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
             out.append(_solo_args_delta(slot))
         if target == "messages":
             out.append("data: %s\n\n" % _json.dumps(
-                {"type": "content_block_stop", "index": slot["block"]},
+                {"type": "content_block_stop", "index": slot.get("block", -1)},
                 ensure_ascii=False))
         else:
             out.append("data: %s\n\n" % _json.dumps(
                 {"type": "response.output_item.done",
-                 "output_index": slot["out_index"],
-                 "item": {"type": "function_call", "id": slot["item_id"],
-                          "call_id": slot["id"] or ("call_%d" % slot.get("_n", 0)),
-                          "name": slot["name"] or "unknown",
-                          "arguments": slot["buf"], "status": "completed"}},
+                 "output_index": slot.get("out_index", 1),
+                 "item": {"type": "function_call", "id": slot.get("item_id", ""),
+                          "call_id": slot.get("id", ""),
+                          "name": slot.get("name", "") or "unknown",
+                          "arguments": slot.get("buf", ""), "status": "completed"}},
                 ensure_ascii=False))
         return out
 
@@ -509,21 +509,13 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                           "arguments": "", "status": "in_progress"}},
                 ensure_ascii=False))
         slot["added"] = True
-        if slot["buf"]:
+        # 开块时只补发**已缓冲**的参数；stop / output_item.done 必须等
+        # 流结束（finish 段统一关闭）—— SOLO 的参数是多帧增量，
+        # 这里提前关闭会让后续 input_json_delta / arguments.delta
+        # 落在已关闭的块上，收尾还会重复发一次关闭（协议违例）。
+        if slot.get("buf"):
             out.append(_solo_args_delta(slot))
-        if target == "messages":
-            out.append("data: %s\n\n" % _json.dumps(
-                {"type": "content_block_stop", "index": slot["block"]},
-                ensure_ascii=False))
-        else:
-            out.append("data: %s\n\n" % _json.dumps(
-                {"type": "response.output_item.done",
-                 "output_index": slot["out_index"],
-                 "item": {"type": "function_call", "id": slot["item_id"],
-                          "call_id": slot["id"] or ("call_%d" % slot.get("_n", 0)),
-                          "name": slot["name"] or "unknown",
-                          "arguments": slot["buf"], "status": "completed"}},
-                ensure_ascii=False))
+        return out
         return out
 
     def render_event(event) -> str:
@@ -575,8 +567,15 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                 solo_any_tool[0] = True
                 frames_out: list[str] = []
                 for n, call in enumerate(converted):
-                    slot = solo_tool_buf.setdefault(int(call.get("index") or n),
-                                                    {"_n": n})
+                    # ⚠️ 槽位字段必须**一次给全**：原来只放 {"_n": n}，其余字段
+                    # 靠惰性赋值 —— `_solo_args_delta` 直接读 `slot["flushed"]`、
+                    # `_solo_flush_tool` 直接读 `slot["buf"]`，带参工具的第二片
+                    # 增量（或零参工具的收尾）当场 KeyError，SOLO 工具调用
+                    # 100% 中途断流（冒烟套件 test_platform_smoke 抓出来的）。
+                    slot = solo_tool_buf.setdefault(int(call.get("index") or n), {
+                        "_n": n, "id": "", "name": "", "buf": "",
+                        "flushed": 0, "added": False, "block": -1,
+                        "item_id": "", "out_index": 0})
                     if call.get("id"):
                         slot["id"] = str(call["id"])
                     fn = call.get("function") if isinstance(call.get("function"), dict) else {}
