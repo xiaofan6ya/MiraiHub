@@ -138,7 +138,9 @@
       --ease-out:cubic-bezier(.38,0,.24,1);   /* 官方 130 处，主体缓动 */
       --ease-in:cubic-bezier(.82,0,1,.9);     /* 官方 22 处，多为退出方向 */
       /* 弹窗遮罩：官方是纯色半透明（color-mix 52%~62%），**不用毛玻璃** */
-      --modal-mask:rgba(15,23,42,.52);
+      /* 遮罩用**纯黑加透明度**（用户反馈 slate 蓝灰看着偏蓝）；
+         官方同为纯色半透明、不用毛玻璃，只换色相 */
+      --modal-mask:rgba(0,0,0,.55);
 
       /* 阴影：极淡的 slate 双层（参考项目的招牌） */
       --sh-1:0 1px 2px rgba(15,23,42,.025), 0 10px 28px rgba(15,23,42,.035);
@@ -427,7 +429,8 @@
     /* 抽屉遮罩：移动端展开时点击空白处收起 */
     .side-scrim{
       display:none; position:fixed; inset:0; z-index:39;
-      background:rgba(15,23,42,.35);
+      /* 纯黑加透明度，与弹窗/确认框遮罩统一（原 slate 蓝灰偏蓝） */
+      background:rgba(0,0,0,.40);
     }
     @media (max-width:900px){
       /* 遮罩淡入（与抽屉的位移动画同时进行，观感更连贯） */
@@ -639,12 +642,14 @@
     #confirmMask{
       position:fixed; inset:0; z-index:70; display:none;
       align-items:center; justify-content:center; padding:1rem;
-      background:transparent;
+      /* 之前是 transparent：删除确认框弹出来背后不发暗，且阴影色
+         rgba(17,24,39) 偏蓝 —— 统一改成纯黑加透明度的遮罩 */
+      background:rgba(0,0,0,.45);
     }
     #confirmMask.show{ display:flex; }
     .confirm-box{
       background:#fff; border-radius:1rem; width:min(26rem,94vw);
-      box-shadow:0 24px 60px rgba(17,24,39,.24); overflow:hidden;
+      box-shadow:0 24px 60px rgba(0,0,0,.30); overflow:hidden;
       animation:pop .18s var(--ease-out);
     }
     @keyframes pop{ from{opacity:0;transform:scale(.94) translateY(8px);} to{opacity:1;transform:none;} }
@@ -1406,7 +1411,20 @@
           <button type="button" data-account-filter="disabled" aria-pressed="false" onclick="setAccountFilter('disabled')">已禁用 <span class="filter-count" id="filterDisabledCount">0</span></button>
         </div>
         <div class="account-tools">
-          <label class="account-search"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="accSearch" oninput="renderAccPage(1)" placeholder="搜索名称 / UID" aria-label="搜索账号名称或 UID" /></label>
+          <label class="account-search"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="accSearch" oninput="accSearchInput()" placeholder="搜索名称 / UID" aria-label="搜索账号名称或 UID" /></label>
+          <label class="account-search" style="max-width:150px"><input id="accMinCredits" type="number" min="0" placeholder="积分≥" oninput="accListReload()" style="max-width:64px" aria-label="积分下限" /><span style="margin:0 2px;color:var(--fg-subtle)">–</span><input id="accMaxCredits" type="number" min="0" placeholder="≤" oninput="accListReload()" style="max-width:56px" aria-label="积分上限" /></label>
+          <select id="accSort" onchange="accListReload()" class="border rounded-lg px-2 py-1.5 text-xs" aria-label="排序" style="background:var(--bg-input);color:var(--fg)">
+            <option value="id_desc">最新添加</option>
+            <option value="credits_desc">积分 高→低</option>
+            <option value="credits_asc">积分 低→高</option>
+            <option value="name_asc">名称 A→Z</option>
+            <option value="synced_desc">最近同步</option>
+          </select>
+          <select id="accPageSize" onchange="accListReload()" class="border rounded-lg px-2 py-1.5 text-xs" aria-label="每页条数" style="background:var(--bg-input);color:var(--fg)">
+            <option value="50">50 条/页</option>
+            <option value="100">100 条/页</option>
+            <option value="200">200 条/页</option>
+          </select>
           <button type="button" id="accountJobStatus" onclick="showAccountJob()" class="console-btn" hidden>执行中 · 查看进度</button>
           <button type="button" data-account-batch onclick="accountBatchAction(refreshAll)" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg>刷新全部</button>
           <details class="action-menu" id="accountBatchMenu">

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -93,10 +93,16 @@ def import_batch(body: ImportBatchIn, _: bool = Depends(require_admin),
 
 @router.get("/accounts")
 def list_accounts(realm: str = "", _: bool = Depends(require_admin),
-                  db: Session = Depends(get_db)):
+                  db: Session = Depends(get_db), request: Request = None):
     from admin.platform.qoder.platform_gateway import QoderAccountOps
+    from admin.platform.shared import list_page_params
 
-    return QoderAccountOps(_realm_or_400(realm)).list(db)
+    lp = list_page_params(request)
+    return QoderAccountOps(_realm_or_400(realm)).list(
+        db, page=lp["page"] if lp["paginated"] else None,
+        page_size=lp["page_size"], search=lp["search"], status=lp["status"],
+        sort=lp["sort"], min_credits=lp["min_credits"],
+        max_credits=lp["max_credits"])
 
 
 @router.post("/accounts/{acc_id}/refresh")

@@ -7,7 +7,10 @@ function uiConfirm(opts) {
 
   const danger = opts.danger !== false; // 默认按危险操作处理（多为删除/覆盖）
   const kind = opts.kind || (danger ? "danger" : "info");
-  const icons = { danger: "fa-triangle-exclamation", warn: "fa-circle-exclamation", info: "fa-circle-question" };
+  // ⚠️ key 必须是 `WB_ICON_PATHS` 的**原始 key**（无 `fa-` 前缀）。
+  // 之前写成 `fa-triangle-exclamation`，查表 miss → `ic()` 返回空串，
+  // 删除确认框的图标就成了空白。
+  const icons = { danger: "triangle-exclamation", warn: "circle-exclamation", info: "circle-question" };
   const tones = { danger: "danger", warn: "warn", info: "info" };
 
   $("#confirmIco").className = "confirm-ico " + (tones[kind] || "danger");
@@ -3034,6 +3037,100 @@ function accRow(a) {
 
 
 let _accountPage = 1;
+
+/* ==================== 大号池列表：服务端分页/搜索/筛选 ====================
+ * 号池到几千几万条后，「一次拉全量 + 前端过滤」就是卡顿与崩溃的主因：
+ * 响应几百 MB、innerHTML 一次塞几万行。现在四个平台统一走服务端分页：
+ * 搜索/状态 tab/积分区间/排序都转成 query 参数，一次只取一页。
+ * 无 page 参数的后端行为保持不变（旧调用方/测试不受影响）。 */
+window._accListState = { page: 1, page_size: 50, search: "", status: "",
+                        sort: "id_desc", min: "", max: "" };
+
+function accListQS() {
+  const st = window._accListState;
+  const p = new URLSearchParams();
+  p.set("page", String(st.page));
+  p.set("page_size", String(st.page_size));
+  if (st.search) p.set("search", st.search);
+  if (st.status && st.status !== "all") p.set("status", st.status);
+  if (st.sort && st.sort !== "id_desc") p.set("sort", st.sort);
+  const min = parseFloat(st.min), max = parseFloat(st.max);
+  if (st.min !== "" && !isNaN(min)) p.set("min_credits", String(min));
+  if (st.max !== "" && !isNaN(max)) p.set("max_credits", String(max));
+  return p.toString();
+}
+
+let _accSearchTimer = null;
+function accSearchInput() {
+  clearTimeout(_accSearchTimer);
+  _accSearchTimer = setTimeout(() => {
+    window._accListState.search = (($("#accSearch") || {}).value || "").trim();
+    window._accListState.page = 1;
+    accReloadActive();
+  }, 350);
+}
+
+function accListReload() {
+  const st = window._accListState;
+  st.sort = ($("#accSort") || {}).value || st.sort;
+  st.page_size = parseInt(($("#accPageSize") || {}).value || "50", 10) || 50;
+  st.min = (($("#accMinCredits") || {}).value || "").trim();
+  st.max = (($("#accMaxCredits") || {}).value || "").trim();
+  st.page = 1;
+  accReloadActive();
+}
+
+function accReloadActive() {
+  const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
+  const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  if (storage === "loomy") return loadLoomyAccounts(spec);
+  if (storage === "trae") return loadTraeAccounts(spec);
+  if (storage === "qoder") return loadQoderAccounts(spec);
+  return loadAccounts();
+}
+
+function accPageTo(p) {
+  window._accListState.page = Math.max(1, parseInt(p, 10) || 1);
+  accReloadActive();
+}
+
+/** 当前页勾选的账号 id（导出选中 / 批量操作共用）。 */
+function accSelectedIds() {
+  return [...document.querySelectorAll("#accBody .acc-pick:checked")]
+    .map(b => parseInt(b.dataset.id, 10)).filter(n => !isNaN(n));
+}
+
+function accPickAllToggle(master) {
+  document.querySelectorAll("#accBody .acc-pick").forEach(b => { b.checked = !!master.checked; });
+}
+
+/** 给行 HTML 的 <tr> 后插入勾选列（不动各平台的行构造器）。 */
+function withPick(rowHtml, id) {
+  return String(rowHtml).replace(/<tr(\s[^>]*)?>/i,
+    m => `${m}<td><input type="checkbox" class="acc-pick" data-id="${id}"></td>`);
+}
+
+function pickAllTh() {
+  return `<th style="width:34px"><input type="checkbox" id="accPickAll" onclick="accPickAllToggle(this)" title="全选本页"></th>`;
+}
+
+/** 筛选 tab 计数：服务端模式下来自 summary（全池分布，不随 tab 变化）。 */
+function accServerTabs(summary) {
+  const s = summary || {};
+  const all = $("#filterAllCount");
+  if (all) all.textContent = s.total ?? 0;
+  const act = $("#filterActiveCount");
+  if (act) act.textContent = s.active ?? 0;
+  const dis = $("#filterDisabledCount");
+  if (dis) dis.textContent = s.disabled ?? 0;
+}
+
+function accServerPager(d) {
+  const totalPages = Math.max(1, Math.ceil((d.total || 0) / (d.page_size || window._accListState.page_size)));
+  const pager = $("#accPager");
+  if (pager) pager.innerHTML = pagerHtml(d.total || 0, d.page || 1, totalPages, "accPageTo");
+}
+
 let _overviewRefreshing = false;
 setInterval(async () => {
   if (document.hidden || !TOKEN || $('#app').classList.contains('hidden') || _overviewRefreshing) return;
@@ -3066,7 +3163,7 @@ async function loadAccounts() {
   if (storage === "loomy") {
     return loadLoomyAccounts(platform);
   }
-  const r = await api("/api/accounts"); if (!r.ok) return;
+  const r = await api("/api/accounts?" + accListQS()); if (!r.ok) return;
   // 从 Trae 切回默认平台时把表头/脚注还原（两平台列语义不同，必须显式复位）
   const headEl = $("#accTableHead");
   if (headEl) {
@@ -3115,6 +3212,21 @@ async function loadAccounts() {
     _accountResourceTimer = setTimeout(async () => { await loadAccounts(); await loadModels(); }, 2000);
   }
   _accSummary = s;
+  if (d.paginated) {
+    // 服务端分页：只渲染当前页；tab 计数/汇总来自 SQL 聚合 summary
+    accServerTabs(s);
+    const headElS = $("#accTableHead");
+    if (headElS && !String(headElS.innerHTML).includes("accPickAll")) {
+      headElS.innerHTML = pickAllTh() + headElS.innerHTML;
+    }
+    const bodyS = $("#accBody");
+    if (bodyS) {
+      bodyS.innerHTML = _accData.map(a => withPick(accRow(a), a.id)).join("") ||
+        `<tr><td colspan="7"><div class="account-empty"><strong>没有匹配的账号</strong>试试调整搜索或筛选条件。</div></td></tr>`;
+    }
+    accServerPager(d);
+    return;
+  }
   renderAccPage(_accountPage);
   // 侧栏角标：没打开积分面板也能看到「有额度要作废」
   const expiringN = Number(s.expiring_accounts || 0);
@@ -3182,12 +3294,16 @@ async function loadTraeAccounts(platform) {
   const spec = window.WBPlatform ? window.WBPlatform.spec() : null;
   const realm = (spec && spec.realm) || (platform && platform.realm) || "";
   const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
-  const r = await api("/api/trae/accounts" + qs);
+  const r = await api("/api/trae/accounts" + qs + (qs ? "&" : "?") + accListQS());
   if (!r.ok) return;
   const d = await r.json();
   _traeState.items = d.items || [];
   _traeState.summary = d.summary || {};
   _traeState.loaded = true;
+  _traeState.paginated = Boolean(d.paginated);
+  _traeState.total = d.total || 0;
+  _traeState.page = d.page || 1;
+  _traeState.page_size = d.page_size || window._accListState.page_size;
   const s = _traeState.summary;
   const unit = (_traeState.items[0] || {}).balance_unit === "percent" ? "%" : "";
   $("#overview").innerHTML = `
@@ -3208,7 +3324,7 @@ async function loadTraeAccounts(platform) {
   // 表头/脚注随平台切换：Trae 没有「积分到期」概念，那一列是凭证到期。
   const head = $("#accTableHead");
   if (head) {
-    head.innerHTML = `<th>名称</th><th>状态</th>
+    head.innerHTML = `${pickAllTh()}<th>名称</th><th>状态</th>
       <th class="text-right">额度总量</th><th class="text-right">剩余</th>
       <th>凭证到期</th><th class="text-right">操作</th>`;
   }
@@ -3225,24 +3341,23 @@ async function loadTraeAccounts(platform) {
   // Trae 的账号对象同样有 `status` 字段（active / disabled），
   // 所以直接复用同一套计数逻辑，不需要新概念。
   _accData = _traeState.items || [];
-  const filterAll = $("#filterAllCount");
-  if (filterAll) filterAll.textContent = _accData.length;
-  const filterActive = $("#filterActiveCount");
-  if (filterActive) {
-    filterActive.textContent = _accData.filter(a => a.status === "active").length;
-  }
-  const filterDisabled = $("#filterDisabledCount");
-  if (filterDisabled) {
-    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
-  }
+  accServerTabs(_traeState.paginated ? _traeState.summary
+    : { total: _accData.length,
+        active: _accData.filter(a => a.status === "active").length,
+        disabled: _accData.filter(a => a.status !== "active").length });
 
   const body = $("#accBody");
   if (body) {
-    body.innerHTML = _traeState.items.map(traeRow).join("") ||
-      `<tr><td colspan="6"><div class="account-empty"><strong>还没有 Trae 账号</strong>用上方「导入本机账号」从本机 Trae 客户端读取，或点「扫描本机 Trae」先看看发现了什么。</div></td></tr>`;
+    body.innerHTML = _traeState.items.map(a => withPick(traeRow(a), a.id)).join("") ||
+      `<tr><td colspan="7"><div class="account-empty"><strong>还没有 Trae 账号</strong>用上方「导入本机账号」从本机 Trae 客户端读取，或点「扫描本机 Trae」先看看发现了什么。</div></td></tr>`;
   }
-  const pager = $("#accPager");
-  if (pager) pager.innerHTML = "";
+  if (_traeState.paginated) {
+    accServerPager({ total: _traeState.total, page: _traeState.page,
+                     page_size: _traeState.page_size });
+  } else {
+    const pager = $("#accPager");
+    if (pager) pager.innerHTML = "";
+  }
   // 切到 Trae 平台时该平台没有「积分到期」概念，角标隐藏。
   setSideDot("#sideExpiringDot", 0);
 }
@@ -3258,7 +3373,7 @@ async function loadQoderAccounts(platform) {
   const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
   const realm = (spec && spec.realm) || (platform && platform.realm) || "";
   const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
-  const r = await api("/api/qoder/accounts" + qs);
+  const r = await api("/api/qoder/accounts" + qs + (qs ? "&" : "?") + accListQS());
   if (!r.ok) {
     const body = $("#accBody");
     if (body) {
@@ -3292,7 +3407,7 @@ async function loadQoderAccounts(platform) {
 
   const head = $("#accTableHead");
   if (head) {
-    head.innerHTML = `<th>名称</th><th>状态</th>
+    head.innerHTML = `${pickAllTh()}<th>名称</th><th>状态</th>
       <th class="text-right">套餐额度</th><th class="text-right">资源包</th>
       <th>套餐</th><th class="text-right">操作</th>`;
   }
@@ -3301,27 +3416,23 @@ async function loadQoderAccounts(platform) {
   const footHint = $("#accFootHint");
   if (footHint) footHint.textContent = "Qoder 凭证加密在客户端原生层，额度由网关按 60 秒 TTL 同步";
 
-  // 筛选器计数（与 WorkBuddy 路径一致，缺了会显示「全部 0」）
-  const filterAll = $("#filterAllCount");
-  if (filterAll) filterAll.textContent = _accData.length;
-  const filterActive = $("#filterActiveCount");
-  if (filterActive) {
-    filterActive.textContent = _accData.filter(a => a.status === "active").length;
-  }
-  const filterDisabled = $("#filterDisabledCount");
-  if (filterDisabled) {
-    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
-  }
+  accServerTabs(d.paginated ? s
+    : { total: _accData.length,
+        active: _accData.filter(a => a.status === "active").length,
+        disabled: _accData.filter(a => a.status !== "active").length });
 
   const body = $("#accBody");
   if (body) {
-    body.innerHTML = items.map(qoderRow).join("") ||
-      `<tr><td colspan="6"><div class="account-empty">
+    body.innerHTML = items.map(a => withPick(qoderRow(a), a.id)).join("") ||
+      `<tr><td colspan="7"><div class="account-empty">
         <strong>还没有 Qoder 账号</strong>
         用「导入 PAT」或设备授权添加。</div></td></tr>`;
   }
-  const pager = $("#accPager");
-  if (pager) pager.innerHTML = "";
+  if (d.paginated) accServerPager(d);
+  else {
+    const pager = $("#accPager");
+    if (pager) pager.innerHTML = "";
+  }
   setSideDot("#sideExpiringDot", 0);
 }
 
@@ -3359,7 +3470,7 @@ async function loadLoomyAccounts(platform) {
   const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
   const realm = (spec && spec.realm) || (platform && platform.realm) || "";
   const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
-  const r = await api("/api/loomy/accounts" + qs);
+  const r = await api("/api/loomy/accounts" + qs + (qs ? "&" : "?") + accListQS());
   if (!r.ok) {
     const body = $("#accBody");
     if (body) {
@@ -3373,9 +3484,11 @@ async function loadLoomyAccounts(platform) {
   const s = d.summary || {};
   _accData = items;
 
+  // 服务端分页后，汇总数字来自 **SQL 聚合 summary**（全池口径），
+  // 不能再 sum 当前页 —— 那是「翻到第 3 页可用积分变少」的假象来源。
   const models = items.reduce((max, i) => Math.max(max, i.models || 0), 0);
-  const available = items.reduce((sum, i) => sum + (i.balance_remain || 0), 0);
-  const daily = items.reduce((sum, i) => sum + (i.daily_balance || 0), 0);
+  const available = s.balance_remain ?? items.reduce((sum, i) => sum + (i.balance_remain || 0), 0);
+  const daily = s.credits_expiring_soon ?? items.reduce((sum, i) => sum + (i.daily_balance || 0), 0);
 
   $("#overview").innerHTML = `
     ${statCard("账号总数", s.total ?? 0, { icon: "fa-users", iconColor: "text-slate-400",
@@ -3394,7 +3507,7 @@ async function loadLoomyAccounts(platform) {
 
   const head = $("#accTableHead");
   if (head) {
-    head.innerHTML = `<th>名称</th><th>状态</th>
+    head.innerHTML = `${pickAllTh()}<th>名称</th><th>状态</th>
       <th class="text-right">可用积分</th><th class="text-right">当日额度</th>
       <th class="text-right">模型数</th><th class="text-right">操作</th>`;
   }
@@ -3403,25 +3516,22 @@ async function loadLoomyAccounts(platform) {
   const footHint = $("#accFootHint");
   if (footHint) footHint.textContent = "凭证为客户端明文 auth-session.json，可重复扫描同步";
 
-  const filterAll = $("#filterAllCount");
-  if (filterAll) filterAll.textContent = _accData.length;
-  const filterActive = $("#filterActiveCount");
-  if (filterActive) {
-    filterActive.textContent = _accData.filter(a => a.status === "active").length;
-  }
-  const filterDisabled = $("#filterDisabledCount");
-  if (filterDisabled) {
-    filterDisabled.textContent = _accData.filter(a => a.status === "disabled").length;
-  }
+  accServerTabs(d.paginated ? s
+    : { total: _accData.length,
+        active: _accData.filter(a => a.status === "active").length,
+        disabled: _accData.filter(a => a.status !== "active").length });
 
   const body = $("#accBody");
   if (body) {
-    body.innerHTML = items.map(loomyRow).join("") ||
-      `<tr><td colspan="6"><div class="account-empty">
+    body.innerHTML = items.map(a => withPick(loomyRow(a), a.id)).join("") ||
+      `<tr><td colspan="7"><div class="account-empty">
         <strong>还没有 Loomy 账号</strong>点上方「扫描本机」自动导入。</div></td></tr>`;
   }
-  const pager = $("#accPager");
-  if (pager) pager.innerHTML = "";
+  if (d.paginated) accServerPager(d);
+  else {
+    const pager = $("#accPager");
+    if (pager) pager.innerHTML = "";
+  }
   setSideDot("#sideExpiringDot", 0);
 }
 
@@ -4438,12 +4548,17 @@ async function platformImportPasteSubmit(base) {
  * Loomy 的凭证是明文 JSON，可以直接导入（用户零操作）；
  * Qoder 的凭证加密在原生层，导入会返回需要 PAT/设备流的提示。
  */
-async function platformImportLocal(spec, storage) {
+/** 执行导入（扫描弹窗里「导入这些凭证」按钮的落点）。
+ *
+ * `uids`：用户在扫描弹窗里勾选的账号（null = 全部）。
+ * loomy 后端的 import-local 已支持 uids 过滤；不支持的平台忽略该字段。
+ */
+async function platformImportConfirm(spec, storage, uids) {
   const path = platformImportPath(spec, storage);
   const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
   // 必须带 JSON body：ImportLocalIn 是必填模型，空 body 会 422
   // （WorkBuddy 的「导入本机」就是这么失效的）。all=true = 导入目录下全部账号。
-  const payload = id === "qoder" ? { all: true } : { all: true };
+  const payload = (uids && uids.length) ? { uids, all: false } : { all: true };
   const r = await api(path, platformActionOptions(spec, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4464,6 +4579,47 @@ async function platformImportLocal(spec, storage) {
   openModal(`<h3 class="font-semibold text-lg mb-2">没有导入任何账号</h3>
     <p class="text-sm" style="color:var(--fg-muted)">${esc(hint)}</p>
     ${data.scanned ? `<p class="text-xs mt-2" style="color:var(--fg-subtle)">已扫描 ${data.scanned} 项</p>` : ""}`);
+}
+
+async function platformImportLocal(spec, storage) {
+  const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
+  // WorkBuddy / CodeBuddy 保持原有直接导入（它们有自己的专用扫描弹窗）。
+  // 其它平台（loomy 等）改成**两步**：先扫描把凭证摆出来，用户确认才导入——
+  // 之前点「导入」是静默 {all:true} 全导，用户反馈「啥都没选就提示导入成功」。
+  if (id !== "workbuddy" && id !== "codebuddy") {
+    const realm = (spec && spec.realm) || "";
+    const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+    const prefix = platformApiPrefix(spec, storage);
+    try {
+      const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
+      const { ok, data } = await safeJson(r);
+      if (ok && data && (data.items || []).length) {
+        await showScanResult(data, spec, storage);
+        return;
+      }
+      if (ok && data && !data.can_import) {
+        // 扫描成功但明确说没有可导入凭证：把原因摆出来，别再闷头导入
+        await showScanResult(data, spec, storage);
+        return;
+      }
+      // scan-local 404 等情况：落到下面的显式确认弹窗
+    } catch (e) { /* 没有 scan-local 接口的平台走确认弹窗 */ }
+    const label = esc((spec && spec.label) || storage);
+    openModal(`<h3 class="font-semibold text-lg mb-1">确认导入 · ${label}</h3>
+      <p class="text-sm mb-3" style="color:var(--fg-muted)">
+        将从本机客户端登录态导入凭证到号池。确认执行？</p>
+      <div class="flex gap-2 justify-end">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+        <button id="impGoBtn" class="px-3 py-1.5 rounded-lg btn-primary">确认导入</button>
+      </div>`, "max-w-md");
+    $("#impGoBtn")?.addEventListener("click", () => {
+      closeModal();
+      platformImportConfirm(spec, storage, null)
+        .catch(error => toast("导入失败：" + error.message, "err"));
+    });
+    return;
+  }
+  await platformImportConfirm(spec, storage, null);
 }
 
 /**
@@ -4719,20 +4875,26 @@ async function showScanResult(data, spec, storage) {
   };
   // 用**表格**展示，而不是裸 <li>：一列一个含义，路径过长自动省略，
   // 鼠标悬停看完整路径。之前所有信息挤在一行里，路径一长就没法读。
+  // 可导入的项加**勾选框**：导入变成「用户明确选择」——
+  // 之前点「导入」直接静默全导（用户反馈：啥都没选就提示导入成功）。
   const rows = items.map((it, index) => {
     // 字段名各平台不同，这里把实际返回的全列出来（WorkBuddy 用
-    // nickname / file / domain；Loomy 用 session / source；
+    // nickname / file / domain；Loomy 用 session / source / userid；
     // Qoder 用 account_id / uid_hint）。漏一个就会显示成空值。
     const where = pick(it, ["source", "file", "data_dir", "dir", "path"]);
     const who = pick(it, ["nickname", "session", "account_id", "uid_hint",
                           "uid", "phone", "name"]);
+    const uid = pick(it, ["userid", "uid", "account_id", "uid_hint"]);
     const realm = pick(it, ["realm", "domain"]);
     // WorkBuddy 不返回 has_plain_credential（它的 .info 本身就是明文），
     // 有文件就视为可导入；其它平台仍看这个字段。
     const ok = Boolean(it.has_plain_credential) || Boolean(it.file);
     const note = pick(it, ["note", "credential_error"]);
+    const pickbox = (ok && uid)
+      ? `<input type="checkbox" class="scan-pick" data-uid="${esc(String(uid))}" checked>`
+      : "";
     return `<tr>
-      <td class="scan-idx">${index + 1}</td>
+      <td class="scan-idx">${pickbox || (index + 1)}</td>
       <td>${ok
         ? '<span class="scan-ok">可导入</span>'
         : '<span class="scan-miss">不可导入</span>'}</td>
@@ -4790,8 +4952,13 @@ async function showScanResult(data, spec, storage) {
     platformBeginAuth(spec, storage).catch(error => toast("授权失败：" + error.message, "err"));
   });
   $("#scanImportLocal")?.addEventListener("click", () => {
+    // 只导入**用户勾选**的凭证（勾选框由 can_import 的行渲染；
+    // 无勾选框的平台保持全量导入语义）
     closeModal();
-    platformImportLocal(spec, storage).catch(error => toast("导入失败：" + error.message, "err"));
+    const picked = [...document.querySelectorAll("#modalBox .scan-pick:checked")]
+      .map(b => b.dataset.uid).filter(Boolean);
+    platformImportConfirm(spec, storage, picked.length ? picked : null)
+      .catch(error => toast("导入失败：" + error.message, "err"));
   });
 }
 
@@ -4954,7 +5121,11 @@ function setAccountFilter(status) {
   document.querySelectorAll("[data-account-filter]").forEach(button => {
     button.setAttribute("aria-pressed", String(button.dataset.accountFilter === status));
   });
-  renderAccPage(1);
+  // 服务端分页模式：状态筛选交给后端（tab 计数来自 summary 全池分布）
+  const st = window._accListState;
+  st.status = (status === "all") ? "" : status;
+  st.page = 1;
+  accReloadActive();
 }
 document.addEventListener("click", event => {
   const menu = document.getElementById("accountBatchMenu");
@@ -6909,12 +7080,19 @@ async function openExport() {
       </select>
     </label>
     <label class="block text-sm mb-3">导出范围
-      <select id="expScope" class="w-full border rounded-lg px-3 py-2 mt-2">
+      <select id="expScope" class="w-full border rounded-lg px-3 py-2 mt-2" onchange="expScopeChanged()">
         <option value="all">全部（可用 ${active} + 禁用 ${disabled}）</option>
         <option value="active">仅可用账号（${active}）</option>
         <option value="disabled">仅禁用账号（${disabled}）</option>
+        <option value="selected">勾选的账号（在账号列表里勾选）</option>
+        <option value="slice">分片导出（第 X 片 × 每片 N 条）</option>
       </select>
     </label>
+    <div id="expSliceBox" class="hidden text-sm mb-3" style="color:var(--fg-muted)">
+      第 <input id="expSliceIndex" type="number" min="1" value="1" class="border rounded-lg px-2 py-1 w-16" /> 片 ·
+      每片 <input id="expSliceSize" type="number" min="1" value="500" class="border rounded-lg px-2 py-1 w-24" /> 条
+      <span class="text-xs" style="color:var(--fg-subtle)">按「最新添加」顺序切片；配合排序可按积分切</span>
+    </div>
     <label class="block text-sm mb-3">筛选账号（可留空）
       <input id="expKeyword" type="text" placeholder="按名称 / uid 关键字筛选" class="w-full border rounded-lg px-3 py-2 mt-2" />
     </label>
@@ -6936,13 +7114,35 @@ async function openExport() {
 }
 
 /** 异步导出：后台线程逐条写出文件并上报进度，前端有进度条，完成后可下载。 */
+function expScopeChanged() {
+  const scope = (document.getElementById('expScope') || {}).value || 'all';
+  const box = document.getElementById('expSliceBox');
+  if (box) box.classList.toggle('hidden', scope !== 'slice');
+}
+
 async function exportAsync() {
   const scope = (document.getElementById('expScope') || {}).value || 'all';
   const format = (document.getElementById('expFormat') || {}).value || 'backup';
   const keyword = ((document.getElementById('expKeyword') || {}).value || '').trim();
   const limit = parseInt((document.getElementById('expLimit') || {}).value || '0', 10) || 0;
   const body = { format, ids: [], keyword, limit };
-  if (scope === 'active') body.status = 'active';
+  if (scope === 'selected') {
+    // **勾选导出**：只导用户在列表里明确勾选的账号
+    const ids = accSelectedIds();
+    if (!ids.length) {
+      toast('请先在账号列表勾选要导出的账号', 'err');
+      return;
+    }
+    body.ids = ids;
+  } else if (scope === 'slice') {
+    // **分片导出**：offset+limit 取一段 —— 几十万号池一片一片导，
+    // 不把导出队列堵死，也方便「先处理完这一片再导下一片」。
+    const idx = Math.max(1, parseInt((document.getElementById('expSliceIndex') || {}).value || '1', 10) || 1);
+    const size = Math.max(1, parseInt((document.getElementById('expSliceSize') || {}).value || '500', 10) || 500);
+    body.offset = (idx - 1) * size;
+    body.limit = size;
+    body.include_disabled = true;
+  } else if (scope === 'active') body.status = 'active';
   else if (scope === 'disabled') body.status = 'disabled';
   else body.include_disabled = true;   // 「当前平台全部」= 可用 + 禁用
   await runJob({
@@ -6989,7 +7189,16 @@ async function _fetchExport() {
   const lim = parseInt($('#expLimit')?.value || '0', 10) || 0;
   if (kw) body.keyword = kw;
   if (lim > 0) body.limit = lim;
-  if (scope === 'active') body.status = 'active';
+  if (scope === 'selected') {
+    body.ids = accSelectedIds();
+    if (!body.ids.length) { toast('请先在账号列表勾选要导出的账号', 'err'); return null; }
+  } else if (scope === 'slice') {
+    const idx = Math.max(1, parseInt(($('#expSliceIndex') || {}).value || '1', 10) || 1);
+    const size = Math.max(1, parseInt(($('#expSliceSize') || {}).value || '500', 10) || 500);
+    body.offset = (idx - 1) * size;
+    body.limit = size;
+    body.include_disabled = true;
+  } else if (scope === 'active') body.status = 'active';
   else if (scope === 'disabled') body.status = 'disabled';
   else body.include_disabled = true;
   const r = await api("/api/accounts/export", {

@@ -52,8 +52,10 @@ class QoderAccountOps:
         self.realm = realm
 
     # ---- 列表 ----
-    def list(self, db):
-        """账号列表（**会同步 DB 余额**）。
+    def list(self, db, *, page: int | None = None, page_size: int = 50,
+             search: str = "", status: str = "", sort: str = "id_desc",
+             min_credits=None, max_credits=None):
+        """账号列表（**会同步 DB 余额**）；支持服务端分页（大号池优化）。
 
         ## 为什么要写回 DB
 
@@ -66,8 +68,33 @@ class QoderAccountOps:
         列表是高频读（每次切平台、每次刷新页面），每次全量拉上游会打爆它。
         `QUOTA_TTL`（60 秒）内直接用缓存，超出才拉。
         """
+        from admin.models import Account
+        from admin.platform.shared import (apply_account_filters,
+                                           account_order,
+                                           summarize_accounts_sql)
+
+        def _base_query():
+            q = db.query(Account).filter(Account.platform == "qoder")
+            if self.realm:
+                q = q.filter(Account.domain == self.realm)
+            return q
+
         usage_map = {}
-        rows = qoder_accounts.accounts_for(db, self.realm)
+        query = _base_query()
+        query = apply_account_filters(
+            query, Account, search=search, status=status,
+            min_credits=min_credits, max_credits=max_credits)
+        query = account_order(query, Account, sort)
+        paginated = page is not None
+        if paginated:
+            from sqlalchemy import func as _func
+
+            total = int(query.with_entities(
+                _func.count(Account.id)).scalar() or 0)
+            rows = (query.offset((max(1, page) - 1) * page_size)
+                    .limit(page_size).all())
+        else:
+            rows = query.all()
         refreshed = False
         for account in rows:
             if qoder_accounts.quota_is_fresh(account):
@@ -97,7 +124,17 @@ class QoderAccountOps:
 
         views = [qoder_accounts.public_view(a, usage=usage_map.get(a.id))
                  for a in rows]
-        return {"items": views, "summary": qoder_accounts.summarize(views)}
+        if not paginated:
+            return {"items": views,
+                    "summary": qoder_accounts.summarize(views)}
+        # tab 计数不吃状态筛选
+        agg_q = apply_account_filters(
+            _base_query(), Account, search=search, status="",
+            min_credits=min_credits, max_credits=max_credits)
+        return {"items": views,
+                "summary": summarize_accounts_sql(agg_q, Account),
+                "paginated": True, "total": total,
+                "page": max(1, page), "page_size": page_size}
 
     # ---- 扫描本机 ----
     def scan(self):

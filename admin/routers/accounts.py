@@ -173,6 +173,9 @@ class ExportAsyncIn(BaseModel):
     #: 条数上限（0 = 不限）。配合 keyword / status 做分批导出：
     #: 例如先导 500 个，处理完再导下一批。
     limit: int = 0
+    #: 起始偏移。与 limit 组合 = **分片导出**（第 N 片 = offset=(N-1)*片大小,
+    #: limit=片大小）—— 号池几十万条时一片一片导，不把导出队列堵死。
+    offset: int = 0
 
 
 class ImportAsyncIn(BaseModel):
@@ -409,6 +412,8 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
         q = q.filter(func.coalesce(Account.name, "").like(like)
                      | func.coalesce(Account.uid, "").like(like))
     q = q.order_by(Account.id.asc())
+    if body.offset and body.offset > 0:
+        q = q.offset(int(body.offset))
     if body.limit and body.limit > 0:
         q = q.limit(int(body.limit))
     ids = [r[0] for r in q.all()]
@@ -890,10 +895,29 @@ def list_accounts(request: Request = None,
     except Exception:  # noqa: BLE001 - 测试桩可能没有 query_params
         all_platforms = False
 
-    query = db.query(Account).order_by(Account.id.desc())
+    # ---- 服务端分页 / 搜索 / 筛选（大号池优化）----
+    # 无 `page` 参数 = 旧的全量行为（Key 表单多选等旧调用方不受影响）；
+    # 前端账号池传 page 后只回当前页 + SQL 聚合 summary。
+    from admin.platform.shared import (list_page_params, apply_account_filters,
+                                       account_order, summarize_accounts_sql)
+
+    lp = list_page_params(request)
+
+    query = db.query(Account)
     if not all_platforms:
         query = platform_scope.filter_accounts(query, db, platform, realm)
-    rows = query.all()
+    query = apply_account_filters(
+        query, Account, search=lp["search"], status=lp["status"],
+        min_credits=lp["min_credits"], max_credits=lp["max_credits"])
+    query = account_order(query, Account, lp["sort"])
+
+    if not lp["paginated"]:
+        rows = query.all()
+        total = len(rows)
+    else:
+        total = int(query.with_entities(func.count(Account.id)).scalar() or 0)
+        rows = (query.offset((lp["page"] - 1) * lp["page_size"])
+                .limit(lp["page_size"]).all())
     owners = binding_owners(db)
     now = datetime.utcnow()
     limits = _active_model_limits(db, now)
@@ -942,6 +966,22 @@ def list_accounts(request: Request = None,
     #
     # 已禁用账号那部分**不隐藏、但单独给**（disabled_*），
     # 这样既不污染「可用」，又不至于让人以为数据丢了。
+    if lp["paginated"]:
+        # ---- 分页模式：summary 走 **SQL 聚合**（同平台/搜索/积分筛选，
+        # 但**不含状态筛选**——筛选 tab 的计数要显示全池分布，不能被
+        # 当前 tab 自己过滤掉）。令牌统计（token_*/renewal_*）需要逐号
+        # 解析凭证 JSON，只有全量模式才有；分页模式的消费方（账号池
+        # 概览卡）不读这些键。
+        agg_q = db.query(Account)
+        if not all_platforms:
+            agg_q = platform_scope.filter_accounts(agg_q, db, platform, realm)
+        agg_q = apply_account_filters(
+            agg_q, Account, search=lp["search"], status="",
+            min_credits=lp["min_credits"], max_credits=lp["max_credits"])
+        summary = summarize_accounts_sql(agg_q, Account)
+        return {"items": items, "summary": summary, "paginated": True,
+                "total": total, "page": lp["page"],
+                "page_size": lp["page_size"]}
     active_items = [i for i in items if i["status"] == "active"]
     disabled_items = [i for i in items if i["status"] != "active"]
     # 令牌统计的样本：只看支持这套凭证结构的平台（见 `_token_fields`）。

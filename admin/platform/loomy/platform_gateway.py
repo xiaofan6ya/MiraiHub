@@ -33,38 +33,100 @@ class LoomyAccountOps:
     def __init__(self, realm: str = ""):
         self.realm = realm
 
-    def list(self, db):
-        """账号列表。
+    def list(self, db, *, page: int | None = None, page_size: int = 50,
+             search: str = "", status: str = "", sort: str = "id_desc",
+             min_credits=None, max_credits=None):
+        """账号列表（支持服务端分页 / 搜索 / 筛选）。
 
-        **会同步 DB 列**：admin 的 `/api/accounts` 读的是列，
-        不写回会导致前端账号池显示旧数据。
+        ## 两种模式
+
+        * `page=None`（默认）：旧行为，全量返回 —— 兼容旧调用方。
+        * `page` 传入：服务端分页。**关键性能点**：`sync_quota` 是逐账号
+          打上游的，全池几十万条时列表页会卡几分钟；分页模式只对**当前页**
+          的 stale 账号做同步，其余读快照。summary 走 SQL 聚合
+          （口径与全量版一致：积分类只算 active）。
+
+        搜索/筛选/排序复用 `admin.platform.shared` 的通用助手，
+        与通用 `/api/accounts` 同一套语义。
         """
+        from sqlalchemy import func as _func
+
+        from admin.models import Account
+        from admin.platform.shared import (apply_account_filters,
+                                           account_order,
+                                           summarize_accounts_sql)
+
+        query = db.query(Account).filter(Account.platform == "loomy")
+        if self.realm:
+            query = query.filter(Account.domain == self.realm)
+        query = apply_account_filters(
+            query, Account, search=search, status=status,
+            min_credits=min_credits, max_credits=max_credits)
+        query = account_order(query, Account, sort)
+
+        if page is None:
+            views = []
+            for account in query.all():
+                views.append(loomy_accounts.public_view(
+                    account, quota=self._quota_of(db, account)))
+            db.commit()
+            return {"items": views,
+                    "summary": loomy_accounts.summarize(views)}
+
+        total = int(query.with_entities(_func.count(Account.id)).scalar() or 0)
+        rows = (query.offset((max(1, page) - 1) * page_size)
+                .limit(page_size).all())
         views = []
-        for account in loomy_accounts.accounts_for(db, self.realm):
-            quota = None
-            if not loomy_accounts.quota_is_fresh(account):
+        for account in rows:
+            views.append(loomy_accounts.public_view(
+                account, quota=self._quota_of(db, account)))
+        db.commit()
+
+        # summary 不含 status 筛选（筛选 tab 显示全池分布）
+        agg_q = db.query(Account).filter(Account.platform == "loomy")
+        if self.realm:
+            agg_q = agg_q.filter(Account.domain == self.realm)
+        agg_q = apply_account_filters(
+            agg_q, Account, search=search, status="",
+            min_credits=min_credits, max_credits=max_credits)
+        return {"items": views,
+                "summary": summarize_accounts_sql(agg_q, Account),
+                "paginated": True, "total": total,
+                "page": max(1, page), "page_size": page_size}
+
+    def _quota_of(self, db, account) -> dict | None:
+        """单账号的积分视图；stale 才打上游同步（分页时只发生在当前页）。
+
+        ⚠️ 同步失败必须兜住：原来 sync_quota 抛错（token 失效/网络断）会
+        让**整个列表 500**——一个坏号拖死所有号的展示。
+        """
+        if not loomy_accounts.quota_is_fresh(account):
+            try:
                 # 用 sync_quota 而不是 fetch_quota ——
                 # 前者**同时**拉积分余额与模型数（fetch_quota 只探模型，
                 # 用它会导致余额永远显示 0）
                 result = loomy_accounts.sync_quota(db, account)
                 if result.get("ok"):
-                    quota = result.get("quota")
-            else:
-                try:
-                    snap = json.loads(account.credits_snapshot or "{}")
-                except ValueError:
-                    snap = {}
-                quota = snap if isinstance(snap, dict) else None
-            views.append(loomy_accounts.public_view(account, quota=quota))
-        db.commit()
-        return {"items": views, "summary": loomy_accounts.summarize(views)}
+                    return result.get("quota")
+            except Exception:  # noqa: BLE001 - 单账号失败不影响列表
+                pass
+            return None
+        try:
+            snap = json.loads(account.credits_snapshot or "{}")
+        except ValueError:
+            snap = {}
+        return snap if isinstance(snap, dict) else None
 
     def scan(self):
         return loomy_scan.discover()
 
-    def import_local(self, db):
-        """本机导入 —— **Loomy 的主路径**（明文 JSON，用户零操作）。"""
-        return loomy_accounts.import_from_local(db)
+    def import_local(self, db, uids: list[str] | None = None):
+        """本机导入 —— **Loomy 的主路径**。
+
+        uids：前端「扫描 → 勾选 → 确认」里用户明确选中的账号；
+        None = 全部导入（兼容定时任务等老调用方）。
+        """
+        return loomy_accounts.import_from_local(db, uids=uids)
 
     def import_record(self, db, record):
         return loomy_accounts.import_record(db, record)

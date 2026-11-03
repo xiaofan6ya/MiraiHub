@@ -195,10 +195,17 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
-def import_from_local(db: Session) -> dict:
-    """从本机 auth-session.json 导入（**用户什么都不用做**）。
+def import_from_local(db: Session, uids: list[str] | None = None) -> dict:
+    """从本机 auth-session.json 导入。
 
-    这是 Loomy 的主路径：凭证是明文 JSON，直接读。
+    ## uids 过滤（「导入」不再是静默全导）
+
+    前端已改为「扫描 → 弹窗展示 → 用户点确认」两步；uids 是用户在
+    弹窗里**明确勾选**的账号（扫描结果里的 userid）。为 None 时保持
+    旧行为（全部导入）—— 兼容老调用方（platform_gateway/定时任务）。
+
+    本机通常只有一份 auth-session.json，但过滤语义必须存在：将来
+    FALLBACK_DIRS 里出现多份凭证时，不该再把「用户没选的」也灌进号池。
     """
     from admin.platform.loomy.services import scan
 
@@ -215,6 +222,20 @@ def import_from_local(db: Session) -> dict:
         "name": "Loomy %s" % (str(creds.get("phone") or "")[-4:] or "account"),
         "expires_at": 0,
     }
+    if uids is not None:
+        wanted = {str(u or "").strip() for u in uids}
+        wanted.discard("")
+        # 前端勾选框携带的是**扫描结果里的打码 uid**（discover 不回完整
+        # token/uid），所以这里同时接受完整 uid 与打码形态的匹配。
+        if wanted and record["uid"] and record["uid"] not in wanted:
+            from admin.platform.loomy.services import scan as _scan
+
+            masked_uid = _scan.mask(record["uid"])
+            masked_phone = _scan.mask(record["phone"]) if record["phone"] else ""
+            if masked_uid not in wanted and masked_phone not in wanted:
+                return {"ok": False, "imported": 0, "reason": "not_selected",
+                        "hint": "本机凭证（uid %s…）不在勾选范围内，未导入"
+                                % record["uid"][:6]}
     result = import_record(db, record)
     return {"ok": True, "imported": 1, **result}
 

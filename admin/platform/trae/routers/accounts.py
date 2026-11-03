@@ -97,12 +97,46 @@ def meta(_: bool = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 # 账号
 # ---------------------------------------------------------------------------
+def _trae_base_query(db, realm: str):
+    """trae 账号的基础查询（platform + 区域），供列表/聚合共用。"""
+    from admin.models import Account
+
+    q = db.query(Account).filter(Account.platform == "trae")
+    if realm:
+        q = q.filter(Account.domain == realm)
+    return q
+
+
 @router.get("/accounts")
 def list_accounts(realm: str = "", _: bool = Depends(require_admin),
-                  db: Session = Depends(get_db)):
-    """号池列表（含额度与到期快照）。"""
+                  db: Session = Depends(get_db), request: Request = None):
+    """号池列表（含额度与到期快照）。
+
+    无 `page` 参数 = 旧的全量行为；传 `page` 走服务端分页 +
+    SQL 聚合 summary（大号池渲染/内存优化，与通用 /api/accounts 同语义）。
+    """
+    from admin.platform.shared import (list_page_params, apply_account_filters,
+                                       account_order, summarize_accounts_sql)
+
     realm = _realm_or_400(realm) if realm else ""
-    rows = trae_pool.accounts_for(db, realm)
+    lp = list_page_params(request)
+
+    query = _trae_base_query(db, realm)
+    query = apply_account_filters(
+        query, Account, search=lp["search"], status=lp["status"],
+        min_credits=lp["min_credits"], max_credits=lp["max_credits"])
+    query = account_order(query, Account, lp["sort"])
+
+    if lp["paginated"]:
+        from sqlalchemy import func as _func
+
+        total = int(query.with_entities(
+            _func.count(Account.id)).scalar() or 0)
+        rows = (query.offset((lp["page"] - 1) * lp["page_size"])
+                .limit(lp["page_size"]).all())
+    else:
+        rows = query.all()
+
     items = []
     for row in rows:
         view = trae_accounts.public_view(row)
@@ -126,6 +160,16 @@ def list_accounts(realm: str = "", _: bool = Depends(require_admin),
             "last_err_msg": row.last_err_msg or "",
             **view,
         })
+    if lp["paginated"]:
+        # tab 计数不吃状态筛选（显示全池分布）
+        agg_q = apply_account_filters(
+            _trae_base_query(db, realm), Account, search=lp["search"],
+            status="", min_credits=lp["min_credits"],
+            max_credits=lp["max_credits"])
+        return {"items": items,
+                "summary": summarize_accounts_sql(agg_q, Account),
+                "paginated": True, "total": total,
+                "page": lp["page"], "page_size": lp["page_size"]}
     return {"items": items, "summary": trae_pool.summarize(rows)}
 
 

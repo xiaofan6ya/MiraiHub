@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -64,10 +64,23 @@ def scan_local(_: bool = Depends(require_admin)):
     return loomy_scan.discover()
 
 
+class ImportLocalIn(BaseModel):
+    """本机导入参数。
+
+    uids：前端「扫描 → 勾选 → 确认」里用户选中的账号 userid。
+    省略 body（或 uids=None）= 全部导入 —— 兼容旧调用方。
+    """
+
+    uids: list[str] | None = None
+
+
 @router.post("/import-local")
-def import_local(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """从本机 `auth-session.json` 一键导入（用户零操作）。"""
-    return loomy_accounts.import_from_local(db)
+def import_local(body: ImportLocalIn | None = None,
+                 _: bool = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """从本机 `auth-session.json` 导入（前端两步确认后调用）。"""
+    return loomy_accounts.import_from_local(
+        db, uids=body.uids if body else None)
 
 
 class ImportIn(BaseModel):
@@ -103,10 +116,16 @@ def import_batch(body: ImportBatchIn, _: bool = Depends(require_admin),
 
 @router.get("/accounts")
 def list_accounts(realm: str = "", _: bool = Depends(require_admin),
-                  db: Session = Depends(get_db)):
+                  db: Session = Depends(get_db), request: Request = None):
     from admin.platform.loomy.platform_gateway import LoomyAccountOps
+    from admin.platform.shared import list_page_params
 
-    return LoomyAccountOps(_realm_or_400(realm)).list(db)
+    lp = list_page_params(request)
+    return LoomyAccountOps(_realm_or_400(realm)).list(
+        db, page=lp["page"] if lp["paginated"] else None,
+        page_size=lp["page_size"], search=lp["search"], status=lp["status"],
+        sort=lp["sort"], min_credits=lp["min_credits"],
+        max_credits=lp["max_credits"])
 
 
 @router.post("/accounts/{acc_id}/refresh")

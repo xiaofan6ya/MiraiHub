@@ -582,3 +582,126 @@ def model_known(db: Session, storage: str, model: str) -> bool:
             .filter(ModelConfig.model_id == model,
                     ModelConfig.platform == storage,
                     ModelConfig.enabled == 1).first() is not None)
+
+
+# ---------------------------------------------------------------------------
+# 账号列表：服务端分页 / 搜索 / 筛选（大号池的渲染与内存优化）
+# ---------------------------------------------------------------------------
+def list_page_params(request, *, default_page_size: int = 50,
+                     max_page_size: int = 200) -> dict:
+    """从 query 参数解析列表分页/筛选条件。
+
+    **无 `page` 参数 = 旧的全量行为**（兼容既有调用方与测试）；
+    前端传 `page` 后进入服务端分页模式 —— 号池几千几万条时，
+    全量 JSON 响应就是「系统越用越卡」的主因。
+
+    返回 dict：
+        paginated / page / page_size / search / status / sort /
+        min_credits / max_credits
+    """
+    return _list_page_params(request, default_page_size=default_page_size,
+                             max_page_size=max_page_size)
+
+
+def _list_page_params(request, *, default_page_size: int,
+                      max_page_size: int) -> dict:
+    out: dict = {"paginated": False, "page": 1, "page_size": default_page_size,
+                 "search": "", "status": "", "sort": "id_desc",
+                 "min_credits": None, "max_credits": None}
+    try:
+        qp = request.query_params
+    except Exception:  # noqa: BLE001 - 测试桩可能没有 query_params
+        return out
+    try:
+        page = int(str(qp.get("page") or "").strip() or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if page <= 0:
+        return out
+    out["paginated"] = True
+    out["page"] = page
+    try:
+        out["page_size"] = min(max_page_size,
+                               max(1, int(str(qp.get("page_size") or "")
+                                          .strip() or default_page_size)))
+    except (TypeError, ValueError):
+        out["page_size"] = default_page_size
+    out["search"] = str(qp.get("search") or qp.get("keyword") or "").strip()
+    out["status"] = str(qp.get("status") or "").strip().lower()
+    out["sort"] = str(qp.get("sort") or "").strip().lower() or "id_desc"
+    for key in ("min_credits", "max_credits"):
+        raw = str(qp.get(key) or "").strip()
+        if raw:
+            try:
+                out[key] = float(raw)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def apply_account_filters(q, model, *, search: str = "", status: str = "",
+                          min_credits=None, max_credits=None):
+    """账号列表的通用过滤（搜索名称/UID + 状态 + 积分区间）。"""
+    from sqlalchemy import func as _func
+
+    if search:
+        like = "%" + search + "%"
+        q = q.filter(_func.coalesce(model.name, "").like(like)
+                     | _func.coalesce(model.uid, "").like(like))
+    if status in ("active", "disabled"):
+        q = q.filter(model.status == status)
+    if min_credits is not None:
+        q = q.filter(model.balance_remain >= min_credits)
+    if max_credits is not None:
+        q = q.filter(model.balance_remain <= max_credits)
+    return q
+
+
+def account_order(q, model, sort: str = "id_desc"):
+    """排序白名单（防注入：直接映射列，不拼字符串）。"""
+    order = {
+        "id_asc": model.id.asc(),
+        "credits_desc": model.balance_remain.desc(),
+        "credits_asc": model.balance_remain.asc(),
+        "name_asc": model.name.asc(),
+        "synced_desc": model.last_sync_at.desc(),
+    }.get(sort)
+    return q.order_by(order) if order is not None else q.order_by(model.id.desc())
+
+
+def summarize_accounts_sql(q, model) -> dict:
+    """账号列表 summary 的 **SQL 聚合版**。
+
+    与 list_accounts 全量版的 Python 口径一致：**积分类合计只算
+    active 账号**，已禁用账号的余额单独给 `disabled_balance_remain`。
+    全量模式要 hydrated items 才能算（令牌统计等需要解析 JSON），
+    分页模式用这里的 SQL 版 —— 几十万行也不会拖慢翻页。
+    """
+    from sqlalchemy import func as _func
+
+    total = int(q.with_entities(_func.count(model.id)).scalar() or 0)
+    aq = q.filter(model.status == "active")
+    active = int(aq.with_entities(_func.count(model.id)).scalar() or 0)
+
+    def _sum(q2, col):
+        return int(q2.with_entities(_func.sum(col)).scalar() or 0)
+
+    soonest = aq.filter(model.credits_soonest_expire_at.isnot(None)).with_entities(
+        _func.min(model.credits_soonest_expire_at)).scalar()
+    return {
+        "total": total,
+        "active": active,
+        "disabled": total - active,
+        "available": int(aq.filter(model.balance_remain > 0)
+                         .with_entities(_func.count(model.id)).scalar() or 0),
+        "balance_total": _sum(aq, model.balance_total),
+        "balance_remain": _sum(aq, model.balance_remain),
+        "disabled_balance_remain": _sum(
+            q.filter(model.status != "active"), model.balance_remain),
+        "credits_expiring_soon": _sum(aq, model.credits_expiring_soon),
+        "credits_evergreen": _sum(aq, model.credits_evergreen),
+        "credits_expired": _sum(aq, model.credits_expired),
+        "expiring_accounts": int(aq.filter(model.credits_expiring_soon > 0)
+                                 .with_entities(_func.count(model.id)).scalar() or 0),
+        "soonest_expire_at": soonest.isoformat() if soonest else None,
+    }
