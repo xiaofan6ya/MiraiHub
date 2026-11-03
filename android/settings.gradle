@@ -1,7 +1,13 @@
+// aliyun 镜像为国内本地构建提速；GitHub Actions 等海外 CI 访问 aliyun 常年 502，
+// 会直接打断依赖解析，因此 CI 环境（CI=true）跳过镜像、直连官方源。
+def useAliyunMirror = System.getenv('CI') != 'true'
+
 pluginManagement {
     repositories {
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        if (useAliyunMirror) {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -10,8 +16,10 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/public' }
+        if (useAliyunMirror) {
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
         google()
         mavenCentral()
     }
