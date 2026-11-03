@@ -475,6 +475,12 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   flex-wrap:wrap;
   gap:6px;
 }
+/* `[hidden]{display:none}` 是 UA 样式，优先级低于上面这条 `display:flex`，
+   所以直接 `el.hidden = true` 是**无效**的 —— WorkBuddy 的按钮会和非 WB
+   平台的动作按钮同时排在「添加与迁移账号」里（用户看到两排乱按钮，
+   还会点到属于 WorkBuddy 的「扫描本机」，扫出来一堆 WorkBuddy 号）。
+   必须显式覆盖。 */
+.intake-actions[hidden] { display:none !important; }
 .intake-divider {
   width:1px;
   height:22px;
