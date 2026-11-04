@@ -84,11 +84,12 @@ def meta(_: bool = Depends(require_admin)):
         "auth": "Bearer JWT（HS256，iss=xiaohuanxiong.com/iam）",
         "quota_kind": "balance",
         "note": "积分制；有 refresh 接口但 refreshToken 与 accessToken 同值",
-        "auth_mode": "import-only",
+        "auth_mode": "device-auth",
         "auth_explain": (
-            "小浣熊客户端用 Electron LevelDB 保存登录态（非明文），"
-            "且不是每台机器都安装。凭证请通过导入添加："
-            "支持 agent2api 导出的 agent2api-account JSON、裸 JWT、或原生对象。"
+            "两种入库方式：①「扫描本机」读取客户端登录态"
+            "（~/.office-raccoon/agent/config/auth.json，明文 IAM JWT）；"
+            "②「授权登录」扫码免客户端入库——官方小程序扫码，手机确认，"
+            "无需滑块与短信验证码。也支持粘贴 agent2api JSON / 裸 JWT。"
         ),
     }
 
@@ -263,10 +264,76 @@ def usage(realm: str = "", days: int = 30, _: bool = Depends(require_admin),
 
 @router.get("/scan-local")
 def scan_local(_: bool = Depends(require_admin)):
-    """明确告知不支持本机扫描（而不是返回空列表）。"""
+    """扫描本机客户端登录态（auth.json，逆向 boxAgentAuthFile.js 确认）。"""
     from admin.platform.raccoon.platform_gateway import RaccoonAccountOps
 
     return RaccoonAccountOps("").scan()
+
+
+class ImportLocalIn(BaseModel):
+    uids: list[str] | None = None
+
+
+class AuthCancelIn(BaseModel):
+    auth_id: str = ""
+
+
+@router.post("/import-local")
+def import_local(body: ImportLocalIn | None = None,
+                 _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """本机凭证入库（前端「扫描 → 勾选 → 确认」两步）。"""
+    from admin.platform.raccoon.platform_gateway import RaccoonAccountOps
+
+    return RaccoonAccountOps("").import_local(
+        db, uids=body.uids if body else None)
+
+
+# ---------------------------------------------------------------------------
+# 扫码授权（免客户端）：官方 IAM 小程序扫码登录，成功即入库
+# ---------------------------------------------------------------------------
+@router.post("/auth/begin")
+def auth_begin(_: bool = Depends(require_admin)):
+    """创建扫码会话：返回 auth_id + 二维码内容（前端渲染二维码）。"""
+    from admin.platform.raccoon.services import webauth
+
+    try:
+        return webauth.begin()
+    except RuntimeError as exc:
+        raise HTTPException(502, detail="官方授权服务不可用：%s" % exc) from exc
+
+
+@router.get("/auth/poll")
+def auth_poll(auth_id: str = "", _: bool = Depends(require_admin),
+              db: Session = Depends(get_db)):
+    """轮询扫码状态；success 时已入库。"""
+    from admin.platform.raccoon.services import webauth
+
+    if not auth_id.strip():
+        raise HTTPException(400, detail="缺少 auth_id")
+    return webauth.poll(db, auth_id.strip())
+
+
+@router.get("/auth/qr.svg")
+def auth_qr_svg(auth_id: str = "", _: bool = Depends(require_admin)):
+    """二维码 SVG（后端渲染，控制台 CSP 只放行同源资源）。"""
+    from admin.platform.raccoon.services import webauth
+
+    with webauth._lock:
+        sess = webauth._sessions.get(auth_id.strip())
+    if sess is None:
+        raise HTTPException(404, detail="授权会话不存在或已过期")
+    from fastapi.responses import Response
+
+    svg = webauth.qr_svg(sess["qr_value"])
+    return Response(svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.post("/auth/cancel")
+def auth_cancel(body: AuthCancelIn, _: bool = Depends(require_admin)):
+    from admin.platform.raccoon.services import webauth
+
+    return webauth.cancel(body.auth_id)
 
 
 @router.get("/checkin")

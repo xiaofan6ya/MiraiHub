@@ -4018,6 +4018,76 @@ async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
 
+  // 小浣熊：官方 IAM 小程序**扫码授权**（免客户端/免滑块/免短信）。
+  // 后端调官方 /api/iam/v1/auth/mp/qrcode 创建会话并返回二维码内容；
+  // 用户手机扫码确认后，轮询即拿到已入库的账号 —— 滑块与验证码
+  // 都由官方体系在手机端处理，网页端没有任何反爬环节。
+  if (id === "raccoon") {
+    let begin;
+    try {
+      begin = await api("/api/raccoon/auth/begin", { method: "POST" });
+    } catch (e) {
+      toast("开始扫码授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok, data } = await safeJson(begin);
+    if (!ok || !data || !data.auth_id) {
+      toast("开始扫码授权失败：" + ((data && data.detail) || "未返回授权会话"), "err");
+      return;
+    }
+    const qrSrc = "/api/raccoon/auth/qr.svg?auth_id=" + encodeURIComponent(data.auth_id);
+    openModal(`<h3 class="font-semibold text-lg mb-1">扫码授权 · 商汤小浣熊</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted)">
+        请用<b>微信</b>或<b>商汤小浣熊 App</b> 扫描下方二维码，并在手机上确认登录。
+        确认后凭证自动入库，全程无需客户端与短信验证码。</p>
+      <div class="flex flex-col items-center gap-3 py-2">
+        <img src="${qrSrc}" alt="授权二维码" width="220" height="220"
+             style="background:#fff;border-radius:12px;padding:8px;border:1px solid var(--line)">
+        <div id="raccoonAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待扫码…</div>
+      </div>
+      <div class="flex justify-end mt-2">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+      </div>`, "max-w-sm");
+    const intervalMs = Math.max(1000, (data.poll_interval || 2) * 1000);
+    const statusEl = () => $("#raccoonAuthStatus");
+    const modalGone = () => {
+      const m = $("#modal");
+      return !m || m.classList.contains("hidden");
+    };
+    const tick = async () => {
+      if (modalGone()) return; // 用户关掉弹窗即停止轮询
+      let st = null;
+      try {
+        const r = await api("/api/raccoon/auth/poll?auth_id=" + encodeURIComponent(data.auth_id));
+        st = (await safeJson(r)).data;
+      } catch (e) { /* 网络抖动：下一轮再试 */ }
+      const status = (st && st.status) || "pending";
+      const el = statusEl();
+      if (status === "done") {
+        if (el) { el.textContent = "✅ 授权成功，账号已入库"; el.style.color = "var(--success)"; }
+        toast("扫码授权成功，账号已入库");
+        loadAccounts();
+        return;
+      }
+      if (status === "logging" && el) el.textContent = "已扫码，请在手机上确认…";
+      if (status === "expired") {
+        if (el) { el.textContent = "二维码已过期，请重新发起授权"; el.style.color = "var(--danger)"; }
+        return;
+      }
+      if (status === "canceled") {
+        if (el) el.textContent = "授权已取消";
+        return;
+      }
+      if (status === "failed") {
+        if (el) { el.textContent = "授权失败：" + ((st && st.error) || "未知原因"); el.style.color = "var(--danger)"; }
+        return;
+      }
+      setTimeout(tick, intervalMs);
+    };
+    setTimeout(tick, intervalMs);
+    return;
+  }
+
   // Trae 没有 PKCE 设备端点：这里的「授权登录」= 打开官方登录页拿 IDE 登录态，
   // 登录后本机 storage.json 会更新，回到这里点「扫描本机」即可导入。
   // 之前 Trae 的登录入口是「贴网页 Cookie」—— 那只是用量查询用的，不是登录。

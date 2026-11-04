@@ -81,29 +81,44 @@ class RaccoonAccountOps:
         return {"items": views, "summary": raccoon_accounts.summarize(views)}
 
     def scan(self):
-        """本机扫描：不支持。
+        """本机扫描（**已支持**）。
 
-        返回结构保持与支持扫描的平台一致（`items` 为空 + `supported`），
-        这样前端「扫描本机」按钮点下去能得到一句人话解释，而不是空列表。
+        逆向 `@raccoonoffice-desktop`（build/electron/main/agent/
+        boxAgentAuthFile.js）确认：客户端登录态是**明文 auth.json**
+        （`BOX_AGENT_CONFIG_DIR` 或 `~/.office-raccoon/agent/config/auth.json`，
+        IAM JWT + office_identity）。PR #9 时代的 LevelDB 结论不成立。
         """
-        return {
-            "supported": False,
-            "items": [],
-            "data_dirs": [],
-            "reason": "electron_leveldb",
-            "summary": "小浣熊登录态存在 Electron LevelDB 中，不是明文文件，无法直接扫描",
-            "hint": "请在 agent2api 中登录后导出账号 JSON，再用「导入」批量添加；"
-                    "或直接粘贴 JWT。",
-        }
+        from admin.platform.raccoon.services import scan as raccoon_scan
 
-    def import_local(self, db):
-        """本机导入：与 scan 同理，不支持。"""
-        return {
-            "supported": False,
-            "imported": 0,
-            "reason": "electron_leveldb",
-            "hint": "请使用「导入凭证」粘贴 agent2api 导出的 JSON 或裸 JWT。",
-        }
+        return raccoon_scan.discover()
+
+    def import_local(self, db, uids: list[str] | None = None):
+        """本机导入：读取客户端 auth.json 入库（uid 过滤口径同 loomy）。
+
+        uids 是前端「扫描 → 勾选 → 确认」里用户选中的 uid；None = 全部。
+        """
+        from admin.platform.raccoon.services import scan as raccoon_scan
+
+        creds = raccoon_scan.read_credentials()
+        if not creds:
+            return {"supported": True, "imported": 0, "reason": "no_local_credential",
+                    "hint": "没找到客户端登录态（~/.office-raccoon/agent/config/auth.json）。"
+                            "请先在客户端登录，或改用「授权登录」扫码入库。"}
+        if uids is not None:
+            wanted = {str(u or "").strip() for u in uids}
+            wanted.discard("")
+            if creds.get("uid") and creds["uid"] not in wanted:
+                return {"supported": True, "imported": 0, "reason": "not_selected",
+                        "hint": "本机凭证不在勾选范围内，未导入"}
+        record = {"token": creds["token"], "uid": creds.get("uid") or "",
+                  "expiresAt": creds.get("expiresAt"), "source": "scan-local"}
+        try:
+            raccoon_accounts.import_record(db, record)
+            db.commit()
+        except ValueError as exc:
+            return {"supported": True, "imported": 0,
+                    "reason": "invalid_credential", "hint": str(exc)}
+        return {"supported": True, "imported": 1}
 
     def import_record(self, db, record):
         """导入单条。返回 `(账号, 是否新建)`（契约要求）。"""
