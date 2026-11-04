@@ -195,36 +195,63 @@ assert sentinel.status("qoder")["total_events"] == 1    # 只有 1 条
 
 ---
 
-## 四、余额/额度必须实时，不能只读 DB 缓存
+## 四、余额要"新"，但**列表接口绝不许同步打上游**
 
-### 症状
+### 先看症状与代价（2026-11-04 实测）
 
-用户消耗了 1 积分，账号池仍显示旧值（`400` 而不是 `399`）。
+用户消耗了 1 积分，账号池显示的是旧值 —— 这确实要修。
+但第一版修法是**在 `list()` 里对每个过期账号同步拉一次上游**：
 
-### 根因：两条读路径
-
+```python
+for account in rows:
+    if quota_is_fresh(account): continue
+    usage = fetch_usage(...)      # ← 一次上游 HTTP，串行
 ```
-/api/qoder/accounts      → 平台 account_ops().list()  → 实时拉上游 ✅
-/api/accounts            → 直读 Account.balance_remain 这一列  ❌ 旧值
-/api/overview            → 概览卡片读 credits_snapshot        ❌ 旧值
-```
 
-`admin/routers/accounts.py` 是**平台无关**的聚合接口，
-它不调平台的 `account_ops().list()`。
+50 个号的池子实测 **2.82 秒**，几千个号就是几十秒。
+用户的原话是「这几个接口太慢了」——**慢的就是它**。
 
-### 修法：在 `list()` 里写回 DB
+### 铁律
+
+> **展示数据不许挡住页面渲染。** 列表接口只读 DB 快照，
+> 刷新交给后台线程。
 
 ```python
 def list(self, db):
+    views, stale = [], []
     for account in rows:
-        if quota_is_fresh(account):        # TTL 内用缓存，不打爆上游
-            continue
-        usage = fetch_usage(...)
-        _apply_usage(account, usage)       # ← 写回 DB 列
-    db.commit()                            # 两条读路径都看到新值
+        if not quota_is_fresh(account):
+            stale.append(account.id)
+        views.append(public_view(account, quota=snapshot_of(account)))
+    if stale:
+        from admin.platform import shared
+        shared.kick_background_refresh(
+            "<platform>", stale,
+            lambda session, account: sync_quota(session, account),
+            max_items=8, min_gap=10.0)
+    return {"items": views, ...}
 ```
 
-TTL 取 60 秒：用户感知得到变化，又不会每次刷页面都打上游。
+`shared.kick_background_refresh()` 已经封好四件事，**不要自己起线程**：
+
+| 约束 | 值 | 为什么 |
+|---|---|---|
+| 单飞 | 同平台同时只有 1 个刷新线程 | 防止翻页把线程开爆 |
+| 限频 | 10 秒/次 | 列表每 30 秒刷一次，够用 |
+| 限量 | 一次 8 个号 | 一轮最多 8 次 RTT，藏在后台 |
+| 不冒泡 | 异常只回滚自己的 Session | 后台任务不能掀翻请求 |
+
+### 两条读路径仍要一致
+
+```
+/api/<平台>/accounts   → 平台 list()，只读快照
+/api/accounts          → 直读 Account.balance_remain 列
+/api/overview          → 概览卡片读 credits_snapshot
+```
+
+后台刷新会 `apply_quota()` 写回这三列/快照，所以**三条路径看到的是同一份数字**，
+只是它可能比上游晚几秒。这是刻意的取舍：**显示晚 5 秒 > 页面卡 3 秒**。
+用户想立刻要最新值，界面上有「刷新额度」按钮（走 `refresh()`，同步打上游）。
 
 ### 多桶额度要合并
 
@@ -239,14 +266,22 @@ total  = userQuota.total     + addOnQuota.total
 > 只看 `userQuota` 会以为「签到没生效」——
 > 签到额度落在 `addOnQuota`，套餐那个桶不变。
 
-### 验证
+### 验证（两条都要过）
 
 ```python
+import time
 account.credits_synced_at = None      # 强制过期
-ops.list(db)
+t0 = time.perf_counter()
+ops.list(db)                          # ← 只读快照 + 丢后台
+elapsed = time.perf_counter() - t0
+assert elapsed < 0.2, "列表仍在同步打上游（实测应 <200ms）"
+
+time.sleep(3)                         # 等后台把余额写回
 db.refresh(account)
 assert account.balance_remain == 399  # 299 套餐 + 100 签到
 ```
+
+> 只断言第二条会漏掉「接口慢」；只断言第一条会漏掉「后台没写回」。
 
 ---
 
@@ -286,6 +321,21 @@ $("#filterAllCount").textContent = _accData.length;
 [ ] 余额：多桶合并（套餐 + 资源包）
 [ ] 前端：两条账号路径维护同一组状态变量
 [ ] 验证：切换平台后余额、筛选器、卡片都变了
+[ ] 路由：>256KB / chunked 请求仍能走对平台（跑 check_hotpath.py）
+[ ] 路由：同名不同写法的模型，上游回显的是该平台真实 id
+[ ] 计费：落库倍率非 -1；短请求积分 = tokens × mult / 1000
+[ ] 积分：空结构不覆盖余额；刷新失败会弹上游原文
+[ ] 凭证：扫描→导入→导出→回灌 全链路一次通过
+[ ] 路径：`core/paths.py` 里没有任何盘符 / `C:\Users` / 绝对路径常量
+[ ] 路径：只提供固定目录名，位置走 `admin.platform.install_paths.resolve()`
+[ ] 路径：`platform_gateway.probe()` 调 `app_exe_candidates()` / `data_dir_candidates()` 函数
+[ ] 路径：换盘 / 加一层父文件夹（`E:\AI\<Product>`）仍能扫到；`<PID>_INSTALL_DIR` 覆盖生效
+[ ] 路径：`discover()` 冷启动 <200ms，连续两次调用第二次走缓存
+[ ] 路径：脚手架 `scaffold.py` 生成的 `core/paths.py` 已接入 `install_paths`
+[ ] 会话 id：同一段对话连发两次，上游收到的会话 id **完全一致**
+[ ] 会话 id：换账号发同一段对话，会话 id **必须不同**（不跨号乱串）
+[ ] 会话 id：`MsgId` / `TurnId` / `requestId` **每次不同**（去重键，复用会少记账）
+[ ] 会话 id：全仓 `grep -rn "uuid4\|token_hex" <平台目录>` 没有任何一处用于会话 id
 ```
 
 ---
@@ -298,3 +348,74 @@ $("#filterAllCount").textContent = _accData.length;
 | `PlatformSpec.load_gateway()` **不存在** | `AttributeError`（被 except 吞掉） |
 | Qoder 余额 = `userQuota` + `addOnQuota` | 实时值 `299 + 100 = 399` |
 | 循环探测 26 个图标 × 20s 超时 = 用户等待 400 秒 | 实际发生，被要求「有这么慢吗」 |
+
+
+---
+
+## 八、上游会话 id：只许**稳定派生**，不许随机 / 伪造
+
+新平台最常见的两个"看不见的错"之一（另一个是路径写死盘符）。
+很多上游要求客户端自带一个会话/聊天 id：Loomy 的 `ChatId`、Qoder 的
+`session_id`、WorkBuddy 的 `X-Conversation-ID`。
+
+**规则：必须从下游（客户端）真实会话标识稳定派生；同账号 + 同对话恒定。
+禁止 `uuid4()`，禁止凭空造一个随机串，禁止"为了看起来真实"而随机化。**
+
+### 为什么
+
+1. 上游前缀缓存按会话算 —— id 每次都换 = 每次全新对话，系统提示、工具定义、
+   历史消息全部重算；表现是**首字延迟高、费用高、缓存命中率永远 0**。
+2. 一个号几分钟内"新建"几十个会话，是风控眼里最典型的脚本形状。
+
+### 唯一入口
+
+```python
+from admin import pool
+
+sid = pool.stable_session_id(
+    "<platform>",                       # 平台存储名
+    int(account.id or 0),               # 账号 id（换号必须换 id）
+    body,                               # 下游请求体（从中取真实会话标识）
+    prefix="gwchat-", size=16,          # 按上游 id 的形状给
+)
+```
+
+内部规则：
+
+```
+会话键（确定性，无随机分支）：
+  1. 客户端显式标识：metadata.conversation_id / conversation_id / prompt_cache_key
+  2. 没有 → 首条 user 文本的 sha256（同一段对话恒定）
+  3. 连消息都没有（探测/空请求）→ 每账号一个固定会话
+会话 id = sha256("平台 | 账号 id | 会话键")[:size]
+```
+
+三条自检：
+
+| 检查 | 期望 |
+|---|---|
+| 同账号同一段对话，连发两次 | 会话 id 相同 |
+| 换账号发同一段对话 | 会话 id 不同 |
+| 客户端完全没给会话标识 | 仍恒定（首条消息派生 / 每账号一个），**不是随机** |
+
+### 哪些 id 必须每次唯一（别搞反）
+
+| id | 生命周期 |
+|---|---|
+| `ChatId` / `session_id` / `X-Conversation-ID` | 会话级，**稳定** |
+| `MsgId` / `TurnId` | **每请求唯一**（去重，复用会覆盖消息） |
+| `X-Conversation-Request-ID` | **每次上游调用唯一**（上游用它当去重键，复用会少记账） |
+
+### 验证（不看代码，看行为）
+
+```
+[ ] 同一对话两次请求 → 抓包/日志里的会话 id 一致
+[ ] 换号同一对话     → 会话 id 不同
+[ ] 一次流式请求     → MsgId 与上次不同
+[ ] 上游用量接口     → 该账号会话数增长 ≈ 真实对话数（不是请求数）
+```
+
+> 反例（2026-11-04 实际代码）：Loomy `chat_headers()` 里
+> `chat_id = "gwchat-" + uuid4().hex[:16]`、Qoder `build_upstream_body()` 里
+> `session_id = "sess-" + uuid4().hex[:16]`、`proxy._turn_headers()` 在客户端
+> 没给会话标识时留空 —— 三处都等于"每请求新会话"。详见 FIXED-BUGS 五·补47。

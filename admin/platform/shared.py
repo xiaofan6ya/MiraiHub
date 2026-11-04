@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 
@@ -226,14 +227,102 @@ def key_scope(key: ApiKey | None) -> tuple[int | None, int | None]:
 # ---------------------------------------------------------------------------
 # 选号
 # ---------------------------------------------------------------------------
+#: 后台快照刷新的状态：name -> {"running": bool, "at": monotonic}
+_SNAPSHOT_REFRESH: dict[str, dict] = {}
+_SNAPSHOT_REFRESH_LOCK = threading.Lock()
+
+
+def kick_background_refresh(name: str, account_ids, worker, *,
+                            max_items: int = 8, min_gap: float = 10.0) -> bool:
+    """把「刷新过期的额度快照」丢到后台线程，**不阻塞当前请求**。
+
+    ## 为什么额度刷新不能留在请求路径里
+
+    账号列表接口（`/accounts`）是面板每次刷新都会打的。原实现会在请求线程里
+    对**每个快照过期的号**同步调一次上游 HTTP 且串行 —— 50 个号的池子稳定
+    2~3 秒，几百个号直接几十秒。用户看到的「这几个接口太慢」就是它。
+
+    额度是**展示数据**：晚半秒没人受影响，但它挡住整页渲染就是问题。
+    所以列表只读 DB 快照立刻返回，刷新丢到这里。
+
+    约束（避免后台线程失控）：
+      · **单飞**：同一个 `name` 同一时刻只有一个刷新线程；
+      · **限频**：两次刷新至少间隔 `min_gap` 秒（翻页很频繁，不能每页都排）；
+      · **限量**：一次最多刷 `max_items` 个号；
+      · **绝不冒泡**：任何异常都吞掉，只回滚自己的 Session。
+
+    `worker(session, account)` 负责真正的同步；本函数替它提交/回滚。
+    """
+    ids = [int(x) for x in (account_ids or []) if x]
+    if not ids:
+        return False
+    now = time.monotonic()
+    with _SNAPSHOT_REFRESH_LOCK:
+        state = _SNAPSHOT_REFRESH.setdefault(name, {"running": False, "at": 0.0})
+        if state["running"] or now - state["at"] < min_gap:
+            return False
+        state["running"] = True
+        state["at"] = now
+    targets = ids[:max_items]
+
+    def run() -> None:
+        from admin.db import SessionLocal
+        from admin.models import Account
+
+        try:
+            with SessionLocal() as session:
+                for account_id in targets:
+                    try:
+                        account = session.get(Account, account_id)
+                        if account is None:
+                            continue
+                        worker(session, account)
+                        session.commit()
+                    except Exception:  # noqa: BLE001 - 单个号失败不影响其它
+                        try:
+                            session.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
+        except Exception:  # noqa: BLE001 - 后台任务绝不冒泡
+            logger.debug("后台刷新快照失败 name=%s", name, exc_info=True)
+        finally:
+            with _SNAPSHOT_REFRESH_LOCK:
+                _SNAPSHOT_REFRESH[name]["running"] = False
+
+    threading.Thread(target=run, name="%s-snapshot-refresh" % name,
+                     daemon=True).start()
+    return True
+
+
 def select_account(db: Session, *, storage: str, realm: str = "",
                    key: ApiKey | None = None, model: str = "",
-                   exclude_ids=None, now: datetime | None = None) -> Account | None:
-    """健康 + 归属 + 冷却 + 在途 过滤后，选**最闲**的一个号。
+                   exclude_ids=None, now: datetime | None = None,
+                   min_balance: int | None = None,
+                   ignore_capacity: bool = False) -> Account | None:
+    """健康 + 归属 + 冷却 + 在途 + 余额 过滤后，选**最闲**的一个号。
 
     与 WorkBuddy 的 `_select_account` 同口径，只是平台/区域由调用方给定。
     之前 Qoder/Loomy 直接 `accounts_for()[0]`：不看在途、不看冷却、
     不看 Key 绑定 —— 并发一上来就全砸同一个号。
+
+    ## `min_balance`（余额下限）
+
+    余额为 0 的号**凭证是好的**，但调用必然被上游打回（Loomy 回 402
+    insufficient_quota）。不在这里挡掉，就只能靠「撞一次 402 → 冷却 600 秒
+    → 换号」，而冷却到期后它又会排回队首（这些号从没成功过，
+    `last_used_at` 恒为 NULL，而选号按它升序）—— 于是每 10 分钟又要
+    白撞几次 402。用户感受到的就是「一直 402，用不了」。
+
+    `None` = 不过滤（默认，保持其它平台行为不变）；NULL 余额视为未知，
+    仍然放行（历史数据没同步过余额，不该被误杀）。
+
+    ## `ignore_capacity`（不要用 `None` 冒充"号用完了"）
+
+    `POOL.available()` 会把**在途已满**的号滤掉。对 CodeArts 这种
+    "只有 1 个号、并发靠排队"的平台，这会让 `select_account()` 返回 `None`，
+    调用方于是报「没有可用账号」——号明明在，只是此刻都在途。
+    置 True 就先返回最闲的那个（哪怕在途满），由调用方的
+    `lease()` 失败分支去**排队**，而不是把"忙"说成"没有号"。
     """
     from admin.account_binding import scope_accounts
     from admin.pool import POOL
@@ -247,6 +336,9 @@ def select_account(db: Session, *, storage: str, realm: str = "",
         query = query.filter(Account.domain == realm)
     if exclude_ids:
         query = query.filter(~Account.id.in_(exclude_ids))
+    if min_balance is not None:
+        query = query.filter(or_(Account.balance_remain.is_(None),
+                                 Account.balance_remain > min_balance))
     query = query.filter(or_(Account.cool_until.is_(None), Account.cool_until <= now))
     query = query.filter(or_(Account.breaker_until.is_(None), Account.breaker_until <= now))
     query = query.filter(or_(Account.degrade_until.is_(None), Account.degrade_until <= now))
@@ -263,11 +355,19 @@ def select_account(db: Session, *, storage: str, realm: str = "",
         if not rows:
             return None
 
-    rows = POOL.available(rows)
+    rows = POOL.available(rows) if not ignore_capacity else rows
     if not rows:
         return None
+    # 排序因子（从前到后）：
+    #   1. 在途数 —— 优先最闲的号；
+    #   2. **余额已知的优先** —— `min_balance` 只是「0 不进候选」，
+    #      NULL（从没同步过余额）仍然放行，于是新导入的 100 个号里
+    #      会混着一些其实是 0 积分的号，每次选中都白撞一个 402。
+    #      把「已知有余额」排前面，未知的当兜底，失败率立刻降下来。
+    #   3. 最久没用过的优先；最后按 id 稳定排序。
     account = min(rows, key=lambda row: (
         POOL.inflight.count(row.uid or ""),
+        0 if row.balance_remain is not None else 1,
         row.last_used_at or datetime.min,
         row.id))
     account.last_picked_at = now
@@ -523,6 +623,68 @@ def _int(value) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+#: 认可的下游思考档位（OpenAI 的 minimal~high + 一些客户端的 xhigh/max/ultra）。
+REASONING_EFFORTS = frozenset({
+    "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    "auto",
+})
+
+
+def reasoning_effort_of(body: dict) -> str:
+    """从下游请求体里读出「思考程度」，只保留有限枚举，绝不落原始 payload。
+
+    三种写法都要认（客户端的方言不统一）：
+
+      * OpenAI：`reasoning_effort: "high"`
+      * Responses：`reasoning: {"effort": "high"}`
+      * Anthropic：`thinking: {"type": "enabled", "budget_tokens": 8192}`
+
+    Anthropic 没有档位概念，只有预算，所以按预算记成 `budget:<n>`；
+    这比"统一折算成 high"更诚实 —— 日志里要能看出客户端到底要了多少。
+
+    **为什么这个函数必须放 shared**：以前只有 WorkBuddy 那条主链路
+    （`proxy.py`）记了它，CodeArts / Loomy / Qoder / Trae / Raccoon 各自记账时
+    一个字都没传，于是用量日志里这些平台永远是「默认 / 未记录」——
+    看起来像"用户没设"，实际是"网关没记"。
+    """
+    if not isinstance(body, dict):
+        return ""
+    effort = body.get("reasoning_effort") or body.get("reasoningEffort")
+    reasoning = body.get("reasoning")
+    if not effort:
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else reasoning
+    if isinstance(effort, str) and effort.strip().lower() in REASONING_EFFORTS:
+        return effort.strip().lower()
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        if thinking.get("type") == "disabled":
+            return "off"
+        budget = thinking.get("budget_tokens")
+        if isinstance(budget, int) and not isinstance(budget, bool) and 0 <= budget <= 10**9:
+            return "budget:%d" % budget
+        if thinking.get("type") in ("enabled", "adaptive"):
+            return str(thinking["type"])
+    return ""
+
+
+def reasoning_effort_of_request(request) -> str:
+    """从请求作用域里取原始 body 再解析档位（记账用）。
+
+    `PlatformDispatchMiddleware` 会把预读到的（并已按目标平台改写 model 的）
+    body 缓存在 `scope["_wb_body"]` 里，所以记账时不必让每个调用点都把
+    body 一路传下来 —— 平台网关的 `_bill()` 只有 request 没有 body。
+
+    解析失败一律返回空串：档位是**观测字段**，绝不能因为它让记账失败。
+    """
+    try:
+        raw = request.scope.get("_wb_body")
+        if isinstance(raw, (bytes, bytearray)) and raw:
+            return reasoning_effort_of(json.loads(raw))
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def _storage_platform(public_platform: str, storage: str = "") -> str:

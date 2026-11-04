@@ -19,6 +19,16 @@ _active = {}
 _waiters = {}
 _total_waiters = 0
 _signals = {}
+#: 进程内租约登记表：token -> (Admission, 过期时刻 monotonic)。
+#:
+#: 为什么要有它：`_active[key]` 只是「当前有几路在途」的计数，**谁占着**
+#: 没有登记。于是只要有一条收尾路径没调到 `release()`（任务被取消、
+#: 生成器没关、中间件抛错），这个名额就永远回不来 —— 表现为「并发被
+#: 打满、排队不回收」，只能重启进程。有了登记表就能按时间兜底回收。
+_leases: dict[str, tuple] = {}
+_lease_sweep_at = 0.0
+#: 租约最长存活：网关请求超时 + 120 秒冗余。超过它一定不是「还在正常跑」。
+_LEASE_GRACE_S = 120.0
 _redis = None
 _redis_initialized = False
 _redis_lock = threading.Lock()
@@ -82,6 +92,89 @@ class Admission:
         self.released = False
         self.client = None
         self.token = uuid.uuid4().hex
+        #: 拿到名额的时刻（monotonic）。回收线程据此判断「占了多久没还」。
+        self.started = time.monotonic()
+
+
+def lease_ttl_seconds() -> float:
+    """一个名额最多允许占用多久（秒）。"""
+    try:
+        base = float(getattr(settings, "GATEWAY_REQUEST_TIMEOUT", 300) or 300)
+    except (TypeError, ValueError):
+        base = 300.0
+    return max(60.0, base + _LEASE_GRACE_S)
+
+
+def _lease_of(admission) -> float:
+    """登记一个进程内租约，返回它的过期时刻。"""
+    deadline = time.monotonic() + lease_ttl_seconds()
+    with _lock:
+        _leases[admission.token] = (admission, deadline)
+    return deadline
+
+
+def reclaim_expired(now: float | None = None) -> int:
+    """回收「超期还没归还」的名额，返回回收条数。
+
+    ## 这不是「猜」——阈值有硬依据
+
+    网关在 `GATEWAY_REQUEST_TIMEOUT`（默认 300s）时会 `cancel()` 掉整条
+    请求任务，正常路径上 `finally` 一定跑过 `release()`。所以一个名额
+    被占用超过 `timeout + 120s`，只可能是收尾路径丢了（取消竞态、
+    生成器没关、中间件异常），不可能是「请求还在正常跑」。
+
+    以前没有任何兜底：丢一次就永久少一路并发，丢满 `MAX_CONCURRENT` 次
+    整个网关就再也接不进新请求 —— 只能重启。用户看到的正是这个。
+    """
+    now = now if now is not None else time.monotonic()
+    with _lock:
+        expired = [(adm, dl) for adm, dl in _leases.values() if dl <= now]
+    released = 0
+    for admission, deadline in expired:
+        try:
+            _logger.warning(
+                "回收超期未归还的并发名额 key=%s token=%s 占用 %.1fs（阈值 %.0fs）",
+                admission.key, admission.token[:8], now - (deadline - lease_ttl_seconds()),
+                lease_ttl_seconds())
+            release(admission)
+            released += 1
+        except Exception:  # noqa: BLE001
+            _logger.debug("回收名额失败", exc_info=True)
+    return released
+
+
+def _maybe_sweep(now: float) -> None:
+    """限频清扫：最多 5 秒一次，避免每次准入都遍历登记表。"""
+    global _lease_sweep_at
+    with _lock:
+        if now - _lease_sweep_at < 5.0:
+            return
+        _lease_sweep_at = now
+    reclaim_expired(now)
+
+
+def pressure() -> dict:
+    """当前的并发压力快照（排障用）。"""
+    now = time.monotonic()
+    with _lock:
+        active = dict(_active)
+        leases = [{"key": adm.key, "held_s": round(now - adm.started, 1),
+                   "ttl_s": round(dl - now, 1)}
+                  for adm, dl in _leases.values()]
+        waiters = dict(_waiters)
+        total_waiters = _total_waiters
+    rate, concurrent = _limits()
+    return {
+        "global_limit": concurrent,
+        "rate_limit_per_minute": rate,
+        "active_by_key": active,
+        "active_total": sum(active.values()),
+        "held_leases": sorted(leases, key=lambda x: -x["held_s"])[:20],
+        "waiters_by_key": waiters,
+        "waiters_total": total_waiters,
+        "lease_ttl_s": lease_ttl_seconds(),
+        "storage": "redis" if _redis is not None else "memory",
+    }
 
 
 class Denied(tuple):
@@ -117,6 +210,8 @@ def allow(key, rate=None, concurrent=None):
                           rate if reason == 1 else concurrent, count)
         return lease
     now = time.monotonic()
+    # 顺手回收超期名额：丢一个名额 = 永久少一路并发，必须兜底。
+    _maybe_sweep(now)
     with _lock:
         for stale in list(_windows):
             values = _windows[stale]
@@ -137,7 +232,9 @@ def allow(key, rate=None, concurrent=None):
                 q.pop()
             return Denied(1, 'concurrent_requests', concurrent, current)
         _active[key] = current + 1
-    return Admission(key)
+    lease = Admission(key)
+    _lease_of(lease)
+    return lease
 
 
 def _notify_release(key):
@@ -161,6 +258,7 @@ def release(admission):
         if admission.released:
             return
         admission.released = True
+        _leases.pop(admission.token, None)
         current = _active.get(admission.key, 0)
         if current <= 1:
             _active.pop(admission.key, None)
@@ -545,14 +643,34 @@ class GatewayAdmissionMiddleware:
         try:
             await self.app(scope, replay if reader is not None else receive, send)
         finally:
-            await stop_monitor()
+            # ---- 名额必须归还，任何异常都不能拦住 ----
+            #
+            # 原来的写法是：
+            #     await stop_monitor()      # ← 这一句在被取消时会抛 CancelledError
+            #     await _finish_thread(release, result)   # ← 于是永远执行不到
+            # 而 `except Exception` 又捕不到 CancelledError（它是 BaseException）。
+            # 结果：请求一旦在客户端断开/网关超时的时候被取消，这个并发名额
+            # 就再也回不来 —— 丢满上限后整个网关排队不动，只能重启。
+            #
+            # 现在拆成三步，且每一步都不允许影响下一步：
+            #   1) 停监听（失败忽略）
+            #   2) 心跳（失败忽略）
+            #   3) 归还名额：内存路径**同步**调用（不会被取消打断），
+            #      Redis 路径用 shield 包住
+            try:
+                await stop_monitor()
+            except BaseException:  # noqa: BLE001 - 取消/异常都不影响归还
+                pass
             if heartbeat:
                 heartbeat.cancel()
                 try:
                     await heartbeat
-                except asyncio.CancelledError:
+                except BaseException:  # noqa: BLE001
                     pass
             try:
-                await _finish_thread(release, result)
-            except Exception:
+                if result.client is None:
+                    release(result)
+                else:
+                    await asyncio.shield(_finish_thread(release, result))
+            except BaseException:  # noqa: BLE001
                 _logger.warning('Gateway lease release failed; Redis lease will expire')

@@ -19,7 +19,7 @@
        错误来源、脚本资源状态、注入痕迹 POST 回 /api/client-diag/report。 -->
   <script src="/admin/assets/boot-diag.js?v=20261103-actions1"></script>
   <script src="/admin/assets/theme.js?v=20261104-ripple2"></script>
-  <script src="/admin/assets/filter-combobox.js?v=20261102-ui1"></script>
+  <script src="/admin/assets/filter-combobox.js?v=20261104-fix7"></script>
   <!--
     全部静态资源都走本地 /static/vendor/**，不再依赖任何 CDN。
 
@@ -36,7 +36,7 @@
   -->
   <link rel="stylesheet" href="/static/vendor/tailwind/tailwind.min.css" />
   <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css" />
-  <link rel="stylesheet" href="/admin/assets/growth_center.css?v=20261026-no-hover-border-1" />
+  <link rel="stylesheet" href="/admin/assets/growth_center.css?v=20261104-tokens1" />
   <link rel="stylesheet" href="/admin/assets/ui-enhancements.css?v=20261026-instant-mask-1" />
   <style>
     /* ==========================================================================
@@ -735,14 +735,23 @@
  * 同时「积分到期」没有宽度，自动布局把 582px 全给了它 —— 一边挤成省略号、
  * 一边空一大片。现在改成「名称吃 34%、到期吃 22%、其余定宽」，并让名称行
  * 允许换行（uuid 落到第二行），彻底消除截断。 */
+/* 列宽按**语义类名**给，不再按 nth-child。
+ *
+ * 原来的写法是 `nth-child(1)=名称 34% / nth-child(2)=状态 90px …`，
+ * 它假设「第一列永远是名称」。但表头会随平台重建、勾选框还会被插到最前
+ * （`pickAllTh()`），于是列号整体错位一格：
+ *   勾选 34% | 名称 90px | 状态 96px | …
+ * 表现就是用户说的「字段没对齐、名称挤成省略号、操作列跑出屏幕」。
+ * 现在每个 th 自带 `.col-*`，宽度与它在第几列无关。 */
 #accountTableWrap{max-height:70vh;overflow:auto;padding:0;}
-.acc-table{ width:100%; min-width:960px; table-layout:fixed; border-collapse:separate; border-spacing:0; font-size:12px; }
-.acc-table thead th:nth-child(1){ width:34%; min-width:300px; }  /* 名称 */
-.acc-table thead th:nth-child(2){ width:90px; }   /* 状态 */
-.acc-table thead th:nth-child(3){ width:96px; }   /* 总积分 */
-.acc-table thead th:nth-child(4){ width:104px; }  /* 剩余 */
-.acc-table thead th:nth-child(5){ width:22%; min-width:250px; }  /* 积分到期 */
-.acc-table thead th:nth-child(6){ width:272px; }  /* 操作（11 个图标按钮一排） */
+.acc-table{ width:100%; min-width:980px; table-layout:fixed; border-collapse:separate; border-spacing:0; font-size:12px; }
+.acc-table thead th.col-name{ width:30%; min-width:240px; }  /* 名称 */
+.acc-table thead th.col-status{ width:88px; }                /* 状态 */
+.acc-table thead th.col-balance{ width:112px; }              /* 总积分 / 可用积分 */
+.acc-table thead th.col-extra{ width:112px; }                /* 剩余 / 当日额度 / 资源包 */
+.acc-table thead th.col-expiry{ width:196px; }               /* 积分 / 凭证到期 */
+.acc-table thead th.col-created{ width:132px; }              /* 入库时间（全平台） */
+.acc-table thead th.col-ops{ width:var(--ops-w,120px); }     /* 操作：按钮数量随平台变 */
 /* 全局 .col-status 是 width:1%+nowrap（给窄列用的）；账号表里冷却徽标可能
  * 和状态胶囊叠放，固定列宽下允许换行竖排，避免溢出。 */
 .acc-table td.col-status{ width:auto; white-space:normal; }
@@ -888,7 +897,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261104-polish2" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261104-fix7" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261026-no-hover-border-1" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -902,8 +911,8 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261104-polish2"></script>
-<script defer src="/admin/assets/growth_center.js?v=20261031-r2"></script>
+<script defer src="/admin/assets/console-app.js?v=20261104-fix13"></script>
+<script defer src="/admin/assets/growth_center.js?v=20261104-tokens1"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
 <script defer src="/static/vendor/marked-12.0.2.min.js"></script>
@@ -913,12 +922,12 @@
 <script defer src="/admin/assets/profile-transfer.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/ip-management.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/key-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/platform-icons.js?v=20261029-loomy-qoder"></script>
+<script defer src="/admin/assets/platform-icons.js?v=20261104-fix8"></script>
 <!-- 平台动作表（扫描/导入/刷新…）：能力由后端 spec.actions 声明，前端只渲染。
      必须在 platform-switch.js **之前**加载 —— 后者要用 actionsFor()。 -->
 <script defer src="/admin/assets/traffic.js?v=20261029-r2"></script>
-<script defer src="/admin/assets/platform-actions.js?v=20261028-r10"></script>
-<script defer src="/admin/assets/platform-switch.js?v=20261103-actions1"></script>
+<script defer src="/admin/assets/platform-actions.js?v=20261104-fix7"></script>
+<script defer src="/admin/assets/platform-switch.js?v=20261104-fix7"></script>
 <script defer src="/admin/assets/agent.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/model-pool.js?v=20261103-noinline1"></script>
 </head>

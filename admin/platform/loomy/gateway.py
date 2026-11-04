@@ -205,18 +205,60 @@ def normalize_messages(raw) -> list[dict]:
     return systems + others
 
 
-def _apply_no_think(body: dict) -> dict:
-    """关掉推理链的三层保险（对非 reasoning 模型是 noop）。
+def _thinking_requested(body: dict) -> str:
+    """下游是否**明确要**思考；要的话返回档位（空串表示没要）。
 
-    上游 reasoning 模型会**无视 max_tokens 跑满思考链**，
-    导致 `finish_reason: length` 且 `content: ""` —— 看起来像「空回复」，
-    其实是正文还没开始就被截断了。
+    以前这里是无条件 `enable_thinking=False` —— 后果是用户把
+    `reasoning_effort` 设成 high/xhigh/max 也照样被网关按死，面板上看
+    「档位没生效」，其实是网关把请求改写成了「不要思考」。
+
+    规则和 `shared.reasoning_effort_of` 对齐：`off/none/minimal` 视为不要，
+    其余档位（含 Anthropic 的 `thinking.budget_tokens`）视为要。
+    """
+    from admin.platform.shared import reasoning_effort_of
+
+    effort = reasoning_effort_of(body)
+    if not effort:
+        return ""
+    if effort in ("off", "none", "minimal"):
+        return ""
+    return effort
+
+
+def _apply_no_think(body: dict) -> dict:
+    """按下游意图决定「要不要思考」，并给够输出预算。
+
+    默认（下游没说要思考）关掉推理链 —— 上游 reasoning 模型会**无视
+    max_tokens 跑满思考链**，导致 `finish_reason: length` 且 `content: ""`，
+    看起来像「空回复」，其实是正文还没开始就被截断。
+
+    但**下游明确要了档位**（`reasoning_effort` = low/medium/high/xhigh/max）
+    时必须尊重：打开 `enable_thinking` 并把档位原样带给上游。否则这个参数
+    在 Loomy 上就是个摆设 —— 客户端以为调高了推理强度，实际被网关抹平。
     """
     out = dict(body)
+    requested = _thinking_requested(body)
     params = dict(out.get("chat_template_kwargs") or {})
-    params.setdefault("enable_thinking", False)
+    if requested:
+        params["enable_thinking"] = True
+        out["enable_thinking"] = True
+        # 上游认的是 OpenAI 的 `reasoning_effort`；档位名原样带过去，
+        # 不支持的档位由上游决定「忽略」还是「报错」，网关不擅自降级。
+        if requested.isdigit() or ":" in requested:
+            # `budget:8192` / `adaptive` 这类不是上游枚举值：转成等价档位
+            try:
+                budget = int(requested.split(":", 1)[1])
+            except (IndexError, ValueError):
+                budget = 0
+            if budget:
+                out["reasoning_effort"] = ("low" if budget <= 2048 else
+                                           "medium" if budget <= 8192 else "high")
+        else:
+            out["reasoning_effort"] = requested
+    else:
+        params.setdefault("enable_thinking", False)
+        out.setdefault("enable_thinking", False)
     out["chat_template_kwargs"] = params
-    out.setdefault("enable_thinking", False)
 
     # **`max_tokens` 必须放大**。
     #
@@ -271,17 +313,19 @@ def _apply_no_think(body: dict) -> dict:
         out["max_tokens"] = 32768
 
     # `/no_think` 前缀对 Loomy **无效**（实测它会把这三个字当正文念出来），
-    # 所以这里不再拼接，避免污染用户输入。
-    messages = normalize_messages(out.get("messages") or [])
-    for index in range(len(messages) - 1, -1, -1):
-        item = messages[index]
-        if not isinstance(item, dict) or item.get("role") != "user":
-            continue
-        content = item.get("content")
-        if isinstance(content, str) and not content.lstrip().startswith("/no_think"):
-            messages[index] = {**item, "content": "/no_think " + content}
-        break
-    out["messages"] = messages
+    # 所以只在**确实要关思考**时才拼；用户明确要思考时拼上去等于往 prompt
+    # 里塞垃圾，既污染输入，也白白拉低缓存命中。
+    if not requested:
+        messages = normalize_messages(out.get("messages") or [])
+        for index in range(len(messages) - 1, -1, -1):
+            item = messages[index]
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and not content.lstrip().startswith("/no_think"):
+                messages[index] = {**item, "content": "/no_think " + content}
+            break
+        out["messages"] = messages
     return out
 
 
@@ -293,7 +337,10 @@ def _attempt(db, request, key, body: dict, realm: str):
     for _ in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
-            model=model, exclude_ids=exclude)
+            model=model, exclude_ids=exclude,
+            # 余额为 0 的号调用必被上游 402 打回：直接不进候选，
+            # 而不是先撞一次再冷却（见 shared.select_account 的说明）。
+            min_balance=0)
         if account is None:
             break
         if not shared.lease(account):
@@ -378,7 +425,8 @@ def _bill(key, account, model, result, *, request, started=None, error="",
                 storage=loomy_accounts.PLATFORM,
                 error_kind=error, client_ip=_client_ip(request),
                 use_case="loomy-chat", seq=1,
-                ttfb_ms=ttfb, latency_ms=latency)
+                ttfb_ms=ttfb, latency_ms=latency,
+                reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("Loomy 记账失败")
 
@@ -464,7 +512,9 @@ async def _forward_stream(body: dict, request):
     for _ in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
-            model=model, exclude_ids=exclude)
+            model=model, exclude_ids=exclude,
+            # 同上：零余额号不进候选，避免每次先撞一次 402 再换号。
+            min_balance=0)
         if account is None:
             break
         if not shared.lease(account):

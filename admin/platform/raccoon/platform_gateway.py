@@ -43,6 +43,27 @@ def _get_account(db, account_id):
     return account
 
 
+def _uid_selected(uid: str, wanted: list[str]) -> bool:
+    """勾选匹配：完整 uid 命中，或脱敏值（含 `*`）按前缀命中。
+
+    前端历史上传过脱敏 uid（`pu-01a1a******`），只做全等比较会导致
+    「明明勾了却提示不在范围内」。带 `*` 的串按 `*` 之前的前缀匹配，
+    既兼容旧前端，也不会误伤别的账号（uid 前缀足够长）。
+    """
+    uid = str(uid or "")
+    for item in wanted:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text == uid:
+            return True
+        if "*" in text:
+            prefix = text.split("*", 1)[0]
+            if prefix and uid.startswith(prefix):
+                return True
+    return False
+
+
 class RaccoonAccountOps:
     """账号池的 11 项操作。"""
 
@@ -96,6 +117,11 @@ class RaccoonAccountOps:
         """本机导入：读取客户端 auth.json 入库（uid 过滤口径同 loomy）。
 
         uids 是前端「扫描 → 勾选 → 确认」里用户选中的 uid；None = 全部。
+
+        ⚠️ 允许**脱敏 uid**：扫描结果里展示的是 `pu-01a1a******`（脱敏），
+        旧版前端会把展示值当 uid 传回来。带 `*` 的值按前缀匹配处理，
+        否则整批会被判成「不在勾选范围内」——用户看到的就是
+        「扫描到凭证了，点导入却说没有导入任何账号」（2026-11-04 复现）。
         """
         from admin.platform.raccoon.services import scan as raccoon_scan
 
@@ -105,9 +131,9 @@ class RaccoonAccountOps:
                     "hint": "没找到客户端登录态（~/.office-raccoon/agent/config/auth.json）。"
                             "请先在客户端登录，或改用「授权登录」扫码入库。"}
         if uids is not None:
-            wanted = {str(u or "").strip() for u in uids}
-            wanted.discard("")
-            if creds.get("uid") and creds["uid"] not in wanted:
+            wanted = [str(u or "").strip() for u in uids]
+            wanted = [w for w in wanted if w]
+            if wanted and creds.get("uid") and not _uid_selected(creds["uid"], wanted):
                 return {"supported": True, "imported": 0, "reason": "not_selected",
                         "hint": "本机凭证不在勾选范围内，未导入"}
         record = {"token": creds["token"], "uid": creds.get("uid") or "",
@@ -308,8 +334,8 @@ class RaccoonClientProbe:
             "note": "凭证不依赖本机客户端；此处仅报告是否安装",
         }
         return enrich(result,
-                      exe_candidates=_paths.APP_EXE_CANDIDATES,
-                      data_dirs=_paths.DATA_DIR_CANDIDATES,
+                      exe_candidates=_paths.app_exe_candidates(),
+                      data_dirs=_paths.data_dir_candidates(),
                       product=_paths.UA_PRODUCT)
 
     def schema(self) -> list[dict]:
@@ -402,7 +428,7 @@ class RaccoonGateway:
             {"key": "models", "label": "可用模型", "value": models,
              "sub": "来自上游 /model_catalog", "icon": "fa-cube", "tone": ""},
             {"key": "mode", "label": "接入方式", "value": "Bearer JWT",
-             "sub": "凭证导入（无本机扫描）", "icon": "fa-key", "tone": ""},
+             "sub": "本机扫描 / 文件导入 / 扫码授权", "icon": "fa-key", "tone": ""},
         ]
 
 

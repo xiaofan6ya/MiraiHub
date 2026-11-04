@@ -71,44 +71,44 @@ def _home() -> pathlib.Path:
 
 
 def user_data_dirs() -> list[pathlib.Path]:
-    """候选数据目录（存在的才算）。"""
-    root = _appdata()
+    """候选数据目录（由平台路径表动态解析，存在的才算）。"""
+    from admin.platform.qoder.core import paths
+
     out = []
-    for name in DATA_DIR_CANDIDATES:
-        path = root / name
-        if path.is_dir():
+    for raw in paths.data_dir_candidates(all_matches=True):
+        path = pathlib.Path(raw)
+        if path.is_dir() and path not in out:
             out.append(path)
     return out
 
 
 def live_user_data_dir() -> pathlib.Path | None:
-    """从运行中的进程读 `--user-data-dir`（最可靠）。
+    """当前真正生效的 userData 目录（路径表解析 + 特征确认）。
 
-    产品名和目录名不一致时，猜目录会全部落空 —— 实测 `Qoder CN`
-    下面只有 Launcher，真正数据在 `com.qodercn.app.stable`。
+    以前只认进程名 `Qoder CN.exe` 并同步调 PowerShell：客户端没运行、
+    换了进程名（国际版 / 改名版）就全部落空，而且拖慢展示接口。
+    产品名和目录名不一致时本来就不能猜 —— 实测 `Qoder CN` 下只有
+    Launcher，真正数据在 `com.qodercn.app.stable`。
     """
-    if sys.platform != "win32":
-        return None
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance Win32_Process -Filter \"Name='Qoder CN.exe'\" "
-             "| Select-Object -ExpandProperty CommandLine) -join \"`n\""],
-            capture_output=True, text=True, timeout=15)
-    except Exception:  # noqa: BLE001
-        return None
-    for line in (result.stdout or "").splitlines():
-        match = re.search(r'--user-data-dir=(?:"([^"]+)"|(\S+))', line)
-        if match:
-            path = pathlib.Path((match.group(1) or match.group(2)).strip())
-            if path.is_dir():
-                return path
+    from admin.platform.qoder.core import paths
+
+    dirs = paths.data_dir_candidates(all_matches=True)
+    for raw in dirs:
+        path = pathlib.Path(raw)
+        if path.is_dir():
+            return path
     return None
 
 
 def cli_dirs() -> list[pathlib.Path]:
-    home = _home()
-    return [home / name for name in CLI_DIR_CANDIDATES if (home / name).is_dir()]
+    from admin.platform.qoder.core import paths
+
+    out = []
+    for raw in paths.cli_dir_candidates():
+        path = pathlib.Path(raw)
+        if path.is_dir() and path not in out:
+            out.append(path)
+    return out
 
 
 # ---------------------------------------------------------------------------

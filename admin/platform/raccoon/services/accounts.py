@@ -411,6 +411,12 @@ def sync_quota(db: Session, account: Account, *, mark_disabled: bool = True) -> 
                 "note": "凭证有效（目录可读），但积分接口不可用；余额沿用上次快照"}
 
     apply_quota(account, quota)
+    # 成功一次就把上一次的错误清掉。
+    # 否则账号池会一直挂着一条早已过期的 `last_err_msg`
+    # （实测：换回可用凭证后，行上仍显示「账号凭证缺少 auth」），
+    # 让人以为号还是坏的。
+    account.last_err_msg = ""
+    account.last_err_at = None
     db.commit()
     return {"ok": True, "quota": quota}
 
@@ -677,3 +683,75 @@ def prune_expired(db: Session, *, days: int = 0) -> dict:
     if marked:
         db.commit()
     return {"marked": marked}
+
+
+def import_batch(db: Session, text: str) -> dict:
+    """从备份文本（JSONL / JSON 数组）批量导入小浣熊账号。
+
+    与 `import_many` 的区别只在**入口形态**：
+    控制台「导入账号」把文件原文整段交过来（不预先解析），
+    这里负责拆记录、逐条入库，并返回与其它平台一致的统计字段
+    （`added / updated / failed / total / errors`），
+    这样 `admin/routers/accounts.py::import_accounts_async` 不用为
+    每个平台写一套汇总逻辑。
+
+    认的形状：
+      * 本网关导出的 `agent2api-account`（含 accessToken / uid）
+      * 手机版备份 `{"realm","token","uid","phone","expires_at"}`
+      * 裸 JWT（一行一个）
+    """
+    import json as _json
+
+    from admin.platform.raccoon.services import scan as _scan
+
+    raw = (text or "").strip().lstrip("\ufeff")
+    if not raw:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0, "errors": ["没有提供任何凭证"]}
+
+    records: list = []
+    try:
+        parsed = _json.loads(raw)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, list):
+        records = [x for x in parsed if isinstance(x, (dict, str))]
+    elif isinstance(parsed, dict):
+        inner = parsed.get("accounts")
+        if isinstance(inner, list):
+            records = [x for x in inner if isinstance(x, (dict, str))]
+        else:
+            records = [parsed]
+    if not records:
+        for line in raw.splitlines():
+            line = line.strip().rstrip(",")
+            if not line:
+                continue
+            try:
+                item = _json.loads(line)
+            except ValueError:
+                item = line  # 裸 JWT
+            if isinstance(item, (dict, str)):
+                records.append(item)
+
+    if not records:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0,
+                "total": 0, "errors": ["没有解析出任何凭证（支持 JSON / JSONL / 裸 JWT）"]}
+
+    result = import_many(db, records)
+    added = int(result.get("added") or 0)
+    updated = int(result.get("skipped") or 0)
+    errors = list(result.get("errors") or [])
+    return {
+        "ok": not errors,
+        "added": added,
+        "updated": updated,
+        "failed": len(errors),
+        "total": len(records),
+        "errors": errors[:50],
+        # 保留原字段，前端/日志仍能读到
+        "notes": result.get("notes") or [],
+        "model_sync": result.get("model_sync"),
+        "_scan_hint": ([str(p) for p in _scan.auth_file_candidates()]
+                       if not added and not updated else None),
+    }

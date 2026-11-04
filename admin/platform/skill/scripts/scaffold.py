@@ -341,21 +341,33 @@ class {cls}AccountOps:
     def list(self, db):
         """账号列表。
 
-        ⚠️ 必须**写回 DB 列**（`balance_remain/total`）——
-        admin 的通用 `/api/accounts` 读的是列，不调本方法。
-        只在这里实时拉、不写回，前端账号池会一直显示旧余额。
+        ## 铁律：列表**不许同步打上游**
+
+        额度是**展示数据**。原模板是在这里对每个快照过期的号串行拉一次
+        上游，50 个号实测把接口拖到 **2.8 秒**（几千个号就是几十秒），
+        用户只会说「这个页面好卡」。
+
+        正确做法：只读 `credits_snapshot` 立刻返回，过期号交给
+        `shared.kick_background_refresh()` 在后台刷新
+        （单飞 + 限频 10s + 一次 8 个 + 绝不冒泡）。
+
+        写回 DB 列**仍然要发生**（admin 的通用 `/api/accounts` 只读列，
+        不调本方法），只是发生在后台线程里，不占请求时间。
         """
         views = []
+        stale = []
         for account in {mod}_accounts.accounts_for(db, self.realm):
-            try:
-                data = {mod}_accounts.ensure_token(db, account)
-                quota = client.fetch_quota({mod}_accounts.token_of(data),
-                                           {mod}_accounts.realm_of(account))
-                {mod}_accounts.apply_quota(account, quota)
-            except Exception:  # noqa: BLE001 - 单账号失败不影响列表
-                quota = {{}}
-            views.append({mod}_accounts.public_view(account, quota=quota))
-        db.commit()
+            if not {mod}_accounts.quota_is_fresh(account):
+                stale.append(int(account.id or 0))
+            views.append({mod}_accounts.public_view(
+                account, quota={mod}_accounts.snapshot_of(account)))
+        if stale:
+            from admin.platform import shared
+
+            shared.kick_background_refresh(
+                "{pid}", stale,
+                lambda session, account: {mod}_accounts.sync_quota(session, account),
+                max_items=8, min_gap=10.0)
         return {{"items": views, "summary": {mod}_accounts.summarize(views)}}
 
     def scan(self):
@@ -461,7 +473,12 @@ class {cls}ClientProbe:
         return list({mod}_scan.discover().get("data_dirs") or [])
 
     def probe(self) -> dict:
-        return {mod}_scan.discover()
+        from admin.platform.probe import enrich
+        from admin.platform.{pid}.core import paths as _paths
+        return enrich({mod}_scan.discover(),
+                      exe_candidates=_paths.app_exe_candidates(),
+                      data_dirs=_paths.data_dir_candidates(),
+                      product=_paths.UA_PRODUCT)
 
     def schema(self) -> list[dict]:
         return []
@@ -619,11 +636,15 @@ def base_of(realm: str) -> str:
 
 CLIENT_PY = '''"""{label} HTTP 客户端。
 
-## 三件事必须做对
+## 四件事必须做对
 
 1. 错误分类（`kind` 决定上层是冷却、禁用还是换号）
 2. 网络异常上报哨兵（连续失败 = 平台不可用）
 3. 不要静默吞异常（否则「查不到」和「没有」分不清）
+4. **上游会话 id 必须稳定派生**：用 `session_id_for()`（内部走
+   `pool.stable_session_id`），从下游真实会话标识按「账号 + 对话」算出，
+   同一账号同一对话恒定。**绝不许 `uuid4()`** —— 每请求换 id 会让上游
+   前缀缓存永远打不中，还会让一个号几分钟内冒出几十个会话（风控特征）。
 """
 from __future__ import annotations
 
@@ -673,6 +694,32 @@ def note_sentinel(realm: str, account_id: int, kind: str, *,
                               detail=str(detail or "")[:200])
     except Exception:  # noqa: BLE001
         logger.debug("哨兵上报失败 kind=%s", kind, exc_info=True)
+
+
+def session_id_for(account_id: int, body: dict, *, prefix: str = "",
+                   size: int = 16) -> str:
+    """**稳定派生**的上游会话 id —— 不要在这里用 `uuid4()`。
+
+    规则见 `admin/pool.py::stable_session_id`：`sha256(平台 | 账号 | 会话键)`。
+    会话键优先取客户端自己的会话标识，没有就取首条 user 文本的哈希 ——
+    两种都是**确定性**的，所以同一段对话永远得到同一个 id。
+
+    为什么必须这样：
+      * 上游前缀缓存按会话算，id 每换一次就是一次全新对话（首字慢、费用高、
+        面板命中率永远是 0）；
+      * 一个号短时间内"新建"大量会话，是风控最敏感的形状。
+
+    注意：`MsgId` / `TurnId` / `requestId` 是**另一回事**，它们必须每次唯一
+    （上游拿它们去重，复用会导致少记账）。
+    """
+    try:
+        from admin import pool
+
+        return pool.stable_session_id("{pid}", int(account_id or 0), body,
+                                      prefix=prefix, size=size)
+    except Exception:  # noqa: BLE001 - 派生失败退回空串，不能挡住调用
+        logger.debug("session id 派生失败", exc_info=True)
+        return ""
 
 
 def _request(url: str, *, method: str = "GET", body: dict | None = None,
@@ -798,6 +845,15 @@ def quota_is_fresh(account: Account) -> bool:
     if synced is None:
         return False
     return (datetime.utcnow() - synced).total_seconds() < QUOTA_TTL
+
+
+def snapshot_of(account: Account) -> dict:
+    """上一次的额度快照（列表接口只读它，绝不打上游）。"""
+    try:
+        snap = json.loads(account.credits_snapshot or "{{}}")
+    except (ValueError, TypeError):
+        snap = {{}}
+    return snap if isinstance(snap, dict) else {{}}
 
 
 def ensure_token(db: Session, account: Account) -> dict:
@@ -933,6 +989,59 @@ def import_record(db: Session, record: dict) -> dict:
 '''
 
 
+PATHS_PY = '''"""{label} 的本机路径表（平台知识，不放共享模块）。
+
+目录名固定（见 INSTALL_NAMES / DATA_NAMES），**位置动态**：
+由 `admin.platform.install_paths` 在「所有实际存在的盘符」+
+「盘下 1~3 层用户新建的父文件夹」里按名字快速定位，命中即停。
+
+禁止在本文件写「盘符开头的绝对路径」（D 盘根目录、系统 Program Files、
+公共用户目录的绝对路径都不行）：用户不一定装在同一块盘，
+也不一定用默认文件夹名。
+覆盖：`<PID>_INSTALL_DIR` / `_USER_DATA_DIR` / `_APP_EXE` 环境变量，
+或后台「客户端路径」设置（`/api/client-paths`）。
+"""
+from __future__ import annotations
+
+from admin.platform import install_paths as ip
+
+PLATFORM = "{pid}"
+
+#: 按 recon 结论改：固定的安装目录名 / 数据目录名 / 主程序名
+INSTALL_NAMES = ("{label}", "{pid}")
+EXE_NAMES = ("{label}.exe",)
+DATA_NAMES = ("{pid}",)
+#: 确认「同名目录确实是本平台」的特征（可留空；泛化特征要放进 require
+#: 而不是 markers，否则会把其它 Electron 应用也算进来）
+INSTALL_REQUIRE = ("resources/app.asar",)
+DATA_REQUIRE = ()
+
+UA_PRODUCT = "{label}"
+
+#: 兜底模板只能含 %VAR% / ~，**不含盘符**
+APP_EXE_CANDIDATES = (r"%LOCALAPPDATA%\\Programs\\{label}\\{label}.exe",)
+DATA_DIR_CANDIDATES = (r"%APPDATA%\\{pid}",)
+
+
+def install_dirs() -> list[str]:
+    return ip.resolve(PLATFORM, kind="install_dir", names=INSTALL_NAMES,
+                      require=INSTALL_REQUIRE)
+
+
+def app_exe_candidates() -> list[str]:
+    return ip.resolve(PLATFORM, kind="app_exe", names=INSTALL_NAMES,
+                      exe_names=EXE_NAMES, require=INSTALL_REQUIRE,
+                      fallback=APP_EXE_CANDIDATES)
+
+
+def data_dir_candidates(*, all_matches: bool = False) -> list[str]:
+    return ip.resolve(PLATFORM, kind="user_data_dir", names=DATA_NAMES,
+                      require=DATA_REQUIRE, roots=(r"%APPDATA%",),
+                      fallback=DATA_DIR_CANDIDATES, max_depth=0,
+                      stop_after_first=not all_matches)
+'''
+
+
 SCAN_PY = '''"""{label} 本机扫描。
 
 ## 找凭证的正确顺序（按可行性）
@@ -946,7 +1055,9 @@ SCAN_PY = '''"""{label} 本机扫描。
 ## 实测教训
 
 * 产品名 ≠ 数据目录名（Qoder：`com.qodercn.app.stable`）
-* 自定义路径猜不到（Loomy：`C:/Users/Public/Loomy/<sha256(用户名)[:12]>`）
+* 自定义 userData 的根目录取环境变量（Loomy：`%PUBLIC%/Loomy/<hash>`），
+  **不要写 `C:/Users/Public`** —— 系统盘不一定是 C
+* 安装目录名固定、盘符与父文件夹动态 → 一律走 `core/paths.py` + `install_paths`
 * 业务文件可能只有几百字节
 """
 from __future__ import annotations
@@ -961,12 +1072,7 @@ import sys
 logger = logging.getLogger("admin.platform.{pid}.scan")
 PLATFORM = "{pid}"
 
-#: 候选数据目录名（**按 recon 结论改**）
-DATA_DIR_CANDIDATES = (
-    "{pid}",
-    "{label}",
-)
-
+#: 固定的目录名与位置解析统一放在 `core/paths.py`（本文件不写任何盘符）
 #: electron-store 的凭证文件名（源码里的 `name`）
 CRED_FILE = "auth-session.json"
 
@@ -978,21 +1084,14 @@ def mask(value: str, keep: int = 4) -> str:
     return text[:keep] + "*" * min(8, len(text) - keep * 2) + text[-keep:]
 
 
-def _appdata() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("APPDATA")
-                        or pathlib.Path.home() / "AppData/Roaming")
-
-
 def user_data_dirs() -> list[pathlib.Path]:
-    """候选数据目录。
+    """候选数据目录（由本平台 `core/paths.py` 动态解析，不写死盘符）。"""
+    from admin.platform.{pid}.core import paths
 
-    TODO: 按 recon 结论补上自定义路径（例如
-    `C:/Users/Public/<Product>/<sha256(username)[:12]>/userData`）。
-    """
     out = []
-    for name in DATA_DIR_CANDIDATES:
-        path = _appdata() / name
-        if path.is_dir():
+    for raw in paths.data_dir_candidates(all_matches=True):
+        path = pathlib.Path(raw)
+        if path.is_dir() and path not in out:
             out.append(path)
     return out
 
@@ -1181,6 +1280,7 @@ def main() -> int:
     write(target / "platform_gateway.py", PLATFORM_GATEWAY_PY.format(**fmt))
     write(target / "core" / "__init__.py", '"""协议层。"""\n')
     write(target / "core" / "endpoints.py", ENDPOINTS_PY.format(**fmt))
+    write(target / "core" / "paths.py", PATHS_PY.format(**fmt))
     write(target / "core" / "client.py", CLIENT_PY.format(**fmt))
     write(target / "services" / "__init__.py", '"""状态层。"""\n')
     write(target / "services" / "accounts.py", ACCOUNTS_PY.format(**fmt))

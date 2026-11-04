@@ -89,6 +89,12 @@ def platform_speed(hours: int = Query(default=24, ge=1, le=720),
             #     tps = decodeTokens / (decodeMs / 1000)
             #     decodeMs = completedTime - firstTokenTime   ← 不含首包等待
             #
+            # ⚠️ `firstTokenTime` 是**首个 token（含 reasoning）**，不是首个正文。
+            # 曾经按「正文」算：思考模型先想 9 秒、正文 150ms 吐完，于是
+            # ttfb 9.33s / latency 9.49s → 解码段 160ms → TPS 被判"量不出来"，
+            # 而 completion_tokens 里明明有上千 reasoning tokens。
+            # 分子含 reasoning_tokens，分母就必须从第一个 reasoning token 起算。
+            #
             # ⚠️ **绝不能退回整段 latency**。
             # 非流式上游（Loomy / Trae 的 llm_raw_chat）把 ttfb 和 latency
             # 记成同一个值，此时 `latency - ttfb = 0`。曾经的兜底是「退回

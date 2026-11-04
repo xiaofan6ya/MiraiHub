@@ -34,6 +34,7 @@ workbuddy 的请求原样穿过，行为零变化。
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from starlette.requests import Request
@@ -53,8 +54,13 @@ GATEWAY_PATHS = frozenset({
 #: 需要预读 body 的方法（GET/HEAD 永远不读 —— 读了会卡住下游）。
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
-#: 预读上限：超过这个体积不参与跨平台选路（大 body 直接走默认平台）。
-_BODY_LIMIT = 262144
+#: 预读上限：超过这个体积**不参与**跨平台选路（避免单个请求把内存打爆）。
+#:
+#: 原来是 256KB，长上下文 / 带图 / 多轮工具调用的请求很容易越线，
+#: 越线就静默丢掉平台后缀 → 落到主应用 → 400 模型不存在。
+#: 提到 32MB 后，正常对话不会触发这条降级。
+_BODY_LIMIT = 262144  # 保留旧名，供外部引用
+_BODY_HARD_CAP = 32 * 1024 * 1024
 
 #: 这些状态表示「这个平台做不了」，值得换下一个平台再试。
 _RETRYABLE_STATUS = frozenset({404, 502, 503})
@@ -217,6 +223,18 @@ def _model_of(request) -> str:
 def _model_of_body(body: bytes) -> str:
     if not body:
         return ""
+    # 大 body 不做整段 json 解析：一轮长对话几 MB，每跳中间件都 parse
+    # 一次会明显拖慢首字延迟。顶层 `model` 字段几乎总在最前面，
+    # 先在前 8KB 里正则取；取不到再退回完整解析（正确性优先）。
+    head = body[:8192]
+    match = re.search(rb'"model"\s*:\s*"([^"\\]{1,200})"', head)
+    if match:
+        try:
+            value = match.group(1).decode("utf-8")
+        except UnicodeDecodeError:
+            value = match.group(1).decode("utf-8", "replace")
+        if value.strip():
+            return value.strip()
     try:
         import json as _json
 
@@ -227,32 +245,54 @@ def _model_of_body(body: bytes) -> str:
 
 
 def _should_peek(request) -> bool:
-    """只对**带 body 的写请求**预读；GET/HEAD 读了会让下游卡死。"""
+    """只对**带 body 的写请求**预读；GET/HEAD 读了会让下游卡死。
+
+    ## 为什么不能只看 `Content-Length`
+
+    预读承担的是**读模型名做后缀路由**（`xxx-raccoon` → 走小浣熊网关）。
+    原实现要求「必须带 Content-Length 且 ≤ 256KB」才预读，于是两种情况
+    会**静默退化**成「不预读 → raw_model 为空 → 落到默认平台」：
+
+      * 客户端用 **chunked** 上传（没有 Content-Length）；
+      * 对话变长后请求体超过 256KB（长上下文 / 带图 / 多轮工具调用）。
+
+    表现就是用户说的「明明能用，用一会儿就 400：
+    模型 'sn-deepseek-v4-1-flash-1017-raccoon' 不存在或已被禁用」——
+    主应用（WorkBuddy）白名单里当然没有这个带平台后缀的名字。
+    """
     try:
         if request.scope.get("method", "").upper() not in _BODY_METHODS:
             return False
-        # **任何 Key 都要预读 body**。
-        #
-        # 原来这里写着「非聚合 Key 不预读」——因为非聚合 Key 不在平台间自动
-        # 选路。但预读还承担另一件事：**读模型名做后缀路由**。
-        # 不预读 → `raw_model` 为空 → `deepseek-v4.1-flash-loomy` 的后缀
-        # 解析不出来 → 落到默认平台（workbuddy）→ 主应用白名单没有这个
-        # 模型 → 400「模型不存在」。
-        # 用户用非聚合 Key（`aggregate=False`）时必现。
-        if _key_of(request) is None:
-            # 未鉴权也允许预读：鉴权由各网关自己做，选路只影响去哪个网关。
-            pass
         for name, value in request.scope.get("headers") or []:
             if name.lower() == b"content-length":
                 raw = value.decode("latin-1")
-                return raw.isdigit() and 0 < int(raw) <= _BODY_LIMIT
-        return False
+                if not raw.isdigit():
+                    return True          # 长度不可信：照样读，读完再看
+                size = int(raw)
+                # 超大请求体不预读（避免把内存打爆），但**必须留日志**，
+                # 否则又是一次「无缘无故 400」。
+                if size > _BODY_HARD_CAP:
+                    logger.warning(
+                        "请求体 %d 字节超过预读上限 %d，本次不做平台后缀路由"
+                        "（model 里带 -平台 后缀会落到默认平台）", size, _BODY_HARD_CAP)
+                    return False
+                return size > 0
+        # 没有 Content-Length（chunked）：以前直接 return False，
+        # 现在照样预读 —— `_read_body` 会把整段读完并回放给下游。
+        return True
     except Exception:  # noqa: BLE001
         return False
 
 
-async def _read_body(receive, limit: int = _BODY_LIMIT) -> bytes:
-    """把请求体读出来（最多 `limit` 字节），超限返回空串（不参与选路）。"""
+async def _read_body(receive, limit: int = _BODY_HARD_CAP) -> bytes:
+    """把请求体整段读出来（最多 `limit` 字节），供回放给下游。
+
+    ⚠️ 这个函数**消费**了 receive，所以只要调用了就必须用 `_replay_receive`
+    把 body 还给下游，否则下游拿到空 body 直接 400「bad json」。
+    因此「超限返回空串」这种降级是**不能用**的（旧实现的坑）；
+    超限时保留已读部分并记日志，路由按拿到的部分判断，下游仍能收到完整
+    前缀 —— 真正的完整 body 由 `_read_body` 一次性读完，不会截断。
+    """
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -264,12 +304,13 @@ async def _read_body(receive, limit: int = _BODY_LIMIT) -> bytes:
             continue
         chunk = message.get("body") or b""
         if chunk:
-            if total < limit:
-                chunks.append(chunk)
+            chunks.append(chunk)
             total += len(chunk)
         if not message.get("more_body"):
             break
-    return b"".join(chunks) if 0 < total <= limit else b""
+    if total > limit:
+        logger.warning("请求体 %d 字节（上限 %d）仍完整回放给下游", total, limit)
+    return b"".join(chunks)
 
 
 def _replay_receive(body: bytes, tail=None):
@@ -868,6 +909,9 @@ def _set_state(scope, platform_id: str, realm: str) -> None:
 
         rid = scope.get("_wb_traffic_rid")
         if rid:
+            # 平台定下来了：把 running 行里那个「选路中」换成真实平台。
+            # 只改平台字段，不新建记录（一条请求只有一条 running）。
+            traffic_stats.annotate(rid, platform=platform_id or "")
             traffic_stats.mark_stage(rid, "upstream")
     except Exception:  # noqa: BLE001
         pass
@@ -1008,9 +1052,29 @@ class PlatformDispatchMiddleware:
                             _client_ip = str(request_ip(request) or "")[:64]
                         except Exception:  # noqa: BLE001
                             _client_ip = ""
-                        scope["_wb_traffic_rid"] = traffic_stats.start(
-                            _guess, model=model_name or "", path=path,
-                            key_label=_key_label, client_ip=_client_ip)
+                        # **不要在这里再建一条 running 记录**。
+                        #
+                        # TimingMiddleware 在 dispatch **外层**（`add_middleware`
+                        # 是前插，越晚注册越靠外），它已经为这条请求建过 rid 了。
+                        # 以前这里无条件 `start()` 又建一条并覆盖
+                        # `scope["_wb_traffic_rid"]` —— 外层那条就再也没人收尾，
+                        # 永久留在 RUNNING_KEY 里。表现就是面板上堆积一堆
+                        # 「已接收 / 选路中」的历史请求，看上去像排队不回收
+                        # （实测一次排障里堆了 59 条，最早的是 1 小时前）。
+                        #
+                        # 现在只复用外层的 rid 补信息（平台猜测 / Key / IP），
+                        # 一条请求从头到尾只有一条记录。
+                        _rid = scope.get("_wb_traffic_rid")
+                        if _rid:
+                            traffic_stats.annotate(
+                                _rid, platform=_guess or "", model=model_name or "",
+                                key_label=_key_label, client_ip=_client_ip)
+                        else:
+                            # 极少见：没有外层埋点（例如直接调用中间件栈），
+                            # 这时才自己建。
+                            scope["_wb_traffic_rid"] = traffic_stats.start(
+                                _guess, model=model_name or "", path=path,
+                                key_label=_key_label, client_ip=_client_ip)
                         # 存进 scope，`request_metrics` 结束时好写进 record()
                         scope["_wb_traffic_key"] = _key_label
                     except Exception:  # noqa: BLE001
@@ -1136,6 +1200,36 @@ class PlatformDispatchMiddleware:
                 }})(scope, receive, send)
 
         _set_state(scope, platform_id, realm)
+
+        # ---- 2.5) 模型名对到**目标平台自己的**真实 id ----
+        #
+        # 同一个模型在不同平台的写法不同：
+        #     GLM-5.3-Flash   WorkBuddy: glm-5.3-flash | Loomy: GLM-5.3-Flash
+        # `/v1/models` 为了跨平台一致，对外统一发小写 slug（可加平台后缀）。
+        # 上游只认自己的写法，直接把 slug 转过去就是「模型不存在」400；
+        # 而全局的 `upstream_of()` 在**同名冲突**时可能返回别家的拼法。
+        # 所以平台定下来之后，按 (platform, model) 收窄还原一次。
+        if body:
+            try:
+                from admin.platform import models_router as _mr
+
+                _spec_mp = registry.get(platform_id)
+                _storage_mp = (str(_spec_mp.storage()).lower()
+                               if _spec_mp is not None else "")
+                _cur_mp = _model_of_body(body)
+                if _cur_mp and _storage_mp:
+                    with _db() as _rdb:
+                        _real_mp = _mr.upstream_of_in_platform(
+                            _cur_mp, _storage_mp, _rdb)
+                    if _real_mp and _real_mp != _cur_mp:
+                        body = _replace_model(body, _real_mp)
+                        receive = _replay_receive(body, tail)
+                        request = Request(scope, receive)
+                        logger.debug("模型名按平台还原 | %s -> %s (%s)",
+                                     _cur_mp, _real_mp, _storage_mp)
+            except Exception:  # noqa: BLE001 - 还原失败就按原样转发
+                logger.debug("平台内模型还原失败 model=%s", _model_of_body(body),
+                             exc_info=True)
 
         # **带平台后缀的请求永远走平台网关**，哪怕它指向默认平台。
         # 理由：后缀是的「我要这个平台的实现」，交给主应用等于

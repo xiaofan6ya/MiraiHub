@@ -20,6 +20,7 @@ BUILTIN = (
     "admin.platform.qoder",
     "admin.platform.loomy",
     "admin.platform.raccoon",
+    "admin.platform.codearts",
 )
 
 _loaded: list[str] = []

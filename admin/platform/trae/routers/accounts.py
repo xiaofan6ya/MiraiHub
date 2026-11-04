@@ -155,6 +155,8 @@ def list_accounts(realm: str = "", _: bool = Depends(require_admin),
             "quota": quota,
             "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
             "last_sync_at": row.last_sync_at.isoformat() if row.last_sync_at else None,
+            # 入库时间：账号池表格的「入库时间」列（全平台统一）
+            "created_at": row.created_at.isoformat() if row.created_at else None,
             "cool_until": row.cool_until.isoformat() if row.cool_until else None,
             "cool_kind": row.cool_kind or "",
             "last_err_msg": row.last_err_msg or "",

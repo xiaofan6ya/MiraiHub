@@ -16,9 +16,11 @@ export function getUserDataPath() {
 }
 ```
 
-    C:/Users/Public/Loomy/<sha256(username)[:12]>/userData/auth-session.json
+    %PUBLIC%/Loomy/<sha256(username)[:12]>/userData/auth-session.json
 
-实测：`C:/Users/Public/Loomy/e7d3e769f3f5/userData/auth-session.json`（137 B）。
+`%PUBLIC%` 由系统环境变量给出（系统盘不一定是 C）；目录名 `Loomy` 是客户端
+写死的。实测本机为 `C:/Users/Public/Loomy/e7d3e769f3f5/userData/auth-session.json`
+（137 B），但**代码里不能写死这个绝对路径**。
 
 ## 为什么不能靠猜
 
@@ -46,8 +48,8 @@ import pathlib
 logger = logging.getLogger("admin.platform.loomy.scan")
 PLATFORM = "loomy"
 
-#: 配置根父目录
-CONFIG_ROOT_PARENT = pathlib.Path("C:/Users/Public/Loomy")
+#: 凭证文件名（与 `core/endpoints.py` 的 CRED_FILE 一致）
+CRED_FILE = "auth-session.json"
 
 #: 也扫这些（兜底，通常是空的）
 FALLBACK_DIRS = (
@@ -72,8 +74,38 @@ def user_hash() -> str:
     return hashlib.sha256(username.encode()).hexdigest()[:12]
 
 
+def config_root_parent() -> pathlib.Path:
+    """配置根的父目录（`%PUBLIC%/Loomy`），随系统环境变量走。"""
+    from admin.platform.loomy.core import paths
+
+    return paths.config_root_parent()
+
+
 def config_root() -> pathlib.Path:
-    return CONFIG_ROOT_PARENT / user_hash()
+    """配置根（含 `userData/` 的那一层）。
+
+    顺序：
+    1. `LOOMY_CONFIG_ROOT` 覆盖（环境变量 / 后台设置）；
+    2. `%PUBLIC%/Loomy/<sha256(用户名)[:12]>`（与客户端同算法）；
+    3. 父目录下按 `userData/auth-session.json` 反查 —— 域用户、用户名变化、
+       多账号、客户端改 hash 算法时也能找到，不再依赖用户名算得一模一样。
+    """
+    from admin.platform import install_paths as ip
+
+    value, _source = ip.override(PLATFORM, "config_root")
+    if value:
+        return ip.expand(value)
+    parent = config_root_parent()
+    hashed = parent / user_hash()
+    if (hashed / "userData" / CRED_FILE).is_file():
+        return hashed
+    try:
+        for sub in sorted(parent.iterdir()):
+            if sub.is_dir() and (sub / "userData" / CRED_FILE).is_file():
+                return sub
+    except OSError:
+        pass
+    return hashed
 
 
 def user_data_dir() -> pathlib.Path:
@@ -81,7 +113,7 @@ def user_data_dir() -> pathlib.Path:
 
 
 def cred_path() -> pathlib.Path:
-    return user_data_dir() / "auth-session.json"
+    return user_data_dir() / CRED_FILE
 
 
 def opencode_config_path() -> pathlib.Path:

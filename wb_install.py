@@ -112,6 +112,24 @@ DEFAULT_RELEASE_DATE_MS = 1789036585355
 #: 安装基目录名候选（大小写变体都要试：Windows 上不区分，Linux 上区分）
 _BASE_NAMES = ("WorkBuddy", "workbuddy")
 
+
+def _base_names() -> tuple:
+    """固定目录名 + 用户额外的渠道版/改名版（`WORKBUDDY_DIR_NAMES`）。"""
+    extra = (os.getenv("WORKBUDDY_DIR_NAMES") or "").strip()
+    return tuple(dict.fromkeys(
+        list(_BASE_NAMES) + [x.strip() for x in extra.split(",") if x.strip()]))
+
+
+def _dynamic_drives():
+    """实际存在的盘符（不再写死 C,D,E,F,G）。"""
+    try:
+        from admin.platform import install_paths as ip
+
+        return list(ip.active_drives())
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("枚举逻辑盘失败，回退默认盘符：%s", exc)
+        return list(_iter_drive_roots(_DEFAULT_DRIVES))
+
 #: 参与扫描的默认盘符（Windows）。用 WORKBUDDY_DRIVES 覆盖。
 _DEFAULT_DRIVES = "C,D,E,F,G"
 
@@ -550,24 +568,39 @@ class _WorkBuddyInstall:
             out.append(a.parent.parent)          # <install>/resources/app.asar
             out.append(a)                        # 也把文件本身当候选
 
+        # 1a) 固定目录名 × 动态盘符 / 用户新建的父文件夹。
+        #     覆盖 E:\AI\WorkBuddy、F:\工具\客户端\WorkBuddy 这类布局，
+        #     且命中即停，比下面逐层拼路径快得多。
+        try:
+            from admin.platform import install_paths as ip
+
+            for raw in ip.find_named(
+                    _base_names(),
+                    require=(os.path.join(*_ASAR_REL),),
+                    stop_after_first=False, max_depth=3):
+                out.append(Path(raw))
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("动态定位安装目录失败：%s", exc)
+
         # 2) 常见安装基目录
         for ev in ("LOCALAPPDATA", "APPDATA", "ProgramFiles",
                    "ProgramFiles(x86)", "ProgramW6432", "USERPROFILE", "HOME"):
             base = os.getenv(ev)
             if not base:
                 continue
-            for name in _BASE_NAMES:
+            for name in _base_names():
                 out.append(Path(base) / name)
 
-        # 3) 各盘根目录
-        drives = (os.getenv("WORKBUDDY_DRIVES") or "").strip() or _DEFAULT_DRIVES
-        for root in _iter_drive_roots(drives):
-            for name in _BASE_NAMES:
+        # 3) 各盘根目录（盘符动态枚举；WORKBUDDY_DRIVES 仍可显式指定）
+        drives = (os.getenv("WORKBUDDY_DRIVES") or "").strip()
+        roots = list(_iter_drive_roots(drives)) if drives else _dynamic_drives()
+        for root in roots:
+            for name in _base_names():
                 out.append(root / name)
             # 3b) 盘根下一层子目录：覆盖 E:\AI\WorkBuddy 这类带分类目录的安装位置。
             #     只做一层、不递归；排在盘根候选之后，命中盘根时不会白扫。
             for parent in _iter_subdir_bases(root):
-                for name in _BASE_NAMES:
+                for name in _base_names():
                     out.append(parent / name)
 
         return _dedup(out)

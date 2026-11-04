@@ -344,6 +344,11 @@ def public_view(account: Account, *, usage: dict | None = None) -> dict:
         "machine_id": str(data.get("machine_id") or "")[:8],
         "last_sync_at": account.last_sync_at.isoformat()
         if account.last_sync_at else None,
+        #: 入库时间：账号池表格的「入库时间」列（**全平台统一字段**）
+        "created_at": account.created_at.isoformat()
+        if account.created_at else None,
+        "last_used_at": account.last_used_at.isoformat()
+        if account.last_used_at else None,
         #: 额度是否来自实时拉取（false = 读的 DB 快照，可能落后）
         "quota_live": bool(usage),
     }

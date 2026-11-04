@@ -2,12 +2,12 @@
 
 用户的核心规则：**只有 0 倍率才算免费。**
 
-这条规则听起来简单，但接平台时会遇到五种完全不同的上游形态。
+这条规则听起来简单，但接平台时会遇到六种完全不同的上游形态。
 判错的后果是「把收费模型标成免费」——用户拿到账单才发现。
 
 ---
 
-## 五种上游形态（全部实测）
+## 六种上游形态（全部实测）
 
 | 平台 | 倍率来源 | 形态 | 样例 |
 |---|---|---|---|
@@ -15,7 +15,12 @@
 | Trae | `credits` | 字符串 | `"x0.79"` |
 | Qoder | `price_factor` | 数字 | `0.5` |
 | **Loomy** | **模型显示名后缀** | **字符串内嵌** | `"DeepSeek V4.1 Flash(x2.0)"` |
+| **Raccoon** | **`billing_effective_multiplier` / `billing_multiplier`** | **两个数字字段** | `0.25` / `0.5` |
 | （兜底） | 无 | — | 返回 `-1` |
+
+> 接第 7 个平台时先问一句：**上游的模型目录接口里，有没有我还没看的字段？**
+> 小浣熊的倍率一直在 `billing_*` 里，只是第一版 `fetch_models()` 只挑了
+> name/display/description/visible 四个键 —— 字段存在，被我们自己过滤掉了。
 
 ---
 
@@ -95,6 +100,162 @@ export function splitModelDisplayName(value) {
 
 ---
 
+## ★ 第六种：标价 ≠ 实扣（Raccoon）
+
+小浣熊的模型目录**同时给两个数字**：
+
+```json
+{
+  "name": "sensenova-6-8-flash",
+  "billing_multiplier": 0.5,             // 标价
+  "billing_effective_multiplier": 0.0,   // 实扣（限免 / 折扣后）
+  "billing_status": "limited_free",
+  "billing_status_note": "限时免费"
+}
+```
+
+### 取哪个：**实扣优先，标价解释**
+
+```python
+for key in ("price_factor", "priceFactor", "original_price_factor",
+            "billing_effective_multiplier",   # ← 实扣必须排在前面
+            "billing_multiplier"):            # ← 标价兜底
+    ...
+```
+
+取错一个的后果是**两个方向都会错**：
+
+| 取错 | 表现 |
+|---|---|
+| 只取标价 | 限免模型被标成「×0.50 收费」，用户不敢用 |
+| 只取实扣 | 折扣结束后仍是旧值，账单对不上 |
+
+### 为什么不能只留一个
+
+`billing_effective_multiplier` 是「**此刻**要花多少」，`billing_multiplier`
+是「原价多少」。前端提示 `×0.25（原价 ×0.50）` 比只给一个数字有用得多 ——
+用户能判断「是限免还是真便宜」。
+
+### 同一条链路的三个字段，一个都不能丢
+
+```python
+flat.append({
+    "billing_multiplier":           multipliers[0],
+    "billing_effective_multiplier": multipliers[1],
+    "billing_status":               item.get("billing_status"),      # limited_free
+    "billing_status_note":          item.get("billing_status_note"), # 限时免费
+    ...
+})
+```
+
+丢了 `billing_status`，前端就只能显示数字，说不出「为什么这么便宜」。
+
+---
+
+## ★ 记账：倍率同时是「每千 token 积分」
+
+`model_configs.credit_multiplier` **一个字段担两个职责**：
+
+| 用途 | 语义 |
+|---|---|
+| 展示 | 相对倍率（`×0.25`） |
+| **记账** | **每 1000 token 扣多少积分** |
+
+```python
+# proxy.py 记账（上游没给 credits，或给了 0 时）
+credits = float(total_tokens) * credit_multiplier / 1000.0
+```
+
+实测：小浣熊 `sn-glm-5-3-flash`，206 token、倍率 0.2 → `0.0412`。
+
+### 三个坑
+
+**① 上游给 `credits = 0` 不代表免费**
+
+WorkBuddy 上游就恒回 `usage.credit = 0`（它根本没算）。判据必须是
+「库里配了正倍率 → 按倍率估算」，而不是「上游说 0 就写 0」。
+
+```python
+if (credits is None or float(credits or 0) <= 0) and (total_tokens or completion_tokens):
+    ...
+```
+
+**② 查倍率必须限定平台**
+
+```python
+# ❌ 只按 model_id：workbuddy 与 trae 都有 `glm-5.2`，.first() 可能命中另一家
+db.query(ModelConfig).filter(ModelConfig.model_id == name).first()
+
+# ✅ 先按平台查，查不到才放宽
+db.query(ModelConfig).filter(ModelConfig.model_id == name,
+                             ModelConfig.platform == resolved_platform,
+                             ModelConfig.enabled == 1).first()
+```
+
+**③ 客户端发的是 slug，库里存的是上游 id**
+
+`deepseek-v4.1-flash-workbuddy`（对外 slug）、`deepseek-v4.1-flash`
+（WorkBuddy 库里）、`DeepSeek-V4.1-Flash`（Loomy 库里）是同一个模型。
+
+只用字面量精确查 → 查不到 → 倍率 0 → **积分显示 0**。必须走候选列表：
+
+```python
+from admin.platform.shared import _billing_candidates
+for name in _billing_candidates(model or ""):
+    ...   # 依次尝试：原名 / 剥后缀 / slug 归一 / 上游 id 反查
+```
+
+---
+
+## 积分获取与显示（读不到 ≠ 0）
+
+### 各平台的余额接口不一样
+
+| 平台 | 接口 | 字段 | 口径 |
+|---|---|---|---|
+| WorkBuddy | `/api/accounts/{id}/refresh` | `balance_remain` | 积分 |
+| Raccoon | `/api/web/points/v1/balance` | `available_points` / `daily_points` | 可用总额 / 当日额度 |
+| Trae | quota detail | `basic_usage_amount`(milli$) / `basic_usage_limit`($) | **单位不同** |
+| Qoder | `/quota` | `price_factor` 计费 | — |
+
+映射到统一三件套：
+
+```python
+account.balance_remain          = available        # 可用
+account.credits_expiring_soon   = daily            # 会过期的部分
+account.credits_snapshot        = json({...})      # 原始结构，供明细页
+```
+
+### ★ 空结构必须抛错，不能取 0
+
+上游 HTTP 200 + 空 body 时，`request_json` 返回 `None`。如果这里变成 `{}`
+再逐字段取 0，`apply_quota` 会把**真实余额覆盖成 0**，账号还是 active ——
+界面上看起来是「这个号没钱了」，实际只是没读到。
+
+```python
+if not isinstance(data, dict) or not data:
+    raise UpstreamError("积分查询返回空结构（HTTP 200）", kind="upstream")
+if not any(k in data for k in _POINTS_KEYS):
+    raise UpstreamError("积分查询缺余额字段", kind="upstream")
+```
+
+调用方按 `partial` 处理：**保留上次快照，不写 0**。
+
+### 缓存命中：`cached_tokens` 要一路带到 UI
+
+```
+上游 usage.prompt_tokens_details.cached_tokens
+  → proxy 归一
+  → usage_logs.cached_tokens
+  → 前端「缓存命中」列
+```
+
+少了任何一环，界面永远是 0，用户会以为网关没做缓存（实测第二次请求
+`cached_tokens=256`）。**注意**：缓存命中**不减倍率**，它只是上游的计费口径，
+别自作聪明打折。
+
+---
+
 ## 三值语义（关键设计）
 
 用 `credit_multiplier` 一个字段表达三种含义：
@@ -136,16 +297,23 @@ for kw in ['倍率','积分','计费','倍']:
 # ③ 最后看 /models 的完整字段清单
 ```
 
-字段可能出现在**四个地方**：
+字段可能出现在**五个地方**：
 
 ```
 顶层             {"price_factor": 0.5}
 命名空间子对象    {"x_qoder": {"price_factor": 0.5}}
 字符串字段        {"credits": "x0.50"}
 ★ 显示名内嵌      {"name": "DeepSeek V4.1 Flash(x2.0)"}
+★ 双数字字段      {"billing_multiplier": 0.5,
+                  "billing_effective_multiplier": 0.0}   ← 实扣优先
 ```
 
-解析函数必须覆盖全部四处。
+解析函数必须覆盖全部五处。**「搜不到」优先怀疑「没把字段从上游带出来」**，
+而不是「平台没有这个概念」——小浣熊就是这么被误判成「无倍率」的：
+字段在上游响应里，被自己的 `fetch_models()` 过滤掉了。
+
+> 判据：`fetch_models()` 里 `flat.append({...})` 的键，等于**上游能力的上限**。
+> 少写一个键，上面所有层都拿不到这个信息，而且不会报错。
 
 ### 2. 别覆盖上游的 `name`
 
@@ -267,7 +435,7 @@ for text in [
 
 ---
 
-## 各平台现状（2026-10-29 实测）
+## 各平台现状（2026-11-04 实测）
 
 | 平台 | 倍率来源 | 免费 | 收费 | 无量纲 |
 |---|---|---|---|---|
@@ -275,6 +443,9 @@ for text in [
 | trae | `credits` 字符串 | 59 | 11 | 0 |
 | qoder | `price_factor` 数字 | 2 | 7 | 0 |
 | loomy | **显示名后缀** | 2 | 7 | 0 |
+| raccoon | **`billing_effective_multiplier` 双字段** | 2 | 7 | 0 |
+
+小浣熊实测落库值：`1.0 / 0.75 / 0.25 / 0.2 / 0`（两个 sensenova 限免为 0）。
 
 WorkBuddy 有 6 个 0 倍率模型，但 4 个是图像/视频
 （`hunyuan-image-*` / `kling-video-*` / `minimax-video-*`）——
@@ -287,7 +458,10 @@ WorkBuddy 有 6 个 0 倍率模型，但 4 个是图像/视频
 ```
 ① 找倍率：先搜中文（「倍率」「计费」），再搜字段名，最后看显示名
 ② 显示名里带倍率时，照抄客户端的 splitModelDisplayName（两层后缀、全角括号）
-③ 有倍率 → 原样存（含 0）；真没有 → 存 -1（不是 0）
-④ 判免费 → 倍率 == 0 才算，且按（平台, 模型）双键判
-⑤ 各平台倍率基准不同，展示要带平台上下文
+③ 双数字字段（标价/实扣）→ 实扣优先，标价留作解释
+④ 有倍率 → 原样存（含 0）；真没有 → 存 -1（不是 0）
+⑤ 判免费 → 倍率 == 0 才算，且按（平台, 模型）双键判
+⑥ 记账用同一个字段：total_tokens × 倍率 / 1000；上游给 0 也要按倍率估算
+⑦ 余额读不到 ≠ 余额 0：空结构必须抛错，保留上次快照
+⑧ 各平台倍率基准不同，展示要带平台上下文
 ```

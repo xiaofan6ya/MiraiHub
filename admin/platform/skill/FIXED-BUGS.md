@@ -393,6 +393,10 @@ z.array(z.object({
 要求这两个字段；DSH 的 schema 是 `additionalProperties: true`，
 多余键被忽略，两者不冲突。
 
+> **后半段在五·补35**：字段形状对了，但**上游的值没被带出来**（平台只给
+> `tags`、或 `fetch_models` 把 `context_window` 过滤掉），表现仍然是空。
+> 形状 + 数据源，两件事都要过。
+
 ---
 
 ## 五·补3、DSH 的「已自定义模型目录」会覆盖手改的 yaml
@@ -438,6 +442,11 @@ dispatch 分叉 | raw_model='' -> platform='workbuddy' explicit=False
 **修法**：任何 Key 都预读，不做聚合与否的分支。
 
 **教训**：一个「顺带做两件事」的分支，条件收紧时会漏掉其中一件。
+
+> **同源第二次**：`Content-Length` 那个条件也是同一类问题（chunked /
+> 大 body 不预读），见**五·补25**。
+> 两次都是「预读被某个条件挡住 → 后缀静默失效」。
+> 现在的实现已经没有任何条件分支（写请求一律预读），别再往里加。
 
 ---
 
@@ -1373,6 +1382,820 @@ const needAuth = !canImport && supportsAuth;
 前端一旦写死「qoder 有授权、其它没有」，加第五个平台就得改前端 ——
 正确做法是问平台，平台说有什么就渲染什么。
 
+## 五·补25 ★ 偶发 400「模型 'xxx-raccoon' 不存在或已被禁用」
+
+**现象**（2026-11-04 用户原话）："用一会就出现这种问题，明明可以用没问题"。
+
+```
+本轮运行失败400: {"message":"模型 'sn-deepseek-v4-1-flash-1017-raccoon'
+不存在或已被禁用；该名字看着像平台模型（raccoon）","type":"model_not_found"}
+```
+
+**根因**：`dispatch._should_peek()` 只在「带 `Content-Length` 且 ≤256KB」时
+预读 body。于是两种请求**静默不预读**：
+
+| 请求 | 为什么会这样 |
+|---|---|
+| chunked（无 Content-Length） | 客户端 / 代理默认分块 |
+| body > 256KB | 多轮对话、长上下文、带图、工具结果 |
+
+不预读 → `raw_model` 为空 → 后缀解析不出 → 落默认平台（WorkBuddy）→
+主应用白名单里没有这个带后缀的名字 → **400**。
+
+「用一会儿才出错」= 对话变长、body 越过 256KB。
+
+**修法**：
+
+```python
+_BODY_METHODS  = {"POST", "PUT", "PATCH"}
+_BODY_HARD_CAP = 32 * 1024 * 1024
+
+# 写请求一律预读；无 Content-Length 也读；超上限不读但要 warning
+```
+
+同时 `_read_body()` **不再「超限返回空串」**——那会把 body 吃掉，
+下游拿到空 body 直接 400 bad json（每个大请求都挂）。
+改动后完整读完、完整回放，只在超限时记日志。
+
+**验证**：300B / 600KB / chunked 三种 body 都必须能拿到带后缀的模型名。
+`scripts/check_hotpath.py` 第 1~2 项已固化为回归。
+
+**教训**：热路径上的「优化条件」如果会让一个**必需**的动作静默跳过，
+那就是 bug 温床。预读不是优化，是路由的前提。
+
+---
+
+## 五·补26 ★ 同名模型写法不同，只剥后缀不还原上游 id
+
+**现象**：`glm-5.3-flash-loomy` 在模型列表里能看到，一发就
+`模型不存在`；同名模型在 WorkBuddy 上正常。
+
+**根因**：`/v1/models` 对外统一发小写 slug + 平台后缀，但上游只认自己的写法：
+
+| 对外 slug | WorkBuddy | Trae | Loomy |
+|---|---|---|---|
+| `glm-5.3-flash` | 同名 | 同名 | **`GLM-5.3-Flash`** |
+| `deepseek-v4.1-flash` | 同名 | **`DeepSeek-V4.1-Flash`** | 同左 |
+| `minimax-m3` | — | `minimax-m3` | **`MiniMax-M3`** |
+
+dispatch 原来只**剥后缀**、不**还原 id**。而且 `upstream_of()` 是全局扫描、
+不分平台，同名时可能返回别家拼法 —— "还原"成另一个平台的模型名。
+
+**修法**：新增 `models_router.upstream_of_in_platform(slug, storage, db)`，
+平台确定后按 `(platform, enabled=1)` 收窄，两级匹配：
+
+1. 完全同名（大小写不敏感）；
+2. `slugify_model_id()` 归一后相同（`GLM-5.3-Flash` ↔ `glm53flash`）。
+
+找不到返回 `""`，调用方**保持原名**——不猜，让上游自己报错（可归因）。
+
+**验证**：`upstream_of_in_platform("glm-5.3-flash","loomy") == "GLM-5.3-Flash"`。
+实测带后缀调用 `glm-5.3-flash-loomy`，上游回显 `model=GLM-5.3-Flash`。
+
+---
+
+## 五·补27 ★ 倍率字段被自己的 `fetch_models()` 过滤掉了
+
+**现象**：小浣熊 9 个模型的倍率列全是「—」（`-1.0`），而客户端里明明
+显示 ×0.25 / ×0.5。
+
+**根因**：上游 `/model_catalog` 每个模型都带
+`billing_multiplier` / `billing_effective_multiplier` / `billing_status`，
+但 `fetch_models()` 只挑了 `name/display/description/visible` 四个键 ——
+**字段存在，被我们自己丢了**。上层自然解析出「没有倍率」。
+
+**修法**：`flat.append({...})` 补齐计费四件套；解析时
+**`billing_effective_multiplier` 必须排在 `billing_multiplier` 前面**
+（实扣 vs 标价）。
+
+**验证**：落库实测 `1.0 / 0.75 / 0.25 / 0.2 / 0`（两个 sensenova 限免为 0）。
+
+**教训**：`fetch_models()` 返回的键 = **整个系统能看到的上限**。
+少一个键不会报错，只会让下游永远拿不到。接平台时先打印上游**完整**条目，
+再决定拍平哪些字段。
+
+---
+
+## 五·补28 ★ 积分显示 0：记账时倍率查不到
+
+**现象**：对话成功、token 正常，但用量日志积分是 0。
+
+**根因**（两个叠加）：
+
+1. **不分平台查倍率**：`workbuddy` 与 `trae` 都有 `glm-5.2`，
+   `.first()` 可能命中另一家的倍率；
+2. **slug 与上游 id 不等**：客户端发 `deepseek-v4.1-flash-workbuddy`
+   （带后缀的规范 slug），库里存 `deepseek-v4.1-flash`（上游 id）——
+   精确查必然落空 → 倍率 0 → 积分 0。
+
+**修法**：
+
+```python
+from admin.platform.shared import _billing_candidates
+for _name in _billing_candidates(model or ""):        # 原名/剥后缀/归一/反查
+    mc = db.query(ModelConfig).filter(
+        ModelConfig.model_id == _name,
+        ModelConfig.platform == resolved_platform,     # ← 必须先限定平台
+        ModelConfig.enabled == 1).first()
+    if mc and mc.credit_multiplier: break
+```
+
+**验证**：小浣熊 `sn-glm-5-3-flash` 206 token、倍率 0.2 → `0.0412`。
+
+**教训**：`credit_multiplier` 既是展示倍率也是**每千 token 单价**
+（`credits = tokens × mult / 1000`）。查错一次，账和展示同时错。
+
+---
+
+## 五·补29 ★ 积分接口返回空结构 → 真实余额被清零
+
+**现象**：账号明明有钱，界面上可用积分变成 0，状态还是 active。
+
+**根因**：上游 HTTP 200 + 空 body 时 `request_json` 返回 `None`；
+代码写成 `data = ... or {}` 再逐字段取 0，`apply_quota()` 就把
+真实余额覆盖成 0。
+
+**修法**：**空结构一律抛错**，并且要求至少命中一个余额键：
+
+```python
+if not isinstance(data, dict) or not data:
+    raise UpstreamError("积分查询返回空结构（HTTP 200）", kind="upstream")
+if not any(k in data for k in ("available_points","daily_points",
+                               "monthly_points","reward_points")):
+    raise UpstreamError("积分查询缺余额字段", kind="upstream")
+```
+
+调用方按 `partial` 处理：保留上次快照、不写 0，账号不算失败。
+
+**验证**：mock 空 body → 余额不变、账号仍 active；
+真实零余额时上游返回完整字段（`available_points=0`），能正常走通。
+
+---
+
+## 五·补30 ★ 「余额刷新失败：凭证缺少 auth」
+
+**现象**：小浣熊账号点刷新，报
+
+```
+上游 HTTP 未记录 / code 未返回
+CredentialError: 账号凭证缺少 auth，请重新导入或授权登录
+```
+
+**根因**（两个）：
+
+1. **前端写死默认平台接口**：`refreshAcc()` 用
+   `/api/accounts/{id}/refresh`（WorkBuddy 号池接口），拿小浣熊的
+   account_id 打过去 → 后端按 WorkBuddy 凭证结构解 → 这句报错；
+2. **成败判据错**：非默认平台的刷新接口**恒返回 HTTP 200**，
+   失败在 body 的 `{"ok": false, "error": {...}}` 里。只判 `r.ok` 会把
+   失败提示成「已刷新」。
+
+**修法**：
+
+```javascript
+const base = platformApiPrefix(spec, storage);   // workbuddy → /api/accounts
+api(`${base}/${id}/refresh`, {method: "POST"});
+
+const failed = !r.ok || (data && data.ok === false);   // 两套形状都认
+```
+
+顺带修：刷新成功后**必须清 `last_err_msg`**，否则健康账号行上永久挂着
+旧报错。
+
+**验证**：`{"ok":true,"quota":{...,"available":6296}}`，账号 active、
+`last_err = None`。
+
+---
+
+## 五·补31 ★★ 扫码授权把「能用的凭证」覆盖成「不能用的凭证」
+
+**现象**：扫码授权显示成功、账号入库，然后这个号所有请求都失败
+（"凭证缺少 auth"）。原本扫本机导入的同一个号是好的。
+
+**根因**：同一个账号两张票，能力完全不同：
+
+| 来源 | sid | `/model_catalog` |
+|---|---|---|
+| 客户端 `auth.json` | `01a1a3ed` | **200** |
+| 扫码授权 | `01a1a434` | **400 `200901 iam_confirm_required`** |
+
+上游要求「IAM 会话确认」，而 `/api/iam/v1/auth/*` 下能想到的 confirm 路径
+全是 404。第一版 webauth **入库前不做任何验证**，直接 `import_record`
+（同 uid 即更新）→ 好票被坏票替换。
+
+**修法**：`poll()` 拿到 token 后**先用业务接口验一次**，不通就**不落库**：
+
+```python
+try:
+    raccoon_client.fetch_models(token, realm, None)     # 业务接口，不是 /me
+except UpstreamError as exc:
+    sess["status"] = "failed"
+    sess["confirm_required"] = (exc.kind == "confirm")
+    sess["error"] = "扫码会话未完成 IAM 确认，已保留原凭证"
+    return                                              # ← 关键
+raccoon_accounts.import_record(db, record)
+```
+
+并把 `200901` 单独归类为 `confirm`，**不能**归 `auth`——归 auth 会把账号
+直接 disabled，用户明明还能用。
+
+**验证**：扫码票入库被拒、旧凭证 `sid` 不变、账号仍能对话。
+
+**教训**：**任何"更新凭证"的路径，写库前都要先证明新票能用。**
+"授权成功"只说明拿到了 token，不说明 token 有权限。
+
+---
+
+## 五·补32 ★ 导出的账号文件导不回来 + GBK 备份变乱码
+
+**现象**：WorkBuddy 导出正常，原样导入报「缺少 auth / 账号 字段」。
+
+**根因**：导出是**信封**：
+
+```json
+{"id":188,"name":"...","format":"client","item":"{\"account\":{...},\"auth\":{...}}"}
+```
+
+凭证在 `item`（**字符串**）里。整份贴回去，校验器只看到 `id/name/item`。
+
+**修法**（两侧都做，双保险）：
+
+- 前端 `submitUpload()` 加 `unwrapExport()`：拆 `item` / `accounts`；
+- 后端 `credential_codec.normalize_credential()` 拆同样的外壳。
+
+⚠️ 拆壳后必须把 `changed = True`，否则函数末尾认为"没改动"又把原串吐回去。
+
+**附带**：文件读取换 `readCredentialFile()`（严格 UTF-8 → GBK → 宽松），
+否则 Windows 的 GBK 备份把中文昵称读成 `Ð¡ä½ÐÜ 1de8`。
+
+**验证**：导出 → 回灌 = `added 0 / skipped 1`，无报错。
+
+---
+
+## 五·补33 ★ 扫描到了却「没有导入任何账号」
+
+**现象**：扫描列出 1 个账号、勾选、确认 → 「本机凭证不在勾选范围内，未导入」。
+
+**根因**：扫描结果是**脱敏 uid**（`pu-01a1a******`），前端把脱敏值塞进
+勾选框 `data-uid`，后端和完整 uid 做**全等**比较 → 一条都对不上。
+
+**修法**：
+
+- 前端优先 `uid_full`；
+- 后端 `_uid_selected()` 兼容带 `*` 的值（按前缀匹配），老页面 / 脚本直调
+  也能导。
+
+**验证**：勾选框是完整 uid；把脱敏值直接 POST 给 `import-local` 同样 200。
+
+---
+
+## 五·补34 ★ 同步提示「新增 N 个」但列表里一条都没有
+
+**现象**：小浣熊同步返回 `fetched 9 / updated 9`，模型配置页空白。
+
+**根因**：聚合视图只渲染 `platform_count > 1` 的组，而小浣熊 9 个模型都是
+单平台 → 全部被过滤。同步确实成功了，只是**列表看不见**。
+
+**修法**：聚合视图渲染**全部组**（单平台组也显示 `平台数=1`），
+"跨平台调度"用徽标区分，而不是用过滤隐藏。
+
+**顺带**（同一处，三个 bug）：
+
+1. `loadModels()` 在**分流到聚合之后**才算平台过滤值 → 聚合视图一直沿用
+   上一次平铺视图的筛选，切平台等于没切；
+2. 聚合视图从不重画平台芯片 → 点了没有视觉反馈；
+3. 关掉聚合后表头不还原（聚合 5 列 / 平铺 8 列）→ 状态、操作列"消失"。
+
+修法：过滤值在分流**之前**算；聚合视图也渲染芯片；覆盖表头前先留档
+`_modelHeadDefault`，平铺时 `restoreModelTableHead()`。
+
+**验证**：聚合 5 列 62 组 ↔ 平铺 8 列 9 行，来回切 3 次正确、无 JS 报错。
+
+---
+
+## 五·补35 ★ 模型目录丢了"这是什么模型"
+
+**现象**：模型配置页一列代号（`raccoon-090dd3` / `sn-glm-5-3-flash`），
+用户不知道哪个该开；上下文窗口、最大输出、图片输入全是空。
+
+**根因**（两处）：
+
+1. `fetch_models()` 把 `display_description` 丢了（见五·补27 同源）；
+2. `/v1/models` 只给 `id` / `name`。DSH 的 `discoverModels` zod schema
+   （反编译 `app.asar` 确认）要的是
+   `{id,name,contextWindow,maxTokens,inputModalities}` —— 缺字段就显示默认空值。
+
+**修法**：
+
+- 描述一路带到 `model_configs.note` / 前端 tooltip；
+- `_caps_flat()` 输出 `contextWindow` / `maxTokens` / `inputModalities`，
+  并附 OpenRouter 别名（`context_length` / `max_output_tokens` /
+  `architecture.input_modalities`）；
+- 能力从 `tags` 兜底（小浣熊只给 `vision` / `reasoning` 标签，没有布尔位）。
+
+**验证**：`sn-deepseek-v4-1-flash-1017-raccoon` →
+`contextWindow 1000000 / maxTokens 100000 / ["text","image"]`。
+
+**已知限制**：DSH 的 schema 里**没有推理档位字段**，那一栏只能手工选。
+不要为此伪造其它键；但 `reasoning_effort` 实测能透传上游（low → 200）。
+
+---
+
+## 五·补36 文档说"不支持扫描"，代码其实支持
+
+**现象**：小浣熊平台看得到「扫描本机」按钮，点了没反应 / 返回
+`reason: electron_leveldb`；而本机 `~/.office-raccoon/agent/config/auth.json`
+明明是明文 JWT。
+
+**根因**：第一版结论（"Electron LevelDB，扫不出来"）写进了三处：
+`README.md` / `__init__.py` 的 `supports_local_scan=False` / `routers/accounts.py`
+的模块注释。**三处都是同一份事实的副本，改一处没同步另外两处**，
+于是功能和文档互相矛盾。
+
+**修法**：改结论时三处同步 + 搜索仓库里所有旧文案（含用户可见的
+`auth_explain`）；`scan()` 返回 `supported: true` 并实际读文件。
+
+**验证**：`/api/raccoon/scan-local` 返回真实 uid；
+`import-local` 返回 `{"supported":true,"imported":1}`。
+
+**教训**：**结论必须是代码验证过的，不是推理出来的。**
+"Electron 应用 → 用 LevelDB → 扫不出来"是很顺的推理，也是错的。
+写进文档前先 `ls` 一下那个目录。
+
+---
+
+## 五·补37 ★★ 一条请求建了两条「进行中」记录，面板永远显示"已接收"
+
+**现象**：请求动态面板上堆着十几条「已接收 / 选路中」，耗时为 `—`；有的挂了
+一小时还在；**重启进程也不消失**（因为记录在 Redis）。用户判断是"排队卡死、
+并发被打满"。
+
+**根因**：`add_middleware` 是**前插**，实际层次是
+
+```
+TimingMiddleware(最外) → GatewayAdmission → PlatformDispatch(最内)
+```
+
+`TimingMiddleware` 与 `PlatformDispatchMiddleware` **都调了**
+`traffic_stats.start()`：外层先建 `rid=B` 并写进 `scope["_wb_traffic_rid"]`，
+dispatch 后建 `rid=A` **覆盖**了它。收尾时只删 scope 里那个（A），
+`B` 永远没人删 —— 一条请求漏一条记录，`running` 计数只增不减。
+
+实测一次排障里堆了 **59 条**，最早的是 1 小时前。
+
+**修法**：
+1. `traffic_stats.annotate(rid, **fields)`：往已有记录里补字段，不新建；
+2. dispatch 只 `annotate`（平台猜测 / Key / IP），**不再 start**；
+3. 平台确定后 `_set_state()` 再 annotate 一次真实平台，running 行不再显示"选路中"；
+4. `snapshot()` 里按 `GATEWAY_REQUEST_TIMEOUT + 120s` 清僵尸记录（复用已读出的
+   hvals，`HDEL` 掉），防止历史残留永远挂着。
+
+**验证**：发一条 `/v1/chat/completions`，`HGETALL wb:traffic:running` 的条数
+**从 0 → 1 → 0**；面板 `running` 归零。`tests/test_gateway_reclaim.py` 覆盖。
+
+**教训**：统计埋点**只能有一个创建点**。多层中间件需要的是「补充」而不是
+「各建一份」——否则谁来收尾那一条永远说不清。
+
+---
+
+## 五·补38 ★★ 402 被当成不可重试 + 零余额号永远排第一 → "一直 402"
+
+**现象**：Loomy 平台所有对话返回
+`402 {"type":"http_error","code":"402","message":"请求失败（HTTP 402）"}`，
+换模型、重启都没用。
+
+**根因**（两段叠加）：
+1. `client._request()` 把 402 归到 `kind="http_error"`，而 `retryable()` 只认
+   408/429/5xx → 网关**不换号直接返回**，号也不进冷却；
+2. 选号按 `last_used_at` 升序取"最闲"，而**从没成功过的空号 `last_used_at`
+   恒为 NULL**，永远排最前 → 每次请求都选中同一个 0 积分号。
+
+上游原文其实是 `{"error":{"type":"insufficient_quota",
+"message":"积分余额不足，请获取积分后再试"}}`，被自己的分类吞掉了。
+
+**修法**：
+1. 402 → `kind="quota_exceeded"` + `retryable()=True` + 透出上游原文
+   （`_upstream_message()`）；网关已有的 `cool_seconds=600` 随即生效；
+2. `shared.select_account(..., min_balance=0)`：余额 ≤0 的号**不进候选**
+   （NULL 视为未知仍放行）；
+3. `sync_quota()` 探到 0 余额主动冷却 600s，不等撞 402。
+
+**验证**：`chat_stream()` 打一个 0 积分号 →
+`kind=quota_exceeded status=402 retryable=True message=积分余额不足，请获取积分后再试`；
+过滤前后 `select_account` 首选 id 从 `199(balance 0)` 变成 `204(20000)`。
+
+---
+
+## 五·补39 ★★ 列表接口在请求线程里同步探活 → 2.8 秒，几千个号几十秒
+
+**现象**：`/api/loomy/accounts?page=1&page_size=50` 稳定 2.4~3.0 秒；
+Qoder 同病。用户："这几个接口太慢了"。
+
+**根因**：`account_ops().list()` 对每个「快照过期」的号同步调一次上游
+（Loomy `sync_quota` / Qoder `fetch_usage`），**串行**。
+把同步调用临时置零后同一接口 **0.05 秒** —— 2.77 秒全在这里。
+
+**修法**：`shared.kick_background_refresh(name, ids, worker, max_items=8, min_gap=10)`，
+单飞 + 限频 + 限量 + 不冒泡；列表只读 `credits_snapshot` 立刻返回。
+Loomy/Qoder 都已改，`scaffold.py` 的模板也改成这个写法（新平台不再复制这个坑）。
+
+**验证**：`list()` 实测 **0.057s**（原 2.82s）；等 3 秒后余额确实被后台写回。
+
+> 详见 [INTEGRATION-CHECKLIST.md](INTEGRATION-CHECKLIST.md) §四 —— 那里已把
+> "在 list() 里实时拉上游" 这条旧约定**改写掉**，因为它就是性能事故本身。
+
+---
+
+## 五·补40 ★★ 注入客户端凭证"成功"了但没生效
+
+**现象**：点「注入本机客户端」提示成功，客户端里还是原来的账号。
+
+**根因**：接口一直 200（文件确实写了），但客户端把登录态放在**内存**里，
+刷新一次令牌就把 `workbuddy-desktop.info` 整份重写回去。
+实测 11:26:02 注入、**11:28:40 被覆盖**。同目录还有
+`<info>.<16hex>.observation.json` 记录 `identity.userId`，只改 `.info`
+等于给客户端两套互相矛盾的"我是谁"。
+
+**修法**：`core/client_session.py`
+· 原子写（临时文件 + `os.replace`，客户端读不到半份 JSON）；
+· `.info` 与 observation 一起改（后缀不猜，复用现场那个文件名）；
+· 写完 1.2 秒读回来核对 uid，被覆盖就回报 `overwritten`；
+· 检测客户端进程；`needs_restart` 时前端二次确认"是否重启客户端"。
+
+**验证**：注入后 `normalize_credential(info).account.uid == 目标 uid`；
+客户端在跑时接口返回 `verified=false / needs_restart=true`，而不是假装成功。
+
+---
+
+## 五·补41 ★ 凭证 `.info` 被当成"批量导出"拆开，auth 连同 refreshToken 一起丢
+
+**现象**：账号登录状态正常、额度查询与用量日志都能用，但列表提示
+「读不出 accessToken 的 exp，也没有 refreshToken」。
+
+**根因**：客户端完整 `.info` 同时含 `account / auth / accounts / allAccounts`。
+`_unwrap_export_wrapper()` 见 `accounts` 就判定为批量导出，取走 `accounts[0]`
+（纯账号档案，没有 `auth`）——令牌全丢。**凭证本身是好的**。
+
+**修法**：先判 `_looks_like_credential()`（有 `auth` 子对象或自带 token 字段
+就原样返回），再考虑拆信封。
+
+**验证**：`summary_line()` 对 #188 从「两条时间线都无法解析」变成
+`access 剩 7 天 / refresh 剩 37 天 / 可自动续期`。
+
+---
+
+## 五·补42 ★ 前端资源初始化轮询无上限，把整个控制台拖进请求风暴
+
+**现象**：DevTools 里 `model-health` / `models/display` / `models/configs`
+每几毫秒刷一次，页面一直在重绘。日志统计：几分钟内 `model-health` 被打了 **106 次**。
+
+**根因**：`loadAccounts()` 末尾只要有一个账号处于 `queued/running`，就
+`setTimeout(2000)` 再来一次，而且**顺带调 `loadModels()`**（一次 5 个接口）。
+没有次数上限、没有退避、没有"卡死"判定 —— 一个后台任务没结束就能让整页无限刷。
+
+**修法**：
+1. 轮询**只刷账号面板**；模型页只在收尾时补一次；
+2. 指数退避 2s→4s→…→10s；
+3. 最多 40 次（约 5 分钟）自动停；
+4. 状态 `updated_at` 超过 10 分钟没动 → 判为卡死，停止等待；
+5. `document.hidden` 或已切走 tab 时不再轮询。
+
+**验证**：账号池有 queued 号时，Network 面板 60 秒内只应看到个位数请求；
+`model-health` 不再周期性出现。
+
+---
+
+---
+
+## 五·补43 ★★ `record()` 提前 return，`/v1/models` 每次都漏一条「进行中」
+
+**现象**：面板动态区里 `/v1/models`、`/v1/balance` 反复出现「streaming」
+且永不消失；点几次模型页就多几条，越积越多（实测 25 分钟前的记录还挂着）。
+
+**根因**：`traffic_stats.record()` 开头有两处 `return`：
+
+```python
+if _path in SKIP_PATHS: return
+if _path not in TRACKED_PATHS: return
+```
+
+而清理「进行中」占位的 `finish_running(rid)` 写在**函数末尾**。
+`/v1/models` 这类「要显示在面板、但不进对话统计白名单」的路径正好走第二个
+`return` —— 于是每条这样的请求都留下一具尸体。
+
+**修法**：把 `finish_running(rid)` 移到 `try` 块的**第一行**，
+在任何过滤之前执行（HDEL 幂等，重复调用无副作用）。
+
+**验证**：连打 5 次 `/v1/models` + 5 次 `/v1/balance`，
+`HLEN wb:traffic:running` 必须回到 0；面板 `running` 归零。
+
+**教训**：任何「先 return 再清理」的写法都要检查一遍 ——
+清理逻辑必须放在**所有出口之前**，否则新增一个白名单路径就多一处泄漏。
+
+---
+
+## 五·补44 ★ 用 `datetime.utcnow().timestamp()` 判过期，东八区凭空多 8 小时
+
+**现象**：临时凭证明明还有 1 小时，网关每次请求都去续期（慢、且刷
+refresh_token）；反过来在某些时区又会「过期了还以为没过期」。
+
+**根因**：`datetime.utcnow()` 返回**naive** datetime，
+`.timestamp()` 会把它当**本地时间**解释 —— 在 UTC+8 上算出来的 epoch
+比真实值大 28800 秒。
+
+**修法**：判过期一律用 `time.time()`（`admin/platform/codearts/.../accounts.py`
+的 `needs_refresh`）。**不要**用 `utcnow().timestamp()`。
+
+**验证**：`expires_at = now + 60s` → 需要续期；`now + 3600s` → 不需要。
+`tests/test_codearts_platform.py::test_needs_refresh_window` 固化这两条。
+
+---
+
+## 五·补45 ★★ 各平台扫描目录写死 `D:\` / `C:\Program Files` / `C:/Users/Public`
+
+**现象**：用户把客户端装在 E 盘、改名安装文件夹、或系统是别的盘时，
+「扫描本机登录态」一律返回空 / 「未检测到客户端」；Trae 读不到
+`product.json` 的 `appVersion`，退化成兜底版本号后被上游 `10101` 拒绝；
+Loomy 永远只找 `C:/Users/Public/Loomy/<hash>`；Qoder 只认
+`Qoder CN.exe` 这一个进程名。写死清单（本次全部清掉）：
+
+| 位置 | 原来写死的 |
+|---|---|
+| `qoder/core/paths.py`、`loomy/core/paths.py` | `D:\Qoder\...`、`D:\Loomy\...` |
+| `codearts/core/paths.py` | `D:/CodeArts/CodeArts.exe` |
+| `trae/core/oauth.py` | `D:\Trae CN`、`C:\Program Files\Trae CN` |
+| `loomy/services/scan.py` | `C:/Users/Public/Loomy` |
+| `wb_install.py` | 扫描盘符集合 `C,D,E,F,G` |
+
+**根因**：把「上游目录名固定」误当成「整条绝对路径固定」。实际上固定的
+只有目录名（`WorkBuddy` / `CodeArts` / `com.qodercn.app.stable` …），
+**动态的是盘符和用户新建的父文件夹**（`E:\AI\工具\WorkBuddy`）。
+
+**修法**：新增 `admin/platform/install_paths.py`（与平台无关）——
+按固定名，在「所有实际存在的盘符」+「盘下 1~3 层动态父文件夹」里
+逐层直接拼路径、**命中即停**（冷启动 <200ms，缓存后 ~0.1ms）；
+数据目录取 `%APPDATA%` / `%PUBLIC%` 等环境变量，不拼 `C:`。
+优先级：`<PID>_INSTALL_DIR` 等环境变量 > 后台「客户端路径」设置
+（`system_settings.client_paths`，`/api/client-paths`）> 自动定位 > 不含盘符的兜底模板。
+库查询走启动时的后台预热，绝不压在展示接口的请求线程里。
+
+各平台 `core/paths.py` 只留平台知识（固定名 / 特征文件 / exe 名），
+对外提供 `app_exe_candidates()` / `data_dir_candidates()`；
+`platform_gateway.probe()` 改调函数而不是迭代写死的常量。
+Loomy 的 `config_root()` 增加「按 `userData/auth-session.json` 反查」，
+域用户 / 多账号 / hash 算法变化时也能找到。
+
+**验证**：`tests/test_install_paths.py`（动态盘符、动态父文件夹、覆盖优先级、
+不写死盘符）；`python -c "from ... import paths; print(paths.data_dir_candidates())"`
+在真机上应命中 `D:\WorkBuddy`、`D:\Trae`、`D:\CodeArts`、
+`%APPDATA%\codearts`、`%PUBLIC%\Loomy\<hash>`；Trae `app_version()` 读到 3.6.4。
+
+**脚手架同步**：`scripts/scaffold.py` 新增 `PATHS_PY` 模板，新平台生成即接入
+`install_paths`；`SCAN_PY` 模板删掉 `_appdata()` 写死与 `C:/Users/Public` 示例。
+
+---
+
+## 五·补46 ★★★ 上游会话窗口满，被报成「没有可用账号」
+
+**现象**：单账号 CodeArts 池，5 路并发流式 → 3 成功、2 条 `503
+{"message":"CodeArts 没有可用账号（请先在控制台导入并确认状态为启用）"}`。
+号明明在，状态 active，额度 4600。
+
+**根因**：`_forward_stream` 把三种完全不同的"拿不到号"混在一个
+`for attempt in range(MAX_ATTEMPTS)` 里：
+
+| 真实原因 | 旧代码的处理 | 后果 |
+|---|---|---|
+| 在途租约满（单号并发上限 3） | `exclude.add(id)` + 消耗一次 attempt | 号被永久排除，第 4/5 路直接 503 |
+| 会话窗口满（上游 3 个/55s） | 只在 `attempt == 0` 等一次 | 等完 attempt 也耗尽了，还是 503 |
+| 上游真的失败 | 换号 | 正常 |
+
+三种都汇成同一句 503「没有可用账号」，排障方向完全错。
+
+**修法**：
+
+1. 抽出 `reserve_slot(uid, deadline)`（async）——窗口满就**排队**，
+   返回 `(slot, waited, timed_out)`；
+2. 排队与等租约**不消耗** `MAX_ATTEMPTS`（那个预算是给"上游真失败"的），
+   也不把号加进 `exclude`（加进去就再也选不到它了）；
+3. 结尾按原因分派：`last_error` → 原样返回；等到超时 → **429**
+   `session_window_full` + `Retry-After: 30`；真的没号 → 503。
+
+**验证**：`tests/test_codearts_session_window.py::TestReserveSlotWaits`
+（等得到 / 超时报忙）；线上 5 路并发：2 路立即成功、2 路排队 ~55s 后成功、
+1 路 429（而非误导性的 503）。
+
+**附带结论（容量口径）**：单账号流式吞吐上限 ≈ **`limit / ttl` = 2 / 55s
+≈ 2.2 请求/分钟**。要更高并发只能加号 —— 上游按**账号**计会话，
+换号是唯一有效的扩容手段。
+
+---
+
+## 五·补47 ★★★ 会话 id 每请求随机：缓存打不中 + 像脚本
+
+**现象**：用户反馈"同账号尽量用同一个会话 id，别乱串，不然缓存命中不了还容易被风控"。
+
+**根因**（三处，各自随机）：
+
+| 位置 | 原来 | 上游看到 |
+|---|---|---|
+| `loomy/core/endpoints.py::chat_headers` | `ChatId = "gwchat-" + uuid4()[:16]` | 每请求新建一个会话 |
+| `qoder/core/protocol.py::build_upstream_body` | `session_id = "sess-" + uuid4()[:16]`（除非客户端给 `user`/`session_id`） | 同上 |
+| `proxy.py::_turn_headers` | 客户端没给会话标识时 `conversation = ""` | 空值 → 上游自造，等于每请求新会话 |
+
+后果是双份：上游前缀缓存永远打不中（费用与时延都上去）；
+一个号几分钟内"新建"几十个会话，是风控最敏感的形状。
+
+**修法**：新增 `pool.stable_session_id(platform, account_id, body, prefix, size)`，
+用 `sha256(平台 | 账号 | 会话键)` 派生：
+
+* 会话键 = 客户端显式会话标识，或**首条 user 文本**的哈希（`session_key_for`）；
+* **同账号 + 同对话 → 恒定**（缓存能命中）；
+* **换号必换 id**（一个会话不会跨账号乱串）；
+* 客户端什么都没给 → 用首条 user 文本派生（同一段对话恒定），连消息都没有
+  才退化成"每账号一个固定会话"；**任何一层都不是随机值**。
+
+`MsgId` / `TurnId` / `X-Conversation-Request-ID` 仍**每请求唯一**
+（它们是去重键，复用会导致上游少记账）。
+
+**验证**：`tests/test_session_effort.py`（同对话稳定 / 跨账号不同 / 显式 id 优先 /
+无信号时每账号一个常数）。
+
+**这已经是铁律，不是个案**：
+[PROTOCOL §4.7](PROTOCOL-ROUTING-CACHE.md)（派生规则 + 哪些 id 必须每次唯一）、
+[INTEGRATION §八](INTEGRATION-CHECKLIST.md)（新平台必做清单）、
+`SKILL.md` 热路径第 10 条、`scripts/scaffold.py` 的 `CLIENT_PY` 模板已内置
+`session_id_for()`。新平台照抄模板即可，不要自己再写一个 id 生成器。
+
+---
+
+## 五·补48 ★★ 思考档位：不记账、被网关抹平、被静默丢弃
+
+**现象**：除 WorkBuddy 外，用量日志的「思考程度」永远是"默认 / 未记录"，
+用户以为是客户端没传。
+
+**实测（2026-11-04，直打 CodeArts 上游，每档 3 次）**：
+
+| 请求 | 结果 |
+|---|---|
+| `reasoning_effort: insane` | **400** `parameter check failed, reasoning_effort must be none or low or medium or high or xhigh or max` |
+| `max` ×3 | reasoning_tokens 中位数 **691**（区间 668~1200，两次顶到 max_tokens） |
+| `high` ×3 | 272 |
+| `xhigh` ×3 | 189（**不比 high 强**，属采样噪声，别把它当"更高档"） |
+| `none` ×3 | 346 —— **`none` 不等于关思考** |
+| `thinking:{type:"disabled"}` | reasoning_tokens **None**，正文正常 → 这才是真正的关闭方式 |
+
+结论：上游**确实解析**这个枚举（非法值直接 400），`xhigh`/`max` 是**合法值**；
+但只有 `max` 有肉眼可见的效果差异。要"完全不思考"必须发
+`thinking:{"type":"disabled"}`，发 `reasoning_effort:none` 没用。
+
+**三个网关侧的真问题**：
+
+1. **不记账**：CodeArts / Loomy / Qoder / Trae / Raccoon 的 `_bill()` 都没传
+   `reasoning_effort`，`shared.record_usage` 的这个参数一直是默认空串。
+   修：`shared.reasoning_effort_of()`（统一口径，认 OpenAI / Responses /
+   Anthropic 三种写法）+ `reasoning_effort_of_request()`（从 `scope["_wb_body"]`
+   取，不必让每个调用点都往下传 body），五个平台的 `_bill` 全部接上。
+2. **被抹平**（Loomy）：`_apply_no_think()` 无条件
+   `enable_thinking=False`，用户把档位调到 max 也照样不思考。
+   修：下游明确要思考时（`reasoning_effort` 不在 off/none/minimal）
+   打开 `enable_thinking` 并把档位带给上游，同时不再往 prompt 里塞
+   `/no_think `（那句上游本来就不认，还会当正文念）。
+3. **被丢弃**（Qoder）：`_effort_of()` 只认 low/medium/high，`xhigh`/`max`
+   直接丢。修：等价映射（xhigh/max/ultra→high，minimal→low）；
+   日志仍记**原始值**（读的是下游 body），所以不会失真。
+
+## 五·补49 ★★ TTFT / TPS 记的不是上游真实值（三种错法）
+
+**现象**：面板上多数平台「TPS 暂无样本」；Loomy 永远是 `ttfb 9.33s /
+latency 9.49s`（解码段 160ms）；Qoder 干脆没有分段；Raccoon 记过 89ms
+的 TTFT 而客户端 2.5 秒才看到字。
+
+**三种错法（都是"看起来有值，实际不可用"）**：
+
+| 平台 | 原来的口径 | 后果 |
+|---|---|---|
+| Loomy / Trae | TTFT 取**首个正文**，思考链不算 | 思考模型先想 9s、正文 150ms 吐完 → 解码段 160ms → `bench_router` 判"量不出来"，TPS 永久缺失 |
+| Qoder | 只写 usage，不写 ttfb / latency | 记账退回「整段耗时」，`ttfb == latency`，TPS 恒不可算 |
+| Raccoon | 从 `iter_lines()` 开始计时 | httpx 在 `send(stream=True)` 返回时已缓冲首批字节 → 记出 89ms 的假 TTFT |
+
+**修法（统一口径：首个 token → 末个 token）**：
+
+1. **TTFT = 首个 token（content / reasoning / tool_calls 任一）**。
+   reasoning token 也是用户看得见的输出，而且 `completion_tokens` 里包含
+   `reasoning_tokens` —— 分子含它，分母就必须从它起算。
+2. Qoder `stream_openai` 记录首/末 token 时刻写回 `holder`，网关 `_bill`
+   显式传入（4 处调用点）。
+3. Raccoon 计时起点移到 `open_stream()` 发请求之前，并只在**带内容的
+   delta** 上记 TTFT（首行常是 role/metadata 帧）。
+4. CodeArts 的 `total_ms` 改成「最后一个 token」而不是生成器收尾
+   （收尾还含 `[DONE]` / usage 帧的网络时间）。
+
+**验证**（同一请求，客户端观测 vs 库里的值）：
+
+```
+loomy     客户端 ttfb=1679ms  total=4530ms  DB 1604/4484  tok=441  tps=154.7
+qoder     客户端 ttfb=1471ms  total=4931ms  DB  554/4013  tok=732  tps=211.6
+trae      客户端 ttfb=25363ms total=34332ms DB 25238/34207 tok=793  tps=88.4
+raccoon   客户端 ttfb=2513ms  total=3335ms  DB 2219/3324  tok=160  tps=194.6
+workbuddy 客户端 ttfb=1903ms  total=2844ms  DB 1832/2774  tok=66   tps=70.1
+```
+
+> Qoder 的库内 TTFT 比客户端小 ~0.9s：它记的是**网关发出上游请求之后**的首字，
+> 取 token / 选模型属于本地准备时间，不计入上游延迟。这一点在
+> [CAPACITY-PLANNING.md §5](CAPACITY-PLANNING.md) 里写明。
+
+---
+
+## 五·补50 ★★ 默认「60 请求/分钟 + 4 并发」把并发锁死，还伪装成上游慢
+
+**现象**：16 路并发时 Loomy 的 TTFT 从 1.6s 涨到 21.9s、TPS 完全正常。
+看起来像"上游扛不住"，实际是准入层按 60/分钟**匀速放行**（约 1 秒 1 个）。
+
+**实测（放开 Key 限后重测，同一台机器同一批号）**：
+
+| 平台 | 1 并发 | 16 并发 | 32 并发 |
+|---|---|---|---|
+| WorkBuddy（24 号） | 4.6s / 46.9 tps | 6.8s / 50.3 | 7.0s / 49.7 |
+| Loomy（101 号） | 1.6s / 162.8 tps | 16.2s / 174.2 | 21.7s / 46.8 |
+| Qoder（2 号） | 1.05s / 174.8 tps | — | — |
+
+WorkBuddy 32 并发几乎无衰减 → 池子够大时并发可以拉满；
+Loomy 即使把单号在途压到 1（101 个号各跑一路）16 并发仍 16.2s →
+**是上游按 IP/用户限速，不是网关挤在几个号上**。
+
+**修法**：
+
+* `ADMIN_GATEWAY_RATE_PER_MINUTE` 60 → **300**，`ADMIN_GATEWAY_MAX_CONCURRENT`
+  4 → **24**（Key 上填了值仍以 Key 为准）；
+* 账号级按平台覆盖：Loomy `max_in_flight=1`、CodeArts `2`（与 3 会话窗口对齐）、
+  Raccoon `2`；WorkBuddy/Qoder/Trae 保持全局 3。
+
+**怎么判断"是限流还是上游慢"**：把 Key 的 `rate_per_minute` 临时调大再测一次
+（`_scratch/platform_bench.py --raise-key-limit 64 --rate-per-minute 6000`），
+TTFT 掉下来就是自己被限了。完整口径见 [CAPACITY-PLANNING.md](CAPACITY-PLANNING.md)。
+
+---
+
+## 五·补51 ★★★ CodeArts：`developer` 角色 → 200 错误帧 → 客户端无限重试
+
+**现象**：Mirai / deepseek-harness 调 `deepseek-v4.1-flash-codearts`，客户端报
+`Stream ended without finish_reason` 并按 ~937ms 退避反复重试；用量日志三条全绿勾、
+TOKEN 0、`ttfb == latency`（632/759/870ms）；账号 status=active、余额 4600，换号无效。
+
+**根因**：上游只认 `system/user/assistant/tool`，`developer` 被解析成空 role，
+回的是 **HTTP 200 的 SSE 错误帧**：
+`{"text":"[DONE]","error_code":"InferHub.001001044.400","error_msg":"Message role cannot empty"}`
+—— 没有 `choices`、没有 `finish_reason`。`client.chat_stream()` 旧判断只看
+`chunk.get("error")`，漏掉 `error_code/error_msg` 形式，把它当正常 chunk 透传；
+网关末尾只补 `[DONE]`，`finally` 里还 `note_success()` 记成成功。
+A/B 实测：`developer` 必失败，改 `system`（保留 tools）立即正常。
+
+**修法**（`admin/platform/codearts/core/client.py` + `gateway.py`）：
+
+* `normalize_body()`：`developer → system`、空 role → `user`，流式/非流式统一调用；
+* `_inband_error()`：识别 `error_code/error_msg/error` 三种信封（正常 chunk 有 `choices` 则跳过）；
+* 流内错误补 `_terminal_frame()`（`finish_reason=stop` + `[DONE]`），
+  `holder["error"]` 写进 `error_kind`，不再 `note_success()`。
+
+**验证**：重启 8790 后同一请求 3167 字节完整流（`finish_reason=stop` +
+usage 37/30 tok + `[DONE]`）；故意用非法 role → 明确 error 帧 + 终止帧 +
+`usage_logs.error_kind='upstream_business'`。详见
+[REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md) §1 / §5。
+
+---
+
+## 五·补52 ★★★ WorkBuddy：11128 指纹在 `/v1/*` 链路没被真正删掉
+
+**现象**：11-02 之后 400 稳定在 4~6%。按「system 里是否带
+`x-anthropic-billing-header`」分组：AUX 带 billHdr 785 请求 / 694 个 400
+（**88.4%**），不带 647 / 28（4.3%）；MAIN 4425 / 63（1.4%）。
+同 key、同 IP、同秒的其它请求 200 —— 不是账号、不是限流。
+
+**根因**：`claude-cli/2.1.310` 的辅助子请求（security monitor / sentinel 哨兵）
+在 system 数组首个 text block 里塞 billing header。两条入口链路净化强度不一致：
+
+* `converter.py` 的 `/gw`：`prepare_upstream_body(sanitize=True)` →
+  `sanitize_messages()` → `_HDR_RE` **整行删除** ✅
+* `admin/routers/proxy.py` 的 `/v1/messages` / `/v1/chat/completions` / `/v1/responses`：
+  `_normalize_harness_body()` + `_desensitize_chat_body()`，前者不碰指纹，
+  后者只对词表插 U+200B。上游会归一化零宽字符，
+  `x-a\u200b…\u200bnthropic-billing-header` 字面仍然成立 → 等于没删。
+  `upstream_compat.py:773` 的注释早已写明「零宽字符无效（上游会归一化）」。
+
+**修法**：`proxy.py` 新增 `_strip_channel_fingerprints()`，在
+`_desensitize_chat_body()` 开头**无条件**执行（不受 `ANTHROPIC_DESENSITIZE`
+开关约束），且**早于**零宽脱敏：调用 `sanitize_messages()` 整行删指纹，
+并净化 `tools[].function.description`。顺序反了正则就再也匹配不到。
+三条 `/v1/*` 链路共用这一入口，不再各自实现。
+
+**验证**：构造带 billing header 的 system + tools 请求体，
+`_desensitize_chat_body()` 输出两处 `has_fingerprint()` 均为 False；
+不含指纹的正常请求零改写。断言脚本见
+[REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md) §5。
+
+---
+
 ## 六、运维
 
 ### 6.1 改完代码没真正重启
@@ -1453,3 +2276,36 @@ Start-Process -FilePath "python" -ArgumentList "main.py" -WorkingDirectory "E:\�
 [ ] 备份是整库复制 → 天然全平台，无需按平台过滤
 [ ] 账号导出默认按平台收窄（安全）；全量迁移要显式传 all_platforms=true
 ```
+
+### 7.5 改了 dispatch / 模型目录 / 计费 / 凭证（2026-11-04 新增）
+
+```
+[ ] python admin/platform/skill/scripts/check_hotpath.py → 0 失败
+[ ] 300B / 600KB / chunked 三种请求都走对平台（抓 x-gateway-platform）
+[ ] 带后缀模型调用：上游回显的 model 是该平台真实 id（不是 slug）
+[ ] 模型配置页每行有「上下文 · 输出 · 输入模态」摘要（不是空）
+[ ] 一条短请求：credits ≈ total_tokens × 倍率 / 1000（不是 0）
+[ ] 刷新额度：失败能弹出上游原文，成功清掉 last_error
+[ ] 导出 backup → 原样回灌 = added 0 / updated N（不是报错）
+[ ] 扫描 → 勾选 → 导入，三步都返回 200 且号池数量 +1
+```
+
+> 这八项覆盖了「HTTP 200 但结果错」的全部已知形态。
+> 只跑契约测试（能加载、方法齐全）**抓不到**其中任何一条。
+
+### 7.6 改了账号列表 / 调度 / 实时面板 / 批量导入（2026-11-04 二次新增）
+
+```
+[ ] 账号列表接口 <200ms（curl -w '%{time_total}' 量，不是肉眼看）
+[ ] 列表打完后 running 记录不增长：HGETALL wb:traffic:running 前后条数一致
+[ ] 选号不会选到 0 余额号：select_account(min_balance=0) 首选 balance>0
+[ ] 402 的错误体是上游原文（积分余额不足），不是「请求失败（HTTP 402）」
+[ ] 面板「进行中」计数只反映真实在跑：发 1 条 → running=1，完成后 → 0
+[ ] 页面上没有周期性出现的 model-health / models/display（Network 面板静置 60 秒）
+[ ] 批量导入 100 条 <10 秒（并发验证生效）；进度条一路在动
+[ ] 提交导入/导出后弹窗能立刻关掉，任务继续跑（后台队列）
+[ ] python admin/platform/skill/scripts/scaffold.py 生成的 list() 不含同步探活
+```
+
+> 最后一项是**防复发**：脚手架模板就是"下一个平台的起点"，
+> 模板里留着同步探活，这个坑就会一直生新副本。

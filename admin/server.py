@@ -258,6 +258,9 @@ app.include_router(growth_center.router)
 app.include_router(ip_management.router)
 from admin.routers import client_profile
 app.include_router(client_profile.router)
+# 客户端路径：自动发现之外的手动指定（换盘 / 便携版 / userData 迁移）。
+from admin.routers import client_paths
+app.include_router(client_paths.router)
 # 浏览器端自检上报：控制台把 pageerror / 资源状态 / 注入痕迹 POST 回来，
 # 落 logs/client-diag.jsonl。用于定位「页面结构完全正常、使用者那边却报
 # SyntaxError 且按钮失灵」这类只在其本机环境复现的问题。
@@ -316,6 +319,11 @@ try:
     app.include_router(raccoon_accounts_router.router)
 except Exception:  # noqa: BLE001 - raccoon 目录被裁剪时降级为不挂载
     logger.exception("小浣熊管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.codearts.routers import accounts as codearts_accounts_router
+    app.include_router(codearts_accounts_router.router)
+except Exception:  # noqa: BLE001 - codearts 目录被裁剪时降级为不挂载
+    logger.exception("CodeArts 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1":
     from admin.routers import app_source
     app.include_router(app_source.router)
@@ -381,6 +389,14 @@ def _startup():
         )
     except Exception:
         logger.exception("号池运行态装配失败，将退化为无粘性/无在途限制")
+
+    # 后台预加载各平台的路径覆盖值（库查询约 0.3s，不能压在展示接口上）。
+    try:
+        from admin.platform import install_paths
+
+        install_paths.warmup()
+    except Exception:
+        logger.debug("客户端路径覆盖预热失败", exc_info=True)
 
     # 把后台保存的路径覆盖注入 wb_install（安装目录 / 逆向产物目录）。
     # 必须在下面「客户端版本发现」之前：否则首个请求拿到的还是扫描结果，

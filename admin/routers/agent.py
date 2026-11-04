@@ -434,7 +434,9 @@ async def _stream_chat(db, key: ApiKey, body: dict, on_delta=None) -> dict:
     # 内嵌智能体也是一次真实的上游调用：报出归属与用途，并给每次尝试独立的
     # trace（上游按 X-Conversation-Request-ID 去重，复用会让后续调用不落账）。
     agent_purpose = identity.purpose_for('agent')
-    agent_conversation = proxy.pool.extract_session_key(outbound)
+    # 无显式会话标识时派生一个稳定的（否则每次请求都是新会话：
+    # 上游前缀缓存打不中、一个号几分钟冒出几十个会话）
+    agent_conversation = proxy.upstream_conversation_id(outbound)
     agent_turn = identity.turn_id(outbound)
 
     budget = proxy.pool_budget(db, key, [model])

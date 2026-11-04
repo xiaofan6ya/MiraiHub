@@ -128,13 +128,13 @@ def _conversation_probe(sess, model: str) -> dict:
 
 
 def _platform_health(db, account: Account) -> dict | None:
-    """非 WorkBuddy 平台的健康检查：走各自网关的 `account_ops().health()`。
+    """非默认平台的健康检查：走各自网关的 `account_ops().health()`。
 
-    之前一律用 WorkBuddy 的 `backend.AccountSession` 去探，结果「扫描 /
-    健康检查」永远打 WorkBuddy 上游，别的平台账号要么 404、要么被误判失效
+    之前一律用默认平台的 `backend.AccountSession` 去探，结果「扫描 /
+    健康检查」永远打默认平台上游，别的平台账号要么 404、要么被误判失效
     （issue #2：账号池的扫描没跟平台走）。
 
-    返回 None 表示「该账号仍走 WorkBuddy 原有检查逻辑」
+    返回 None 表示「该账号仍走默认平台原有检查逻辑」
     （默认平台 / 未登记平台 / 网关未实现 health）。
     """
     from admin.platform import registry
@@ -219,8 +219,8 @@ def check_account(db, account: Account) -> dict:
             return {"account_id": account.id, "account": label, "ok": False,
                     "healthy": False, "status": "skipped", "reason": "账号当前有在途请求或维护任务"}
 
-        # 非 WorkBuddy 平台：走各自网关健康检查，避免用 WorkBuddy 后端去探
-        # （issue #2：账号池扫描/健康检查一直打 WorkBuddy 上游）。
+        # 非默认平台：走各自网关健康检查，避免用默认平台后端去探
+        # （issue #2：账号池扫描/健康检查一直打默认平台上游）。
         plat = _platform_health(db, account)
         if plat is not None:
             return plat

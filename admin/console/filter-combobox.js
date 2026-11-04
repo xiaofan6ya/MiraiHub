@@ -91,8 +91,13 @@ window.WBFilterCombobox = (() => {
     const current = state.select?.selectedOptions[0]?.textContent;
     const query = (state.select && state.input.value === current ? '' : state.input.value).trim().toLocaleLowerCase();
     const label = value => state.select ? value.label : value;
-    const empty = state.select ? {value:'', label:state.select.options[0].textContent} : '';
-    state.matches = [empty, ...state.values.filter(value => label(value).toLocaleLowerCase().includes(query))];
+    // 「空值项」只有在 select 真的有 `<option value="">` 时才补。
+    // 账号池的排序 / 每页条数没有空选项，硬补一个会让用户点「最新添加」
+    // 却把 value 设成空串（后端拿不到排序），看起来像「选了没生效」。
+    const first = state.select ? state.select.options[0] : null;
+    const empty = (first && !first.value) ? { value: '', label: first.textContent } : null;
+    state.matches = [...(empty ? [empty] : []),
+                     ...state.values.filter(value => label(value).toLocaleLowerCase().includes(query))];
     state.active = -1;
     state.input.removeAttribute('aria-activedescendant');
     state.panel.replaceChildren();

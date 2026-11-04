@@ -1,6 +1,6 @@
 ---
 name: gateway-platform
-description: 多平台网关的架构规范与接入指南。当需要新增一个上游平台、修改现有平台（workbuddy / trae / qoder / loomy）、给平台加授权登录（PKCE）、调整跨平台调度策略、排查「客户端能调但网关调不通」、或验证网关是否正确跑通时使用。涵盖：职责边界、目录结构、Gateway 契约、账号池操作、调度策略、禁用语义、同名模型后缀路由、PKCE 设备授权、风控哨兵、已修 bug 档案、测试与验收。
+description: 多平台网关的架构规范与接入指南。当需要新增一个上游平台、修改现有平台（workbuddy / trae / qoder / loomy / raccoon 小浣熊 / codearts 华为云 CodeArts）、给平台加授权登录（PKCE/扫码）、调整跨平台调度与缓存策略、排查「模型 400 / 积分 0 / 余额刷新失败 / 导入不进来」、或验证网关是否正确跑通时使用。涵盖：职责边界、目录结构、Gateway 契约、协议转换与平台选路、缓存、计费倍率与积分、凭证生命周期（扫描/授权/登录/导入/导出）、同名模型后缀路由、风控哨兵、已修 bug 档案、测试与验收。
 ---
 
 # 多平台网关规范
@@ -24,30 +24,60 @@ description: 多平台网关的架构规范与接入指南。当需要新增一�
 | 你要做什么 | 读哪份 |
 |---|---|
 | **搞清楚「主网关是谁」、要不要改 workbuddy 命名** | 本文 §2.5 — admin 就是网关，别为命名动热路径 |
+| **偶发 400「模型 xxx-平台 不存在」/ 协议转换 / `/v1/models` 字段 / 缓存** | [PROTOCOL-ROUTING-CACHE.md](PROTOCOL-ROUTING-CACHE.md) — 预读 body、后缀还原、能力字段、四处缓存 |
+| **账号进不来 / 导出的导不回来 / 余额刷新失败 / 扫码后不能调** | [CREDENTIAL-LIFECYCLE.md](CREDENTIAL-LIFECYCLE.md) — 扫描·授权·登录·导入·导出·刷新 |
 | **客户端能调、网关调不通** | [ENDPOINT-FIRST.md](ENDPOINT-FIRST.md) — 4023 是端点错，不是模型错 |
+| **平台请求体不兼容 / 400 11128 / 200 流无 finish_reason** | [REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md) — 平台私有契约 · 两条入口链路同步 · 两个实测案例 |
 | **给平台加授权登录** | [PKCE-AUTH.md](PKCE-AUTH.md) — 通用 PKCE 骨架 + Trae/Qoder 实现 |
 | **改过相关代码要验证** | [FIXED-BUGS.md](FIXED-BUGS.md) — 已修 bug 档案 + 验证清单 |
 | 读不出本机凭证 | [DEVICE-AUTH.md](DEVICE-AUTH.md) — Qoder 详细版、refresh 串格式 |
+| **接华为云系产品**（AK/SK 签名 / OSCrypt 凭证 / DPoP 续期） | [CASE-CODEARTS.md](CASE-CODEARTS.md) |
 | 追凭证存哪 | [NO-CREDENTIAL.md](NO-CREDENTIAL.md) — 追凭证四跳 |
 | 新平台接入 | [ONBOARDING.md](ONBOARDING.md) |
 | 任务/签到/保活 | [ACTIONS-AND-TASKS.md](ACTIONS-AND-TASKS.md) |
-| 计费/倍率 | [BILLING.md](BILLING.md) |
-| 能力矩阵 | [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md) |
+| 计费/倍率/积分 | [BILLING.md](BILLING.md) — 六种上游形态 + 记账公式 + 余额读不到≠0 |
+| 能力矩阵（档位/上下文） | [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md) |
+| **并发上不去 / TTFT 越压越高 / TPS 缺失** | [CAPACITY-PLANNING.md](CAPACITY-PLANNING.md) — 三层闸门的实测默认值 |
 
 > **⚠️ 改动任何代码前，先扫一遍 [FIXED-BUGS.md](FIXED-BUGS.md)。**
-> 那份文档记录了 **30 余条真实 bug**（其中 14 条是「五·补」系列的新增踩坑），
+> 那份文档记录了 **70 条真实 bug**（其中 52 条是「五·补」系列：
+> 五·补25~36 是接入小浣熊时新增，五·补37~42 是同日「卡死 / 402 / 列表慢 /
+> 注入不生效」五连修，五·补43~44 是接入 CodeArts 时补的
+> 「`record()` 提前 return 漏 running」「`utcnow().timestamp()` 时区错」，
+> 五·补45 是「各平台扫描目录写死盘符 / 目录名」，五·补46~48 是
+> 「会话窗口满被报成没有号 / 会话 id 每请求随机 / 思考档位不记账还被抹平」，
+> 五·补49~50 是「TTFT/TPS 记的不是上游真实值」「默认 60 转/分把并发锁死」，
+> 五·补51~52 是「CodeArts developer 角色 / WorkBuddy 11128 指纹两条链路不一致」）。
 > 每条都写清「现象 / 根因 / 修法 / 怎么验证」。
 > 高频踩坑的几个：
 >
 > | 改动区 | 先看 |
 > |---|---|
 > | 调度 / 禁用 / 模型配置 / 前端扫描 | 一~四章 |
+> | **预读 body / 平台后缀 / 同名模型** | 五·补25、五·补26 |
+> | **倍率 / 记账 / 积分显示** | 五·补27~29 |
+> | **余额刷新 / 扫码授权 / 导入导出** | 五·补30~33 |
+> | **聚合视图 / 模型能力字段** | 五·补34、五·补35 |
 > | **Key 绑定平台 / 分组 / 多账号** | 五·补11（`trae` 存储 id ≠ 对外 id → 503）|
 > | **流式 / TPS / TTFT** | 五·补8、五·补12、五·补13（伪流式、口径错、`ttfb==latency`）|
-> | **实时面板 / 用量日志** | 五·补14（running 残留、旧快照）|
+> | **实时面板 / 用量日志** | 五·补14（running 残留、旧快照）、五·补37（一请求两条记录）|
+> | **一直 402 / 选到空号** | 五·补38（402 不可重试 + 零余额号排第一）|
+> | **列表接口慢（秒级）** | 五·补39（请求线程里同步探活）+ [INTEGRATION §四](INTEGRATION-CHECKLIST.md) |
+> | **注入客户端不生效** | 五·补40（客户端内存态覆盖 `.info`）|
+> | **前端无限刷接口** | 五·补42（轮询无上限 + 顺带拉模型页）|
+> | **面板总有 `/v1/models` 在跑** | 五·补43（`record()` 提前 return 漏清理）|
+> | **临时凭证反复续期 / 不续期** | 五·补44（`utcnow().timestamp()` 时区错）|
+> | **换盘/改文件夹就扫不到客户端** | 五·补45（路径写死盘符/目录名，见 `install_paths`）|
+> | **并发时莫名「没有可用账号」** | 五·补46（在途/会话窗口满 ≠ 没号，排队而非 503）|
+> | **上游缓存不命中 / 一个号一堆会话** | 五·补47（会话 id 每请求随机，见 `pool.stable_session_id`）|
+> | **档位设了没反应 / 日志显示未记录** | 五·补48（不记账 + Loomy 抹平 + Qoder 丢弃）|
+> | **TPS 一直是「暂无样本」/ 解码段只有几百毫秒** | 五·补49（TTFT 只认正文，思考链不算）|
+> | **并发上不去但 TPS 正常** | 五·补50（60 转/分匀速放行，见 [CAPACITY](CAPACITY-PLANNING.md)）|
+> | **400/11128、200 流无 finish_reason、绿勾 0 token** | 五·补51、五·补52 + [REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md) |
 > | **同步 / 备份 / 导出** | 五·补10（漏 `platform` → 线上号池废掉）|
 >
 > 每改完一处，照 §七 的**验证清单**跑一遍（7.1~7.4 按改动类型分好了）。
+> 热路径相关改动再加跑 `scripts/check_hotpath.py`（见 §12）。
 
 > **⚠️ 别把 `copilot.tencent.com` 当成「主网关」。**
 > `admin/` 才是网关本体（`/v1/*` 由 `routers/proxy.py` 实现），
@@ -73,6 +103,10 @@ description: 多平台网关的架构规范与接入指南。当需要新增一�
 | 它认识具体平台吗？（代码里出现 `trae` / `workbuddy`） | 平台模块 | 框架层 |
 | 新增平台时需要改它吗？ | 平台模块 | 框架层 |
 | 删掉某个平台后它还成立吗？ | 框架层 | 平台模块 |
+
+> 请求体规则同理：**role 白名单 / tools schema / 指纹词表 / 错误帧格式都是平台私有契约**，
+> 见 [REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md)。别把某个上游的净化规则
+> 升级成框架层的「通用能力」。
 
 ---
 
@@ -106,7 +140,26 @@ admin/platform/
   workbuddy/
     __init__.py           PlatformSpec + Gateway + AccountOps + ClientProbe
     core/                 实现层（backend / wb_login / credential_codec …）
+  raccoon/                小浣熊（扫码 / 明文本机凭证 / 双字段倍率）
+  codearts/               华为云 CodeArts（AK/SK 签名 / STS 临时凭证 / DPoP 续期）
+    __init__.py           PlatformSpec
+    core/signer.py        华为云签名（唯一实现，别在业务里手写）
+    core/client.py        对话 / 模型 / 额度 / 身份
+    core/session.py       OSCrypt 解密本机登录态 + DPoP 续期
+    services/             accounts / scan
+    gateway.py            /v1/*（上游本身就是 OpenAI 协议，不做字段翻译）
+    __init__.py           PlatformSpec（actions 声明见 ACTIONS-AND-TASKS.md）
+    gateway.py            转发 + /v1/models（能力字段在这里）
+    platform_gateway.py   AccountOps（scan / import / export / refresh）
+    core/                 client（request_json / fetch_models / fetch_points）
+    services/             accounts / scan / webauth（扫码，入库前必须验票）
+    routers/              /api/raccoon/*
 ```
+
+> 平台数量：`workbuddy` · `trae-cn` · `trae-intl` · `qoder` · `loomy` · `raccoon` ·
+> `codearts`（华为云，AK/SK 签名 —— 见 [CASE-CODEARTS.md](CASE-CODEARTS.md)）。
+> 新增平台只改两处（新建目录 + `loader.BUILTIN` 一行），其余自动生效 ——
+> 如果不能做到，说明有平台相关的判断漏在了框架层。
 
 ### ⚠️ 最容易犯的错
 
@@ -132,16 +185,18 @@ admin/platform/
 
 ```
 admin/                              ← 网关本体（我们自己的 FastAPI 服务）
-├── routers/proxy.py   4527 行      ← /v1/{chat,responses,messages} 的真正实现
+├── routers/proxy.py               ← /v1/{chat,responses,messages} 的真正实现
 │      负责：Key 鉴权 · 配额 · 选号 · 重试 · 限流 · 记账 · 三协议转换
 │      └── 3 处 settings.BACKEND + "/v2/chat/completions"
 │            = copilot.tencent.com  ← 这是 **workbuddy 平台的上游**，
 │                                      不是「主网关的归属」
+├── anthropic_adapter.py           ← Anthropic ↔ Chat 的字段转换（见 PROTOCOL §4.1.1）
 └── platform/
-    ├── workbuddy/      只有 core/   ← **没有 gateway.py**，上游适配在 proxy.py 里
-    ├── trae/gateway.py      1215 行
-    ├── qoder/gateway.py      744 行
-    └── loomy/gateway.py      979 行
+    ├── workbuddy/      只有 core/    ← **没有 gateway.py**，上游适配在 proxy.py 里
+    ├── trae/           gateway.py + platform_gateway.py
+    ├── qoder/          gateway.py + platform_gateway.py
+    ├── loomy/          gateway.py + platform_gateway.py
+    └── raccoon/        gateway.py + platform_gateway.py（扫码 / 明文本机凭证）
 ```
 
 | 疑问 | 事实 |
@@ -150,6 +205,7 @@ admin/                              ← 网关本体（我们自己的 FastAPI �
 | 我们自己有没有内置代理？ | **有**，就是 `admin` 本身，不需要外部中间件 |
 | `copilot.tencent.com` 是什么？ | **workbuddy 这个平台的上游地址**（`ADMIN_BACKEND` 默认值） |
 | 为什么只有 workbuddy 没 `gateway.py`？ | 它是第一个平台，是 `DEFAULT_PLATFORM`，上游调用直接写在 `proxy.py` |
+| 平台判断到底在哪一行？ | `dispatch.py` 的中间件 —— 全站唯一的平台分叉点 |
 
 ### ⚠️ 不要为了「看着统一」去改名或拆分
 
@@ -465,6 +521,16 @@ None  # 没指定平台 → 不过滤（老脚本 / curl 行为不变）
 
 ## 9. 验证与测试
 
+> 三类验证**不能互相替代**：
+>
+> | 类型 | 回答的问题 | 工具 |
+> |---|---|---|
+> | 契约 | 平台"长得像不像"一个平台 | `test_gateway_contract.py` / `verify_platform.py` |
+> | 行为 | 请求**有没有走对路、记对账** | `check_hotpath.py` |
+> | 端到端 | 用户路径能不能走完 | HTTP / Playwright（§9.3、§9.4） |
+>
+> 契约全绿但路由/计费错了，是这批 bug 的常见形态（§12）。
+
 ### 9.1 契约测试（必须全过）
 
 ```bash
@@ -487,6 +553,30 @@ python tests/test_gateway_contract.py
 ```bash
 python tests/test_trae_platform.py        # 172 项
 ```
+
+### 9.2.1 单个平台验收（接完平台 / 改完平台）
+
+```bash
+# 结构（不需要服务）：登记 / 三个 Protocol / 11 项操作 / 任务 / 探测 / 卡片 / 幂等
+python admin/platform/skill/scripts/verify_platform.py --platform raccoon
+
+# 含运行检查（需要服务 + 管理员账号）：平台在列表 / 卡片有值 / 账号不跨平台重复
+python admin/platform/skill/scripts/verify_platform.py --platform raccoon \
+    --base http://127.0.0.1:8790 --user xiaofan --password 123456
+```
+
+实测输出（小浣熊）：`PASS=19 FAIL=0`，账号隔离逐平台列出。
+
+### 9.2.2 热路径不变量（改了 dispatch / 模型目录 / 计费 / 凭证）
+
+```bash
+python admin/platform/skill/scripts/check_hotpath.py
+```
+
+29 项断言，覆盖：预读判定、大 body 取模型名、后缀解析、六种倍率、
+DSH 能力字段与白名单、导出信封、脱敏 uid、积分空结构、平台内 id 还原、
+动作声明 ↔ 前端对齐。**任何一项红都别上线** —— 这些错不会报错，
+只会静默走错平台 / 记错账。
 
 ### 9.3 端到端检查清单
 
@@ -601,6 +691,18 @@ with sync_playwright() as p:
 | 配置保存后不生效 | 缓存没失效 | 变更时调 `invalidate()` |
 | 熔断影响所有平台 | 哨兵 key 没带平台 | `wb:sentinel:<platform>:events` |
 | 重复登记「平台已存在」 | `install()` 不幂等 | 先 `get()` 判断再 `register()` |
+| **偶发 400「模型 xxx-平台 不存在」** | 预读 body 条件太窄（chunked / 大 body） | 写请求一律预读 + 回放 |
+| **某平台模型全部 400** | 只剥后缀、没还原上游 id | `upstream_of_in_platform()` |
+| **积分显示 0** | 查倍率没限定平台 / slug 查不到 | `_billing_candidates` + 平台过滤 |
+| **余额被清零** | 积分接口空结构被取 0 | 空结构抛错，保留快照 |
+| **刷新余额报「凭证缺少 auth」** | 前端写死默认平台接口 | 按 `storage_platform` 拼前缀 |
+| **扫码后账号全挂** | 未验证的票覆盖了可用凭证 | 入库前先打业务接口 |
+| **导出的文件导不回来** | 导出信封的 `item` 没拆 | 前后端都拆壳 |
+| **扫描勾选后 0 导入** | 拿脱敏 uid 做全等比较 | 用 `uid_full` + 前缀兜底 |
+| **同步成功但列表为空** | 聚合视图过滤掉单平台组 | 聚合渲染全部组 |
+| **模型能力/上下文全空** | `/v1/models` 缺 `contextWindow` 等 | 按 DSH schema 补字段 |
+| **WorkBuddy 稳定 4~6% 400/11128** | `/v1/*` 只插零宽空格，没整行删 billing header | 五·补52 / [REQUEST-BODY-CONTRACT](REQUEST-BODY-CONTRACT.md) |
+| **CodeArts 200 流无 finish_reason、客户端无限重试** | `developer` 角色 + 上游 `error_code` 错误帧没被识别 | 五·补51 / 同上 |
 
 ---
 
@@ -619,7 +721,51 @@ with sync_playwright() as p:
 
 ---
 
-## 12. 快速命令
+## 12. 稳定性铁律（热路径十一条）
+
+这十一条是**踩过坑之后总结出来的不变量**。它们的共同点：违反了不会报错，
+只会让请求静默走到错误的平台 / 错误的计价 / 错误的状态。
+
+| # | 铁律 | 违反后的现象 | 细节 |
+|---|---|---|---|
+| 1 | **写请求一律预读 body**（含 chunked），读完必须回放 | 偶发 400「模型 xxx-平台 不存在」 | [PROTOCOL §2](PROTOCOL-ROUTING-CACHE.md) |
+| 2 | **平台确定后必须按平台还原上游 model_id** | 同名模型某平台全 400 | 五·补26 |
+| 3 | **缓存键必须带 `platform` + `group_id`** | 切平台没效果 / 分组越权 | 本文 §8 |
+| 4 | **上游给 `credits=0` 也要按倍率估算**，且查倍率必须先限定平台 | 积分永远 0 / 记到别家的价 | 五·补28 |
+| 5 | **余额空结构必须抛错**，不能取 0 | 真实余额被清零，账号还显示 active | 五·补29 |
+| 6 | **凭证写库前先证明它能用**（扫码更要） | 好票被坏票覆盖，号突然全挂 | 五·补31 |
+| 7 | **「不支持」要返回 `supported:false` + 原因**，不能返回空 | 用户以为客户端没登录 | 五·补36 |
+| 8 | **展示数据（余额/模型数）不许在请求线程里同步拉上游** | 列表接口 2.8 秒，几千个号几十秒 | 五·补39 / [INTEGRATION §四](INTEGRATION-CHECKLIST.md) |
+| 9 | **扫描路径不许写死盘符 / 目录名 / `C:\Users`** | 用户换盘或改父文件夹后整平台扫不到客户端 | 五·补45 / `install_paths.py` |
+| 10 | **上游会话 id 必须由客户端真实 id 稳定派生**（`pool.stable_session_id`），禁用 `uuid4()` | 缓存命中永远 0；一个号几分钟冒出几十个会话（风控） | 五·补47 / [PROTOCOL §4.7](PROTOCOL-ROUTING-CACHE.md) |
+| 11 | **请求体净化规则是平台私有的，且 `/gw` 与 `/v1/*` 两条链路必须同步**（先整行删指纹，再零宽脱敏） | 400/11128 稳定 4~6%；或 200 流无 `finish_reason` 无限重试、日志误记成功 | 五·补51、五·补52 / [REQUEST-BODY-CONTRACT.md](REQUEST-BODY-CONTRACT.md) |
+
+### 这些规则为什么值得单独成节
+
+每条都对应一次「看起来像缓存 / 像白名单 / 像平台抽风」的故障，实际全是
+**我们自己的静默降级**。判断标准很简单：
+
+> **任何「为了性能 / 兼容而跳过某一步」的代码，问一句：跳过之后
+> 下游会得到什么？如果答案是「一个看起来合法但错误的默认值」，就是 bug。**
+
+### 自动化守卫
+
+```bash
+python admin/platform/skill/scripts/check_hotpath.py
+```
+
+覆盖：预读判定（300B / 600KB / chunked / >32MB）、模型名提取、
+平台内 id 还原、六种倍率形态解析、能力字段（DSH schema）、导出信封拆解、
+脱敏 uid 匹配、积分空结构抛错。
+
+**另外两条不变量不靠这个脚本，靠人工量**（都在 §7.6 的清单里）：
+列表接口必须 <200ms；一条请求只能产生一条「进行中」记录。
+
+退出码 `0` 全绿；`1` 有不变量被破坏；`2` 只是环境缺依赖（不算失败）。
+
+---
+
+## 13. 快速命令
 
 ```bash
 # 契约完整性（新增平台后必跑）
@@ -633,6 +779,12 @@ python tests/test_pool.py
 python tests/test_credits.py
 python tests/test_console_boot.py
 python tests/test_hardening.py
+
+# ★ 热路径不变量（改了 dispatch / models_router / 计费 / 凭证就要跑）
+python admin/platform/skill/scripts/check_hotpath.py
+
+# 跨平台同名模型冲突扫描（退出码 2 = 有未映射）
+python scripts/check_model_conflicts.py
 
 # 服务
 python -m uvicorn admin.server:app --host 0.0.0.0 --port 8790

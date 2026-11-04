@@ -44,8 +44,19 @@ class Settings:
     # 不会让吞吐变差，只会让慢请求有机会跑完。
     GATEWAY_REQUEST_TIMEOUT = max(1.0, min(900.0, float(os.getenv("ADMIN_GATEWAY_REQUEST_TIMEOUT", "300"))))
     JOIN_MAX_CONCURRENT = max(1, int(os.getenv("ADMIN_JOIN_MAX_CONCURRENT", "4")))
-    GATEWAY_RATE_PER_MINUTE = int(os.getenv("ADMIN_GATEWAY_RATE_PER_MINUTE", "60"))
-    GATEWAY_MAX_CONCURRENT = int(os.getenv("ADMIN_GATEWAY_MAX_CONCURRENT", "4"))
+    # 每个 Key 的每分钟请求数 / 同时在途数（Key 上填了值就以 Key 为准）。
+    #
+    # 2026-11-04 实测（单 Key，逐档加压，5 个平台 × 1~32 并发）：
+    #   · 默认 60/分钟会让 16 并发被**匀速放行**：Loomy 的 TTFT 从 1.6s
+    #     一路涨到 21.9s，看起来像"上游扛不住"，实际是准入层在排队；
+    #   · WorkBuddy 32 并发：TTFT 7.0s、TPS 49.7，与 1 并发的 4.6s/46.9
+    #     基本持平 —— 说明池子够大时并发可以拉满；
+    #   · Qoder 1~2 并发：TTFT 1.0~1.2s、TPS 175~193，余量充足。
+    #
+    # 所以默认放到 300/分钟 + 24 并发：够 agent 的工具循环跑，又不会在
+    # 单号池上瞬间打爆上游（每号在途上限 3 才是真正的背压）。
+    GATEWAY_RATE_PER_MINUTE = int(os.getenv("ADMIN_GATEWAY_RATE_PER_MINUTE", "300"))
+    GATEWAY_MAX_CONCURRENT = int(os.getenv("ADMIN_GATEWAY_MAX_CONCURRENT", "24"))
     GATEWAY_LIMIT_BACKEND = os.getenv("ADMIN_GATEWAY_LIMIT_BACKEND", "auto").lower()
     # Per-upstream-account start pacing is independent of per-key concurrency/RPM.
     UPSTREAM_START_INTERVAL_MS = int(os.getenv("ADMIN_UPSTREAM_START_INTERVAL_MS", "75"))

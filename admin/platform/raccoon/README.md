@@ -22,27 +22,38 @@ python main.py
 
 ## 导入账号
 
-小浣熊客户端用 **Electron LevelDB** 存登录态（不是明文 JSON），而且不是
-每台机器都装。所以本平台**没有「扫描本机」**——不是没实现，是扫不出来。
-`scan()` 会明确返回 `supported: false` 并说明原因，而不是返回空列表让你
-以为客户端没登录。
+客户端把登录态写成**明文** `auth.json`
+（`~/.office-raccoon/agent/config/auth.json`，IAM JWT + office_identity），
+所以**支持本机扫描**。三条路都能入库：
 
-三种凭证都接受：
-
-| 来源 | 形态 | 用法 |
+| 入口 | 做什么 | 接口 |
 |---|---|---|
-| agent2api 导出 | `agent2api-account` JSON（单条或打包） | 控制台「导入凭证」粘贴 |
-| 裸 JWT | `eyJhbGciOiJIUzI1NiIs...` | 直接粘贴，一行一个 |
-| 原生字段 | `{"token": "...", "uid": "..."}` | 直接粘贴 |
+| 扫描本机 | 读客户端 `auth.json`，摆出可导入项，勾选后入库 | `GET /api/raccoon/scan-local` → `POST /api/raccoon/import-local` |
+| 导入文件 | 选本地 `.json` / `.jsonl` / `.txt`（可多选、可拖放），自动识别 UTF-8 / GBK / BOM | `POST /api/raccoon/import` `{"text": ...}` |
+| 授权登录 | 官方 IAM 小程序扫码，免客户端 | `POST /api/raccoon/auth/begin` + `/auth/poll` |
 
-接口：
+> 历史备注：PR #9 曾判定「登录态在 Electron LevelDB 里，扫不出来」，
+> 逆向 `boxAgentAuthFile.js` 后确认那是旧版结论 —— 现行客户端就是明文 JSON。
+> 代码里若还有 `supported: false` / `electron_leveldb` 字样，那是过期注释。
+
+`import` 接受三种形态：
 
 ```http
 POST /api/raccoon/import
 {"records": [ {agent2api 导出的对象}, ... ]}   # 批量
 {"credential": {单条}}                          # 单条
-{"text": "<整段粘贴，JSON / JSONL / 裸 JWT 都行>"}  # 省事
+{"text": "<整段粘贴，JSON / JSONL / 裸 JWT 都行>"}  # 文件内容也走这个字段
 ```
+
+## 导出账号
+
+```http
+GET /api/raccoon/export?mode=backup   # 含明文 token，可原样再导入（往返一致）
+GET /api/raccoon/export?mode=plain    # 移除 access/refresh token，只给清单
+```
+
+控制台的「导出」按钮会把结果落成 `raccoon-backup-YYYYMMDD-HHMM.json`，
+两种模式都在弹窗里选。
 
 导入后**自动做两件事**：探一次积分余额（避免「导入成功但根本不能用」），
 同步模型目录进 `model_configs`（否则 `/v1/models` 是空的，而调用却是通的）。
@@ -116,6 +127,7 @@ admin/platform/raccoon/
 
 | 能力 | 状态 | 原因 |
 |---|---|---|
-| 本机扫描 | ❌ | Electron LevelDB，非明文 |
+| 本机扫描 | ✅ | 读 `~/.office-raccoon/agent/config/auth.json`（明文 IAM JWT） |
+| 导入 / 导出文件 | ✅ | JSON / JSONL / TXT，备份可原样回灌 |
 | 签到 | ❌ | 上游没有签到接口 |
-| 写回客户端 | ❌ | 要改 LevelDB，风险高且无必要 |
+| 写回客户端 | ❌ | 会篡改用户客户端登录态，风险高且无必要 |

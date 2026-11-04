@@ -4,7 +4,7 @@ window.WBGrowthCenter = (() => {
   const n = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
   let accounts = [], selected = null, data = null, generation = 0, timer = null, pollDeadline = 0;
   let records = [], recordsMore = false, recordsBefore = null, modalVersion = 0, busy = false;
-  const colors = ['#edf0f2','#c4f0c2','#78d38c','#30a657','#196636'];
+  const colors = ['var(--gc-heat-0)','var(--gc-heat-1)','var(--gc-heat-2)','var(--gc-heat-3)','var(--gc-heat-4)'];
   const section = key => data?.snapshot?.sections?.[key]?.data || {};
   const endpoint = suffix => '/api/growth-center/accounts/' + selected + suffix;
   const fmt = value => {

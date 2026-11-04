@@ -344,6 +344,15 @@ function actionsFor(spec) {
     },
     current: function () { return { platform: state.platform, realm: state.realm }; },
     spec: function () { return specOf(state.platform); },
+    /**
+     * 已加载的平台清单（`/api/platforms` 的 items）。
+     *
+     * 给「把落库平台 id 翻成中文名」的场景用：实时请求行、日志、运行平台
+     * 这些地方拿到的是 `raccoon` / `qoder` 这种 id，直接显示就是英文代号，
+     * 而控制台其它地方（平台卡片、模型页）显示的是「小浣熊」——
+     * 同一个平台两种叫法，用户会以为是两个东西。
+     */
+    list: function () { return state.items || []; },
     selector: function () { return window.WBPlatform.route(); },
     onChange: function (fn) {
       if (typeof fn === "function") listeners.push(fn);

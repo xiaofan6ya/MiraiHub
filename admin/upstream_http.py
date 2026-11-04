@@ -39,7 +39,7 @@ import urllib.request  # noqa: E402  (延迟导入，仅给 urllib 系平台复�
 def build_opener(trust_env: bool | None = None):
     """构造带「系统+ certifi 信任库」且默认**不走系统代理**的 urllib opener。
 
-    Loomy / Trae 等平台的上游调用走 `urllib.request` 而非 httpx，
+    平台模块（`admin/platform/<name>/`）的上游调用走 `urllib.request` 而非 httpx，
     同样要躲开加速器做的 TLS 中间人（issue #5）。
 
     `trust_env=None` 时按 `upstream_trust_env()` 决定要不要读系统代理。

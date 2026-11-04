@@ -119,10 +119,16 @@ def candidate_dirs(app_name: str = "") -> list[pathlib.Path]:
         if value:
             out.append(pathlib.Path(value))
     out.append(pathlib.Path.home() / "AppData/Roaming")
-    # Windows 特有：Public\<Product>\<hash>
-    public = pathlib.Path("C:/Users/Public")
-    if public.is_dir():
-        out.append(public)
+    # Windows 特有：Public\<Product>\<hash> —— 取环境变量，不写死 C 盘。
+    # %PUBLIC% 在标准安装里就是 C:\Users\Public，但系统盘可以是任意盘符。
+    public_value = (os.environ.get("PUBLIC") or "").strip()
+    if not public_value:
+        drive = (os.environ.get("SystemDrive") or "").strip()
+        public_value = drive + "\\Users\\Public" if drive else ""
+    if public_value:
+        public = pathlib.Path(public_value)
+        if public.is_dir():
+            out.append(public)
 
     found = []
     for root in out:

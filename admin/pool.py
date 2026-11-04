@@ -722,6 +722,39 @@ def session_key_for(body: dict) -> str:
     return extract_session_key(body) or fallback_session_key(body)
 
 
+def stable_session_id(platform: str, account_id: object, body: dict,
+                      *, prefix: str = "", size: int = 16) -> str:
+    """派生**按账号稳定**的上游会话 id（同一账号同一对话 → 恒定值）。
+
+    ## 为什么要它
+
+    有几个平台的上游信封要求客户端自己带「会话/聊天 id」（Loomy 的
+    `ChatId`、Qoder 的 `session_id`）。原来的实现是**每请求 `uuid4()`**：
+
+    * 同一段对话的第二次请求在上游看来是**另一个会话** → 上游的前缀缓存
+      永远命中不了（上下文要重算，首字延迟和费用都上去）；
+    * 一个号在几分钟里「新建」几十个会话 —— 在风控眼里就是脚本行为。
+
+    所以这里改成确定性派生：`sha256(平台 | 账号 | 会话键)`。
+    会话键的取法见 `session_key_for()`，**每一层都是确定性的**：
+
+      1. 客户端显式给的会话标识（`metadata.conversation_id` /
+         `conversation_id` / `prompt_cache_key`）—— 原样参与哈希；
+      2. 没有显式标识时取**首条 user 文本**的 sha256（同一段对话恒定）；
+      3. 连消息都没有（探测/空请求）才退化成「每账号一个固定会话」。
+
+    于是：同账号 + 同对话恒定；换号必然换 id（一个会话不会跨号乱串）；
+    任何一种情况都**不会**退化成"每请求一个随机值"—— 那正是要修的病。
+
+    注意 `size`：按上游 id 的形状给（Loomy 是 16 位十六进制，
+    Qoder 的 `sess-` 后面留 24 位更保险），别一个长度套所有平台。
+    """
+    key = session_key_for(body) if isinstance(body, dict) else ""
+    seed = "%s|%s|%s" % (platform or "", account_id or 0, key or "default")
+    digest = hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
+    return (prefix or "") + digest[:max(8, int(size))]
+
+
 def _has_user_id(body: dict) -> bool:
     """body 是否携带用户维度标识（metadata.user_id 或顶层 user_id）。"""
     meta = body.get("metadata")

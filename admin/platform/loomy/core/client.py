@@ -76,8 +76,14 @@ class UpstreamError(Exception):
 
         但要**排除真正由我校验错误的 400**（鉴权类 401/403 已单独分类）：
         这里只把「上游明确建议重试」的 400 视为可重试。
+
+        ## 402 必须可重试
+
+        402 = 这个号积分用光了，**换一个号就能成**。把它当「不可重试」
+        会让一个空号毒死整个号池（详见 `_raise_http_error`）。
+        冷却与换号由网关的 `note_failure(cool_seconds=600)` 负责。
         """
-        if self.status in (408, 429) or self.status >= 500:
+        if self.status in (402, 408, 429) or self.status >= 500:
             return True
         if self.status == 400:
             detail = str(self.detail or "")
@@ -120,6 +126,73 @@ LAST_TOTAL_MS: "_ctxvars.ContextVar[int]" = _ctxvars.ContextVar(
     "loomy_total_ms", default=0)
 
 
+def _upstream_message(payload: str) -> str:
+    """从上游错误 body 里抠一句**能给人看**的话。
+
+    上游的 402 长这样（实测账号 #194 的 `last_upstream_error`）：
+
+        {"error":{"message":"积分余额不足，请获取积分后再试",
+                  "type":"insufficient_quota","param":null}}
+
+    以及 200 业务错误长这样：`{"code":"100002","desc":"..."}`。
+    两种形状都要认，认不出就返回空串（调用方兜底自己的文案）。
+    """
+    text = str(payload or "").strip()
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "msg", "detail"):
+            value = err.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+    for key in ("desc", "message", "msg", "detail"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return ""
+
+
+def _raise_http_error(code: int, payload: str, realm: str,
+                      account_id: int) -> None:
+    """把 urllib 的 HTTPError 翻译成带**处置语义**的 UpstreamError。
+
+    ## 为什么 402 单独拎出来
+
+    `402 Payment Required` 在 Loomy 上就是「这个号的积分用光了」。
+    原来它掉进 else 分支变成 `kind="http_error"`、`retryable()=False`：
+
+      · 网关**立刻放弃**，不换下一个号；
+      · 号也不进冷却，下一次选号仍然会选到它。
+
+    而选号按 `last_used_at` 升序取最闲的号，那些「一次都没成功过」的空号
+    `last_used_at` 永远是 NULL，永远排在最前面 —— 于是每次请求都选中同一个
+    空号、每次都 402、每次都不换号。表现就是用户说的「一直 402，用不了」。
+
+    所以 402 必须归到 `quota_exceeded`（可重试 + 冷却换号），
+    并且把上游那句「积分余额不足」原样透出来，别吞成「请求失败」。
+    """
+    if code == 402:
+        note_sentinel(realm, account_id, "quota_exceeded", code="402",
+                      status=402, detail=payload)
+        raise UpstreamError(_upstream_message(payload) or "账号积分不足（HTTP 402）",
+                            status=402, code="402", kind="quota_exceeded",
+                            detail=payload)
+    kind = ("auth" if code in (401, 403)
+            else "rate_limit" if code == 429
+            else "upstream_error" if code >= 500 else "http_error")
+    note_sentinel(realm, account_id, kind, code=str(code),
+                  status=code, detail=payload)
+    raise UpstreamError("请求失败（HTTP %d）" % code, status=code,
+                        code=str(code), kind=kind, detail=payload)
+
+
 def _request(url: str, *, method: str = "GET", body: dict | None = None,
              token: str = "", timeout: float = DEFAULT_TIMEOUT,
              account_id: int = 0, realm: str = "",
@@ -154,14 +227,7 @@ def _request(url: str, *, method: str = "GET", body: dict | None = None,
             payload = exc.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             pass
-        kind = ("auth" if exc.code in (401, 403)
-                else "rate_limit" if exc.code == 429
-                else "upstream_error" if exc.code >= 500 else "http_error")
-        note_sentinel(realm, account_id, kind, code=str(exc.code),
-                      status=exc.code, detail=payload)
-        raise UpstreamError("请求失败（HTTP %d）" % exc.code, status=exc.code,
-                            code=str(exc.code), kind=kind,
-                            detail=payload) from exc
+        _raise_http_error(exc.code, payload, realm, account_id)
     except Exception as exc:  # noqa: BLE001
         note_sentinel(realm, account_id, "network", detail=str(exc)[:200])
         raise UpstreamError("网络失败", status=0, kind="network",
@@ -338,13 +404,30 @@ def is_thinking_hungry(model_id: str) -> bool:
     return model_id in THINKING_HUNGRY
 
 
+def _chat_session_id(account_id: int, body: dict) -> str:
+    """按「账号 + 对话」派生的稳定 `ChatId`（见 `pool.stable_session_id`）。
+
+    同账号同对话恒定 → 上游前缀缓存能命中；换号必换 id → 一个会话不会
+    跨号乱串；客户端没给会话标识时用首条 user 文本派生（同一段对话恒定），
+    连消息都没有才退化成「每账号一个固定会话」。**任何一层都不是随机值。**
+    """
+    try:
+        from admin import pool
+
+        return pool.stable_session_id("loomy", account_id, body,
+                                      prefix="gwchat-", size=16)
+    except Exception:  # noqa: BLE001 - 派生失败退回每请求随机，不能挡住调用
+        return ""
+
+
 def chat_completions(token: str, realm: str, body: dict, *,
                      account_id: int = 0, timeout: float = DEFAULT_TIMEOUT) -> dict:
     """对话（非流式）。走 `chat_headers`（含归因头）。"""
     return _request(endpoints.base_of(realm) + endpoints.CHAT_PATH,
                     method="POST", body=body, token=token,
                     timeout=timeout, account_id=account_id, realm=realm,
-                    headers=endpoints.chat_headers(token))
+                    headers=endpoints.chat_headers(
+                        token, session_id=_chat_session_id(account_id, body)))
 
 
 def chat_stream(token: str, realm: str, body: dict, *,
@@ -371,7 +454,8 @@ def chat_stream(token: str, realm: str, body: dict, *,
     req = urllib.request.Request(url, data=data, method="POST")
     # 归因头（ChatId/MsgId/TurnId/X-Loomy-Request-Purpose）与鉴权头一起带 ——
     # 官方客户端每个模型请求都注入，缺了上游计费归因失败
-    for key, value in endpoints.chat_headers(token).items():
+    for key, value in endpoints.chat_headers(
+            token, session_id=_chat_session_id(account_id, body)).items():
         req.add_header(str(key), str(value))
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
@@ -387,14 +471,7 @@ def chat_stream(token: str, realm: str, body: dict, *,
             payload = exc.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             pass
-        kind = ("auth" if exc.code in (401, 403)
-                else "rate_limit" if exc.code == 429
-                else "upstream_error" if exc.code >= 500 else "http_error")
-        note_sentinel(realm, account_id, kind, code=str(exc.code),
-                      status=exc.code, detail=payload)
-        raise UpstreamError("请求失败（HTTP %d）" % exc.code, status=exc.code,
-                            code=str(exc.code), kind=kind,
-                            detail=payload) from exc
+        _raise_http_error(exc.code, payload, realm, account_id)
     except Exception as exc:  # noqa: BLE001
         note_sentinel(realm, account_id, "network", detail=str(exc)[:200])
         raise UpstreamError("网络失败", status=0, kind="network",
@@ -427,15 +504,27 @@ def chat_stream(token: str, realm: str, body: dict, *,
                 if first_at is None:
                     first_at = now
                 last_at = now
-                # 只有**正文**才算解码进度：思考链（reasoning_content）
-                # 属于「首包等待」的一部分，DSH 的 ttft 也是到第一个
-                # 正文 token 才截止。
+                # **思考链也算出字**（2026-11-04 修正）。
+                #
+                # 原来的口径是「只认正文」，理由是「DSH 的 ttft 到第一个正文
+                # token 才截止」。但 DeepSeek-V4.1 这类模型会先流式思考 5~10 秒、
+                # 正文在最后 100~300ms 才一次性吐完，于是：
+                #     ttfb 9.33s / latency 9.49s -> 解码段 160ms
+                #     -> bench_router 判「量不出来」-> TPS 永远缺失
+                # 而前端明明是一路在出字的（思考块），用户也会觉得"早开始了"。
+                #
+                # 口径改成「首个 token（含 reasoning）」：
+                #   · TTFT = 用户看到第一个字的时刻，对思考模型才诚实；
+                #   · 解码段与 completion_tokens（含 reasoning_tokens）同口径，
+                #     TPS 才算得出来。
                 _has_text = False
                 for _c in (chunk.get("choices") or []):
                     if not isinstance(_c, dict):
                         continue
                     _d = _c.get("delta") or {}
-                    if _d.get("content") or _d.get("tool_calls"):
+                    if (_d.get("content") or _d.get("tool_calls")
+                            or _d.get("reasoning_content")
+                            or _d.get("reasoning")):
                         _has_text = True
                         break
                 if _has_text:

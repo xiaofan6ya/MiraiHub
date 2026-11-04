@@ -22,11 +22,16 @@
 
 ## 凭证从哪来
 
-小浣熊客户端用 Electron LevelDB 存登录态，不是明文 JSON，且不是每台机器都装。
-所以本平台**没有本机扫描**（`supports_local_scan=False`），凭证靠导入：
-agent2api 导出的 `agent2api-account` JSON / 裸 JWT / 原生对象都接受。
+小浣熊客户端（Electron）把登录态写成**明文** `auth.json`
+（`~/.office-raccoon/agent/config/auth.json`，IAM JWT + office_identity），
+所以本平台 `supports_local_scan=True`，三种入库方式都支持：
 
-该「明确不支持」要好过「假装能扫然后返回空」——后者会让用户以为客户端没登录。
+  1. 扫描本机 → 读取上面那个 auth.json（`services/scan.py`）
+  2. 导入文件 → 本地 JSON / JSONL / TXT（agent2api 备份、裸 JWT 都吃）
+  3. 授权登录 → 官方 IAM 小程序扫码，免客户端
+
+历史备注：PR #9 曾判定「凭证在 Electron LevelDB 里，扫不出来」，
+后续逆向 `boxAgentAuthFile.js` 确认那是旧版结论，现行版本就是明文 JSON。
 """
 from __future__ import annotations
 
@@ -90,9 +95,12 @@ def install() -> None:
             notes="小浣熊（xiaohuanxiong.com）：Bearer JWT，积分制；支持本机扫描 + 扫码授权 + 导入",
             extra={
                 "task_runners": list(_task_runners().keys()),
-                # 契约词表内的动作：扫描本机 / 导入（两步确认）/
-                # 授权登录（扫码）/ 刷新额度。
-                "actions": ["scan", "import", "begin-auth", "refresh-quota"],
+                # 契约词表内的动作：扫描本机 / 导入（文件或粘贴）/
+                # 导出（备份含凭证 / 脱敏清单）/ 授权登录（扫码）/ 刷新额度。
+                # `import-file` 已并入 `import`（两者都打开同一个导入弹窗，
+                # 同时挂着会出现两个一模一样的按钮）。
+                "actions": ["scan", "import", "export",
+                            "begin-auth", "refresh-quota"],
             },
         ))
         logger.debug("小浣熊平台已登记：%s", platform_id)

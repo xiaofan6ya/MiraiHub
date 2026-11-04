@@ -326,6 +326,8 @@ def _parse_multiplier(model: dict) -> tuple[float, str]:
         workbuddy  {"credits": "x0.50"}      -> 0.5
         trae       {"credits": "x0.79"}      -> 0.79
         qoder      {"price_factor": 0.5}     -> 0.5   数字，不是字符串
+        raccoon    {"billing_effective_multiplier": 0.25,
+                    "billing_multiplier": 0.25}       -> 0.25 数字（实扣/标价两个字段）
 
     ## 为什么必须分开处理
 
@@ -354,7 +356,12 @@ def _parse_multiplier(model: dict) -> tuple[float, str]:
             scopes.append(value)
 
     for scope in scopes:
-        for key in ("price_factor", "priceFactor", "original_price_factor"):
+        # `billing_effective_multiplier` 必须排在 `billing_multiplier` 前面：
+        # 前者是**实扣**倍率（限免/折扣后），后者是标价。小浣熊的
+        # `sn-sensenova-*-flash` 标价 0.5、限免实扣 0 —— 取错一个就会把
+        # 「现在免费」的模型标成收费，或者反过来。
+        for key in ("price_factor", "priceFactor", "original_price_factor",
+                    "billing_effective_multiplier", "billing_multiplier"):
             value = scope.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 factor = float(value)

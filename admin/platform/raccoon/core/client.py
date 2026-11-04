@@ -40,6 +40,23 @@ _AUTH_CODES = {401, 403, 40101, 40102, 40103, 100002}
 _QUOTA_CODES = {402, 40201, 40202, 40203}
 _RATE_CODES = {429, 42901, 42902}
 _MODEL_CODES = {404, 40401, 4023}
+#: `200901 iam_confirm_required` —— **扫码授权拿到的会话还没被确认**。
+#:
+#: 实测（2026-11-04）：同一个 JWT 打 `/model_catalog`、`/points/balance`、
+#: `/entitlement_info` 一律返回
+#: `400 {"code":200901,"message":"iam_confirm_required"}`；
+#: 而客户端 `auth.json` 里那张票（另一个 `sid`）同样的请求是 200。
+#: 也就是说**扫码得到的 IAM 会话缺一步确认，业务接口全部不可用**。
+#:
+#: 不能归进 `_AUTH_CODES`：那会让 `sync_quota` 把它当「凭证失效」直接
+#: `disabled`，而这其实是「换个入口取凭证」就能解决的事，禁用反而更难理解。
+_CONFIRM_CODES = {200901}
+
+
+def _confirm_hint() -> str:
+    """`iam_confirm_required` 给人看的解释（两处错误分支共用）。"""
+    return ("登录会话未完成 IAM 确认（上游 200901）：扫码得到的会话不能直接调接口，"
+            "请在小浣熊客户端登录后用「扫描本机 / 导入文件」入库")
 
 
 def _redact(text: str, limit: int = 500) -> str:
@@ -139,6 +156,8 @@ def _classify(code: int | None, status: int, message: str) -> str:
     """
     if code in _AUTH_CODES or status in (401, 403):
         return "auth"
+    if code in _CONFIRM_CODES:
+        return "confirm"
     if code in _QUOTA_CODES or status == 402:
         return "quota"
     if code in _RATE_CODES or status == 429:
@@ -180,7 +199,15 @@ def unwrap(payload, *, status: int = 200, context: str = ""):
     kind = _classify(code_int, status, message)
     # 上游 message 进 `detail`（已脱敏），响应侧只给固定的短句 ——
     # 见 `request_json` 里「message/detail 分离」的说明。
-    raise UpstreamError(context or "上游返回业务错误",
+    #
+    # `iam_confirm_required` 是**唯一**要给出可操作提示的错误：
+    # 用户看到「上游返回业务错误」只会反复点刷新，而真实解法是
+    # 「换一种入口取凭证」。
+    hint = ""
+    if kind == "confirm":
+        hint = _confirm_hint()
+    raise UpstreamError((context + hint) if (kind == "confirm" and context)
+                        else (hint or context or "上游返回业务错误"),
                         status=status, kind=kind, code=code_int, payload=payload,
                         detail=_redact("code=%s message=%s" % (code_int, message)))
 
@@ -261,10 +288,16 @@ def request_json(method: str, url: str, *, token: str, realm: str = "cn",
             if isinstance(err, dict):
                 message = str(err.get("message") or "")
             message = message or str(payload.get("message") or "")
-        kind = _classify(_code_of(payload), status, message)
+        code = _code_of(payload)
+        kind = _classify(code, status, message)
+        # ⚠️ 这里**必须**再判一次 confirm：上游把 `iam_confirm_required`
+        # 放在 HTTP 400 里，走的是这个分支（不是 `unwrap`）。
+        # 只改 unwrap 的话，实测仍然拿到「上游错误（HTTP 400）」这种
+        # 什么也没说的文案。
         raise UpstreamError(
-            "%s 上游错误（HTTP %d）" % (tag, status),
-            status=status, kind=kind, code=_code_of(payload),
+            (context + _confirm_hint() if kind == "confirm" else "")
+            or "%s 上游错误（HTTP %d）" % (tag, status),
+            status=status, kind=kind, code=code,
             detail=_redact("%s %s -> HTTP %d %s" % (method, url, status, text)),
             payload=payload)
     return unwrap(payload, status=status, context=context)
@@ -274,6 +307,34 @@ def request_json(method: str, url: str, *, token: str, realm: str = "cn",
 # ---------------------------------------------------------------------------
 # 业务接口
 # ---------------------------------------------------------------------------
+def _has_payload(raw) -> bool:
+    """这一行 SSE 里有没有真正的输出内容（content / reasoning / tool_calls）。
+
+    只用于 TTFT 判定：`data: {"choices":[{"delta":{"role":"assistant"}}]}` 这种
+    角色帧不算「开始出字」，但 `reasoning_content` 算 —— 思考块也是用户能
+    看到的输出，而且 `completion_tokens` 里包含 reasoning_tokens，口径要一致。
+    """
+    try:
+        text = (raw.decode("utf-8", "replace").strip()
+                if isinstance(raw, (bytes, bytearray)) else str(raw).strip())
+        if not text.startswith("data:"):
+            return False
+        payload = text[5:].strip()
+        if not payload or payload == "[DONE]":
+            return False
+        chunk = json.loads(payload)
+        for choice in (chunk.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            if (delta.get("content") or delta.get("reasoning_content")
+                    or delta.get("reasoning") or delta.get("tool_calls")):
+                return True
+    except Exception:  # noqa: BLE001 - 解析失败按"没内容"处理
+        return False
+    return False
+
+
 class _StreamHandle:
     """流式响应的轻量包装：按行产出 + 关闭。
 
@@ -284,11 +345,19 @@ class _StreamHandle:
     `finally` 里 `close()`，避免「生成器早就返回了但连接还挂着」。
     """
 
-    def __init__(self, client_obj, response, stats: dict | None = None):
+    def __init__(self, client_obj, response, stats: dict | None = None,
+                 started_at: float | None = None):
         self._client = client_obj
         self._response = response
         self._stats = stats if isinstance(stats, dict) else None
         self._first = True
+        #: 计时起点用**发起请求之前**，不是开始读行时。
+        #:
+        #: ✅ 实测教训：只从 `iter_lines()` 起算会得到 89ms 的 TTFT，
+        #: 而客户端实际 2.5 秒才看到第一个字 —— 因为 httpx 在
+        #: `send(stream=True)` 返回时已经把响应头和缓冲的首批字节收下了。
+        #: 那个 89ms 是"读缓冲"的时间，不是上游首字时间。
+        self._started_at = started_at if started_at else time.perf_counter()
         #: 读/关互斥。
         #:
         #: ## 为什么必须加锁
@@ -304,10 +373,12 @@ class _StreamHandle:
         self._closed = False
 
     def iter_lines(self):
-        started = time.perf_counter()
+        started = self._started_at
         try:
             for line in self._response.iter_lines():
-                if self._first:
+                # TTFT 只认**第一个带内容的 delta**，不是第一行 SSE ——
+                # 第一行常常是 role/metadata 帧，早记会虚高一点点。
+                if self._first and _has_payload(line):
                     self._first = False
                     if self._stats is not None:
                         self._stats["ttfb_ms"] = int((time.perf_counter() - started) * 1000)
@@ -349,6 +420,9 @@ def open_stream(url: str, *, token: str, realm: str = "cn", json_body=None,
     headers = endpoints.auth_headers(token, realm)
     headers["Content-Type"] = "application/json"
     headers["Accept"] = "text/event-stream"
+    # 计时起点：**发起请求之前**（不是开始读行时）。httpx 的 send 返回时
+    # 已经收下响应头和首批缓冲字节，从那里起算会把 TTFT 记成几十毫秒。
+    started = time.perf_counter()
     client_obj = httpx.Client(timeout=TIMEOUT, follow_redirects=True)
     try:
         request = client_obj.build_request("POST", url, headers=headers,
@@ -403,7 +477,7 @@ def open_stream(url: str, *, token: str, realm: str = "cn", json_body=None,
                             status=status, kind="upstream",
                             payload=payload, detail=_redact(text))
 
-    return _StreamHandle(client_obj, response, stats)
+    return _StreamHandle(client_obj, response, stats, started_at=started)
 
 
 def fetch_models(token: str, realm: str = "cn", account_id: int | None = None) -> list[dict]:
@@ -411,10 +485,24 @@ def fetch_models(token: str, realm: str = "cn", account_id: int | None = None) -
 
     返回扁平化的模型列表：
         [{"name": "raccoon-090dd3", "category": "chat",
-          "display": "...", "description": "...", "visible": bool}]
+          "display": "...", "description": "...", "visible": bool,
+          "billing_multiplier": 1.0, "billing_effective_multiplier": 0.0,
+          "billing_status": "limited_free", "tags": [...], "context_window": ...}]
 
     上游结构是 `data.categories[].models[]`，这里拍平 —— 上层只关心
     「有哪些模型可调」，不关心它的分类树。
+
+    ## 为什么要把计费字段一起带出来（2026-11-04 修正）
+
+    上游 `/model_catalog` 每个模型都带 `billing_multiplier`（标价倍率）与
+    `billing_effective_multiplier`（**实际扣减**倍率，限免/折扣后），
+    第一版 `fetch_models` 只留了 name/display/description/visible，
+    于是模型配置页的小浣熊行倍率全是「无」（`-1.0`）——
+    而客户端里明明看得见 ×0.25 / ×0.5 这些倍率。
+
+    两个值的区别是实打实的钱：
+        sn-sensenova-6-8-flash  标价 0.5，`billing_status=limited_free` 实扣 0
+    所以两个都留着，上层用 effective 作为「此刻要花多少」，标价用来解释限免。
     """
     url = endpoints.llm_base_of(realm) + endpoints.MODELS_PATH
     data = request_json("GET", url, token=token, realm=realm, account_id=account_id)
@@ -426,15 +514,52 @@ def fetch_models(token: str, realm: str = "cn", account_id: int | None = None) -
             name = str(item.get("name") or item.get("model_name") or "").strip()
             if not name:
                 continue
+            multipliers = _multipliers_of(item)
+            params = item.get("params") if isinstance(item.get("params"), dict) else {}
             flat.append({
                 "name": name,
                 "category": ctype,
-                "display": str(item.get("display_name") or name),
+                "display": str(item.get("display_name")
+                               or item.get("description") or name),
                 "description": str(item.get("display_description")
                                    or item.get("description") or ""),
                 "visible": bool(item.get("visible", True)),
+                # 计费：标价 / 实扣 / 分类 / 状态
+                "billing_multiplier": multipliers[0],
+                "billing_effective_multiplier": multipliers[1],
+                "billing_category": str(item.get("billing_category") or ""),
+                "billing_status": str(item.get("billing_status") or ""),
+                "billing_status_note": str(item.get("billing_status_note") or ""),
+                # 能力：标签与上下文长度（模型配置页用来解释「这模型是什么」）
+                "tags": [str(t) for t in (item.get("tags") or []) if t],
+                "context_window": params.get("context_window"),
+                "max_tokens": params.get("max_tokens"),
+                "ability_level": item.get("ability_level"),
             })
     return flat
+
+
+def _multipliers_of(item: dict) -> tuple[float | None, float | None]:
+    """从上游模型条目取 `(标价倍率, 实扣倍率)`。
+
+    缺失/非法一律 `None`（= 该平台没有倍率概念），**不要**回落到 0 ——
+    0 在模型配置页会被当成「免费」，把收费模型标成免费比不显示更糟。
+    """
+    def _num(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip().rstrip("xX×"))
+            except ValueError:
+                return None
+        return None
+
+    listed = _num(item.get("billing_multiplier"))
+    effective = _num(item.get("billing_effective_multiplier"))
+    return listed, (effective if effective is not None else listed)
 
 
 def fetch_points(token: str, realm: str = "cn", account_id: int | None = None) -> dict:

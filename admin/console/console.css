@@ -1092,6 +1092,20 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .filter-combobox-toggle:focus-visible {
   outline:2px solid var(--brand);
 }
+/* 账号池 / IP 页的原生 select 替换成组件后，宽度与高度要和旁边按钮对齐。
+   `attachSelect()` 会生成 `#<id>Search` 这个输入框，原 select 被 hidden。 */
+.account-tools .filter-combobox input,
+.ip-toolbar .filter-combobox input {
+  height:32px;
+  padding:5px 32px 5px 10px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  font-size:12px;
+}
+#accSortSearch { width:132px; }
+#accPageSizeSearch { width:112px; }
+#ipUsageFilterSearch { width:150px; }
+
 .filter-combobox-panel {
   position:fixed;
   z-index:70;
@@ -1769,6 +1783,8 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .wb-mic-sm { width:14px; height:14px; }
 /* 模型 ID 那一行：厂商图标 + 等宽 ID，基线对齐 */
 .model-id-line { display:inline-flex; align-items:center; gap:6px; min-width:0; }
+/* 上下文 / 输出 / 输入类型 / 推理 摘要（值来自上游同步的 metadata） */
+.model-capacity-line { margin-top:3px; font-size:10px; color:var(--fg-subtle); letter-spacing:.01em; }
 .model-id-line:hover .wb-mic { color:var(--brand-ink); }
 .model-id-line .model-id-description { min-width:0; }
 /* 「旧模型」标：官方客户端前端当前不渲染的模型（不在 cli agent 名单内）。
@@ -3720,6 +3736,22 @@ tbody tr:hover > th { background:transparent!important; }
 /* ============================================================================
    扫描结果表格（平台管理 / 账号池共用）
    ========================================================================== */
+/* 导入弹窗的「选择文件 / 拖放」区：文件选择器本身太窄，
+   拖进来比点两次「浏览」快，所以整块都能点、也能拖。 */
+.imp-file-drop {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px dashed var(--border); border-radius: 9px;
+  background: var(--surface-2); cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.imp-file-drop:hover { border-color: var(--brand-strong); }
+.imp-file-drop.drag {
+  border-color: var(--brand-strong);
+  background: var(--brand-soft);
+}
+.imp-file-drop #impFileInfo { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .scan-table-wrap {
   max-height: 260px; overflow: auto;
   border: 1px solid var(--border); border-radius: 8px;

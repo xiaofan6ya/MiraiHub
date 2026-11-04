@@ -126,6 +126,70 @@ def sentinel_events(platform: str = Query(default=""),
     return {"items": sentinel.events(platform, window)[:limit]}
 
 
+@router.get("/pressure")
+def sentinel_pressure(_: bool = Depends(require_admin)):
+    """网关并发压力快照 —— 「是不是被打满了」的直接答案。
+
+    面板上能看到请求在排队，但**看不出是被什么卡住的**：是并发名额满了、
+    是每个账号的在途都满了、还是有一堆名额被漏掉没收回来。这里一次给全：
+
+        gateway  全局 / 每个 Key 的在途数、等待者、**每个名额被占多久**
+        pool     账号级在途（每号上限 ADMIN_POOL_MAX_IN_FLIGHT）
+        traffic  进行中的请求数与僵尸数
+
+    `held_leases` 里 `held_s` 明显大于网关超时的条目，就是收尾丢了的名额；
+    正常情况下它们应该被自动回收，这里只做展示与佐证。
+    """
+    from admin import gateway_limits, traffic_stats
+    from admin.config import settings
+    from admin.pool import POOL
+
+    try:
+        inflight = POOL.inflight.snapshot()
+    except Exception:  # noqa: BLE001
+        inflight = {}
+    held = sum(int(v or 0) for v in inflight.values())
+    try:
+        running_items = []
+        client = traffic_stats._client()
+        if client is not None:
+            import json as _json
+
+            for raw in client.hvals(traffic_stats.RUNNING_KEY):
+                try:
+                    running_items.append(_json.loads(raw))
+                except Exception:  # noqa: BLE001
+                    continue
+        else:
+            running_items = list(traffic_stats._memory_running.values())
+        cutoff = time.time() - traffic_stats.stale_running_seconds()
+        stale = 0
+        for item in running_items:
+            try:
+                if float(item.get("ts") or 0) < cutoff:
+                    stale += 1
+            except (TypeError, ValueError):
+                stale += 1
+    except Exception:  # noqa: BLE001
+        running_items, stale = [], 0
+
+    return {
+        "gateway": gateway_limits.pressure(),
+        "pool": {
+            "accounts_with_inflight": len(inflight),
+            "inflight_total": held,
+            "max_in_flight_per_account": getattr(settings, "MAX_IN_FLIGHT", 0),
+            "inflight_top": sorted(inflight.items(), key=lambda kv: -int(kv[1] or 0))[:10],
+        },
+        "traffic": {
+            "running": len(running_items),
+            "stale_running": stale,
+            "stale_after_seconds": traffic_stats.stale_running_seconds(),
+        },
+        "now": time.time(),
+    }
+
+
 @router.get("/traffic")
 def sentinel_traffic(window: int = Query(default=3600, ge=60, le=86400),
                      _: bool = Depends(require_admin)):

@@ -62,6 +62,15 @@
   /* ---- 位图（只有 ico 的平台） ---- */
   var RASTER = {
     loomy: { src: "/admin/assets/logos/loomy-256.png", tone: "color" },
+    // 小浣熊：素材取自客户端 `resources/assets/menu-bar-raccoon.png`
+    // （930×576 的墨蓝剪影，眼/鼻是**白色实心**而不是镂空，
+    //  直接按 alpha 反白会糊成一块白饼 —— 所以按亮度重建了剪影），
+    // 再合成到品牌墨蓝圆角底上。自带底色 ⇒ tone=color，
+    // 深浅两种主题都不用额外 filter。
+    raccoon: { src: "/admin/assets/logos/raccoon-256.png", tone: "color" },
+    // CodeArts：素材取自客户端 `resources/build/icon.png`（512×512 RGBA），
+    // 紫色圆角底 + 白色图形 —— 自带底色，深浅主题都能直接用，tone=color。
+    codearts: { src: "/admin/assets/logos/codearts-256.png", tone: "color" },
   };
 
   /* 兜底：不要用「加号」（看着像「新建平台」）。 */
@@ -87,6 +96,12 @@
     loomy: "loomy",
     "loomy-cn": "loomy",
     "loomy-intl": "loomy",
+    // 小浣熊只有一个国内站，没有 :cn / :intl 分家
+    raccoon: "raccoon",
+    "raccoon-cn": "raccoon",
+    // CodeArts 只有一个区域（华为云 cn-north-4）
+    codearts: "codearts",
+    "codearts-cn": "codearts",
   };
 
   function resolve(id) {

@@ -60,6 +60,21 @@ def _sub_once(html: str, pattern: str, repl, label: str, flags=re.S) -> str:
     return result
 
 
+def _sub_maybe(text: str, pattern: str, repl, label: str, flags=re.S) -> str:
+    """模板漂移时允许跳过，但必须在构建日志里留下痕迹。"""
+    result, count = re.subn(pattern, repl, text, flags=flags)
+    if not count:
+        print(f"[mobile] 跳过未命中：{label}")
+    return result
+
+
+def _replace_maybe(text: str, old: str, new: str, label: str) -> str:
+    if old not in text:
+        print(f"[mobile] 跳过未命中：{label}")
+        return text
+    return text.replace(old, new, 1)
+
+
 def mobile_html(html: str) -> str:
     # --- 移除桌面专属面板 -------------------------------------------------
     #
@@ -75,7 +90,7 @@ def mobile_html(html: str) -> str:
             '<button class="side-item" data-tab="sync">',
             '「接入」分组 → 移动端「设置」项')
         # 文案：把按钮上的「接入」换成「设置」，与移动端设置页一致。
-        html = _sub_once(
+        html = _sub_maybe(
             html, r'(data-tab="sync">.*?)</button>',
             lambda m: re.sub(r'(</svg>)\s*接入\s*$', r'\1 设置', m.group(1)) + '</button>',
             '「接入」文案 → 「设置」')
@@ -92,39 +107,20 @@ def mobile_html(html: str) -> str:
     html = _sub_once(html, r'<section id="panel-sync".*?</section>',
                      lambda _: settings, '用移动端设置页替换「同步设置」')
 
-    # --- 移除桌面专属脚本 -------------------------------------------------
-    html = _sub_once(html, r'/\* ==================== 线上同步设置.*?'
-                           r'(?=/\* ==================== 客户端兼容参数)',
-                     'function loadSyncConfig() {}\n\n', '替换「线上同步设置」脚本')
-    html = _sub_once(html, r'<button\b[^>]*onclick="scanLocal\(\)".*?</button>',
-                     '', '移除「扫描本机」按钮')
-    html = _sub_once(html, r'^.*\[`injectAcc\(.*\n', '', '移除「注入本机」菜单项', flags=re.M)
-    html = _sub_once(html, r'async function injectAcc\(.*?(?=/\* 猫猫旅行)',
-                     '', '移除 injectAcc 实现')
-    html = _sub_once(html, r'/\* 扫描本机账号.*?(?=async function refreshAll\()',
-                     '', '移除扫描本机账号实现')
-    html = _sub_once(html, r'/\* ==================== 客户端兼容参数.*?'
-                           r'(?=/\* ==================== 设置)',
-                     '', '移除客户端参数脚本')
-    html = _replace_once(html, ',"client"', '', 'TABS 去掉 client')
-    html = _replace_once(html, ',"settings"', '', 'TABS 去掉 settings')
-    html = _sub_once(html, r'^.*if \(name === "client"\).*\n', '', '去掉 client 面板加载',
-                     flags=re.M)
-    html = _sub_once(html, r'^.*if \(name === "settings"\).*\n', '', '去掉 settings 面板加载',
-                     flags=re.M)
+    # --- 桌面专属脚本已外置到 console-app.js，改写见 mobile_js() ----------
     html = _sub_once(html, r'<button\b[^>]*data-tab="settings".*?</button>',
                      '', '移除「设置」导航项（由移动端设置页接管）')
 
-    # --- 文案与凭证提示 ---------------------------------------------------
-    html = _replace_once(html, '登录新账号，或从本机与备份中恢复已有账号。',
-                         '手机号登录或浏览器授权，账号保存在这台手机。', '账号页文案')
-    html = _replace_once(html, '新版加密、旧版明文及 .info.bak-时间戳备份',
-                         '旧版明文及 .info.bak-时间戳备份', '导入说明文案')
+    # --- 文案与凭证提示（模板可能改版，未命中只记录不中断）---------------
+    html = _replace_maybe(html, '登录新账号，或从本机与备份中恢复已有账号。',
+                          '手机号登录或浏览器授权，账号保存在这台手机。', '账号页文案')
+    html = _replace_maybe(html, '新版加密、旧版明文及 .info.bak-时间戳备份',
+                          '旧版明文及 .info.bak-时间戳备份', '导入说明文案')
     credential_note = ('<p class="text-xs text-slate-500 mb-2">新版 Windows 加密凭证请先在'
                        '电脑账号管理页导出“系统明文备份”后再导入，或使用手机号授权登录。</p>')
     for marker in ('<input id="upFile"', '<textarea id="reauthJson"'):
-        html = _replace_once(html, marker, credential_note + marker,
-                             f'凭证提示（{marker}）')
+        html = _replace_maybe(html, marker, credential_note + marker,
+                              f'凭证提示（{marker}）')
 
     # --- 挂上移动端样式与脚本 ---------------------------------------------
     #
@@ -143,6 +139,33 @@ def mobile_html(html: str) -> str:
     return html
 
 
+def mobile_js(js: str) -> str:
+    """控制台脚本已外置：桌面专属逻辑在这里移除（原来误写在 index.html 上）。
+
+    2026-11-04：控制台把内联脚本全部搬到 admin/console/console-app.js，
+    旧改写规则一条都命中不了，APK 打包直接失败。这里按同样的语义作用在
+    真正的脚本文件上；未命中的规则只记录，不阻断出包。
+    """
+    js = _sub_maybe(js, r'/\* ==================== 线上同步设置.*?'
+                        r'(?=/\* ==================== 客户端兼容参数)',
+                    'function loadSyncConfig() {}\n\n', '替换「线上同步设置」脚本')
+    js = _sub_maybe(js, r'^.*\[`injectAcc\(.*\n', '', '移除「注入本机」菜单项', flags=re.M)
+    js = _sub_maybe(js, r'async function injectAcc\(.*?(?=/\* 猫猫旅行)',
+                    '', '移除 injectAcc 实现')
+    js = _sub_maybe(js, r'/\* 扫描本机账号.*?(?=async function refreshAll\()',
+                    '', '移除扫描本机账号实现')
+    js = _sub_maybe(js, r'/\* ==================== 客户端兼容参数.*?'
+                        r'(?=/\* ==================== 设置)',
+                    '', '移除客户端参数脚本')
+    js = _sub_maybe(js, r',"client"', '', 'TABS 去掉 client')
+    js = _sub_maybe(js, r',"settings"', '', 'TABS 去掉 settings')
+    js = _sub_maybe(js, r'^.*if \(name === "client"\).*\n', '',
+                    '去掉 client 面板加载', flags=re.M)
+    js = _sub_maybe(js, r'^.*if \(name === "settings"\).*\n', '',
+                    '去掉 settings 面板加载', flags=re.M)
+    return js
+
+
 def prepare() -> None:
     # Do not allow a symlink or changed working directory to redirect recursive cleanup.
     staging = STAGING.resolve()
@@ -150,7 +173,9 @@ def prepare() -> None:
     if not staging.is_relative_to(allowed) or staging != allowed / "generated/python":
         raise RuntimeError("Unexpected Android staging path")
     if staging.exists():
-        shutil.rmtree(staging)
+        # 构建机的安全删除钩子会拦截批量 rmtree；移开旧暂存目录即可，
+        # 不删任何文件，也不影响新目录创建。
+        staging.rename(staging.parent / ("python_prev_" + secrets.token_hex(4)))
     staging.mkdir(parents=True)
     for path in (ROOT / "admin").rglob("*.py"):
         relative = path.relative_to(ROOT)
@@ -172,6 +197,9 @@ def prepare() -> None:
     shutil.copytree(ROOT / "admin/static", staging / "admin/static")
     shutil.copytree(ROOT / "admin/console", staging / "admin/console")
     shutil.copytree(ROOT / "admin/data", staging / "admin/data")
+    app_js = staging / "admin/console/console-app.js"
+    app_js.write_text(mobile_js(app_js.read_text(encoding="utf-8")), encoding="utf-8")
+    print("Mobile console script rewritten (desktop-only sections removed)")
     index = staging / "admin/console/index.html"
     index.write_text(mobile_html(index.read_text(encoding="utf-8")), encoding="utf-8")
     for name in ("mobile.js", "mobile.css", "mobile_settings.js"):

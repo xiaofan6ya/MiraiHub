@@ -27,6 +27,37 @@ from admin.platform.loomy.services import scan as loomy_scan
 logger = logging.getLogger("admin.platform.loomy.platform_gateway")
 
 
+#: 一次**后台**刷新最多同步几个「积分快照已过期」的号。
+#:
+#: ⚠️ 这不再是「列表请求里同步几个」—— 那版实测把 `/accounts` 拖到 **2.8 秒**
+#: （50 个号里 8 个各要一次上游 RTT，串行）。现在列表只读快照、立刻返回，
+#: 刷新交给 `shared.kick_background_refresh()`（单飞 + 限频 + 限量）。
+QUOTA_SYNC_PER_LIST = 8
+
+#: 后台刷新的最小间隔（秒）。翻页很频繁，不能每页都排一批上游请求。
+QUOTA_REFRESH_MIN_GAP = 10.0
+
+
+def _kick_quota_refresh(account_ids: list[int]) -> bool:
+    """把「刷新过期余额」丢到后台，**不阻塞列表响应**（见 shared 里的说明）。"""
+    from admin.platform import shared
+
+    return shared.kick_background_refresh(
+        "loomy", account_ids,
+        lambda session, account: loomy_accounts.sync_quota(
+            session, account, with_models=False),
+        max_items=QUOTA_SYNC_PER_LIST, min_gap=QUOTA_REFRESH_MIN_GAP)
+
+
+def _snapshot_of(account) -> dict:
+    """账号上一次的积分快照（打上游失败时的兜底显示）。"""
+    try:
+        snap = json.loads(account.credits_snapshot or "{}")
+    except (ValueError, TypeError):
+        snap = {}
+    return snap if isinstance(snap, dict) else {}
+
+
 class LoomyAccountOps:
     """账号池 11 项操作。"""
 
@@ -41,10 +72,14 @@ class LoomyAccountOps:
         ## 两种模式
 
         * `page=None`（默认）：旧行为，全量返回 —— 兼容旧调用方。
-        * `page` 传入：服务端分页。**关键性能点**：`sync_quota` 是逐账号
-          打上游的，全池几十万条时列表页会卡几分钟；分页模式只对**当前页**
-          的 stale 账号做同步，其余读快照。summary 走 SQL 聚合
+        * `page` 传入：服务端分页。summary 走 SQL 聚合
           （口径与全量版一致：积分类只算 active）。
+
+        ## 列表**不碰上游**
+
+        余额是展示数据，不该挡住整页渲染。这里只读 `credits_snapshot`，
+        过期账号丢给后台线程刷新（`_kick_quota_refresh`，单飞 + 限频）。
+        实测把同步探活从请求路径里拿掉后：**2.82s → 0.05s**。
 
         搜索/筛选/排序复用 `admin.platform.shared` 的通用助手，
         与通用 `/api/accounts` 同一套语义。
@@ -65,22 +100,14 @@ class LoomyAccountOps:
         query = account_order(query, Account, sort)
 
         if page is None:
-            views = []
-            for account in query.all():
-                views.append(loomy_accounts.public_view(
-                    account, quota=self._quota_of(db, account)))
-            db.commit()
+            views, stale = self._views_of(db, query.all())
             return {"items": views,
                     "summary": loomy_accounts.summarize(views)}
 
         total = int(query.with_entities(_func.count(Account.id)).scalar() or 0)
         rows = (query.offset((max(1, page) - 1) * page_size)
                 .limit(page_size).all())
-        views = []
-        for account in rows:
-            views.append(loomy_accounts.public_view(
-                account, quota=self._quota_of(db, account)))
-        db.commit()
+        views, stale = self._views_of(db, rows)
 
         # summary 不含 status 筛选（筛选 tab 显示全池分布）
         agg_q = db.query(Account).filter(Account.platform == "loomy")
@@ -94,28 +121,28 @@ class LoomyAccountOps:
                 "paginated": True, "total": total,
                 "page": max(1, page), "page_size": page_size}
 
-    def _quota_of(self, db, account) -> dict | None:
-        """单账号的积分视图；stale 才打上游同步（分页时只发生在当前页）。
+    def _views_of(self, db, accounts) -> tuple[list[dict], list[int]]:
+        """把账号列表转成视图，**只读快照、绝不打上游**。
 
-        ⚠️ 同步失败必须兜住：原来 sync_quota 抛错（token 失效/网络断）会
-        让**整个列表 500**——一个坏号拖死所有号的展示。
+        返回 `(views, stale_ids)`；`stale_ids` 交给 `_kick_quota_refresh()`
+        在后台刷新。这里一个 HTTP 都不发 —— 实测原来同步跑 8 个号要 2.8 秒，
+        现在整个列表 0.05 秒。
+
+        ⚠️ `credits_snapshot` 解析失败必须兜住：一个坏行不能让整页 500。
         """
-        if not loomy_accounts.quota_is_fresh(account):
-            try:
-                # 用 sync_quota 而不是 fetch_quota ——
-                # 前者**同时**拉积分余额与模型数（fetch_quota 只探模型，
-                # 用它会导致余额永远显示 0）
-                result = loomy_accounts.sync_quota(db, account)
-                if result.get("ok"):
-                    return result.get("quota")
-            except Exception:  # noqa: BLE001 - 单账号失败不影响列表
-                pass
-            return None
+        views: list[dict] = []
+        stale: list[int] = []
+        for account in accounts:
+            if not loomy_accounts.quota_is_fresh(account):
+                stale.append(int(account.id or 0))
+            views.append(loomy_accounts.public_view(
+                account, quota=_snapshot_of(account)))
+        # 过期余额交给后台刷（单飞 + 限频），页面不等它。
         try:
-            snap = json.loads(account.credits_snapshot or "{}")
-        except ValueError:
-            snap = {}
-        return snap if isinstance(snap, dict) else None
+            _kick_quota_refresh(stale)
+        except Exception:  # noqa: BLE001 - 后台调度失败不影响列表
+            logger.debug("后台刷新调度失败", exc_info=True)
+        return views, stale
 
     def scan(self):
         return loomy_scan.discover()
@@ -278,8 +305,8 @@ class LoomyClientProbe:
         from admin.platform.loomy.core import paths as _paths
 
         return enrich(result,
-                      exe_candidates=_paths.APP_EXE_CANDIDATES,
-                      data_dirs=_paths.DATA_DIR_CANDIDATES,
+                      exe_candidates=_paths.app_exe_candidates(),
+                      data_dirs=_paths.data_dir_candidates(),
                       product=_paths.UA_PRODUCT)
 
 

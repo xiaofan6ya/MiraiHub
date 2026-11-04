@@ -123,7 +123,17 @@ def _thinking_choice(body: dict) -> bool | None:
 
 
 def _effort_of(body: dict) -> str:
+    """下游档位 -> Qoder 上游认的三档（low/medium/high）。
+
+    Qoder 的 `parameters.reasoning_effort` 只有三档，原来只透传 low/medium/high，
+    于是客户端发 `xhigh` / `max` / `minimal` 会被**静默丢弃** ——
+    表现是「档位设了也没变化」，而用量日志里又记着 xhigh，看起来像上游不认。
+    这里做等价映射：更高档收敛到 high，minimal 收敛到 low。日志仍记**原始值**
+    （`shared.reasoning_effort_of` 读的是下游 body），所以不会失真。
+    """
     effort = str(body.get("reasoning_effort") or "").lower()
+    effort = {"minimal": "low", "xhigh": "high", "max": "high",
+              "ultra": "high"}.get(effort, effort)
     if effort in ("low", "medium", "high"):
         return effort
     thinking = body.get("thinking")
@@ -138,6 +148,35 @@ def _effort_of(body: dict) -> str:
             return "medium"
         return "high"
     return ""
+
+
+def stable_session_seed(account, body: dict) -> str:
+    """上游 `session_id` 的种子：按「账号 + 对话」确定性派生。
+
+    原先直接拿 `body["user"] / body["session_id"]`，而绝大多数客户端两个都
+    不传 → `protocol.build_upstream_body` 走 `uuid4()` 分支，**每请求新建一个
+    上游会话**：上游的上下文缓存永远命中不了，一个号在几分钟里就"新建"了
+    几十个会话（风控视角的脚本特征）。
+
+    现在：显式会话标识（`session_id` / `conversation_id` / `user`）仍被尊重，
+    但会和账号绑在一起哈希；没有标识时用首条 user 文本派生，
+    连消息都没有才退化成「每账号一个固定会话」。**任何一层都不是随机值。**
+    """
+    merged = body
+    if isinstance(body, dict):
+        explicit = (body.get("session_id") or body.get("conversation_id")
+                    or body.get("user"))
+        if isinstance(explicit, str) and explicit.strip():
+            merged = dict(body)
+            merged.setdefault("conversation_id", explicit.strip())
+    try:
+        from admin import pool
+
+        return pool.stable_session_id(
+            "qoder", int(getattr(account, "id", 0) or 0), merged, size=24)
+    except Exception:  # noqa: BLE001 - 派生失败退回「不指定」，不能挡住调用
+        logger.debug("qoder session seed 派生失败", exc_info=True)
+        return ""
 
 
 def prepare(db, account, body: dict, *, scene: str = "chat",
@@ -164,12 +203,15 @@ def prepare(db, account, body: dict, *, scene: str = "chat",
     if not messages:
         raise client.UpstreamError("messages 不能为空", status=400, kind="bad_request")
 
+    # 上游 `session_id` 是**会话**标识：必须按「账号 + 对话」稳定，否则每请求
+    # 新建一个会话 → 上游上下文缓存命中不了、一个号短时间内冒出大量会话。
+    # 见 pool.stable_session_id 的推导口径。
     upstream = protocol.build_upstream_body(
         model=model, messages=messages, tools=body.get("tools"),
         max_tokens=body.get("max_tokens") or body.get("max_completion_tokens"),
         thinking=_thinking_choice(body),
         reasoning_effort=_effort_of(body),
-        session_seed=str(body.get("user") or body.get("session_id") or ""),
+        session_seed=stable_session_seed(account, body),
     )
     return {"token": token, "realm": realm, "uid": uid, "machine_id": machine_id,
             # 哨兵归因用：哪条账号出了错
@@ -195,6 +237,11 @@ def stream_openai(plan: dict, *, want_usage: bool = False,
     model_name = plan["model_name"]
     usage: dict = {}
     emitted_role = False
+    # **真实分段耗时**：首字 / 末字的墙钟时刻，流结束时写回 holder。
+    # 以前这里只记 usage，网关只能拿「请求开始→收尾」当 TTFT，
+    # 于是 `latency == ttfb`、TPS 永远算不出来（面板上 Qoder 一片“—”）。
+    started_at = time.perf_counter()
+    first_at = last_at = 0.0
 
     for inner in client.iter_chat_stream(
             plan["token"], plan["realm"], uid=plan["uid"],
@@ -222,6 +269,10 @@ def stream_openai(plan: dict, *, want_usage: bool = False,
                     chunk_id=chunk_id, model_name=model_name, created=created,
                     tool_calls=tool_calls))
             if content or reasoning:
+                now = time.perf_counter()
+                if not first_at:
+                    first_at = now
+                last_at = now
                 yield protocol.sse(protocol.openai_chunk(
                     chunk_id=chunk_id, model_name=model_name, created=created,
                     content=content, reasoning=reasoning))
@@ -255,6 +306,11 @@ def stream_openai(plan: dict, *, want_usage: bool = False,
             chunk_id=chunk_id, model_name=model_name, usage=usage,
             created=created, credit=credit))
     holder["usage"] = usage
+    if first_at:
+        holder["ttfb_ms"] = int((first_at - started_at) * 1000)
+    if last_at:
+        # 纯解码段终点（不含收尾帧 / usage 帧的网络时间）
+        holder["total_ms"] = int((last_at - started_at) * 1000)
     yield protocol.sse_done()
 
 

@@ -86,6 +86,12 @@ _CAP_FALLBACK: dict[str, dict] = {
 }
 
 
+#: 上游 tags 里表示「能看图」的标签（小浣熊 `vision`、部分平台的 `image`）。
+_VISION_TAGS = frozenset({"vision", "image", "img", "omni", "multimodal",
+                          "image-input", "vision-input"})
+#: 表示「支持思考/推理」的标签。
+_REASON_TAGS = frozenset({"reasoning", "thinking", "cot", "reason"})
+
 def _num(value) -> int:
     """把上游的 `1000000` / `"1M"` / `"256K"` 之类统一成整数。"""
     if isinstance(value, (int, float)):
@@ -166,6 +172,22 @@ def _capabilities_of(row) -> dict:
     if efforts:
         caps["reasoning_efforts"] = efforts
 
+    # ---- 兜底 0：上游自带的 tags ----
+    #
+    # 小浣熊这类平台（`/model_catalog`）**不返回** supportsImages /
+    # supportsReasoning 布尔位，但每个模型带一组能力标签：
+    #     sn-glm-5-3-flash -> [..., "vision"]          能看图
+    #     sn-glm-5-3       -> [..., "reasoning"]       能思考
+    # 之前完全忽略 tags，于是 DSH 的模型目录里这些模型全被当成「纯文本」，
+    # 图片勾选框是灰的、推理等级也没有 —— 用户看到的「没按上游返回」。
+    tags = [str(t).strip().lower() for t in (md.get("tags") or [])
+            if str(t).strip()]
+    if tags:
+        if "supports_images" not in caps and any(t in _VISION_TAGS for t in tags):
+            caps["supports_images"] = True
+        if "supports_reasoning" not in caps and any(t in _REASON_TAGS for t in tags):
+            caps["supports_reasoning"] = True
+
     tools = md.get("supportsToolCall")
     if isinstance(tools, bool):
         caps["supports_tools"] = tools
@@ -219,14 +241,21 @@ def _caps_flat(caps: dict, display_name: str = "") -> dict:
     ctx = caps.get("context_window")
     if isinstance(ctx, int) and ctx > 0:
         out["contextWindow"] = ctx
+        # OpenRouter / vLLM / LiteLLM 生态认的是下面这几个别名。
+        # DSH 只读 `contextWindow`，但别的客户端（Cherry、Lobe）读
+        # `context_length` —— 多给几个键没有副作用。
+        out["context_length"] = ctx
+        out["max_input_tokens"] = ctx
     mt = caps.get("max_output_tokens")
     if isinstance(mt, int) and mt > 0:
         out["maxTokens"] = mt
+        out["max_output_tokens"] = mt
     if "supports_images" in caps:
         mods = ["text"]
         if caps.get("supports_images"):
             mods.append("image")
         out["inputModalities"] = mods
+        out["architecture"] = {"input_modalities": mods}
     efforts = caps.get("reasoning_efforts")
     if isinstance(efforts, list) and efforts:
         out["reasoningEfforts"] = efforts
@@ -661,6 +690,67 @@ def platform_of_model(name: str, db=None) -> str:
                 pass
 
 
+def upstream_of_in_platform(slug: str, storage: str, db=None) -> str:
+    """把「某个平台的名字」还原成**该平台自己的真实 model_id**。
+
+    与 `upstream_of()` 的区别（这就是「同名冲突」的修法）：
+
+        glm-5.3-flash   在 WorkBuddy 叫 `glm-5.3-flash`
+                        在 Loomy 叫 `GLM-5.3-Flash`
+                        在 Trae  叫 `glm-5.3-flash`
+
+    `/v1/models` 为了跨平台一致，对外统一发小写 slug + 平台后缀
+    （`glm-5.3-flash-loomy`）。但上游只认自己的写法 —— 把 slug 原样
+    发给 Loomy 就是「模型不存在」。而 `upstream_of()` 是**全局**扫描、
+    不区分平台，同名时可能返回别家的拼法，同样会 400。
+
+    所以：平台确定之后，必须按 `(platform, model)` 收窄再还原。
+    找不到就原样返回（让上游自己报错，别悄悄换成别的模型）。
+    """
+    target = str(slug or "").strip().lower()
+    store = str(storage or "").strip().lower()
+    if not target or not store:
+        return ""
+    own_db = db is None
+    try:
+        if own_db:
+            from admin.db import SessionLocal
+
+            db = SessionLocal()
+        from sqlalchemy import func as _sql_func
+
+        from admin.models import ModelConfig
+
+        rows = (db.query(ModelConfig)
+                .filter(ModelConfig.enabled == 1,
+                        _sql_func.lower(ModelConfig.platform) == store)
+                .all())
+        # 1) 完全同名（大小写不敏感）—— 最常见，直接命中
+        for row in rows:
+            raw = str(row.model_id or "")
+            if raw and raw.lower() == target:
+                return raw
+        # 2) slug 归一后相同（`GLM-5.3-Flash` <-> `glm53flash`）
+        for row in rows:
+            raw = str(row.model_id or "")
+            if not raw:
+                continue
+            if slugify_model_id(raw) == target:
+                return raw
+            if slugify_model_id(raw) == slugify_model_id(target):
+                return raw
+        return ""
+    except Exception:  # noqa: BLE001
+        logger.debug("平台内模型还原失败 storage=%s slug=%s", store, slug, exc_info=True)
+        return ""
+    finally:
+        if own_db and db is not None:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def upstream_of(slug: str, db=None) -> str:
     """把规范 id 还原成**上游真实 id**。
 
@@ -709,17 +799,36 @@ def upstream_of(slug: str, db=None) -> str:
                 pass
 
 
+#: `/v1/models` 除 `id/object/created` 外**额外放行**的键。
+#:
+#: 这份名单就是 DSH `discoverModels` zod schema 认的字段（外加两个推理相关
+#: 扩展）。**增删这里的每一条都要同步 skill 文档 §4.4 与 check_hotpath.py**，
+#: 否则会出现「代码下发但文档说没有」或反过来的偏差。
+_STRICT_EXTRA_KEYS = ("name", "contextWindow", "maxTokens",
+                      "inputModalities", "reasoningEfforts",
+                      "defaultReasoningEffort", "canDisableThinking")
+
+
 def to_openai_strict(payload: dict, readable: bool = True) -> dict:
-    """裁成**最严格**的 OpenAI `/v1/models` 形状。
+    """裁成 `/v1/models` 对外形状（白名单，不放行任意键）。
 
     有些客户端（Rust 的 serde、Go 的 strict struct）遇到未知字段会直接
-    `error decoding response body`，所以只保留 `id` / `object` / `created`
-    三个标准字段。
+    `error decoding response body`，所以这里**白名单**放行：
+
+        id / object / created
+        name / contextWindow / maxTokens / inputModalities
+        reasoningEfforts / defaultReasoningEffort / canDisableThinking
+
+    前三个是 OpenAI 标准字段，后七个是 DSH `discoverModels` 的 zod schema
+    认的扩展字段（见 PROTOCOL-ROUTING-CACHE.md §4.4）。
+
+    ⚠️ `_caps_flat()` 还会产出 OpenRouter 别名（`context_length` /
+    `max_output_tokens` / `architecture`），**这里故意不放行** ——
+    那些键只在内部 payload（管理端聚合视图）里用。
+    要对外也下发就改下面 `_STRICT_KEYS`，但先确认目标客户端不会因未知键报错。
 
     `readable=True` 时 `id` 用**可读名字**（`DeepSeek-Flash · Qoder 中国版`）
-    而不是上游原始 id（`dfmodel-qoder`）。原因：客户端界面上只显示 `id`，
-    上游 id 是 `dfmodel` / `dmodel` / `kmodel_latest` 这种缩写，用户根本
-    看不出是哪个模型。
+    而不是上游原始 id（`dfmodel-qoder`）。
     """
     out = []
     seen: set[str] = set()
@@ -750,9 +859,7 @@ def to_openai_strict(payload: dict, readable: bool = True) -> dict:
         # 「256K / 32K / 纯文本 / 不支持推理」的灰块。
         # 这些字段都是 OpenAI 生态的常见扩展（vLLM / LiteLLM 也这么发），
         # 严格解析的客户端会忽略未知键，不会因此报错。
-        for key in ("name", "contextWindow", "maxTokens",
-                    "inputModalities", "reasoningEfforts",
-                    "defaultReasoningEffort", "canDisableThinking"):
+        for key in _STRICT_EXTRA_KEYS:
             val = item.get(key)
             if val not in (None, "", [], {}):
                 entry[key] = val

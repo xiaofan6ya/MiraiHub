@@ -2,15 +2,18 @@
 
     GET  /api/raccoon/meta             平台元信息
     GET  /api/raccoon/accounts         账号列表（按平台隔离）
-    POST /api/raccoon/import           导入（单条 / 批量）
-    GET  /api/raccoon/export           导出成 agent2api 兼容格式
+    POST /api/raccoon/import           导入（单条 / 批量 / 整段粘贴）
+    POST /api/raccoon/scan-local       扫描本机（~/.office-raccoon/.../auth.json）
+    POST /api/raccoon/import-local     本机凭证入库（扫描 → 勾选 → 确认）
+    GET  /api/raccoon/export           导出成 agent2api 兼容格式（备份 / 脱敏）
     POST /api/raccoon/accounts/{id}/refresh   探活并刷新
     POST /api/raccoon/accounts/{id}/test      分段连通性检查
     GET  /api/raccoon/credits          积分总览
     GET  /api/raccoon/usage            用量（本网关账本）
 
-注意：**没有 scan-local / import-local** —— 小浣熊的登录态在 Electron
-LevelDB 里，不是明文文件，扫不出来。硬加一个只会让人以为客户端没登录。
+说明：小浣熊的登录态是**明文** auth.json（逆向 `boxAgentAuthFile.js` 确认），
+所以 scan-local / import-local 是真的能用的 —— PR #9 时代的 LevelDB
+结论早已作废，别照着那句旧注释把这两个接口删掉。
 """
 from __future__ import annotations
 
@@ -86,10 +89,11 @@ def meta(_: bool = Depends(require_admin)):
         "note": "积分制；有 refresh 接口但 refreshToken 与 accessToken 同值",
         "auth_mode": "device-auth",
         "auth_explain": (
-            "两种入库方式：①「扫描本机」读取客户端登录态"
+            "三种入库方式：①「扫描本机」读取客户端登录态"
             "（~/.office-raccoon/agent/config/auth.json，明文 IAM JWT）；"
-            "②「授权登录」扫码免客户端入库——官方小程序扫码，手机确认，"
-            "无需滑块与短信验证码。也支持粘贴 agent2api JSON / 裸 JWT。"
+            "②「导入文件」选本地 JSON / JSONL / TXT（agent2api 备份、裸 JWT 都吃，"
+            "自动识别 UTF-8 / GBK）；③「授权登录」扫码免客户端入库——"
+            "官方小程序扫码，手机确认，无需滑块与短信验证码。"
         ),
     }
 

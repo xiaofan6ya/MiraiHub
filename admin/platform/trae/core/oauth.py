@@ -93,39 +93,26 @@ _ENV_PLUGIN_VERSION = "TRAE_PLUGIN_VERSION"
 _FALLBACK_APP_VERSION = "3.4.11"
 _FALLBACK_PLUGIN_VERSION = "2.3.98528"
 
-#: 可能的安装根目录（相对各自平台）
-_APP_ROOTS = (
-    r"%LOCALAPPDATA%\Programs\Trae CN",
-    r"%LOCALAPPDATA%\Programs\Trae",
-    r"C:\Program Files\Trae CN",
-    r"C:\Program Files\Trae",
-    r"D:\Trae CN\Trae CN",
-    r"D:\Trae CN",
-    r"D:\Trae",
-    "/opt/trae-cn",
-    "/opt/trae",
-    "/Applications/Trae CN.app",
-    "/Applications/Trae.app",
-)
+#: 安装根目录由 `core/paths.py` 动态解析（固定名 + 动态盘符 / 父文件夹）。
+#: 这里不再列 `D:\Trae CN` 之类的绝对路径：用户换盘、改父目录就会读不到
+#: appVersion，进而被上游以 `10101 无效参数` 拒绝。
 
 
 def _read_product_json() -> dict:
     """读本机 Trae 的 `product.json`，读不到返回空 dict。"""
-    import glob as _glob
-    for root in _APP_ROOTS:
-        expanded = os.path.expandvars(root.rstrip("\\/"))
-        for pattern in (
-            os.path.join(expanded, "resources", "app", "product.json"),
-            os.path.join(expanded, "Contents", "Resources", "app", "product.json"),
-        ):
-            for path in _glob.glob(pattern):
-                try:
-                    with open(path, "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                    if isinstance(data, dict):
-                        return data
-                except Exception:  # noqa: BLE001 - 探测失败不致命
-                    continue
+    from admin.platform.trae.core import paths
+
+    for raw in paths.product_json_candidates():
+        path = os.path.expandvars(str(raw))
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except Exception:  # noqa: BLE001 - 探测失败不致命
+            continue
     return {}
 
 

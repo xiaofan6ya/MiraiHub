@@ -154,12 +154,11 @@ def current(db=None) -> dict:
 # ---------------------------------------------------------------------------
 # 客户端探测（WorkBuddy 自己的路径表，不放总网关）
 # ---------------------------------------------------------------------------
-#: 可执行文件候选（找得到就用它的版本拼 UA）
+#: 可执行文件兜底模板（**只含环境变量，不写盘符**）。
+#: 实际定位走 `app_exe_candidates()`：固定目录名 × 动态盘符 / 父文件夹。
 APP_EXE_CANDIDATES = (
     r"%LOCALAPPDATA%\WorkBuddy\WorkBuddy.exe",
     r"%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe",
-    r"C:\Program Files\WorkBuddy\WorkBuddy.exe",
-    r"C:\Program Files (x86)\WorkBuddy\WorkBuddy.exe",
 )
 
 #: 数据目录候选（扫凭据 / 登录态用）
@@ -173,6 +172,29 @@ DATA_DIR_CANDIDATES = (
 
 #: UA 前缀用的产品名
 UA_PRODUCT = "WorkBuddy"
+
+
+def app_exe_candidates() -> list[str]:
+    """主程序路径（固定名 × 动态盘符 / 父文件夹，命中即停）。"""
+    from admin.platform import install_paths as ip
+
+    return ip.resolve("workbuddy", kind="app_exe",
+                      names=("WorkBuddy", "workbuddy"),
+                      exe_names=("WorkBuddy.exe", "CodeBuddy.exe"),
+                      require=("resources/app.asar",),
+                      fallback=APP_EXE_CANDIDATES)
+
+
+def data_dir_candidates() -> list[str]:
+    """数据目录（名字固定，位置取环境变量，不拼 C 盘）。"""
+    from admin.platform import install_paths as ip
+
+    return ip.resolve("workbuddy", kind="user_data_dir",
+                      names=("CodeBuddyExtension", "WorkBuddy", "workbuddy",
+                             "codebuddy"),
+                      roots=(r"%LOCALAPPDATA%", r"%APPDATA%"),
+                      fallback=DATA_DIR_CANDIDATES, max_depth=0,
+                      stop_after_first=False)
 
 
 def client_dirs() -> list[str]:
@@ -206,6 +228,6 @@ def probe() -> dict:
         # `admin.client_profile` 统一管理，这里只报路径与版本
     }
     return enrich(result,
-                  exe_candidates=APP_EXE_CANDIDATES,
-                  data_dirs=DATA_DIR_CANDIDATES,
+                  exe_candidates=app_exe_candidates(),
+                  data_dirs=data_dir_candidates(),
                   product=UA_PRODUCT)

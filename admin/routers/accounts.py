@@ -109,6 +109,7 @@ def _platform_import_module(storage: str):
         "trae": "admin.platform.trae.services.accounts",
         "qoder": "admin.platform.qoder.services.accounts",
         "loomy": "admin.platform.loomy.services.accounts",
+        "raccoon": "admin.platform.raccoon.services.accounts",
     }
     modname = mapping.get((storage or "").lower())
     if not modname:
@@ -139,6 +140,12 @@ class AccountBatchIn(BaseModel):
 
 class InjectIn(BaseModel):
     confirm: bool = False
+    #: 注入前是否重启本机客户端。
+    #:
+    #: 客户端把登录态放在内存里，只改磁盘文件撑不过一次令牌刷新（实测
+    #: 2 分钟就被覆盖）。所以「注入并生效」= 关掉客户端 → 写文件 → 再拉起。
+    #: 默认 **False**：重启会打断用户当前正在做的事，必须由他明确选择。
+    restart_client: bool = False
 
 
 class ImportLocalIn(BaseModel):
@@ -594,16 +601,37 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
                 chunk_size = 200
                 agg = {"ok": True, "added": 0, "updated": 0, "failed": 0,
                        "total": 0, "errors": []}
+                # 平台若支持细粒度进度（例如 Loomy 的并发探活），把 job 的
+                # set_done 传进去 —— 否则 100 个号在探活阶段进度条是死的，
+                # 用户以为卡住了（实测反馈）。用签名探测而不是写死平台名。
+                try:
+                    import inspect as _inspect
+
+                    _supports_progress = "on_progress" in _inspect.signature(
+                        mod.import_batch).parameters
+                except (TypeError, ValueError):
+                    _supports_progress = False
                 for start in range(0, len(records), chunk_size):
                     chunk = "\n".join(
                         json.dumps(r, ensure_ascii=False)
                         for r in records[start:start + chunk_size])
-                    part = mod.import_batch(db, chunk) or {}
+                    kwargs = {}
+                    if _supports_progress:
+                        def _on_progress(done, total, note=""):
+                            job.set_done(
+                                min(start + int(done), len(records)),
+                                note or "已导入 %d 条（更新 %d，失败 %d）"
+                                % (agg["added"], agg["updated"], agg["failed"]))
+                        kwargs["on_progress"] = _on_progress
+                    part = mod.import_batch(db, chunk, **kwargs) or {}
                     for k in ("added", "updated", "failed", "total"):
                         agg[k] += int(part.get(k) or 0)
                     for e in (part.get("errors") or [])[:20]:
                         if len(agg["errors"]) < 200:
                             agg["errors"].append(e)
+                    for k in ("probe_ok", "probe_failed", "elapsed_ms"):
+                        if k in part:
+                            agg[k] = int(agg.get(k) or 0) + int(part.get(k) or 0)
                     agg["ok"] = agg["ok"] and (part.get("ok", True) is not False)
                     job.set_done(min(start + chunk_size, len(records)),
                                  f"已导入 {agg['added']} 条（更新 {agg['updated']}，失败 {agg['failed']}）")
@@ -1300,70 +1328,137 @@ def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Sessio
 
 def _batch_add_core(body: AccountBatchIn, db: Session,
                     on_progress: "Callable[[int, int], None] | None" = None) -> dict:
+    """批量导入：结构校验 + 上游验证 + 落库。
+
+    ## 为什么要把「验证」和「落库」拆成两段
+
+    原实现是一条一条串行跑的，每条要打**两次**上游（`probe_credential_live`
+    验证 + `_refresh_balance` 再取一次余额），外加每条 `commit()` + `refresh()`。
+    实测单条约 0.7~1.5 秒，1000 个号就是 20 分钟起步 —— 用户说的「几百几千
+    几万个要等半天」就是这个。
+
+    现在：
+
+      1. **验证段并发**（默认 8 路）：纯网络 + 字符串处理，不碰 Session，
+         所以可以安全地丢进线程池；上游验证一次就把 balance 一起带回来，
+         不再重复取第二次余额。
+      2. **落库段串行批量**：`flush()` 拿自增 id（不再每条 `refresh()`），
+         每 200 条提交一次；单条失败只记账，不影响整批。
+
+    进度按**已处理条数**上报（含被跳过的），进度条不会卡住。
+    """
+    items = list(body.items or [])
+    total = len(items)
+    errors: list[str] = []
+    if total == 0:
+        return {"added": 0, "skipped": 0, "errors": ["没有提供任何账号凭证"]}
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    verify = bool(body.verify)
+
+    def _prepare(item) -> tuple[dict | None, str]:
+        """线程里跑：只做校验与上游探测，**不碰数据库**。"""
+        try:
+            raw = normalize_credential(item.auth_json or "")
+        except CredentialDecodeError as exc:
+            return None, f"跳过一条：{exc}"
+        except Exception as exc:  # noqa: BLE001 - 单条坏数据不阻断
+            return None, f"跳过一条：{str(exc)[:120]}"
+        chk = wb_login.validate_credential(raw)
+        if not chk.ok:
+            return None, f"跳过一条：不是有效的客户端凭证（{chk.reason}）"
+        if not verify:
+            return {"raw": raw, "profile": {}, "balance": {}}, ""
+        probe = wb_login.probe_credential_live(raw)
+        if not probe.ok:
+            return None, f"跳过一条：未通过上游验证（{probe.message}）"
+        return ({"raw": raw, "profile": probe.profile or {},
+                 "balance": probe.balance or {}}, "")
+
+    # ---- 1) 并发验证 ----
+    prepared: list[tuple[dict | None, str]] = [({}, "")] * total
+    done = 0
+    # 8 路足够把 RTT 藏起来；再多只会把上游/本机 socket 打满，收益递减。
+    workers = 1 if not verify or total < 8 else min(8, max(2, total // 4))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_prepare, it): i for i, it in enumerate(items)}
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    prepared[index] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    prepared[index] = (None, f"跳过一条：{str(exc)[:120]}")
+                done += 1
+                if on_progress:
+                    on_progress(done, total)
+    else:
+        for index, item in enumerate(items):
+            prepared[index] = _prepare(item)
+            done += 1
+            if on_progress:
+                on_progress(done, total)
+
+    # ---- 2) 落库（串行、批量提交） ----
     added = 0
     skipped = 0
-    errors = []
-    # 一次性取出已有 uid，避免每条都查库；
-    # 同时把自己刚加进去的 uid 也塞进去，这样同一批里的重复项也能拦住
     seen = _existing_uid_index(db)
-    total = len(body.items)
-    for i, it in enumerate(body.items):
-        # 每一条（无论成功/跳过/异常）都要推进进度，否则进度条会卡在
-        # 「校验失败率高的批次」上不动 —— 用户会以为任务死了。
+    pending = 0
+
+    def _flush(every: int = 200) -> None:
+        nonlocal pending
+        pending += 1
+        if pending >= every:
+            db.commit()
+            pending = 0
+
+    for index, item in enumerate(items):
+        payload, error = prepared[index]
+        if payload is None:
+            if error:
+                errors.append(error)
+            continue
         try:
-            if not it.auth_json or not it.auth_json.strip():
-                continue
-            try:
-                it.auth_json = normalize_credential(it.auth_json)
-            except CredentialDecodeError as exc:
-                errors.append(f"跳过一条：{exc}")
-                continue
-            # 第一道：非凭证拒收（与单条上传、与手机号登录共用同一校验器）
-            chk = wb_login.validate_credential(it.auth_json)
-            if not chk.ok:
-                errors.append(f"跳过一条：不是有效的客户端凭证（{chk.reason}）")
-                continue
-
-            # 第二道：真调上游确认可用、非伪造（可显式关闭）
-            profile: dict = {}
-            balance: dict = {}
-            if body.verify:
-                probe = wb_login.probe_credential_live(it.auth_json)
-                if not probe.ok:
-                    errors.append(f"跳过一条：未通过上游验证（{probe.message}）")
-                    continue
-                profile = probe.profile or {}
-                balance = probe.balance or {}
-
-            # uid 以上游返回的真实值为准（挡「真令牌 + 假 uid」）
-            uid = str(profile.get("uid") or _uid_of(it.auth_json) or "")
+            raw = payload["raw"]
+            profile = payload["profile"]
+            balance = payload["balance"]
+            uid = str(profile.get("uid") or _uid_of(raw) or "")
             if uid and uid in seen:
-                # 已存在 -> 覆盖新凭证并刷新余额（与单条上传同口径）
                 old = seen[uid]
-                _apply_meta(old, it.auth_json, profile=profile if body.verify else None,
-                            balance=balance if body.verify else None)
-                db.commit()
+                _apply_meta(old, raw,
+                            profile=profile if verify else None,
+                            balance=balance if verify else None)
+                _flush()
                 _post_login_automation(old.id, old.name or old.uid)
                 skipped += 1
                 continue
-            acc = Account(name=clean_display_name(it.name)) if it.name else Account()
-            _apply_meta(acc, it.auth_json, profile=profile, balance=balance)
+            acc = Account(name=clean_display_name(item.name)) if item.name else Account()
+            _apply_meta(acc, raw, profile=profile, balance=balance)
             db.add(acc)
-            db.commit()
-            db.refresh(acc)
+            # flush 只发 INSERT、拿回自增 id，比 refresh（多一次 SELECT）便宜得多
+            db.flush()
             if uid:
                 seen[uid] = acc
             _post_login_automation(acc.id, acc.name or acc.uid)
-            if _refresh_balance(acc, with_expiry=True):
+            # 验证阶段已经带回余额的，不再重复打一次上游
+            if balance and (balance.get("total") is not None
+                            or balance.get("remain") is not None):
+                added += 1
+            elif _refresh_balance(acc, with_expiry=True):
                 added += 1
             else:
-                # 走到这里说明上游验证已过（或未开启），余额刷新失败通常是
-                # 瞬时网络问题 —— 记为警告而不是拒绝，凭证本身是可信的。
                 errors.append(f"账号 {acc.id} 余额刷新失败（凭据可能失效，请稍后刷新）")
-            db.commit()
-        finally:
-            if on_progress:
-                on_progress(i + 1, total)
+            _flush()
+        except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
+            db.rollback()
+            pending = 0
+            errors.append(f"跳过一条：{str(exc)[:120]}")
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        errors.append(f"收尾提交失败：{str(exc)[:160]}")
     return {"added": added, "skipped": skipped, "errors": errors}
 
 
@@ -1639,26 +1734,65 @@ def export_one_account(
 
 
 @router.post("/{acc_id}/inject")
-def inject_to_client(acc_id: int, body: InjectIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """把号池里某账号的 .info 注入到本机客户端的活动登录文件（先备份当前登录态）。"""
+def inject_to_client(acc_id: int, body: InjectIn,
+                     _: bool = Depends(require_admin),
+                     db: Session = Depends(get_db)):
+    """把号池里某账号注入成本机客户端的**当前登录态**。
+
+    ## 为什么不是「写个文件回 200」就完事（2026-11-04 实测）
+
+    旧实现只覆盖 `workbuddy-desktop.info`，接口恒 200 —— 但用户看到的是
+    「注入失败了」：客户端把登录态放在内存里，刷新一次令牌就把文件整份
+    重写回去（实测 11:26 注入、11:28 被覆盖），注入当场作废。
+
+    现在交给平台模块 `client_session.inject()`：
+      * `.info` 与它的 `.observation.json` 旁证**两个文件一起改**；
+      * 原子写（先写临时文件再 replace），客户端永远读不到半份 JSON；
+      * 写完读回来核对 uid，被覆盖就如实回报，不再假装成功；
+      * 客户端在跑时明确告诉前端「必须重启才生效」，而不是让用户瞎试。
+
+    响应里 `ok` 只代表「文件写成功」，**是否生效看 `verified`**。
+    """
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
     if not body.confirm:
         raise HTTPException(status_code=400, detail="需要 confirm=true 才执行注入")
+    platform = str(getattr(acc, "platform", "") or "").lower()
+    if platform and platform not in ("workbuddy", "codebuddy"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{platform} 的凭证无法注入 WorkBuddy 客户端（客户端只认本平台登录态）")
+
     raw = _client_export(acc.auth_json)
-    d = _client_auth_dir()
-    if not os.path.isdir(d):
-        raise HTTPException(status_code=500, detail=f"客户端登录目录不存在: {d}")
-    target = os.path.join(d, "workbuddy-desktop.info")
-    backup = None
-    if os.path.exists(target):
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = target + f".bak-{ts}"
-        shutil.copy2(target, backup)
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(raw)
-    return {"ok": True, "target": target, "backup": backup, "account": acc.name, "uid": acc.uid}
+    from admin.platform.workbuddy.core import client_session
+
+    uid = str(acc.uid or "")
+    if not uid:
+        # 少数账号 uid 列是空的（历史导入），从凭证里补一次
+        try:
+            payload = json.loads(normalize_credential(acc.auth_json))
+            uid = str(((payload or {}).get("account") or {}).get("uid") or "")
+        except Exception:  # noqa: BLE001
+            uid = ""
+    try:
+        result = client_session.inject(payload=raw, uid=uid, name=acc.name or "",
+                                       restart=bool(body.restart_client))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from None
+    except PermissionError:
+        raise HTTPException(
+            status_code=423,
+            detail="客户端登录文件被占用（客户端正在写）。请完全退出 WorkBuddy 后重试，或勾选「注入后重启客户端」。") from None
+
+    result["account"] = acc.name
+    if result.get("overwritten"):
+        result["hint"] = ("客户端在 1 秒内把登录态改回去了 —— 它内存里还持有一份旧会话。"
+                          "请完全退出 WorkBuddy 再注入，或勾选「注入后重启客户端」。")
+    elif result.get("needs_restart"):
+        result["hint"] = ("文件已写入，但客户端正在运行，它会在下次刷新令牌时覆盖。"
+                          "请重启 WorkBuddy 让注入生效。")
+    return result
 
 
 def _refresh_one_account(db, account) -> dict:

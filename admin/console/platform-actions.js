@@ -42,12 +42,20 @@
       '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M3 12h18M12 8v13M12 8a3 3 0 1 0-3-3c0 2 3 3 3 3zm0 0a3 3 0 1 1 3-3c0 2-3 3-3 3z"/></svg>',
     key:
       '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M14 9l3 3"/></svg>',
+    upload:
+      '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V8m-4 4 4-4 4 4M4 6h16"/></svg>',
   };
 
   /* 动作 -> 展示配置。**只有展示信息，能力由后端决定** */
   var ACTION_META = {
     scan: { label: "扫描本机", icon: "search" },
-    import: { label: "导入本机", icon: "download", primary: true },
+    // 导入 = **选文件 / 粘贴**（支持本网关导出的 .json / .jsonl）。
+    // 以前这里的 import 走的是「扫描本机登录态」，跟「扫描」按钮做的是
+    // 同一件事，用户根本找不到「把导出的账号导回来」的入口。
+    import: { label: "导入账号", icon: "download", primary: true },
+    "import-file": { label: "导入账号", icon: "upload" },
+    // 导出号池（含明文凭证 / 脱敏清单两种模式）
+    export: { label: "导出", icon: "download" },
     "refresh-quota": { label: "刷新额度", icon: "refresh" },
     usage: { label: "用量明细", icon: "chart" },
     // Trae 的 Cookie 只用于「查询用量明细」，不是登录手段 ——

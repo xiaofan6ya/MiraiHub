@@ -147,3 +147,68 @@ effort = "low" if budget <= 2048 else "medium" if budget <= 8192 else "high"
 | Trae Intl | 不支持 | `max_tokens` | — |
 | Qoder | ✅ 支持 `thinking_config` | `max_tokens` | 但**必须剥掉** `thinking_config` 否则覆盖 `enable_thinking` |
 | Loomy | ❌ 传了无效 | 三个别名都认 | 未知参数被忽略 |
+| Raccoon | ✅ `reasoning_effort` 透传（low → 200） | `max_tokens`；目录给 `context_window` / `max_tokens` | 档位未在目录声明；能力靠 `tags`（`vision` / `reasoning`） |
+
+---
+
+## ★ 上下文窗口 / 最大输出：客户端从哪读？
+
+这是「模型配置里上下文全是空」的根因。**客户端不问上游，只问我们的
+`/v1/models`。**
+
+DSH 的 `discoverModels`（反编译 `app.asar` 确认）zod schema：
+
+```ts
+{ id: string, name?: string,
+  contextWindow?: number,          // 正整数，缺省 = 未知
+  maxTokens?: number,              // 正整数
+  inputModalities?: ("text"|"image")[] }
+```
+
+所以平台接入时必须走完这条链路：
+
+```
+上游目录（context_window / max_tokens / tags）
+  → fetch_models() 带出来          ← 漏了这里，后面全空（五·补27）
+  → model_configs.upstream_metadata
+  → _capabilities_of()             ← tags 兜底推 supports_images / supports_reasoning
+  → _caps_flat()                   ← 输出 contextWindow / maxTokens / inputModalities
+  → /v1/models
+  → 客户端表单
+```
+
+### 三层校验（缺一层就可能是空值）
+
+```bash
+# 1) 上游原始字段
+python -c "from admin.platform.raccoon.core import client; ..."   # 看 context_window
+
+# 2) 我们的接口
+curl -s $BASE/v1/models -H "Authorization: Bearer $KEY" | jq '.data[] | select(.owned_by=="raccoon")'
+
+# 3) 客户端实际渲染
+#    模型配置页每行应有「1M 上下文 · 100K 输出 · 图片输入 · 推理」摘要
+```
+
+### 两个「看起来该有但没有」的字段
+
+| 字段 | 为什么没有 | 怎么办 |
+|---|---|---|
+| 推理档位（`reasoningEfforts`） | DSH schema 里**没有这个键**，它不读 | 只能手工选；`reasoning_effort` 透传有效 |
+| 上下文窗口 | 上游没给 `context_window` | 走品牌兜底 → 再不行落保守值（128K / 16K） |
+
+### 三级兜底链（现行实现，改之前先读）
+
+```
+上游 metadata（contextWindow / maxInputTokens / tags）
+  → ① 品牌兜底 _CAP_FALLBACK（按模型名里的 glm / deepseek / qwen …）
+  → ② 保守值 128K / 16K / 纯文本 / 不支持推理
+```
+
+第 ③ 级是**取舍**，不是理想状态：给一个保守数字，好过让客户端显示灰块
+（灰块会让用户以为模型坏了）。但它也意味着**界面上显示 128K 不代表上游
+真的支持 128K**。
+
+> 排查「上下文显示不对」时，先看这一行是第几级兜底给的。
+> 想让它准，就往上游 `upstream_metadata` 补真实字段，而不是在兜底表里
+> 调数字 —— 那只是把错误藏得更深。

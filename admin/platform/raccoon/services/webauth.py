@@ -163,6 +163,32 @@ def poll(db, auth_id: str) -> dict:
         if status == "success":
             token = str(data.get("access_token") or "")
             if token:
+                # ⚠️ 入库前必须**先验证**。
+                #
+                # 实测（2026-11-04）：扫码拿到的 IAM 会话对业务接口一律返回
+                # `200901 iam_confirm_required`（目录 / 积分 / 权益全一样），
+                # 而客户端 auth.json 里那张票是好的。直接入库的后果是
+                # **把能用的凭证覆盖成不能用的**：账号还在，但刷新余额报错、
+                # 对话 502，用户只会看到「授权成功了却什么都用不了」。
+                #
+                # 这里用最便宜的目录接口探一次：不通就不落库，把原因回给前端。
+                from admin.platform.raccoon.core import client as raccoon_client
+
+                try:
+                    models = raccoon_client.fetch_models(token, "cn", None)
+                except raccoon_client.UpstreamError as exc:
+                    sess["status"] = "failed"
+                    sess["error"] = str(exc.message or "扫码会话不可用")
+                    sess["confirm_required"] = (getattr(exc, "kind", "") == "confirm")
+                    logger.warning("扫码会话验证失败 auth_id=%s kind=%s",
+                                   auth_id, getattr(exc, "kind", ""))
+                    return _public(sess)
+                if not models:
+                    sess["status"] = "failed"
+                    sess["error"] = ("扫码成功但拿不到模型目录（上游返回空清单），"
+                                     "该会话暂不可用；请改用客户端凭证扫描/导入")
+                    return _public(sess)
+
                 # 直接入库（import_record 幂等：同 uid 更新）
                 from admin.platform.raccoon.services import accounts as raccoon_accounts
 
@@ -234,6 +260,9 @@ def _public(sess: dict) -> dict:
         "done": status == "done",
         "account": sess.get("account"),
         "error": sess.get("error"),
+        # 扫码会话缺 IAM 确认时单独标出来：前端据此提示
+        # 「去客户端登录一次 / 改用扫描入库」，而不是笼统地说「授权失败」。
+        "confirm_required": bool(sess.get("confirm_required")),
         "expires_in": max(0, int(sess.get("expires_at", 0) - time.time())),
         "poll_interval": sess.get("poll_interval", 2),
     }

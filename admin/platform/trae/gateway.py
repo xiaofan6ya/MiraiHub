@@ -763,8 +763,12 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                     if (event.get("response") or event.get("reasoning_content")
                             or event.get("tool_calls")):
                         _arm_watchdog(_SOLO_CONTENT_GAP_S)
-                    # TTFT 只认**正文/工具**；思考链不算「开始出字」
-                    if event.get("response") or event.get("tool_calls"):
+                    # TTFT 认**首个 token（正文/思考/工具）**：思考链也是
+                    # 用户能看到的输出流，且 completion_tokens 里包含
+                    # reasoning_tokens —— 分母必须同口径，否则思考模型的
+                    # 解码段只剩末尾几百毫秒，TPS 直接被判「量不出来」。
+                    if (event.get("response") or event.get("tool_calls")
+                            or event.get("reasoning_content")):
                         _now_c = time.perf_counter()
                         if first_content_at is None:
                             first_content_at = _now_c
@@ -998,7 +1002,8 @@ def _bill_solo(db, key, account, model, usage, started, request, error="",
             storage="trae", error_kind=error,
             client_ip=_client_ip(request),
             use_case="trae-solo-chat",
-            ttfb_ms=ttfb, latency_ms=latency)
+            ttfb_ms=ttfb, latency_ms=latency,
+            reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("SOLO 记账失败")
 
@@ -1402,6 +1407,7 @@ def _bill(key, account, model, holder, ip, ttfb_ms, attempted, path,
                 ttfb_ms=ttfb or total_ms,
                 latency_ms=total_ms or ttfb,
                 realm=str(holder.get("realm") or ""),
+                reasoning_effort=shared.reasoning_effort_of_request(request),
             )
     except Exception:  # noqa: BLE001
         logger.exception("trae 记账失败 path=%s", path)

@@ -126,9 +126,26 @@ class WorkBuddyAccountOps:
         return accounts_router.health_check(account_id, _=True, db=db)
 
     def inject(self, db, account_id):
-        from admin import client_profile
+        """把账号写成本机客户端的当前登录态（`.info` + observation 旁证）。
 
-        return client_profile.inject(db, account_id)
+        原来这里调 `client_profile.inject()` —— **那个函数根本不存在**
+        （`client_profile` 只负责客户端参数档案），任何走到这条路的调用
+        都会 `AttributeError`。真正的实现在 `core/client_session.py`，
+        与 `/api/accounts/{id}/inject` 路由共用同一套逻辑（备份、原子写、
+        写后校验、客户端占用检测）。
+        """
+        from admin.models import Account
+        from admin.platform.workbuddy.core import client_session
+        from admin.platform.workbuddy.core.credential_codec import (
+            encrypt_credential,
+        )
+
+        acc = db.query(Account).filter(Account.id == account_id).first()
+        if acc is None:
+            raise ValueError("账号不存在")
+        payload = encrypt_credential(acc.auth_json)
+        return client_session.inject(payload=payload, uid=str(acc.uid or ""),
+                                     name=acc.name or "")
 
     def export(self, db, ids=None):
         from admin.routers import accounts as accounts_router

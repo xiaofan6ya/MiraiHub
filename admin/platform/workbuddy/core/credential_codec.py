@@ -122,14 +122,98 @@ def _open_field(wrapper: dict, key_id: str, key: bytes) -> str:
         raise CredentialDecodeError('加密凭证损坏或校验失败，请重新导出客户端凭证或使用手机号授权登录') from None
 
 
+def _looks_like_credential(value) -> bool:
+    """这个对象本身是不是**一份客户端凭证**（而不是导出信封 / 账号列表项）。
+
+    判据：有 `auth` 子对象，或自己就带令牌字段。
+
+    为什么必须先判这个：客户端的完整 `.info` 里本来就同时有
+    `account` / `auth` / `accounts` / `allAccounts` 四个键 ——
+    `accounts` 是**账号档案列表**（没有 auth）。如果拆信封时只看
+    「有没有 accounts」，就会把这四个键的凭证误判成批量导出，
+    取走 `accounts[0]`（纯档案），`auth` 连同 refreshToken 一起丢失。
+    实测账号 #188 就是这么被清空的：界面上报「读不出 exp，也没有
+    refreshToken」，实际库里凭证完好、调用完全正常。
+    """
+    if not isinstance(value, dict):
+        return False
+    if isinstance(value.get("auth"), dict):
+        return True
+    for key in ("accessToken", "access_token", "refreshToken", "refresh_token",
+                "session", "token"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            return True
+    return False
+
+
+def _unwrap_export_wrapper(data):
+    """拆掉「导出文件外壳」，拿到真正的客户端凭证。
+
+    `/api/accounts/{id}/export` 返回的是**带元信息的信封**：
+
+        {"id":188,"name":"...","uid":"...","format":"client",
+         "item":"{\\"account\\":{...},\\"auth\\":{...}}"}
+
+    真正的凭证在 `item`（字符串）里。整份文件原样贴回导入，
+    `validate_credential` 只看到 `id/name/item`，于是判「缺少 auth / account
+    字段」—— 这就是「导出的文件导不回来」（2026-11-04 用户反馈）。
+
+    顺序很重要（踩过一次）：
+
+      1. **本身已经是凭证** → 原样返回。客户端的完整 `.info` 同时带
+         `account` / `auth` / `accounts` / `allAccounts`，其中 `accounts`
+         是账号档案列表（无 auth）。先判「有没有 accounts」会把真凭证
+         换成档案，令牌全丢（#188 实测）。
+      2. `item` 字符串 → 拆开看内层是不是凭证。
+      3. `accounts` 列表 → 只在**没有 auth**、且像批量导出时取第一条。
+
+    兼容的形状：
+      * `{"format":"client"|"backup","item":"<json>"}` 单账号
+      * `{"accounts":[{...}]}`（批量导出）
+      * 客户端 `.info` 原文（`account` + `auth` [+ `accounts`]）
+    """
+    if not isinstance(data, dict):
+        return data
+    if _looks_like_credential(data):
+        return data
+
+    item = data.get("item")
+    if isinstance(item, str) and item.strip().startswith("{"):
+        try:
+            inner = json.loads(item)
+        except ValueError:
+            return data
+        if _looks_like_credential(inner):
+            return inner
+
+    accounts = data.get("accounts")
+    if isinstance(accounts, list) and accounts and all(
+            isinstance(x, dict) for x in accounts):
+        for entry in accounts:
+            if _looks_like_credential(entry):
+                # 批量导出文件：取第一条**带凭证**的（调用方本来按条目逐条导入，
+                # 不会走到这里；这是给「整包贴进来」兜底）
+                return entry
+    return data
+
+
 def normalize_credential(raw: str) -> str:
-    """Keep legacy JSON unchanged; fully decode encrypted fields before validation."""
+    """Keep legacy JSON unchanged; fully decode encrypted fields before validation.
+
+    额外负责**拆导出外壳**（`{"format":"client","item":"<json>"}`）：
+    整份导出文件原样回灌时，校验器只看到 id/name/item，会判「缺少
+    auth / account 字段」。拆完之后才轮得到解密与校验。
+    """
     try:
         data = json.loads(raw.lstrip('\ufeff'))
     except (ValueError, TypeError):
         return raw  # The existing validator reports malformed credentials.
+    original = data
+    data = _unwrap_export_wrapper(data)
+    # 外壳被拆过也要重新序列化，否则末尾的 `changed` 判定会把原串吐回去。
+    changed = data is not original
     key_material = None
-    changed = False
 
     def visit(value, depth=0):
         nonlocal key_material, changed

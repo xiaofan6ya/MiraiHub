@@ -4,6 +4,7 @@
 用该账号凭据转发到后端 → 流式返回 → 按用量回扣 Key 额度。
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,8 @@ from upstream_compat import (
     cleanup_orphan_tool_calls,
     validate_tool_pairing,
     normalize_harness_body,
+    sanitize_messages,
+    sanitize_text,
 )
 
 HTTP_LIMITS = backend.HTTP_LIMITS
@@ -200,6 +203,33 @@ def _tool_diag(chat_body: dict) -> str:
         return f"diag-failed:{e}"
 
 
+def _strip_channel_fingerprints(chat_body: dict) -> int:
+    """删掉客户端指纹，与 converter /gw 的 `prepare_upstream_body(sanitize=True)` 同款。
+
+    **顺序是语义**：必须先整行删 `x-anthropic-billing-header`，再做零宽空格脱敏。
+    脱敏会在词内部插 U+200B，`_HDR_RE` 之后就再也匹配不到这个头；而上游会
+    归一化零宽字符，于是「看起来改过了，字面仍然成立」—— 这正是 400/11128
+    长期稳定在 4~6% 的成因（实测：AUX 带 billHdr 88.4% 被拒，不带 4.3%）。
+
+    这一步**不受 `ANTHROPIC_DESENSITIZE` 开关约束**：指纹是渠道校验，不是内容审核。
+    """
+    try:
+        n = sanitize_messages(chat_body)
+        tools = chat_body.get("tools")
+        if isinstance(tools, list):
+            for tool in tools:
+                fn = tool.get("function") if isinstance(tool, dict) else None
+                if isinstance(fn, dict) and isinstance(fn.get("description"), str):
+                    new = sanitize_text(fn["description"])
+                    if new != fn["description"]:
+                        fn["description"] = new
+                        n += 1
+        return n
+    except Exception as e:
+        _logger.warning("[fingerprint] 净化失败，按原样发送：%s", e)
+        return 0
+
+
 def _desensitize_chat_body(chat_body: dict) -> dict:
     """harness 脱敏（CC / OpenAI 反代 / converter /gw 共用同一套）。
 
@@ -208,6 +238,10 @@ def _desensitize_chat_body(chat_body: dict) -> dict:
     /v1/messages 早就做了这一步；/v1/chat/completions、/v1/responses 若不同步，
     就会出现「CC 能用、OpenAI 反代发不出去」。
     """
+    # 指纹净化无条件执行且必须早于脱敏；三条 /v1/* 链路都从这里过。
+    removed = _strip_channel_fingerprints(chat_body)
+    if removed:
+        _logger.info("[fingerprint] 客户端指纹净化 %d 处", removed)
     if not (_DESENSITIZE_AVAILABLE and settings.ANTHROPIC_DESENSITIZE):
         return chat_body
     try:
@@ -295,11 +329,33 @@ def _session_headers(body: dict, uid: str) -> dict:
     return h
 
 
+def upstream_conversation_id(body: dict) -> str:
+    """本次 upstream 调用声明的「会话」。
+
+    优先用客户端显式给的会话标识（原样转发 —— 那是它自己的对话 id）；
+    没有时用**首条 user 消息**派生一个 32 位十六海的稳定值，而不是留空。
+
+    留空的后果不是"没有会话"，而是 `trace_headers` 每请求现造一个 UUID：
+    上游眼里每次请求都是全新对话，前缀缓存永远打不中，一个号一分钟内
+    能"新建"几十个会话 —— 这既是缓存浪费，也是风控最敏感的形状。
+    """
+    body = body if isinstance(body, dict) else {}
+    explicit = pool.extract_session_key(body)
+    if explicit:
+        return explicit
+    derived = pool.session_key_for(body)
+    if not derived:
+        return ""
+    return hashlib.sha256(("workbuddy|" + derived).encode("utf-8")).hexdigest()[:32]
+
+
 def _turn_headers(body: dict, purpose: str) -> tuple[str, str]:
     """Resolve (conversation, turn) once per gateway request.
 
-    The conversation id comes from the caller when it supplied one; the turn id
-    is stable for every attempt that belongs to this gateway request, so a
+    The conversation id comes from the caller when it supplied one; otherwise
+    ``upstream_conversation_id`` derives a stable one (see its docstring — the
+    empty case used to randomise the conversation on every request). The turn
+    id is stable for every attempt that belongs to this gateway request, so a
     rotated/retried request still reads as one turn upstream. ``purpose`` is
     accepted so endpoints can state their use case at the same place.
 
@@ -309,30 +365,20 @@ def _turn_headers(body: dict, purpose: str) -> tuple[str, str]:
     instead of being pinned to the turn.
     """
     del purpose
-    conversation = pool.extract_session_key(body) if isinstance(body, dict) else ""
+    conversation = upstream_conversation_id(body)
     return conversation, identity.turn_id(body if isinstance(body, dict) else None)
 
 
 
 def _reasoning_effort(payload: dict) -> str:
-    """Keep only a bounded request setting, never prompts or arbitrary payloads."""
-    effort = payload.get("reasoning_effort") or payload.get("reasoningEffort")
-    reasoning = payload.get("reasoning")
-    if not effort:
-        effort = reasoning.get("effort") if isinstance(reasoning, dict) else reasoning
-    allowed = {"off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"}
-    if isinstance(effort, str) and effort.strip().lower() in allowed:
-        return effort.strip().lower()
-    thinking = payload.get("thinking")
-    if isinstance(thinking, dict):
-        if thinking.get("type") == "disabled":
-            return "off"
-        budget = thinking.get("budget_tokens")
-        if isinstance(budget, int) and not isinstance(budget, bool) and 0 <= budget <= 10**9:
-            return f"budget:{budget}"
-        if thinking.get("type") in ("enabled", "adaptive"):
-            return thinking["type"]
-    return ""
+    """Keep only a bounded request setting, never prompts or arbitrary payloads.
+
+    实现已收敛到 `admin.platform.shared.reasoning_effort_of` —— 各平台网关记账时
+    也要记同一个口径，不能各写一份（否则日志里同一个请求会有两种值）。
+    """
+    from admin.platform.shared import reasoning_effort_of
+
+    return reasoning_effort_of(payload)
 
 
 def _record_usage(key_id: int, account_id: int, model: str, credits: float | None,

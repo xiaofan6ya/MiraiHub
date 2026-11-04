@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -42,6 +43,18 @@ import urllib.request
 from http.cookiejar import CookieJar
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# 仓库根要进 sys.path，否则 `python admin/platform/skill/scripts/verify_platform.py`
+# 只有脚本目录在 path 里，`import admin` 直接 ModuleNotFoundError。
+# 按「能不能看到 admin/__init__.py」向上找，别写死层数。
+_here = os.path.abspath(os.path.dirname(__file__))
+_root = _here
+for _ in range(6):
+    if os.path.isfile(os.path.join(_root, "admin", "__init__.py")):
+        break
+    _root = os.path.dirname(_root)
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
 PASS = 0
 FAIL = 0

@@ -245,7 +245,8 @@ def _bill(key, account, model, usage, *, request, ttfb_ms=0, latency_ms=0,
                 client_ip=_client_ip(request),
                 use_case="qoder-" + (request.url.path.rsplit("/", 1)[-1] or "chat"),
                 seq=seq, ttfb_ms=ttfb_ms,
-                latency_ms=latency_ms or _elapsed_ms(started) or ttfb_ms)
+                latency_ms=latency_ms or _elapsed_ms(started) or ttfb_ms,
+                reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("Qoder 记账失败")
 
@@ -392,7 +393,11 @@ async def chat_completions(request):
                 shared.release(account)
                 _bill(key, account, plan.get("model_name", ""),
                       usage_holder.get("usage") or {}, request=request,
-                      started=started)
+                      started=started,
+                      # 真实首字/末字时刻（stream_openai 写回 holder）。
+                      # 不传就会退回「整段耗时」，TPS 永远算不出来。
+                      ttfb_ms=int(usage_holder.get("ttfb_ms") or 0),
+                      latency_ms=int(usage_holder.get("total_ms") or 0))
 
         return StreamingResponse(
             bridge.with_pings(generator(), ping=bridge.CHAT_PING),
@@ -477,7 +482,11 @@ async def messages(request):
                 shared.release(account)
                 _bill(key, account, plan.get("model_name", ""),
                       usage_holder.get("usage") or {}, request=request,
-                      started=started)
+                      started=started,
+                      # 真实首字/末字时刻（stream_openai 写回 holder）。
+                      # 不传就会退回「整段耗时」，TPS 永远算不出来。
+                      ttfb_ms=int(usage_holder.get("ttfb_ms") or 0),
+                      latency_ms=int(usage_holder.get("total_ms") or 0))
 
         inner = StreamingResponse(
             bridge.with_pings(generator(), ping=bridge.CHAT_PING),
@@ -548,7 +557,11 @@ async def responses(request):
                 shared.release(account)
                 _bill(key, account, plan.get("model_name", ""),
                       usage_holder.get("usage") or {}, request=request,
-                      started=started)
+                      started=started,
+                      # 真实首字/末字时刻（stream_openai 写回 holder）。
+                      # 不传就会退回「整段耗时」，TPS 永远算不出来。
+                      ttfb_ms=int(usage_holder.get("ttfb_ms") or 0),
+                      latency_ms=int(usage_holder.get("total_ms") or 0))
 
         inner = StreamingResponse(
             bridge.with_pings(generator(), ping=bridge.CHAT_PING),

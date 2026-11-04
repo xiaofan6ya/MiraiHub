@@ -353,8 +353,8 @@ class TraeClientProbe:
         from admin.platform.probe import enrich
         from admin.platform.trae.core import paths as _paths
         return enrich(result,
-                      exe_candidates=_paths.APP_EXE_CANDIDATES,
-                      data_dirs=_paths.DATA_DIR_CANDIDATES,
+                      exe_candidates=_paths.app_exe_candidates(),
+                      data_dirs=_paths.data_dir_candidates(),
                       product=_paths.UA_PRODUCT)
 
     def schema(self) -> list[dict]:

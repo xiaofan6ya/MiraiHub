@@ -358,7 +358,8 @@ def _bill(key, account, model, result, *, request, started=None, error="",
                 storage=raccoon_accounts.PLATFORM,
                 error_kind=error, client_ip=_client_ip(request),
                 use_case="raccoon-chat", seq=1,
-                ttfb_ms=ttfb, latency_ms=latency)
+                ttfb_ms=ttfb, latency_ms=latency,
+                reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("小浣熊记账失败")
 
@@ -843,6 +844,11 @@ async def list_models(request):
             return _fail(exc)
     payload = [{"id": m["name"], "object": "model",
                 "owned_by": "raccoon",
+                # `name` 是**官方展示名**：模型 id 是小浣熊的内部代号
+                # （`raccoon-090dd3` / `sn-glm-5-3`），只有展示名能和别的平台
+                # 聚到一起（`DeepSeek-V4.1-Flash-1017` ↔ `DeepSeek-V4.1-Flash`）。
+                # 同步时它还会落进 `note`，模型配置页终于能看懂这行是什么。
+                "name": m.get("display") or m["name"],
                 "display_name": m.get("display") or m["name"],
                 # ⚠️ 必须带上描述：模型名是代号（`raccoon-090dd3` /
                 # `sn-glm-5-3`），没有描述用户在模型配置里根本看不出
@@ -850,6 +856,20 @@ async def list_models(request):
                 # `display_description` 正是那条文案，漏传就等于丢掉了
                 # 唯一能解释模型用途的信息。
                 "description": m.get("description") or "",
+                # 计费倍率：`billing_effective_multiplier` 是**实扣**倍率
+                # （限免 / 折扣之后），`billing_multiplier` 是标价。
+                # 两者都透出，模型配置页才能显示「×0.25」而不是「无」，
+                # 也才能解释「标价 0.5 但当前限免」。
+                "billing_multiplier": m.get("billing_multiplier"),
+                "billing_effective_multiplier": m.get("billing_effective_multiplier"),
+                "billing_category": m.get("billing_category") or "",
+                "billing_status": m.get("billing_status") or "",
+                "billing_status_note": m.get("billing_status_note") or "",
+                # 能力元数据（上游 tags / 上下文），同步后进 upstream_metadata，
+                # 模型配置页的标签与 tooltip 都用得上。
+                "tags": m.get("tags") or [],
+                "maxInputTokens": m.get("context_window"),
+                "maxOutputTokens": m.get("max_tokens"),
                 "visible": bool(m.get("visible", True))}
                for m in models]
     return JSONResponse({"object": "list", "data": payload})
