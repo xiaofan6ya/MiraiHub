@@ -18,8 +18,12 @@ window.WBMobile = (() => {
     if(ok) pending.resolve(); else pending.reject(new Error(message || '文件未保存'));
   }
   function initialize(token) {
-    TOKEN = token;
-    localStorage.setItem(TOKEN_KEY, token);
+    // 桥接令牌**不是**长期凭据，也绝不能落 localStorage / JS 全局：
+    // 认证由 console-app 的 ensureLocalSession() 现场用 WBAndroid.sessionToken()
+    // 换 HttpOnly Cookie，这里只负责把工作台点亮。
+    // （2026-11-05 安全整改删掉了 console 侧的 TOKEN_KEY，这里残留的两行
+    // 引用直接 ReferenceError，整个页面初始化中断 —— issue #23/#24 的根因。）
+    void token;
     if (!initialized) {
       enterApp();
       document.getElementById('localBoot')?.remove();
