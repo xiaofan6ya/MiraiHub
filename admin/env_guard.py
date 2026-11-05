@@ -148,11 +148,18 @@ def assert_boot_policy() -> None:
     """
     if not IS_PROD:
         # 非 prod 也要挡住最危险的一种误配置：服务绑在公网/全网卡，却带着
-        # 「本机客户端免密」标志。server._console_allowed() 命中该标志时
-        # 不校验任何 Cookie/JWT，等于 /admin 与 /admin/assets/* 整体裸奔
-        # （事故报告 R2）。桌面 EXE 只监听回环，所以按 HOST 判断。
+        # 「本机客户端免密」标志 —— server._console_allowed() 命中时不校验
+        # 任何 Cookie/JWT，等于 /admin 与 /admin/assets/* 整体裸奔（事故 R2）。
+        #
+        # 但客户端打包运行时（桌面 EXE / 安卓 APK）由启动器显式设置
+        # `WORKBUDDY_CLIENT_RUNTIME=1`：它们本来就要绑 0.0.0.0 供局域网 /
+        # WebView 访问，数据目录只在本机，属于合法场景（2026-11-05 打包
+        # 冒烟发现：只按 HOST 判断会让两个客户端产物启动即崩）。
+        # 源码服务误把 WORKBUDDY_DESKTOP / WORKBUDDY_ANDROID 写进 .env 时
+        # 不会带这个标志 —— 那才是要拦的「/admin 裸奔」。
         host = (os.getenv("ADMIN_HOST", "") or "").strip()
         if (host and host not in ("127.0.0.1", "::1", "localhost")
+                and not _env_flag("WORKBUDDY_CLIENT_RUNTIME")
                 and (_env_flag("WORKBUDDY_DESKTOP") or _env_flag("WORKBUDDY_ANDROID"))):
             raise RuntimeError(
                 "启动策略校验失败：ADMIN_HOST=%s 不是回环，却设置了 "

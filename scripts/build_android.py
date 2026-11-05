@@ -225,6 +225,11 @@ def main() -> None:
     parser.add_argument("--gradle", help="Gradle 8.11.1 executable")
     parser.add_argument("--jdk", help="JDK 17 directory")
     parser.add_argument("--sdk", help="Android SDK directory")
+    parser.add_argument("--skip-python-install", action="store_true",
+                        help="Skip Chaquopy's installReleasePythonRequirements when the pinned "
+                             "dependencies are already staged. Needed on hosts where a bulk-delete "
+                             "guard blocks pip's post-install cache cleanup (pip itself succeeds). "
+                             "Fails loudly if the staged dependencies are incomplete.")
     args = parser.parse_args()
     prepare()
     if args.prepare_only:
@@ -261,7 +266,17 @@ def main() -> None:
     tasks = ["assembleRelease", "lintRelease"]
     if args.with_debug:
         tasks.append("assembleDebug")
-    subprocess.run([gradle, "--no-daemon", *tasks], cwd=ROOT / "android", env=env, check=True)
+    gradle_cmd = [gradle, "--no-daemon"]
+    if args.skip_python_install:
+        common = ROOT / "android/app/build/python/pip/release/common"
+        required = ("fastapi", "uvicorn", "pydantic", "sqlalchemy", "httpx", "jwt")
+        missing = [name for name in required if not (common / name).is_dir()]
+        if missing:
+            raise SystemExit("不能跳过 pip 安装任务，staged 依赖不完整：%s" % ", ".join(missing))
+        print("Skipping installReleasePythonRequirements (staged deps verified: %d/%d)"
+              % (len(required) - len(missing), len(required)))
+        gradle_cmd += ["-x", ":app:installReleasePythonRequirements"]
+    subprocess.run([*gradle_cmd, *tasks], cwd=ROOT / "android", env=env, check=True)
     version = json.loads((ROOT / "desktop/version.json").read_text(encoding="utf-8"))["version"]
     output = ROOT / "dist/android"
     output.mkdir(parents=True, exist_ok=True)

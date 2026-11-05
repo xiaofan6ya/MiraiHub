@@ -38,7 +38,11 @@ def main():
             with TestClient(app) as client:
                 assert client.get('/api/app/version').status_code == 200
                 assert client.get('/admin').status_code == 200
-                assert client.get('/static/join.html').status_code == 200
+                # 2026-11-05 安全加固：join 总闸默认关闭，公开注册页一律 404；
+                # 只有票据引导页 /j 可达（短码放在 #k= 片段里，不进服务端）。
+                assert client.get('/static/join.html').status_code == 404
+                assert client.get('/join').status_code == 404
+                assert client.get('/j').status_code == 200
                 assert client.post('/v1/audio/transcriptions').status_code == 401
                 from zoneinfo import ZoneInfo
                 assert str(ZoneInfo('Asia/Shanghai')) == 'Asia/Shanghai'

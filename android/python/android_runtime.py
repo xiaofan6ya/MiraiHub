@@ -92,7 +92,8 @@ def start(directory: str, progress=None) -> str:
         path = base / "config.json"
         config = load_config(path)
         nonce = secrets.token_urlsafe(32)
-        os.environ.update({"WORKBUDDY_ANDROID": "1", "WB_DESKTOP_BOOT": nonce,
+        os.environ.update({"WORKBUDDY_ANDROID": "1", "WORKBUDDY_CLIENT_RUNTIME": "1",
+                           "WB_DESKTOP_BOOT": nonce,
                            "ADMIN_DATABASE_URL": "sqlite:///" + (base / "workbuddy.db").as_posix(),
                            "ADMIN_GATEWAY_LIMIT_BACKEND": "memory", "ADMIN_HOST": "0.0.0.0",
                            "ADMIN_USERNAME": config["username"], "ADMIN_PASSWORD": config["password"],
