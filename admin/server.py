@@ -299,6 +299,28 @@ async def _stop_upstream_connections():
     from admin import upstream_http
     await upstream_http.stop(app)
 
+
+@app.on_event("startup")
+async def _start_loop_watch():
+    # **必须是 async 启动钩子**：探针要记下「事件循环线程」的 ident，
+    # 同步钩子会被 Starlette 丢到线程池执行，记到的就是工作线程。
+    try:
+        from admin import loop_watch
+        # `start()` 是**同步**函数（内部用 get_running_loop().create_task
+        # 挂心跳协程），这里不能 await —— 它返回的是 bool。
+        loop_watch.start(app)
+    except Exception:  # noqa: BLE001 - 探针起不来不影响业务
+        logger.exception("事件循环探针启动失败（不影响服务）")
+
+
+@app.on_event("shutdown")
+async def _stop_loop_watch():
+    try:
+        from admin import loop_watch
+        await loop_watch.stop()
+    except Exception:  # noqa: BLE001
+        pass
+
 if os.getenv("WORKBUDDY_ANDROID") == "1":
     accounts.router.routes[:] = [route for route in accounts.router.routes
                                 if getattr(route, "path", "") not in

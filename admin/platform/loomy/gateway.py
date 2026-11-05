@@ -24,6 +24,7 @@ Loomy 上游只有非流式接口。`stream: true` 时把完整结果**合成为
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -334,7 +335,14 @@ def _apply_no_think(body: dict) -> dict:
 
 
 def _attempt(db, request, key, body: dict, realm: str):
-    """选号 + 租约 + 调上游（换号重试）。"""
+    """选号 + 租约 + 调上游（换号重试）。
+
+    **必须在工作线程里执行**（见 `_forward`）：本函数从头到尾是同步的
+    —— SQLAlchemy 同步会话 + `client.chat_completions` 里的 `urlopen`。
+    直接跑在事件循环线程上时，一次上游卡顿会把整个单进程服务冻住
+    （2026-11-05 线上「导入账号卡死」就是这么来的：`DEFAULT_TIMEOUT`
+    是 600 秒，期间所有请求、控制台、同步接口全部无响应）。
+    """
     model = str(body.get("model") or "")
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
@@ -356,7 +364,13 @@ def _attempt(db, request, key, body: dict, realm: str):
             result = client.chat_completions(
                 loomy_accounts.token_of(data), realm, _apply_no_think(body),
                 account_id=int(account.id or 0))
-            return result, account, started
+            # **contextvar 只在设置它的线程上下文里可见**。这段跑在工作线程，
+            # 事件循环那边的 `_bill` 读不到，必须在这里取出来随结果带回去。
+            stats = {
+                "ttfb_ms": int(client.LAST_TTFB_MS.get() or 0),
+                "total_ms": int(client.LAST_TOTAL_MS.get() or 0),
+            }
+            return result, account, started, stats
         except client.UpstreamError as exc:
             shared.release(account)
             shared.note_failure(
@@ -435,28 +449,47 @@ def _bill(key, account, model, result, *, request, started=None, error="",
         logger.exception("Loomy 记账失败")
 
 
+def _settle(db, account) -> None:
+    """释放租约 + 记成功 + 提交（同步 DB，跟着工作线程一起跑）。"""
+    shared.release(account)
+    shared.note_success(account)
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
+
 async def _forward(body: dict, request, *, usage=None) -> JSONResponse:
-    """鉴权 -> 选号 -> 上游 -> 记账。"""
+    """鉴权 -> 选号 -> 上游 -> 记账。
+
+    ## 为什么每一步都要 `to_thread`
+
+    `admin.server` 是**单进程单 worker** 的 uvicorn。`shared.authenticate`
+    与 `_attempt` 都是纯同步实现（SQLAlchemy 同步会话 + `urlopen`），
+    直接 `await` 之外的地方调用就等于把事件循环钉死：一次上游卡顿会让
+    控制台、导入账号、同步接口全部失去响应，且 `DEFAULT_TIMEOUT=600`
+    意味着最坏要等 10 分钟。2026-11-05 线上事故即此。
+
+    放进工作线程后，阻塞只占一个线程，事件循环照常服务其它请求。
+    """
     from admin.db import SessionLocal
 
     realm = _realm(request)
     db = SessionLocal()
     try:
-        key = shared.authenticate(db, request, platform=_public(request))
+        key = await asyncio.to_thread(
+            shared.authenticate, db, request, platform=_public(request))
         try:
-            result, account, started = _attempt(db, request, key, body, realm)
+            result, account, started, stats = await asyncio.to_thread(
+                _attempt, db, request, key, body, realm)
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:
             return _fail(exc)
-        shared.release(account)
-        shared.note_success(account)
-        try:
-            db.commit()
-        except Exception:  # noqa: BLE001
-            db.rollback()
-        _bill(key, account, str(body.get("model") or ""), result,
-              request=request, started=started)
+        await asyncio.to_thread(_settle, db, account)
+        await asyncio.to_thread(
+            _bill, key, account, str(body.get("model") or ""), result,
+            request=request, started=started, stats=stats)
         return JSONResponse(result)
     finally:
         db.close()
@@ -490,24 +523,16 @@ async def chat_completions(request):
     return await _forward_stream(body, request)
 
 
-async def _forward_stream(body: dict, request):
-    """真流式：选号 -> 上游 SSE -> 逐帧转发 -> 收尾记账。"""
-    from admin.db import SessionLocal
+def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
+                 model: str):
+    """选号 + 租约 + 上游建连（**同步阻塞，必须跑在工作线程里**）。
 
-    # **强制要 usage 尾帧**：客户端没带 `stream_options.include_usage` 时
-    # 上游不发 usage —— `_bill` 记到 0 token，客户端的「消耗积分」
-    # 也永远是空。这是「积分不显示」的直接根因之一。
-    if body.get("stream") and not isinstance(
-            (body.get("stream_options") or {}).get("include_usage"), bool):
-        body = {**body, "stream_options": {"include_usage": True}}
+    `client.chat_stream` 里那句 `opener.open(...)` 会一直阻塞到**响应头**
+    到达才返回，因此这一步和 `_attempt` 一样不能待在事件循环上。
 
-    realm = _realm(request)
-    db = SessionLocal()
-    key = shared.authenticate(db, request, platform=_public(request))
-    model = str(body.get("model") or "")
-    # 分段耗时容器：**必须在调用 client.chat_stream 之前定义**。
-    # 它由上游流式读取器填 ttfb/total，再交给 _bill 记账。
-    stats: dict = {}
+    返回 `(chunks, account, last_error, started)`：`chunks` 为 None 表示
+    没拿到可用账号，调用方据此返回上游错误或 503。
+    """
     exclude: set[int] = set()
     account = None
     chunks = None
@@ -545,6 +570,30 @@ async def _forward_stream(body: dict, request):
             logger.exception("Loomy 流式调用失败 acc=%s", account.id)
             last_error = client.UpstreamError(str(exc), kind="network")
             exclude.add(account.id)
+    return chunks, account, last_error, started
+
+
+async def _forward_stream(body: dict, request):
+    """真流式：选号 -> 上游 SSE -> 逐帧转发 -> 收尾记账。"""
+    from admin.db import SessionLocal
+
+    # **强制要 usage 尾帧**：客户端没带 `stream_options.include_usage` 时
+    # 上游不发 usage —— `_bill` 记到 0 token，客户端的「消耗积分」
+    # 也永远是空。这是「积分不显示」的直接根因之一。
+    if body.get("stream") and not isinstance(
+            (body.get("stream_options") or {}).get("include_usage"), bool):
+        body = {**body, "stream_options": {"include_usage": True}}
+
+    realm = _realm(request)
+    db = SessionLocal()
+    key = await asyncio.to_thread(
+        shared.authenticate, db, request, platform=_public(request))
+    model = str(body.get("model") or "")
+    # 分段耗时容器：**必须在调用 client.chat_stream 之前定义**。
+    # 它由上游流式读取器填 ttfb/total，再交给 _bill 记账。
+    stats: dict = {}
+    chunks, account, last_error, started = await asyncio.to_thread(
+        _open_stream, db, request, key, body, realm, stats, model)
 
     if chunks is None:
         db.close()
@@ -929,28 +978,61 @@ async def responses(request):
     return bridge.responses_stream_relay(inner, model, prefix="loomy")
 
 
+def _models_payload(db, request, realm: str) -> dict:
+    """`/v1/models` 的同步实现：选号 -> 取 token -> 拉模型目录。
+
+    同步网络调用，必须由调用方放进工作线程（理由同 `_attempt`）。
+    """
+    account = shared.select_account(
+        db, storage=loomy_accounts.PLATFORM, realm=realm,
+        key=shared.key_row(db, request))
+    if account is None:
+        return {
+            "object": "list", "data": shared.catalog_from_db(
+                db, loomy_accounts.PLATFORM),
+            "note": "号池没有可用 Loomy 账号，仅返回配置目录"}
+    data = loomy_accounts.ensure_token(db, account)
+    models = client.fetch_models(loomy_accounts.token_of(data), realm,
+                                 account_id=int(account.id or 0))
+    return {"object": "list", "data": models}
+
+
 async def list_models(request):
     """/v1/models —— 只返回能调的模型；无号时回落数据库目录。"""
     from admin.db import SessionLocal
 
     with SessionLocal() as db:
-        shared.authenticate(db, request, platform=PUBLIC)
         realm = _realm(request)
-        account = shared.select_account(
-            db, storage=loomy_accounts.PLATFORM, realm=realm,
-            key=shared.key_row(db, request))
-        if account is None:
-            return JSONResponse({
-                "object": "list", "data": shared.catalog_from_db(
-                    db, loomy_accounts.PLATFORM),
-                "note": "号池没有可用 Loomy 账号，仅返回配置目录"})
+        await asyncio.to_thread(
+            shared.authenticate, db, request, platform=PUBLIC)
         try:
-            data = loomy_accounts.ensure_token(db, account)
-            models = client.fetch_models(loomy_accounts.token_of(data), realm,
-                                         account_id=int(account.id or 0))
+            payload = await asyncio.to_thread(
+                _models_payload, db, request, realm)
         except client.UpstreamError as exc:
             return _fail(exc)
-    return JSONResponse({"object": "list", "data": models})
+    return JSONResponse(payload)
+
+
+def _balance_payload(db, request, realm: str) -> dict:
+    """`/v1/balance` 的同步实现（同步网络，交给工作线程跑）。"""
+    account = shared.select_account(
+        db, storage=loomy_accounts.PLATFORM, realm=realm,
+        key=shared.key_row(db, request))
+    if account is None:
+        return {"error": "no_available_account"}
+    data = loomy_accounts.ensure_token(db, account)
+    points = client.fetch_points_balance(
+        loomy_accounts.token_of(data), realm,
+        account_id=int(account.id or 0))
+    return {
+        "platform": PUBLIC, "realm": realm, "reachable": True,
+        "balance": points.get("available") or 0,
+        "available": points.get("available") or 0,
+        "base_balance": points.get("balance") or 0,
+        "daily_balance": points.get("daily_balance") or 0,
+        "unit": "points",
+        "raw": points.get("raw") or {},
+    }
 
 
 async def balance(request):
@@ -967,31 +1049,19 @@ async def balance(request):
     from admin.db import SessionLocal
 
     with SessionLocal() as db:
-        shared.authenticate(db, request, platform=PUBLIC)
         realm = _realm(request)
-        account = shared.select_account(
-            db, storage=loomy_accounts.PLATFORM, realm=realm,
-            key=shared.key_row(db, request))
-        if account is None:
-            return JSONResponse({"platform": PUBLIC, "realm": realm,
-                                 "reachable": False, "balance": 0,
-                                 "note": "号池没有可用账号"}, status_code=503)
+        await asyncio.to_thread(
+            shared.authenticate, db, request, platform=PUBLIC)
         try:
-            data = loomy_accounts.ensure_token(db, account)
-            points = client.fetch_points_balance(
-                loomy_accounts.token_of(data), realm,
-                account_id=int(account.id or 0))
+            payload = await asyncio.to_thread(
+                _balance_payload, db, request, realm)
         except client.UpstreamError as exc:
             return _fail(exc)
-    return JSONResponse({
-        "platform": PUBLIC, "realm": realm, "reachable": True,
-        "balance": points.get("available") or 0,
-        "available": points.get("available") or 0,
-        "base_balance": points.get("balance") or 0,
-        "daily_balance": points.get("daily_balance") or 0,
-        "unit": "points",
-        "raw": points.get("raw") or {},
-    })
+    if payload.get("error") == "no_available_account":
+        return JSONResponse({"platform": PUBLIC, "realm": realm,
+                             "reachable": False, "balance": 0,
+                             "note": "号池没有可用账号"}, status_code=503)
+    return JSONResponse(payload)
 
 
 _HANDLERS = {
