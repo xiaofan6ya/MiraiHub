@@ -1179,7 +1179,16 @@ def _catalog_for_platform(db, storage: str) -> dict:
         return catalog
 
     last_error = None
+    # 记下试过的账号：默认平台可能一个可用账号都没有（全部 401 / 额度用尽），
+    # 这时下面要返回「试了谁、为什么都不行」，而不是连原因都拼不出来。
+    #
+    # 之前这里没有初始化 tried，函数末尾却引用了它 —— 只要默认平台的账号
+    # 全部失败，就会 NameError('tried' is not defined) → 整个
+    # POST /api/models/sync（同步全部平台）直接 500，前端只看到
+    # "Internal Server Error"（不是 JSON，前端 r.json() 报解析错）。
+    tried: list[str] = []
     for acc in rows:
+        tried.append(str(getattr(acc, "name", "") or acc.id))
         try:
             from admin import maintenance
 
