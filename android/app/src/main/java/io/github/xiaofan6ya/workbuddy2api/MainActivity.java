@@ -23,7 +23,9 @@ public class MainActivity extends Activity {
     private WebView web;
 
     private void applySystemTheme(boolean dark) {
-        int background = dark ? Color.rgb(30, 35, 44) : Color.WHITE;
+        // 与控制台主题同源：浅色页底 #f6f7f9，深色官方石墨 #0e1014。
+        // 旧值（#1E232C / 纯白）是青绿时代的残留，进工作台会闪一下旧底色。
+        int background = dark ? Color.rgb(14, 16, 20) : Color.rgb(246, 247, 249);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
             (dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR) |
@@ -217,8 +219,10 @@ public class MainActivity extends Activity {
         layout.addView(web, new FrameLayout.LayoutParams(-1, -1));
         applySystemTheme(false);
         boot = new FrameLayout(this);
+        // 启动页配色与控制台同源：极淡的品牌蓝水洗（#f4f7fd→#f6f7f9），
+        // 不再引入薄荷绿旧主题（青绿光斑会和蓝色选中态串色）。
         boot.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-            new int[]{Color.rgb(230, 246, 240), Color.rgb(245, 247, 250), Color.rgb(232, 239, 250)}));
+            new int[]{Color.rgb(244, 247, 253), Color.rgb(246, 247, 249), Color.rgb(236, 241, 253)}));
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -234,7 +238,7 @@ public class MainActivity extends Activity {
         logo.setImageResource(R.drawable.app_icon);
         card.addView(logo, new LinearLayout.LayoutParams(dp(68), dp(68)));
         TextView tag = new TextView(this);
-        tag.setText("你的本地 AI 网关"); tag.setTextSize(12); tag.setTextColor(Color.rgb(20, 134, 101));
+        tag.setText("你的本地 AI 网关"); tag.setTextSize(12); tag.setTextColor(Color.rgb(65, 118, 230));
         tag.setGravity(Gravity.CENTER);
         tag.setPadding(0, dp(20), 0, 0); card.addView(tag);
         TextView brand = new TextView(this);
@@ -251,13 +255,13 @@ public class MainActivity extends Activity {
         status.setTextColor(Color.rgb(101, 105, 112)); status.setLineSpacing(dp(5), 1);
         status.setPadding(0, dp(12), 0, dp(20)); card.addView(status);
         progress = new ProgressBar(this);
-        progress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Color.rgb(20, 134, 101)));
+        progress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Color.rgb(65, 118, 230)));
         card.addView(progress, new LinearLayout.LayoutParams(dp(28), dp(28)));
         restart = new Button(this);
         setStartupText(restart, "启动服务");
         restart.setTextColor(Color.WHITE);
         GradientDrawable action = new GradientDrawable();
-        action.setColor(Color.rgb(20, 134, 101)); action.setCornerRadius(dp(12));
+        action.setColor(Color.rgb(65, 118, 230)); action.setCornerRadius(dp(12));
         restart.setBackground(action); restart.setVisibility(View.GONE);
         restart.setOnClickListener(view -> {
             if (LocalApiService.origin != null && !LocalApiService.starting) loadWorkbench();
@@ -265,7 +269,7 @@ public class MainActivity extends Activity {
         });
         card.addView(restart, new LinearLayout.LayoutParams(-1, dp(48)));
         details = new Button(this);
-        details.setText("启动诊断 · 复制或导出"); details.setTextSize(12); details.setTextColor(Color.rgb(20, 134, 101));
+        details.setText("启动诊断 · 复制或导出"); details.setTextSize(12); details.setTextColor(Color.rgb(65, 118, 230));
         details.setBackgroundColor(Color.TRANSPARENT); details.setVisibility(View.GONE);
         details.setOnClickListener(view -> showStartupDiagnostic());
         card.addView(details);

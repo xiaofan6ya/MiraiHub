@@ -1,3 +1,19 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
-    <path android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M3,6 L6,19 L12,10 L18,19 L21,6" />
+<!-- 通知栏小图标：星形拓扑白色剪影（三条入边 + 菱形核心 + 出边）。
+     通知图标只吃 alpha 通道，必须是纯白单色。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 三条入边 -->
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round"
+        android:pathData="M5,4.6 L9.9,9.2" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round"
+        android:pathData="M3.6,12 L7.2,12" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round"
+        android:pathData="M5,19.4 L9.9,14.8" />
+    <!-- 汇聚核心（菱形） -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M12,6.9 L17.1,12 L12,17.1 L6.9,12 Z" />
+    <!-- 出边 -->
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round"
+        android:pathData="M17.6,12 L20.8,12" />
 </vector>
