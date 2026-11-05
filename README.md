@@ -194,6 +194,57 @@ python main.py
 > 数据与日志默认在项目目录下的 `data/` 与 `logs/`。
 > 数据库支持 SQLite（默认）与 MySQL（`ADMIN_DATABASE_URL`）。
 
+### 方式三：Linux Docker 部署
+
+安装 Docker Engine 和 Compose 插件后执行：
+
+```bash
+git clone https://github.com/xiaofan6ya/MiraiHub.git
+cd MiraiHub
+umask 077
+printf 'ADMIN_USERNAME=admin\nADMIN_PASSWORD=%s\nADMIN_JWT_SECRET=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" > .env.docker
+cat .env.docker  # 查看并保存自动生成的后台密码
+docker compose --env-file .env.docker up -d --build
+docker compose --env-file .env.docker ps
+docker compose --env-file .env.docker logs --tail=100 admin
+```
+
+访问 `http://服务器IP:8790/admin`，使用 `.env.docker` 的用户名和密码登录。放行 TCP 8790；公网部署建议配置 HTTPS 反向代理（并把代理地址加入 `ADMIN_TRUSTED_PROXY_IPS`）。
+
+国内网络构建较慢时，可给基础镜像与 pip 换源后再构建（参数以 Dockerfile 顶部注释为准）：
+
+```bash
+docker compose --env-file .env.docker build \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple admin
+docker compose --env-file .env.docker up -d
+```
+
+默认只运行**一个 admin 容器**，包含 Web UI、多账号网关与定时任务。SQLite 保存在 `admin_data` 命名卷（容器内 `/data/workbuddy.db`），限流使用进程内存，无需另装 MySQL 或 Redis。保持单 worker，使账号租约、短信出口限流与调度任务共享状态。
+
+Compose 中的 converter 是可选的单账号转换器，已放入 `standalone` profile，admin 不依赖它。只有需要独立读取宿主机 `credentials/` 凭证目录时，才在 `.env.docker` 中配置独立转换器的访问密钥（参数原名以 Compose 文件为准，即 `CODEBUDDY2OPENAI_KEY`），并执行：
+
+```bash
+docker compose --env-file .env.docker --profile standalone up -d --build
+```
+
+升级执行 `git pull`，再执行 `up -d --build`。`docker compose down` 保留数据，**不要添加 `-v`**。旧版 MySQL 数据不会自动迁入 SQLite；迁移前先备份。沿用 MySQL 时用 Compose override 覆盖 `ADMIN_DATABASE_URL`，地址须从容器内可达。
+
+管理台的「更新与备份」可以检查 GitHub 正式版本、查看 Docker/Linux 升级命令，并下载经过完整性校验的 SQLite 在线备份。MySQL 部署会提供备份命令说明，需先用数据库工具完成备份。当前采用版本检查和手动执行升级，不会从 Web 服务控制宿主机或 Docker。
+
+也可以通过命令行备份 SQLite：
+
+```bash
+docker compose --env-file .env.docker stop admin
+docker compose --env-file .env.docker cp admin:/data/. ./backup-data/
+docker compose --env-file .env.docker start admin
+```
+
+容器内检测到的 IP 可能属于 Docker 网桥。远程接入优先使用浏览器当前访问的服务器地址及映射端口；需要局域网访问时填写宿主机 IP。
+
+管理台「积分流水」分别展示上游确认的奖励和余额变化观察，支持账号、来源、类型、时间范围筛选及分页。签到、成长奖励和补偿都会记录来源；无法确认来源的余额变化标记为未知，不与奖励记录相加。升级前已保存的成长记录可分批导入，更早未保存的来源及奖励后余额无法恢复。
+
+账号池操作中的「账号并发上限」支持留空跟随全局、0 不限、正整数限制在途请求数。全局默认仍为 `ADMIN_POOL_MAX_IN_FLIGHT=3`；这是网关本地的并发保护，不代表上游提供的配额。维护中的账号始终暂停接入。
+
 ---
 
 ## 用起来
