@@ -1401,7 +1401,11 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
     prepared: list[tuple[dict | None, str]] = [({}, "")] * total
     done = 0
     # 8 路足够把 RTT 藏起来；再多只会把上游/本机 socket 打满，收益递减。
-    workers = 1 if not verify or total < 8 else min(8, max(2, total // 4))
+    # **不再让小批量退化成串行**：旧规则是 `total < 8 -> workers=1`，
+    # 于是导 7 个号要跑 7 次串行上游往返（单次实测 1.2 秒，网络差时能顶到
+    # 15 秒超时）—— 这正是「才一二十个账号也觉得卡」的来源。
+    # 现在按条数给并发，上限 16（与各平台 import_batch 的默认值一致）。
+    workers = 1 if not verify else max(1, min(16, total))
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_prepare, it): i for i, it in enumerate(items)}
@@ -1426,6 +1430,8 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
     skipped = 0
     seen = _existing_uid_index(db)
     pending = 0
+    #: 落库后需要补刷余额的账号 id（并发刷，见下方第 3) 段）
+    needs_refresh: list[int] = []
 
     def _flush(every: int = 200) -> None:
         nonlocal pending
@@ -1462,14 +1468,16 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
             if uid:
                 seen[uid] = acc
             _post_login_automation(acc.id, acc.name or acc.uid)
-            # 验证阶段已经带回余额的，不再重复打一次上游
+            # 验证阶段已经带回余额的，不再重复打一次上游；
+            # 没带回的（例如 verify=False 的大批量导入）先记下来，
+            # 落库完成后**并发**补刷 —— 逐条串行刷是 1.2 秒/号，
+            # 几百个号就是十几分钟（用户说的「导入卡死」）。
             if balance and (balance.get("total") is not None
                             or balance.get("remain") is not None):
                 added += 1
-            elif _refresh_balance(acc, with_expiry=True):
-                added += 1
             else:
-                errors.append(f"账号 {acc.id} 余额刷新失败（凭据可能失效，请稍后刷新）")
+                needs_refresh.append(int(acc.id or 0))
+                added += 1
             _flush()
         except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
             db.rollback()
@@ -1480,6 +1488,13 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         errors.append(f"收尾提交失败：{str(exc)[:160]}")
+
+    # ---- 3) 余额补刷：并发（独立 Session），失败只记警告 ----
+    if needs_refresh:
+        for acc_id, ok, why in _refresh_many(needs_refresh, with_expiry=True,
+                                             workers=min(8, len(needs_refresh))):
+            if not ok:
+                errors.append(f"账号 {acc_id} 余额刷新失败（{why or '上游未返回'}，请稍后刷新）")
     return {"added": added, "skipped": skipped, "errors": errors}
 
 
@@ -1636,9 +1651,69 @@ def scan_local(request: Request = None, _: bool = Depends(require_admin),
             "pool_only_sample": pool_only_sample}
 
 
+def _refresh_one_account(acc_id: int, with_expiry: bool = True) -> tuple[int, bool, str]:
+    """在工作线程里刷新**一个**账号的余额（独立 Session）。
+
+    ## 为什么必须独立 Session
+
+    SQLAlchemy 的 `Session` 不是线程安全的：并发导入时拿主线程那个会话
+    去多线程里用，轻则串数据，重则 `This session is provisioning a new
+    connection` 崩掉。这里每个线程自己开一个，互不干扰。
+
+    返回 `(acc_id, 是否成功, 错误信息)`。
+    """
+    from admin.db import SessionLocal
+
+    try:
+        with SessionLocal() as s:
+            acc = s.query(Account).filter(Account.id == acc_id).first()
+            if acc is None:
+                return acc_id, False, "账号已被删除"
+            ok = _refresh_balance(acc, with_expiry=with_expiry)
+            try:
+                s.commit()
+            except Exception as exc:  # noqa: BLE001
+                s.rollback()
+                return acc_id, False, str(exc)[:120]
+            return acc_id, ok, "" if ok else "上游未返回余额"
+    except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
+        return acc_id, False, str(exc)[:120]
+
+
+def _refresh_many(acc_ids: list[int], *, with_expiry: bool = True,
+                  workers: int = 8) -> list[tuple[int, bool, str]]:
+    """并发刷新一批账号的余额。
+
+    ## 为什么不是 `for acc in rows: _refresh_balance(acc)`
+
+    线上实测**单账号一次上游往返 1.2 秒**（fetch_balance 0.61s +
+    fetch_credit_details 0.59s），网络差时单次能顶到 15 秒超时。
+    串行跑 20 个号就是 24 秒起，几百个号直接「卡死」—— 用户反馈的
+    「导入一个账号卡半天、几百个就卡死」就是这个串行 I/O。
+    """
+    if not acc_ids:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = max(1, min(int(workers or 1), len(acc_ids)))
+    if n == 1:
+        return [_refresh_one_account(i, with_expiry) for i in acc_ids]
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        return list(pool.map(lambda i: _refresh_one_account(i, with_expiry), acc_ids))
+
+
 @router.post("/import-local")
 def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """把本机登录态目录里的 .info 直接读入号池（服务端读取，不向前端暴露 token）。"""
+    """把本机登录态目录里的 .info 直接读入号池（服务端读取，不向前端暴露 token）。
+
+    ## 为什么先落库、再并发刷新余额
+
+    旧实现对**每个文件**串行做 `_refresh_balance(with_expiry=True)`，
+    也就是每个账号 2 次上游往返。20 个号 = 24 秒，几百个号 = 几十分钟，
+    前端一直在等这一个 HTTP 响应，看起来就是「导入卡死」。
+    现在：文件解析/落库照旧（本地操作，毫秒级），余额改为**最多 8 路并发**
+    刷新，单条失败只记一次警告，不拖累整批。
+    """
     d = _client_auth_dir()
     if not os.path.isdir(d):
         raise HTTPException(status_code=500, detail=f"客户端登录目录不存在: {d}")
@@ -1652,6 +1727,8 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
     updated = 0
     skipped = 0
     errors = []
+    #: 落库成功、待并发刷新余额的账号 id（串行打上游是原来最大的瓶颈）
+    pending: list[int] = []
     seen = _existing_uid_index(db)   # 已存在的 uid 更新凭证；同批内也去重
     for name in names:
         path = os.path.join(d, name)
@@ -1698,9 +1775,10 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
                 existing.cool_kind = ""
                 existing.last_err_msg = ""
                 db.commit()
-                db.refresh(existing)
-                _refresh_balance(existing, with_expiry=True)
-                db.commit()
+                # **不在这里打上游**：余额刷新统一放到下面并发跑。
+                # `db.refresh()` 也去掉 —— commit 后紧接着一次 SELECT，
+                # 只为了拿回刚落库的值，几百个号就是几百次白跑。
+                pending.append(existing.id)
                 updated += 1
                 continue
             except Exception as exc:  # noqa: BLE001 - 更新失败按错误报，不新建
@@ -1708,21 +1786,23 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
                 continue
         acc = Account()
         # 这是**本机客户端自己写的**登录态，可信度天然高于网页上传，
-        # 故不做额外的上游验证；`_refresh_balance` 已经会真调一次上游，
-        # 失败时记为警告（凭证本身来自本机，不该因瞬时网络问题被丢弃）。
+        # 故不做额外的上游验证；余额由下面的并发阶段补。
         _apply_meta(acc, auth)
         db.add(acc)
         db.commit()
-        db.refresh(acc)
         if uid:
             seen[uid] = acc
-        if _refresh_balance(acc, with_expiry=True):
-            added += 1
-        else:
-            errors.append(f"账号 {acc.id}({acc.name}) 余额刷新失败（稍后可手动刷新）")
-        db.commit()
+        pending.append(acc.id)
+        added += 1
+
+    # ---- 余额：并发刷新（原来这里是每个文件一次串行上游往返）----
+    if pending:
+        for acc_id, ok, why in _refresh_many(pending, with_expiry=True,
+                                             workers=min(8, len(pending))):
+            if not ok:
+                errors.append(f"账号 {acc_id} 余额刷新失败（{why or '上游未返回'}，稍后可手动刷新）")
     return {"added": added, "updated": updated, "skipped": skipped,
-            "errors": errors}
+            "refreshed": len(pending), "errors": errors}
 
 
 @router.get("/{acc_id}/export")
