@@ -54,7 +54,16 @@ def service():
     try:
         from desktop.updates import UpdateService
     except ModuleNotFoundError as exc:
-        if exc.name != "packaging" and not (exc.name or "").startswith("packaging."):
+        name = exc.name or ""
+        if name == "desktop" or name.startswith("desktop."):
+            # 生产镜像按白名单构建，**不包含** desktop/updates.py 与 runtime.py
+            # —— 那两个模块带着"下载并执行安装包"的能力。生产不应该有自我
+            # 更新的通道，升级走镜像替换（可回滚、可审计）。
+            raise HTTPException(
+                status_code=503,
+                detail="当前部署不包含客户端更新模块（生产镜像按最小面构建，请用镜像升级）",
+            ) from exc
+        if name != "packaging" and not name.startswith("packaging."):
             raise
         raise HTTPException(
             status_code=503,

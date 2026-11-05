@@ -21,8 +21,24 @@
 }
 
 /* 深色模式下的品牌标签 */
+/* 深色下的品牌标签：**纯主题蓝 + 白字**。
+   原来用 `#9BC0E2 → brand` 的渐变配 `#064e3b`（深绿）文字 ——
+   蓝底绿字，对比度不到 2:1，截图里那种"发脏"的观感就来自这里。 */
 :root[data-theme="dark"] .model-vendor-tag {
-  background:linear-gradient(135deg,#9BC0E2 0%,var(--brand) 100%);
-  color:#064e3b;
-  border-color:var(--brand);
+  background:var(--brand);
+  color:var(--on-brand);
+  border-color:transparent;
+  box-shadow:none;
+}
+
+/* 窄屏：品牌标签不能被内容撑破。
+   模型聚合视图里一个 chip 内会同时出现「厂商标签 + 模型名 + 倍率」，
+   380px 宽度下 nowrap 的文字会溢出到相邻卡片上（截图里的"重影"）。 */
+@media (max-width:640px) {
+  .model-vendor-tag {
+    font-size: 8.5px; padding: 1px 4px; letter-spacing: 0;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .model-chip { max-width: 100%; }
+  .model-chip b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }

@@ -44,9 +44,26 @@ select {
   transition:border-color .15s ease,box-shadow .15s ease,background .15s ease;
 }
 
-input:focus,
-textarea:focus,
+/* 输入框聚焦不描边（用户要求）：hover/focus 用轻阴影反馈；
+   键盘导航（focus-visible）仍保留描边以保证可见性。 */
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):hover,
+textarea:hover {
+  box-shadow:0 1px 5px rgba(15,23,42,.07);
+}
+
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):focus,
+textarea:focus {
+  outline:none;
+  box-shadow:0 1px 5px rgba(15,23,42,.12);
+}
+
 select:focus {
+  outline:none;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
   outline:none;
   border-color:var(--brand);
   box-shadow:0 0 0 3px var(--brand-soft);

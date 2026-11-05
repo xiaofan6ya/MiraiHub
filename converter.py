@@ -469,7 +469,8 @@ class CredentialManager:
         }
         # 企业账号才发归属头：官方只在 enterpriseId 非空时设置它们，
         # 个人账号请求里根本没有这两个头（发空值反而是特征）。
-        enterprise = str(account.get("enterpriseId") or "").strip()
+        enterprise = str(account.get("enterpriseId")
+                         or account.get("enterprise_id") or "").strip()
         if enterprise:
             h["X-Enterprise-Id"] = enterprise
             h["X-Tenant-Id"] = enterprise
@@ -635,6 +636,79 @@ class CredentialManager:
         except Exception as e:
             raise _upstream_error()(f"后端返回非 JSON {method} {path}", r.status_code, r.text) from e
 
+    def ensure_enterprise_id(self, enterprise_id: str) -> None:
+        """把落库的企业 ID 补进会话。
+
+        为什么需要：客户端 `.info` 里通常带 `account.enterpriseId`，但手工
+        导入 / 旧版本凭证可能只有 uid。缺了它 `is_enterprise()` 会判成个人版，
+        于是去调个人积分接口、拿到空结果 —— 表现就是「企业号积分恒为 0」。
+        以库里的 `accounts.enterprise_id` 为准补一次，并随 `export_json()`
+        一起回写，后续所有请求（含 X-Enterprise-Id 头）都正确。
+        """
+        eid = str(enterprise_id or "").strip()
+        if not eid:
+            return
+        with self._lock:
+            session = self._session()
+            acct = session.setdefault("account", {})
+            if str(acct.get("enterpriseId") or "").strip() == eid:
+                return
+            acct["enterpriseId"] = eid
+
+    def is_enterprise(self) -> bool:
+        """是否企业版账号。
+
+        判据与官方客户端完全一致（`isEnterpriseAccount`）：
+        `account.enterpriseId` 非空即是企业版。个人版请求里根本没有这个字段。
+        """
+        s = self._session()
+        acct = s.get("account") or {}
+        eid = acct.get("enterpriseId") or acct.get("enterprise_id") or ""
+        return bool(str(eid).strip())
+
+    def fetch_enterprise_usage(self) -> dict | None:
+        """企业版周期额度（官方 `getEnterpriseUsage` 的同构实现）。
+
+        为什么必须单独一个接口：企业账号打个人的
+        `/get-user-resource-{summary,paid,free}` 会返回空的 Accounts，
+        于是积分恒为 0 —— 但请求照常可用，账单也照常扣。官方客户端在
+        `enterpriseId` 非空时**根本不走**个人那套，改打：
+
+            POST /v2/billing/meter/get-enterprise-user-usage
+            headers: X-Enterprise-Id / X-Tenant-Id（见 _build_headers_from）
+
+        响应 `{limitNum, credit, cycleResetTime}`：
+            limitNum = 本周期总额度（-1 表示不限）
+            credit   = **已消耗**（不是剩余）
+            remain   = limitNum - credit
+
+        取不到（网络/权限/非企业凭证）返回 None，调用方回落到个人口径。
+        """
+        try:
+            data = self._request_backend(
+                "POST", "/v2/billing/meter/get-enterprise-user-usage", {})
+        except Exception:
+            return None
+        node = data.get("data") or {}
+        if isinstance(node.get("data"), dict):
+            node = node["data"]
+        if not isinstance(node, dict):
+            return None
+        limit = node.get("limitNum")
+        if not isinstance(limit, (int, float)):
+            return None
+        used = node.get("credit")
+        used = float(used) if isinstance(used, (int, float)) else 0.0
+        limit = float(limit)
+        unlimited = limit < 0
+        return {
+            "limit": None if unlimited else limit,
+            "used": used,
+            "remain": 0.0 if unlimited else max(0.0, limit - used),
+            "unlimited": unlimited,
+            "reset_at": node.get("cycleResetTime") or node.get("cycleResetTimeStr") or "",
+        }
+
     def _enterprise_path_key(self) -> str:
         """返回模型列表 endpoint 里的 enterprise 段：personal 或 enterpriseId。"""
         s = self._session()
@@ -743,6 +817,21 @@ class CredentialManager:
         CodeBuddy 个人体验版等一次性资源在账号层级 CapacityRemain 仍显示原始额度，
         但当期已用完后 CycleCapacityRemain 为 0；界面上的「累积剩余」也以周期剩余为准。
         """
+        # 企业版没有个人那套 Accounts 结构：先按企业口径取，
+        # 取不到再回落到个人（例如凭证其实是个人号但带了企业字段）。
+        if self.is_enterprise():
+            usage = self.fetch_enterprise_usage()
+            if usage is not None:
+                if usage["unlimited"]:
+                    # 不限额度：没有"总量/剩余"这组数字可填。
+                    # 前端会按 credits_snapshot 里的 unlimited 标记显示「不限」。
+                    return {"total": 0, "remain": 0, "unlimited": True}
+                return {
+                    "total": int(round(usage["limit"] or 0)),
+                    "remain": int(round(usage["remain"])),
+                    "used": int(round(usage["used"])),
+                    "unlimited": False,
+                }
         data = self._request_backend("POST", "/v2/billing/meter/get-user-resource", {})
         resp = data.get("data", {}).get("Response", {}).get("Data", {}) or {}
         total = 0

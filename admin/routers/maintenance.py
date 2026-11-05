@@ -25,6 +25,19 @@ from desktop.common import VERSION, RELEASES_URL
 
 logger = logging.getLogger("admin.maintenance")
 
+
+def _fs_guard() -> None:
+    """写宿主机文件 / 控制进程前先过总闸。
+
+    prod 黑名单是「外层 404」，这里是「路由内再兜一层」：即便有人把
+    `/api/maintenance/*` 从黑名单里摘掉、或误以 dev 部署到公网，
+    没有显式 `ADMIN_ALLOW_FS_OPS=1` 也一律 404。
+    """
+    from admin import env_guard
+
+    if not env_guard.fs_ops_allowed():
+        raise HTTPException(404, detail="Not Found")
+
 router = APIRouter(prefix="/api/maintenance", tags=["maintenance"], dependencies=[Depends(require_admin)])
 
 
@@ -68,7 +81,11 @@ def update_info(db: Session = Depends(get_db)):
 
 
 @router.post("/backup")
-def backup():
+def backup(request: Request):
+    # 备份下载含**全量账号凭据与 API Key**，属于最高敏感度的导出操作：
+    # 记录调用来源，事后能追溯「谁在什么时候把号池整包拿走了」。
+    ip = request.client.host if request.client else "?"
+    logger.warning("数据库备份下载 ip=%s ua=%s", ip, request.headers.get("user-agent", "")[:160])
     """在线备份当前 SQLite 库，以文件响应返回。
 
     ## 为什么每一步都记日志
@@ -203,6 +220,7 @@ class BackupDirIn(BaseModel):
 @router.put("/backup/dir")
 def set_backup_dir(body: BackupDirIn, db: Session = Depends(get_db)):
     """修改备份存放目录。传 `reset=true` 恢复默认。"""
+    _fs_guard()
     if body.reset:
         target = _default_backup_dir()
     else:
@@ -291,6 +309,7 @@ def _restore_sqlite_bytes(data: bytes) -> dict:
 
 @router.post("/restore")
 async def restore(request: Request):
+    _fs_guard()
     data = await request.body()
     size_limit = 512 * 1024 * 1024
     if len(data) > size_limit:
@@ -307,6 +326,7 @@ _restart_last = 0.0
 
 @router.post("/restart")
 async def restart_service(request: Request):
+    _fs_guard()
     global _restart_last
     try:
         payload = await request.json()

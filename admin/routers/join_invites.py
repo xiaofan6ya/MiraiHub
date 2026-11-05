@@ -33,16 +33,22 @@ class InviteCreateIn(BaseModel):
     note: str = Field(default="", max_length=200)
     #: 最大可用次数（默认 1，即一次性）。
     max_uses: int = Field(default=1, ge=1, le=1000)
-    #: 有效天数（默认 7，上限 90）。
-    valid_days: int = Field(default=7, ge=1, le=90)
+    #: 有效天数（默认 1，上限 7）。
+    #:
+    #: 2026-11-05 从 90 收到 7：邀请码只该活到"对方点开链接"这一刻。
+    #: 长期有效的码等于一个不设防的入库通道。
+    valid_days: int = Field(default=1, ge=1, le=7)
 
 
 @router.get("")
 def invite_list(db: Session = Depends(get_db), _=Depends(require_admin)):
     """列出全部凭证（明文不可见，只有前缀与用量）。"""
+    from admin import join_gate
     rows = list_invites(db)
     return {
-        "open": has_any_invite(db),
+        # `open` 现在是**总闸状态**，不再是"有没有码"。
+        "open": join_gate.is_open(db),
+        "epoch": join_gate.epoch(db),
         "total": len(rows),
         "items": [invite_status(r) for r in rows],
     }
@@ -53,8 +59,14 @@ def invite_create(body: InviteCreateIn, request: Request,
                   db: Session = Depends(get_db), _=Depends(require_admin)):
     """生成一张凭证。
 
-    **明文邀请码只在这里返回一次**，之后无法再取回（库里只存哈希）。
+    **前置条件：总闸必须已打开**。否则会生成一堆"看起来能用、实际被
+    middleware 404 挡住"的码，排查起来非常费劲。
     """
+    from admin import join_gate
+    if not join_gate.is_open(db):
+        raise HTTPException(
+            status_code=409,
+            detail="自助入口当前关闭，请先在「自助注册」里打开总闸再生成邀请码")
     row, code = create_invite(
         db,
         note=body.note,
@@ -76,7 +88,8 @@ def invite_revoke(invite_id: int, db: Session = Depends(get_db),
     """撤销一张凭证（保留记录，标记失效）。"""
     if not revoke_invite(db, invite_id):
         raise HTTPException(status_code=404, detail="凭证不存在")
-    return {"ok": True, "open": has_any_invite(db)}
+    from admin import join_gate
+    return {"ok": True, "open": join_gate.is_open(db)}
 
 
 @router.delete("/{invite_id}")
@@ -85,4 +98,5 @@ def invite_delete(invite_id: int, db: Session = Depends(get_db),
     """彻底删除一张凭证。"""
     if not delete_invite(db, invite_id):
         raise HTTPException(status_code=404, detail="凭证不存在")
-    return {"ok": True, "open": has_any_invite(db)}
+    from admin import join_gate
+    return {"ok": True, "open": join_gate.is_open(db)}

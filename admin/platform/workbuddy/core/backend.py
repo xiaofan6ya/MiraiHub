@@ -216,13 +216,16 @@ def parse_auth_meta(auth_json: str) -> dict:
 class AccountSession:
     """把一个账号的 auth_json 包成可用的后端会话。"""
 
-    def __init__(self, auth_json: str):
+    def __init__(self, auth_json: str, enterprise_id: str = ""):
         self._http = None
         #: 本次会话是否发生过 token 刷新（意味着库里那份凭证已经旧了）。
         #: 调用方据此决定要不要 `updated_json()` 回写 —— 只读场景（列表、
         #: 健康检查的失败分支）不该为了一个没变的凭证白跑一次 commit。
         self._token_rotated = False
         self.cm = CredentialManager.from_json(auth_json)
+        # 库里的 enterprise_id 是权威值：凭证里缺就补上，否则企业版会被
+        # 当成个人版，积分接口拿到空结果（= 永远显示 0）。
+        self.cm.ensure_enterprise_id(enterprise_id)
 
     @contextmanager
     def http_client(self, timeout=15):
@@ -340,6 +343,13 @@ class AccountSession:
         改名，导致 `admin/credits.py` 按上游原名读取时**一个字段都匹配不上**，
         所有包都被判成「无到期时间 / 剩余 0」，调度依据静默失效。
         """
+        # 企业版：没有个人那三路资源包，额度是「周期总量 - 已消耗」。
+        # 这里把它伪装成单个资源包，让 normalize/summarize/调度整条链路
+        # 原样复用 —— 不给企业版另写一套到期口径。
+        if self.cm.is_enterprise():
+            usage = self.cm.fetch_enterprise_usage()
+            if usage is not None:
+                return _enterprise_packages(usage)
         from admin.billing import collect_billing
         return collect_billing(self.cm._request_backend)
 
@@ -1795,3 +1805,36 @@ def _map_checkin_status(code: int) -> str:
         1002: "not_eligible",      # 无领取资格
         1003: "event_ended",       # 活动已结束
     }.get(code, "unknown")
+
+
+def _enterprise_packages(usage: dict):
+    """把企业版周期额度包装成一个「资源包」。
+
+    字段全部用个人包同名字段（`CycleCapacitySize*/Remain*/Used*`），
+    这样 `admin.credits.resource_summary` 不需要知道企业版的存在：
+        total = limitNum
+        used  = credit
+        remain= limitNum - credit
+    到期时间用 `CycleEndTime`（= 周期重置时间），与个人包的日历年包同义。
+    """
+    from admin.billing import BillingPackages
+
+    limit = usage.get("limit")
+    unlimited = bool(usage.get("unlimited"))
+    row = {
+        "ResourceId": "enterprise-cycle",
+        "PackageCode": "ENTERPRISE_CYCLE",
+        "PackageName": "企业版 · 不限额度" if unlimited else "企业版周期额度",
+        "Status": 0,
+        "CycleCapacitySizePrecise": str(0 if limit is None else limit),
+        "CycleCapacityRemainPrecise": str(0 if unlimited else max(0.0, usage.get("remain") or 0)),
+        "CycleCapacityUsedPrecise": str(max(0.0, usage.get("used") or 0)),
+    }
+    if usage.get("reset_at"):
+        row["CycleEndTime"] = usage["reset_at"]
+    return BillingPackages([row], {
+        "complete": True,
+        "enterprise": True,
+        "unlimited": unlimited,
+        "sources": {"enterprise": {"ok": True, "complete": True, "pages": 1, "rows": 1}},
+    })

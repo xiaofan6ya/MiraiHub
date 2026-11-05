@@ -287,12 +287,14 @@
     });
   }
 
-  // 邀请码：从 URL 查询参数预填（带码分享链接），用户也可手动改。
+  // 2026-11-05：**不再从 URL 查询参数预填邀请码**。
+  //
+  // `?invite_code=MH-xxxx` 会原样进 nginx access log、浏览器历史、
+  // 以及页面里任何第三方资源的 Referer —— 等于把一张可用凭证写在日志里。
+  // 现在的分享链路是：
+  //     /j#k=<一次性票据>  →  换 join_access Cookie  →  /join
+  // 邀请码只由用户手动填写，走 POST body / X-Join-Invite 头。
   var INVITE = "";
-  try {
-    var q = new URLSearchParams(location.search);
-    INVITE = (q.get("invite_code") || q.get("invite") || "").trim();
-  } catch (e) { INVITE = ""; }
 
   function inviteValue() {
     var el = $("inviteCode");

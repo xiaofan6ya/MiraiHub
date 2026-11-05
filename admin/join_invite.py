@@ -52,7 +52,11 @@ _CODE_PREFIX = "MH"
 _PBKDF2_ITER = 100_000
 
 #: 凭证有效期上限（天）。防止管理员生成一张"永久有效"的码忘了撤销。
-_MAX_VALID_DAYS = 90
+#:
+#: 2026-11-05 从 90 收到 7：邀请码的实际生命周期是「发出去 → 对方当天注册」，
+#: 90 天只是给一张泄露的码留了三个月的后门。现在配合总闸的代次机制，
+#: 即便码没被撤销，下一次 toggle 也会让它失效。
+_MAX_VALID_DAYS = 7
 
 
 def _hash_code(code: str) -> str:
@@ -97,6 +101,9 @@ def create_invite(db: Session, *, note: str = "", max_uses: int = 1,
     days = max(1, min(int(valid_days or 1), _MAX_VALID_DAYS))
     uses = max(1, int(max_uses or 1))
     code = generate_code()
+    # 绑定当前代次：总闸下一次 toggle 时，这张码会随代次一起失效，
+    # 不需要管理员记得手动撤销。
+    from admin import join_gate
     row = JoinInvite(
         code_hash=_hash_code(code),
         code_prefix=code[:8],
@@ -104,14 +111,15 @@ def create_invite(db: Session, *, note: str = "", max_uses: int = 1,
         max_uses=uses,
         used_count=0,
         enabled=1,
+        epoch=join_gate.epoch(db),
         expires_at=datetime.utcnow() + timedelta(days=days),
         created_by=(created_by or "")[:120],
     )
     db.add(row)
     db.commit()
     db.refresh(row)
-    _logger.info("已生成邀请码 prefix=%s uses=%d days=%d by=%s",
-                 row.code_prefix, uses, days, created_by or "-")
+    _logger.info("已生成邀请码 prefix=%s uses=%d days=%d epoch=%s by=%s",
+                 row.code_prefix, uses, days, row.epoch, created_by or "-")
     return row, code
 
 
@@ -153,8 +161,10 @@ def _active_invite(db: Session, code: str) -> Optional[JoinInvite]:
     if not code:
         return None
     now = datetime.utcnow()
+    from admin import join_gate
     candidates = (db.query(JoinInvite)
-                  .filter(JoinInvite.enabled == 1)
+                  .filter(JoinInvite.enabled == 1,
+                          JoinInvite.epoch == join_gate.epoch(db))
                   .order_by(JoinInvite.id.desc())
                   .limit(500)
                   .all())
@@ -169,13 +179,16 @@ def _active_invite(db: Session, code: str) -> Optional[JoinInvite]:
 
 
 def has_any_invite(db: Session) -> bool:
-    """是否至少存在一张**当前可用**的凭证。
+    """是否至少存在一张**当前代次、当前可用**的凭证。
 
-    这是 fail-closed 的判据：一张都没有 → 整个自助入口关闭。
+    注意：它已**不再**是入口开关 —— 开关在 `admin/join_gate.py`。
+    保留这个函数是给后台列表展示"当前还有几张能用的码"。
     """
     now = datetime.utcnow()
+    from admin import join_gate
     rows = (db.query(JoinInvite)
-            .filter(JoinInvite.enabled == 1)
+            .filter(JoinInvite.enabled == 1,
+                    JoinInvite.epoch == join_gate.epoch(db))
             .limit(500)
             .all())
     for row in rows:
@@ -218,6 +231,10 @@ def check_invite(db: Session, code: str) -> tuple[bool, str]:
     """
     if not code:
         return False, "missing"
+    from admin import join_gate
+    if not join_gate.is_open(db):
+        # 总闸关闭时，任何码都不该通过 —— 即使库里还留着上一代的记录。
+        return False, "closed"
     row = _active_invite(db, code)
     if row is not None:
         return True, "ok"
@@ -262,6 +279,7 @@ def invite_status(row: JoinInvite) -> dict:
         "max_uses": row.max_uses,
         "used_count": row.used_count,
         "enabled": row.enabled,
+        "epoch": int(row.epoch or 1),
         "state": state,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,

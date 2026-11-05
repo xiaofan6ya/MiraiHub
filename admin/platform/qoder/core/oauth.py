@@ -62,18 +62,22 @@ def _b64url(raw: bytes) -> str:
 
 
 def machine_id_of_local() -> str:
-    """本机设备标识。
+    """本机设备标识（**无控制终端的服务也不能失败**）。
 
     参考实现用 `machine::machine_id()`（读系统信息生成稳定的 UUID）。
-    这里用一个稳定的派生值：用户名 + 主机名 的 UUID5 ——
-    同一台机器上恒定，重装系统会变。
-    """
-    import os
-    import platform
 
-    seed = "%s|%s" % (os.environ.get("USERNAME") or os.getlogin(),
-                      platform.node() or "")
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    原实现是 `os.environ.get("USERNAME") or os.getlogin()`：
+    Windows 桌面端有 USERNAME 所以短路了，但 Linux 上以 systemd /
+    supervisord / Docker 跑的后台服务既没有 USERNAME、也没有控制终端，
+    `os.getlogin()` 直接抛 `OSError: [Errno 6] No such device or address`
+    —— 表现就是线上「点发起授权 → 生成授权链接失败」。
+    现在统一走 `admin.platform.host_identity.stable_machine_id()`：
+    环境变量 > 持久化文件 > 用户+主机派生值，任何一步失败都只降级。
+    """
+    from admin.platform import host_identity
+
+    return host_identity.stable_machine_id(
+        "qoder", "qoder_machine_id", env_key="QODER_MACHINE_ID")
 
 
 class DeviceLogin:

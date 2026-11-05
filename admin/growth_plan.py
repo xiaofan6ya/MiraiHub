@@ -315,7 +315,10 @@ def run_growth_plan(db, *, budget_seconds=180, progress=None, now=None, lease=No
     day = (now or datetime.now(_DAY_TZ)).astimezone(_DAY_TZ).date().isoformat()
     detail = []
     try:
-        accounts = db.query(Account).filter(Account.status == "active").order_by(Account.id).all()
+        from admin.scheduler import growth_eligible
+        # 企业版没有成长计划，混进来只会每天白跑一轮
+        accounts = growth_eligible(
+            db.query(Account).filter(Account.status == "active").order_by(Account.id).all())
         cursor_state = _read(db, _CURSOR_KEY)
         cursor = _number(cursor_state.get("id"))
         outstanding = cursor_state.get("remaining") or []

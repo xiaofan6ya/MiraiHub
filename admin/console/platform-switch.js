@@ -45,8 +45,10 @@
     return (window.WBPlatformIcons && window.WBPlatformIcons.get(id)) || "";
   }
 
+  /* 凭证走 HttpOnly Cookie，这里不再读取任何令牌。
+   * 保留同名函数是为了让调用点保持"显式声明鉴权意图"的可读性。 */
   function storedToken() {
-    return window.TOKEN || localStorage.getItem("wb_admin_token") || "";
+    return "";
   }
 
   function saved() {
@@ -251,7 +253,7 @@ function actionsFor(spec) {
       render();
       return Promise.resolve(state);
     }
-    return fetch("/api/platforms", { headers: { "X-Admin-Token": storedToken() } })
+    return fetch("/api/platforms", { credentials: "same-origin" })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (data && data.items && data.items.length) {
@@ -319,7 +321,7 @@ function actionsFor(spec) {
     load: function () {
       if (state.busy) return Promise.resolve(state);
       state.busy = true;
-      return fetch("/api/platforms", { headers: { "X-Admin-Token": storedToken() } })
+      return fetch("/api/platforms", { credentials: "same-origin" })
         .then(function (res) { return res.ok ? res.json() : null; })
         .then(function (data) {
           state.busy = false;

@@ -225,7 +225,8 @@ def check_account(db, account: Account) -> dict:
         if plat is not None:
             return plat
 
-        sess = backend.AccountSession(original)
+        sess = backend.AccountSession(
+            original, enterprise_id=(getattr(account, "enterprise_id", "") or ""))
         balance_value: dict = {}
 
         def fetch_balance():

@@ -39,7 +39,25 @@ _MAX_BODY = 96 * 1024          # 单条上报上限
 _MAX_FILE = 4 * 1024 * 1024    # 文件超过 4MB 时轮转
 _KEEP = 200                    # /last 默认最多返回多少条
 
+#: 匿名/弱身份上报的频控：同一 IP 每 10 秒最多 20 条。
+#: 没有这道闸，任何人都能以 96KB/条的速率把 logs/client-diag.jsonl 刷爆，
+#: 甚至伪造「页面被注入」的诊断记录误导排障。E 盘曾被写满过一次，不能再来。
+_RATE_WINDOW = 10.0
+_RATE_MAX = 20
+_rate: dict[str, list[float]] = {}
+
 _lock = threading.Lock()
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    hits = _rate.setdefault(ip, [])
+    while hits and now - hits[0] > _RATE_WINDOW:
+        hits.pop(0)
+    if len(hits) >= _RATE_MAX:
+        return True
+    hits.append(now)
+    return False
 
 
 def _rotate_if_needed() -> None:
@@ -51,8 +69,15 @@ def _rotate_if_needed() -> None:
 
 
 @router.post("/report")
-async def report(request: Request):
-    """接收浏览器自检报告（匿名、限长、只落盘）。"""
+async def report(request: Request, _: bool = Depends(require_admin)):
+    """接收浏览器自检报告（需登录态、限长、限频、只落盘）。
+
+    控制台页面本来就只对已登录会话下发，这里没必要留成匿名写接口 ——
+    匿名 = 任何人都能往服务器磁盘写任意 JSON（每条 96KB、无次数限制）。
+    """
+    ip = request.client.host if request.client else "?"
+    if _rate_limited(ip):
+        return JSONResponse({"ok": False, "detail": "too many reports"}, status_code=429)
     raw = await request.body()
     if not raw:
         return JSONResponse({"ok": False, "detail": "empty"}, status_code=400)
@@ -65,7 +90,7 @@ async def report(request: Request):
 
     entry = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "ip": request.client.host if request.client else "",
+        "ip": ip,
         "data": data if isinstance(data, dict) else {"raw": str(data)[:2000]},
     }
     line = json.dumps(entry, ensure_ascii=False)

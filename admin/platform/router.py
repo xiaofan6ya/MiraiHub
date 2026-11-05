@@ -167,3 +167,83 @@ def set_current(body: CurrentIn, _: bool = Depends(require_admin),
         row.value = value
     db.commit()
     return {"ok": True, "platform": spec.id, "realm": realm, "raw": value}
+
+@router.get("/export-all")
+def export_all_platforms(mode: str = "backup", _: bool = Depends(require_admin),
+                         db: Session = Depends(get_db)):
+    """导出**全部平台**的账号（一键备份整个号池）。
+
+    形状（`format=miraihub-all-platforms`）：
+
+        {"platforms": {"loomy": {"label": "Loomy", "count": 3,
+                                 "accounts": [{...平台自己的备份记录...}]},
+                       ...}}
+
+    每个平台的 `accounts` 就是它**自己备份格式**的记录列表（凭证主体取自
+    `Account.auth_json` —— 各平台 import 时存的就是这个 JSON，回灌时
+    逐条序列化成 JSONL 喂回 `import_batch` / import-async 即可无损还原）。
+    `workbuddy` / `codebuddy` 的 `auth_json` 原样保留（含 auth/account 结构）。
+
+    `mode=plain` 输出脱敏清单：尽量移除 token 类字段，只留核对用的信息。
+    平台记录形态各异，脱敏按「常见凭证键名」做，宁可漏删不可错删，
+    所以 plain 模式响应里带 `sanitized: true` 提示**不要**当凭证回灌。
+    """
+    import json as _json
+    from datetime import datetime as _dt
+
+    TOKEN_KEYS = ("token", "accesstoken", "access_token", "refreshtoken",
+                  "refresh_token", "session", "sessionkey", "session_key",
+                  "apikey", "api_key", "secret", "password", "cookie")
+    _SENSITIVE = {k.lower() for k in TOKEN_KEYS}
+
+    def _sanitize(record: dict) -> dict:
+        out = {}
+        for key, value in record.items():
+            if key.lower() in _SENSITIVE and isinstance(value, str) and value:
+                out[key] = value[:6] + "…"
+            else:
+                out[key] = value
+        return out
+
+    items: dict[str, dict] = {}
+    # 一次拉全表再按平台分组：账号量级在几千内，比按平台逐个查询更快也更简单。
+    rows = db.query(Account).all()
+    grouped: dict[str, list[Account]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.platform or "").lower(), []).append(row)
+
+    load_platforms()
+    for platform_id in registry.ids():
+        spec = registry.get(platform_id)
+        if spec is None:
+            continue
+        storage = str(spec.storage()).lower()
+        if storage in items:
+            continue
+        accounts = []
+        for row in grouped.get(storage, []):
+            try:
+                record = _json.loads(row.auth_json or "{}")
+            except ValueError:
+                record = {"raw": str(row.auth_json or "")}
+            if not isinstance(record, dict):
+                record = {"raw": str(record)}
+            record.setdefault("name", row.name or "")
+            if str(mode).lower() == "plain":
+                record = _sanitize(record)
+            accounts.append(record)
+        if not accounts:
+            continue
+        items[storage] = {"label": spec.label, "count": len(accounts),
+                          "accounts": accounts}
+    return {
+        "format": "miraihub-all-platforms",
+        "version": 1,
+        "mode": "backup" if str(mode).lower() != "plain" else "plain",
+        "sanitized": str(mode).lower() == "plain",
+        "exported_at": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "platforms": items,
+        "note": ("已移除 token 类字段，仅用于清单核对，不要当凭证回灌"
+                 if str(mode).lower() == "plain"
+                 else "含明文凭证，请按机密文件保管；可在「导入全部平台」原样回灌"),
+    }

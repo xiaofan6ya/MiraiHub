@@ -816,10 +816,11 @@ def run_growth_tasks() -> dict:
                     .filter(Account.status == "active",
                             Account.platform == _platform_of(_current_schedule()))
                     .order_by(Account.id.asc()).all())
+        accounts = growth_eligible(accounts)
         ids = [a.id for a in accounts]
         if not ids:
             return {"task": "run_growth_tasks", "ok": True, "accounts": 0,
-                    "msg": "没有可用账号"}
+                    "msg": "没有可用账号（企业版账号没有成长任务）"}
 
         run_res = growth_router.run_accounts(
             ids, None, db,
@@ -937,6 +938,19 @@ def run_refresh_growth_tasks() -> dict:
     }
 
 
+def growth_eligible(accounts):
+    """过滤掉**企业版账号**。
+
+    企业版（`enterpriseId` 非空）在官方客户端里没有「签到 / 成长任务 /
+    猫猫旅行」这些活动：它们属于个人版的运营玩法。用企业号去打这些接口
+    只会拿到 1002/1003 之类的"无资格"，既浪费请求、又把结果页刷成一片红。
+
+    判据与 `converter.ClientManager.is_enterprise()` 一致：读落库的
+    `enterprise_id`，不额外发请求。
+    """
+    return [a for a in accounts if not (getattr(a, "enterprise_id", "") or "").strip()]
+
+
 def run_daily_checkin(db, schedule: "Schedule | None" = None) -> dict:
     """遍历活跃账号执行每日签到领取积分。
 
@@ -964,9 +978,11 @@ def run_daily_checkin(db, schedule: "Schedule | None" = None) -> dict:
     accounts = (db.query(Account).filter(Account.status == "active")
                 .filter(Account.platform == _platform_of(schedule))
                 .order_by(Account.id.asc()).all())
+    # 企业版没有签到活动，先剔掉再判断「有没有账号」
+    accounts = growth_eligible(accounts)
     if not accounts:
         return {"task": "daily_checkin", "ok": True, "total": 0,
-                "msg": "没有可用账号"}
+                "msg": "没有可用账号（企业版账号不参与签到）"}
 
     claimed = skipped_already = failed = 0
     total_credit = 0
@@ -1241,12 +1257,24 @@ def _run_one(s: Schedule, db, now: datetime):
     db.commit()
 
 
+#: 上次平台任务补种的时间（monotonic）。新平台接入 / 新账号导入后，
+#: 不必重启进程就能拿到定时任务 —— 导入成功路径也会立刻补一次，这里只是兜底。
+_last_platform_seed = 0.0
+
+
 def _loop():
     while True:
         db = None
         try:
             db = SessionLocal()
             now = datetime.utcnow()
+            global _last_platform_seed
+            if time.monotonic() - _last_platform_seed > 900:
+                _last_platform_seed = time.monotonic()
+                try:
+                    ensure_platform_schedules(db)
+                except Exception:  # noqa: BLE001 - 兜底失败不能停调度
+                    _logger.exception("平台定时任务兜底补种失败")
             schedules = db.query(Schedule).filter(Schedule.enabled == 1).all()
             # 先启动独立的成长巡检线程，再执行原有同步任务。旧的一次性
             # 成长任务可能很长，不能让它拖延已经到期的每日活跃巡检。
@@ -1651,6 +1679,41 @@ _scheduler_lock = threading.Lock()
 _scheduler_started = False
 
 
+#: 定时任务的默认周期与名称后缀。
+#:
+#: 为什么不再只认 `*_checkin` / `*_keepalive`：平台 `task_runners()` 声明的
+#: 任务远不止这两个，整点刷新余额、积分到期快照、模型同步、成长任务都需要在
+#: 库里有一条 Schedule 才会被调度线程执行。只种签到等于「平台接进来了，但只有
+#: 签到会跑」。这里按任务名给出默认周期，已存在的记录一律不覆盖（用户改过的
+#: 周期优先）。
+_TASK_SCHEDULE_META = {
+    "refresh_balances": ("整点刷新余额", 60),
+    "refresh_credits": ("积分到期快照", 360),
+    "sync_models": ("同步模型列表", 360),
+    "daily_checkin": ("每日签到", 1440),
+    "refresh_growth_tasks": ("更新成长任务", 360),
+    "run_growth_tasks": ("自动成长任务", 1440),
+    "run_growth_plan": ("成长计划", 240),
+    "keepalive_tokens": ("令牌保活", 360),
+    "ban_recheck": ("风控封号复核", 30),
+}
+
+
+def _schedule_meta(task: str, label: str) -> tuple[str, int]:
+    """任务名 → (展示名, 周期分钟)。"""
+    name = str(task)
+    if name in _TASK_SCHEDULE_META:
+        title, minutes = _TASK_SCHEDULE_META[name]
+        return f"{title} · {label}", minutes
+    if name.endswith("_checkin"):
+        return f"每日签到 · {label}", 1440
+    if name.endswith("_keepalive"):
+        return f"会话保活 · {label}", 360
+    if name.endswith("_refresh_quota"):
+        return f"刷新额度 · {label}", 360
+    return f"{name} · {label}", 360
+
+
 def ensure_platform_schedules(db):
     """把**各平台**的签到 / 保活任务补进定时任务表（幂等）。
 
@@ -1694,23 +1757,28 @@ def ensure_platform_schedules(db):
                                Account.status == "active").first()) is not None
         if not has_account:
             continue
+        # 平台 `task_runners()` 声明的任务**全部**补种（不只是签到/保活）：
+        # 各平台只声明自己的任务，不会把 WorkBuddy 的成长任务带进来。
         for task in runners:
             name = str(task)
-            if not (name.endswith("_checkin") or name.endswith("_keepalive")):
+            # ban_recheck 是全局任务，已有 ensure_ban_recheck_schedule 负责，
+            # 这里再按平台种一遍只会变成 N 条重复探测。
+            if name == "ban_recheck":
                 continue
             exists = (db.query(Schedule)
                       .filter(Schedule.task == name,
                               Schedule.platform == storage).first())
             if exists is not None:
                 continue
+            title, minutes = _schedule_meta(name, spec.label)
             is_checkin = name.endswith("_checkin")
             db.add(Schedule(
-                name=("每日签到 · %s" % spec.label) if is_checkin
-                     else ("会话保活 · %s" % spec.label),
+                name=title,
                 task=name,
                 platform=storage,
-                interval_minutes=1440 if is_checkin else 360,
+                interval_minutes=minutes,
                 enabled=1,
+                # 签到错开 5 分钟先跑；其余 15 分钟后排队，避免启动瞬间并发
                 next_run_at=now + (timedelta(minutes=5) if is_checkin
                                    else timedelta(minutes=15)),
             ))

@@ -129,7 +129,6 @@ function uiSelectSet(id, value, notify = true) {
   uiSelectPick(id, String(value), null, notify);
 }
 const $ = (s) => document.querySelector(s);
-const TOKEN_KEY = "wb_admin_token";
 /* 用量日志 SSE 句柄。
  *
  * **必须在这里声明**：`activateTab()` 在模块顶层（首屏）就会调用，
@@ -221,20 +220,49 @@ let _logLiveRows = new Map();
 
 
 
-let TOKEN = localStorage.getItem(TOKEN_KEY) || "";
-// 桌面托盘的「在浏览器中打开」会带一次性 JWT（?token=）：普通浏览器没有 pywebview 桥，
-// ?desktop=1 的免密通道走不通。取到即存 localStorage 并清掉参数，避免 token 留在地址栏/历史里。
+/* 2026-11-05：**令牌不再落 localStorage**。
+ *
+ * 事故复盘的核心结论之一：`wb_admin_token` 存在 localStorage，一次存储型
+ * XSS 就能把它读走并复用 24 小时。现在浏览器侧唯一的有效副本是 HttpOnly
+ * Cookie（`admin_session`），`document.cookie` 读不到它。
+ *
+ * `TOKEN` 只作为**本地壳（桌面 / 安卓 WebView）**的短暂中转：从桥接拿到
+ * 一次性票据 → 立刻换 Cookie → 变量清空。普通浏览器里它恒为空字符串。
+ */
+let TOKEN = "";
+/* 桌面托盘「在浏览器中打开」会带一次性令牌（?token=）。
+ *
+ * 处理方式变了：**不再写 localStorage**，而是立刻用它换一枚 HttpOnly
+ * Cookie，然后把参数从地址栏抹掉。令牌只在内存里存在几百毫秒。
+ */
 (() => {
   try {
     const t = new URLSearchParams(location.search).get("token");
-    if (t) {
-      TOKEN = t; localStorage.setItem(TOKEN_KEY, t);
-      const u = new URL(location.href);
-      u.searchParams.delete("token");
-      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
-    }
+    if (!t) return;
+    const u = new URL(location.href);
+    u.searchParams.delete("token");
+    history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    TOKEN = t;
+    fetch("/api/login/session", { headers: { "X-Admin-Token": t } })
+      .catch(() => {})
+      .finally(() => { TOKEN = ""; });
   } catch (e) { /* 老浏览器兜底：忽略，走登录表单 */ }
 })();
+
+/** 服务端时间戳 → 毫秒。
+ *
+ * 为什么不能直接 `Date.parse`：数据库存的是 **UTC 无时区串**
+ * （"2026-11-05T10:47:00" / "2026-11-05 10:47:00"），而浏览器会按
+ * **本地时区**解析 —— 东八区上就整体偏 8 小时，倒计时会差一天。
+ * 带 Z / +08:00 的串原样交给 Date.parse。
+ */
+function toMs(v) {
+  if (v === null || v === undefined || v === "") return NaN;
+  const t = String(v).trim();
+  if (!t) return NaN;
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) return Date.parse(t);
+  return Date.parse(t.replace(" ", "T") + "Z");
+}
 
 /* 时间格式化：数据库存的是 UTC，统一 +8 展示为北京时间（与服务器时区无关） */
 function fmtTime(s, withSec = true) {
@@ -305,7 +333,12 @@ async function ensureLocalSession(force = false) {
   if (!_localSessionPromise) _localSessionPromise = (async () => {
     const token = window.pywebview?.api ? (await pywebview.api.desktop_login()).token : await WBAndroid.sessionToken();
     if (!token) throw new Error('本地连接凭据未准备好');
-    TOKEN = token; localStorage.setItem(TOKEN_KEY, token); _localSessionReady = true;
+    // 桥接令牌**不是**长期凭据：立刻拿去换 HttpOnly Cookie，然后丢弃。
+    // 这样即使 WebView 里出现注入，也读不到任何可复用的令牌。
+    const r = await fetch('/api/login/session', { headers: { 'X-Admin-Token': token } });
+    if (!r.ok) throw new Error('本地连接凭据校验失败');
+    TOKEN = '';
+    _localSessionReady = true;
   })().finally(() => { _localSessionPromise = null; });
   return _localSessionPromise;
 }
@@ -334,12 +367,49 @@ function _loadStart() {
     if (bar) bar.classList.add("on");
   }, 120);
 }
+/* ==================== 手机端：表格 → 卡片 ====================
+ *
+ * 窄屏上用表格的体验很差：列挤在一起、文字竖排、横向滑动还找不到行。
+ * 这里把所有 `.tbl` / `.acc-table` 在 <=640px 时改成卡片：
+ *   · JS 只做两件事 —— 把表头文字写进每个 td 的 data-label、给标题列打标记；
+ *   · 版式全部交给 CSS（table.is-cards），桌面端一行都不受影响。
+ *
+ * 为什么不用 MutationObserver：控制台每 2~3 秒就有面板重绘，观察器会被
+ * 触发得非常频繁。挂在 `_loadEnd()`（所有请求的统一收口）上更省，
+ * 而且"数据回来之后"正是需要重算标签的时机。
+ */
+function mobileCardsEnabled() {
+  return window.matchMedia && window.matchMedia("(max-width:640px)").matches;
+}
+
+function applyMobileCards() {
+  if (!mobileCardsEnabled()) return;
+  document.querySelectorAll("table.tbl, table.acc-table").forEach(table => {
+    const heads = Array.from(table.querySelectorAll("thead th"))
+      .map(th => (th.textContent || "").replace(/\s+/g, " ").trim());
+    // 标题列：优先"名称 / 任务名 / 平台 / 模型 / Key"，找不到就用第一列
+    let titleIdx = heads.findIndex(t => /名称|任务名|平台|模型|Key/i.test(t));
+    if (titleIdx < 0) titleIdx = 0;
+    table.querySelectorAll("tbody tr").forEach(tr => {
+      Array.from(tr.children).forEach((td, i) => {
+        if (!td.hasAttribute("data-label")) {
+          td.setAttribute("data-label", heads[i] || "");
+        }
+        td.classList.toggle("c-title", i === titleIdx);
+      });
+    });
+    table.classList.add("is-cards");
+  });
+}
+
 function _loadEnd() {
   _apiPending = Math.max(0, _apiPending - 1);
   if (_apiPending > 0) return;
   if (_apiBarTimer) { clearTimeout(_apiBarTimer); _apiBarTimer = null; }
   const bar = document.getElementById("globalLoadBar");
   if (bar) bar.classList.remove("on");
+  // 数据回来后面板会整块重建：补一次卡片化的表头标签（桌面端直接返回）
+  try { applyMobileCards(); } catch (_) { /* 纯展示逻辑，不能影响请求链 */ }
   // 这一屏的数据都回来了：把面板骨架屏收掉（内容早就在它下面布局好了，
   // 淡出时不会位移，所以不会有「抽搐」）。
   try { _panelSkeletonFlush(); } catch (e) { /* 骨架只是装饰，不能影响请求 */ }
@@ -350,7 +420,10 @@ async function _apiRaw(path, opts = {}) {
   // Prepare the non-expiring shell credential before the first request;
   // concurrent panel loads share one bridge call and never need a login form.
   if (localShell) await ensureLocalSession();
-  opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
+  // 凭证只走 HttpOnly Cookie。**不再**把令牌塞进 X-Admin-Token ——
+  // 那个头意味着令牌必须在 JS 里可读，等于把事故的根因留在原地。
+  opts.credentials = "same-origin";
+  opts.headers = Object.assign({}, opts.headers || {});
   // 平台作用域：**每个**后台请求都带上当前平台，后端据此收窄统计口径。
   // 只给账号池加平台筛选是不够的 —— 使用记录/日志/积分到期那些面板
   // 拿到的数据必须跟着平台走，否则平台一多就全是混算的数字。
@@ -371,9 +444,9 @@ async function _apiRaw(path, opts = {}) {
   }
   let response = await fetch(path, opts);
   if (response.status === 401 && localShell) {
+    // 本地 Cookie 可能因为重启服务/换设备而失效：重新向桥接换一次。
     try {
       await ensureLocalSession(true);
-      opts.headers['X-Admin-Token'] = TOKEN;
       response = await fetch(path, opts);
     } catch (_) {}
   }
@@ -544,6 +617,24 @@ async function clearInvitation() {
   $('#invitationInput').value = '';
   await saveInvitation();
 }
+/** 把接口错误收敛成一句人话。
+ *
+ * 反代 / 隧道挂掉时会返回整页 HTML（Cloudflare 502、nginx 500…），
+ * safeJson 解析失败会把整页 HTML 塞进 detail —— 用户看到的就是
+ * 一屏 "<!DOCTYPE html> …"，既看不懂也没法照着做。这里统一识别并截断。
+ */
+function apiErrText(data, status, fallback) {
+  let raw = (data && (data.detail ?? data.message ?? data.error)) || "";
+  if (typeof raw !== "string") {
+    try { raw = JSON.stringify(raw); } catch (_) { raw = ""; }
+  }
+  raw = String(raw).trim();
+  if (/^<!doctype|^<html|<\/html>|<head[\s>]|<body[\s>]/i.test(raw)) {
+    return `网关返回了非 JSON 页面（HTTP ${status || "?"}），请检查反向代理 / 隧道是否正常`;
+  }
+  return (raw || fallback || `HTTP ${status || "?"}`).slice(0, 160);
+}
+
 async function safeJson(r) {
   /* 容错解析：后端偶发返回非 JSON（如 500 明文）时，避免报 "Unexpected token" 崩溃 */
   const t = await r.text();
@@ -835,8 +926,9 @@ async function doLogin() {
       showErr(msg);
       return;
     }
-    const d = await r.json();
-    TOKEN = d.token; localStorage.setItem(TOKEN_KEY, TOKEN);
+    // 服务端只回 {"ok": true, ...} —— 令牌在 HttpOnly Cookie 里，JS 拿不到。
+    // 登录成功后直接进应用，不再有"把 token 存起来"这一步。
+    TOKEN = "";
     enterApp();
   } catch (e) {
     showErr("网络异常：" + (e && e.message ? e.message : e));
@@ -845,8 +937,12 @@ async function doLogin() {
   }
 }
 async function logout() {
-  try { await fetch("/api/login/logout", { method: "POST" }); } catch (e) {}
-  localStorage.removeItem(TOKEN_KEY); location.reload();
+  // **真实退出**：服务端把会话行置为 revoked，Cookie 由响应删除。
+  // 即便有人在退出前复制过 Cookie，那张票也已经不能再用了。
+  try { await fetch("/api/login/logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+  TOKEN = "";
+  // 回 /admin 由服务端判定：没有有效会话就只下发登录壳。
+  location.replace("/admin");
 }
 /**
  * 显示登录卡片。
@@ -2025,6 +2121,14 @@ async function loadGateway() {
   }
 }
 
+/** 只刷新右侧「当前调度顺序」——拖拽后调用，避免重绘左侧列表打断动画。 */
+async function loadGatewayOrderOnly() {
+  try {
+    const r = await api("/api/gateway/order");
+    if (r.ok) renderGatewayOrder((await r.json()).items || []);
+  } catch (_) { /* 顺序可视化失败不影响已经保存的优先级 */ }
+}
+
 function renderGatewayStrategies(cfg) {
   const host = $("#gwStrategies");
   if (!host) return;
@@ -2074,41 +2178,121 @@ function renderGatewayPlatforms(cfg, order) {
     return;
   }
 
-  host.innerHTML = items.map(item => {
+  // ---- 排序：**列表顺序就是调度顺序** -------------------------------------
+  // 以前这里是每行一个数字输入框（priority 越小越优先），既抽象又容易填错。
+  // 现在改成拖拽：拖完把 10/20/30… 写回 priority，后端语义不变。
+  const prioOf = (item, index) => Object.prototype.hasOwnProperty.call(priority, item.id)
+    ? (Number(priority[item.id]) || 0) : 1000 + index;
+  const sorted = items.map((item, index) => ({ item, p: prioOf(item, index) }))
+    .sort((a, b) => a.p - b.p || String(a.item.label).localeCompare(String(b.item.label), "zh"))
+    .map(x => x.item);
+
+  host.innerHTML = sorted.map(item => {
     const off = Object.prototype.hasOwnProperty.call(disabled, item.id);
-    const prio = Object.prototype.hasOwnProperty.call(priority, item.id)
-      ? priority[item.id] : "";
-    return `<div class="gw-platform-row${off ? " disabled" : ""}">
+    const pos = sorted.findIndex(x => x.id === item.id) + 1;
+    return `<div class="gw-platform-row${off ? " disabled" : ""}" draggable="true"
+        data-gw-row="${esc(item.id)}">
+      <span class="gw-drag" aria-hidden="true" data-tooltip="拖拽调整调度顺序"
+            data-tooltip-description="松手即保存。顺序决定平台之间的优先级，数字越小越先被调度。"></span>
       <span class="gw-platform-logo">${window.WBPlatformIcons ? WBPlatformIcons.get(item.id) : ""}</span>
       <span class="gw-platform-name">${esc(item.label)}</span>
-      <span class="gw-platform-rank">${off ? "已禁用" : (rank[item.id] ? "第 " + rank[item.id] + " 位" : "无可用账号")}</span>
-      <label class="gw-priority">优先级
-        <input type="number" min="0" max="9999" value="${esc(String(prio))}"
-               data-gw-priority="${esc(item.id)}" placeholder="100">
-      </label>
-      <button type="button" class="gw-toggle ${off ? "on" : ""}"
+      <span class="gw-platform-rank">${off ? "已禁用" : "第 " + pos + " 位"}</span>
+      <button type="button" class="gw-toggle ${off ? "on" : ""}" draggable="false"
               data-gw-toggle="${esc(item.id)}" data-gw-enabled="${off ? "1" : "0"}">
         ${off ? "启用" : "禁用"}
       </button>
     </div>`;
   }).join("");
 
-  // 优先级：失焦时保存（避免每敲一个键就发一次请求）
-  host.querySelectorAll("[data-gw-priority]").forEach(node => {
-    node.addEventListener("change", async () => {
-      const pid = node.dataset.gwPriority;
-      const value = node.value.trim();
-      const next = { ...(cfg.priority || {}) };
-      if (value === "") delete next[pid];
-      else next[pid] = Number(value) || 0;
-      const r = await api("/api/gateway/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ priority: next }),
+  // ---- 拖拽排序（FLIP 动画）----------------------------------------------
+  //
+  // 为什么不用现成的拖拽库：控制台没有打包器，引一个库就是一次额外的
+  // 网络请求 + 一套自己的样式体系；而这里只需要"同列表内换位"。
+  //
+  // 动画用 FLIP：先记下每行的位置 → 移动 DOM → 计算位移差 → 反向 transform
+  // 再过渡回 0。这样即使浏览器没有 View Transitions，换位也是连续移动，
+  // 不会"闪一下就跳过去"。
+  const rows = () => Array.from(host.querySelectorAll("[data-gw-row]"));
+  let dragRow = null, dragged = false;
+
+  function flip(mutate) {
+    const before = new Map(rows().map(r => [r, r.getBoundingClientRect()]));
+    mutate();
+    rows().forEach(r => {
+      const b = before.get(r);
+      if (!b) return;
+      const a = r.getBoundingClientRect();
+      const dy = b.top - a.top;
+      if (!dy) return;
+      r.style.transition = "none";
+      r.style.transform = `translateY(${dy}px)`;
+      requestAnimationFrame(() => {
+        r.style.transition = "transform .19s cubic-bezier(.2,.75,.3,1)";
+        r.style.transform = "";
       });
-      if (r.ok) { toast("优先级已保存"); loadGateway(); }
-      else toast("保存失败", "err");
     });
+  }
+
+  function updateRanks() {
+    rows().forEach((r, i) => {
+      const label = r.querySelector(".gw-platform-rank");
+      if (!label || r.classList.contains("disabled")) return;
+      label.textContent = "第 " + (i + 1) + " 位";
+    });
+  }
+
+  host.addEventListener("dragstart", e => {
+    const row = e.target.closest("[data-gw-row]");
+    if (!row) return;
+    dragRow = row;
+    dragged = true;
+    row.classList.add("dragging");
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", row.dataset.gwRow);
+    } catch (_) {}
+  });
+
+  host.addEventListener("dragover", e => {
+    if (!dragRow) return;
+    const over = e.target.closest("[data-gw-row]");
+    if (!over || over === dragRow) return;
+    e.preventDefault();
+    const rect = over.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    flip(() => {
+      if (after) over.after(dragRow);
+      else over.before(dragRow);
+    });
+  });
+
+  host.addEventListener("dragend", async () => {
+    if (!dragRow) return;
+    dragRow.classList.remove("dragging");
+    const row = dragRow;
+    dragRow = null;
+    if (!dragged) return;
+    dragged = false;
+    updateRanks();
+    // 松开即保存：整表重排成 10/20/30…，后端只认数字大小
+    const next = {};
+    rows().forEach((r, i) => { next[r.dataset.gwRow] = (i + 1) * 10; });
+    const r = await api("/api/gateway/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priority: next }),
+    });
+    if (r.ok) {
+      Object.assign(priority, next);
+      toast("调度顺序已保存");
+      // 顺序可视化（右侧"当前调度顺序"）跟着刷新，但**不重绘本列表**，
+      // 否则刚拖好的行会被整块替换，动画白做。
+      if (typeof loadGatewayOrderOnly === "function") loadGatewayOrderOnly();
+    } else {
+      toast("保存失败", "err");
+      loadGateway();
+    }
+    void row;
   });
 
   // 禁用 / 启用
@@ -2156,6 +2340,96 @@ function renderGatewayOrder(order) {
     </div>`).join("");
 }
 
+/* ==================== 自助注册入口（join 总闸） ====================
+ *
+ * 为什么放在平台页：/join 是 WorkBuddy 专属的自助注册页，和平台上下文强相关。
+ * 这里只做三件事：看状态、开/关、签发一次性链接。
+ * 语义提醒：每次 toggle 都会推进代次，之前发出去的链接与邀请码全部作废 ——
+ * 所以"关"不是"暂停"，是"全部重来"。
+ */
+let _joinGate = null;
+
+async function loadJoinGate() {
+  const card = $("#joinGateCard");
+  if (!card) return;
+  const cur = window.WBPlatform ? window.WBPlatform.current() : null;
+  const pid = (cur && cur.platform) || "";
+  if (pid && pid !== "workbuddy") { card.hidden = true; return; }
+  card.hidden = false;
+  try {
+    const r = await api("/api/join/gate/status");
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    _joinGate = data;
+    const open = !!data.open;
+    $("#joinGateDot").classList.toggle("on", open);
+    $("#joinGateLabel").textContent = open ? "已开启" : "未开启";
+    $("#joinGateMeta").textContent =
+      `代次 ${data.epoch} · 可用票据 ${data.active_tickets} · 有效邀请码 ${data.active_invites}`;
+    $("#joinGateHint").textContent = open
+      ? `链接 ${joinGateTtlText(data.ticket_ttl)} 内有效、可重复打开`
+      : "开启后才能签发访问链接";
+    // 只改文字节点，不要 textContent 整个按钮 —— 那会把里面的图标一起抹掉
+    const toggleText = $("#joinGateToggleText");
+    if (toggleText) toggleText.textContent = open ? "关闭入口" : "开启入口";
+    $("#joinGateToggle").className = "console-btn" + (open ? "" : " primary");
+    $("#joinGateLink").disabled = !open;
+  } catch (e) {
+    $("#joinGateHint").textContent = "状态读取失败：" + (e.message || e);
+  }
+}
+
+async function joinGateToggle() {
+  const open = !!(_joinGate && _joinGate.open);
+  const yes = await uiConfirm({
+    title: open ? "关闭自助注册入口" : "开启自助注册入口",
+    message: open
+      ? "关闭后 /join 立即 404；此前签发的**全部**访问链接与邀请码同时失效，且无法恢复。"
+      : "开启后即可签发给朋友的一次性链接。每次开关都会推进代次，旧链接一律作废。",
+    okText: open ? "关闭" : "开启",
+  });
+  if (!yes) return;
+  const r = await api("/api/join/gate/toggle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enable: !open }),
+  });
+  const { ok } = await safeJson(r);
+  if (ok) { toast(open ? "入口已关闭，旧链接全部失效" : "入口已开启，可生成链接"); loadJoinGate(); }
+  else toast("操作失败", "err");
+}
+
+/** 票据 TTL → 人话（>=1 天按天，>=1 小时按小时）。 */
+function joinGateTtlText(seconds) {
+  const n = Number(seconds) || 0;
+  if (n >= 86400) return Math.round(n / 86400) + " 天";
+  if (n >= 3600) return Math.round(n / 3600) + " 小时";
+  return Math.max(1, Math.round(n / 60)) + " 分钟";
+}
+
+async function joinGateMakeLink() {
+  const r = await api("/api/join/gate/tickets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ count: 1 }),
+  });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast("签发失败", "err"); return; }
+  const url = (data.urls || [])[0] || "";
+  if (!url) { toast("签发失败：空链接", "err"); return; }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast(`链接已复制，${joinGateTtlText(_joinGate && _joinGate.ticket_ttl)} 内有效`);
+  } catch (_) {
+    // 剪贴板被拒（非 https / 无权限）时退化为弹窗展示，不能把链接弄丢
+    showModal(`<div class="text-sm" style="color:var(--fg-muted)">复制下面的链接发给对方：</div>
+      <textarea readonly class="w-full mt-2" rows="3" onclick="this.select()">${esc(url)}</textarea>
+      <div class="flex justify-end mt-2"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`,
+      "max-w-lg");
+  }
+  loadJoinGate();
+}
+
 async function loadPlatformOverview() {
   // 平台概览卡片：**完全由平台自己声明**，前端只负责渲染。
   //
@@ -2165,6 +2439,7 @@ async function loadPlatformOverview() {
   // 加载对应网关 → 渲染卡片 → 平台增删自动反映，互不影响。
   const host = $("#platformOverview");
   if (!host || !window.WBPlatform) return;
+  loadJoinGate();
   const cur = window.WBPlatform.current();
   const spec = window.WBPlatform.spec() || {};
   const platformId = cur.platform || spec.id || "";
@@ -2263,7 +2538,7 @@ document.addEventListener("wb-platform-change", () => {
   // 而它又是默认首页 —— 漏了这条就会出现「切了平台，概览还是上一个平台的数」，
   // 用户会以为有缓存（数据其实一直是各自平台的新数据，只是没重取）。
   if (active === "overview") loadOverview(true);
-  if (active === "platforms") { loadPlatformOverview(); loadPlatformBench(); }
+  if (active === "platforms") { loadPlatformOverview(); loadPlatformBench(); loadJoinGate(); }
   if (active === "accounts") loadAccounts();
   if (active === "usage") loadUsageStats();
   if (active === "logs") openLogsPanel();
@@ -2344,9 +2619,28 @@ window.addEventListener("resize", () => {
 // Esc 关闭抽屉（与关闭弹窗同键，行为一致）
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeSideMenu();
+
+/* 横竖屏切换 / 拖窗口宽度跨过 640px 时补一次卡片化 */
+let _cardsResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_cardsResizeTimer);
+  _cardsResizeTimer = setTimeout(() => { try { applyMobileCards(); } catch (_) {} }, 160);
+});
 });
 
-function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+/* HTML 文本/属性转义。
+ *
+ * 2026-11-05 补上单引号与反引号：原实现只转 `& < > "`，而事故里的注入点
+ * 正是 `onclick="fn('${esc(name)}')"` —— 属性值先被 HTML 解码、再交给 JS
+ * 解析，昵称里一个 `'` 就能闭合参数位。现在 esc 自己也不再漏这两个字符，
+ * 任何"历史写法"即使没改成 jsv() 也不会立刻变成 RCE。
+ * （正解仍是 jsv()：见下。）
+ */
+function esc(s){
+  return (s==null?"":String(s)).replace(/[&<>"'`]/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","`":"&#96;"
+  }[c]));
+}
 /* 把任意值安全地嵌进「内联 onclick 里的 JS 参数位」。
  *
  * 为什么不能直接用 esc()：esc 只做 HTML 实体转义（& < > "），
@@ -2506,6 +2800,8 @@ function fmtCreditExact(n) {
 function expiryBadge(daysLeft, expired, expiringSoon) {
   if (expired) return `<span class="exp-badge dead"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg></span>已到期</span>`;
   if (daysLeft == null) return `<span class="exp-badge ever">长期有效</span>`;
+  // 时间戳解析失败（NaN）时宁可留空，也不能渲染出"NaN 天后"这种字样。
+  if (!Number.isFinite(Number(daysLeft))) return "";
   const txt = daysLeft < 1 ? `${Math.max(1, Math.round(daysLeft * 24))} 小时内`
                            : `${Math.floor(daysLeft)} 天后`;
   return `<span class="exp-badge ${expiringSoon ? 'soon' : 'ever'}">${
@@ -3038,6 +3334,11 @@ const ACC_GROUP_LABELS = {
   data: "数据", danger: "危险操作",
 };
 
+/** 企业版账号：落库的 enterprise_id 非空（与后端/官方客户端同一判据）。 */
+function isEnterpriseAccount(a) {
+  return !!(a && String(a.enterprise_id || '').trim());
+}
+
 function accOpsHtml(a, ops) {
   // 条目形状：[onclick, icon, tooltip, group]
   const primary = [];
@@ -3201,7 +3502,10 @@ function accRow(a) {
   // 点开就是一个永远报错的空面板 —— 所以按账号平台过滤。
   const accStorage = String(a.platform || (window.WBPlatform
     ? (window.WBPlatform.current() || {}).platform : "") || "").toLowerCase();
-  if (!accStorage || accStorage === "workbuddy" || accStorage === "codebuddy") {
+  // 企业版没有签到 / 成长任务 / 猫猫旅行（官方企业版也没有这些入口），
+  // 摆出来只会点开一个必然失败的弹窗。
+  if (!isEnterpriseAccount(a)
+      && (!accStorage || accStorage === "workbuddy" || accStorage === "codebuddy")) {
     ops.push([`growthTasks(${a.id},${jsv(a.name||'')})`, "fa-seedling", "成长任务", "grow"]);
     ops.push([`catTravel(${a.id})`, "fa-cat", "猫猫旅行", "grow"]);
   }
@@ -3227,6 +3531,7 @@ function accRow(a) {
       <div class="nm">
         <b data-tooltip="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
         <span class="c-uid" data-tooltip="账号 UID" data-tooltip-description="${esc(a.uid || '（该账号未提供 UID）')}">${esc(a.uid || "-")}</span>
+        ${isEnterpriseAccount(a) ? `<small class="tag-enterprise" data-tooltip="企业版账号" data-tooltip-description="额度按企业周期计算（${esc(a.enterprise_id)}）；没有签到 / 成长任务">企业版</small>` : ''}
         ${tokenBadge(a)}
         ${a.bound_key_id ? `<small class="text-indigo-600">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</small>` : ''}
         ${a.post_login_automation ? `<small style="color:var(--fg-muted)" data-tooltip="登录后自动任务" data-tooltip-description="${esc((a.post_login_automation.result?.errors || []).join('；') || '由账号登录后自动排队的收尾任务（余额、模型、权益同步）')}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
@@ -3237,7 +3542,7 @@ function accRow(a) {
     <td class="col-status" data-label="状态">${badge(a.status)}</td>
     <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${fmtInt(a.balance_total)}</td>
     <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}">${fmtInt(a.balance_remain)}</td>
-    <td class="col-expiry" data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
+    <td class="col-expiry" data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.enterprise ? '企业版周期' : a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
     ${accCreatedCell(a)}
     <td class="c-ops" data-label="操作">${accOpsHtml(a, ops)}</td>
   </tr>`;
@@ -3433,8 +3738,9 @@ async function loadAccounts() {
   const d = await r.json();
   const s = d.summary;
   const soon = Number(s.credits_expiring_soon || 0);
-  const soonest = s.soonest_expire_at
-    ? expiryBadge((s.soonest_expire_at - Date.now()) / 86400000, false, true) : "";
+  const soonestMs = toMs(s.soonest_expire_at);
+  const soonest = Number.isFinite(soonestMs)
+    ? expiryBadge((soonestMs - Date.now()) / 86400000, false, true) : "";
   $("#overview").innerHTML = `
     ${statCard("账号总数", s.total, { icon:"fa-users", iconColor:"text-slate-400",
         sub: `启用 ${s.active} · 可用 ${s.available}`
@@ -4226,6 +4532,29 @@ document.addEventListener("wb-platform-change", function () {
   try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake] 渲染平台登录入口失败", e); }
 });
 
+/** 账号池页头的平台下拉：选择即切换全局平台上下文（与点平台卡片等效）。 */
+function renderAccPlatformSwitch() {
+  const host = document.getElementById("accPlatformSwitch");
+  if (!host) return;
+  const items = (window.WBPlatform && window.WBPlatform.list()) || [];
+  if (!items.length) { host.innerHTML = ""; return; }
+  const cur = (window.WBPlatform && window.WBPlatform.current()) || {};
+  const options = items.map(it => ({ value: it.id, label: it.label || it.id }));
+  host.innerHTML = uiSelectHTML("accPlatformSel", {
+    value: cur.platform || (options[0] && options[0].value),
+    options,
+    class: "acc-platform-select-btn",
+    onChange: (v) => {
+      if (window.WBPlatform && v && v !== window.WBPlatform.current().platform) {
+        window.WBPlatform.select(v);
+      }
+    },
+  });
+}
+document.addEventListener("wb-platform-change", function () {
+  try { renderAccPlatformSwitch(); } catch (e) { console.warn("[acc] 渲染平台下拉失败", e); }
+});
+
 /**
  * 用量明细。
  *
@@ -4799,7 +5128,7 @@ async function platformBeginAuth(spec, storage) {
                           { method: "POST" });
   const { ok, data } = await safeJson(start);
   if (!ok) {
-    toast(`发起授权失败：${(data && data.detail) || start.status}`, "err");
+    toast(`发起授权失败：${apiErrText(data, start.status, "请稍后重试")}`, "err");
     return;
   }
   const authUrl = data.auth_url || "";
@@ -5101,6 +5430,251 @@ async function platformExportDownload(base, mode, storage) {
   }
 }
 
+/* ==========================================================================
+   全平台批量操作（平台管理页头的「全部平台」按钮组）
+   --------------------------------------------------------------------------
+   用户痛点：每扫/导出一个平台都要「切平台 → 点账号池动作 → 再切回来」，
+   8 个平台就是 8 趟。这里把高频动作提升为「全部平台」一键：
+     · 一键扫描全部平台并入库（platformScanAll）
+     · 导出全部平台（platformExportAll → 单文件，含各平台自己的备份格式）
+     · 导入全部平台（platformImportAll → 读上面的导出文件，逐平台走
+       import-async 后台任务）
+   ========================================================================== */
+
+/** 一键扫描全部平台并把扫到的凭证入库。逐平台串行执行，结果汇总成表。 */
+async function platformScanAll(btn) {
+  const specs = (window.WBPlatform && window.WBPlatform.list()) || [];
+  if (!specs.length) { toast("平台清单还没加载好，请稍后再试", "err"); return; }
+  const restore = btnBusy(btn, "扫描中");
+  const rows = [];
+  try {
+    for (const spec of specs) {
+      const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+      const row = { label: spec.label || storage, scanned: 0, imported: 0,
+                    skipped: 0, note: "" };
+      rows.push(row);
+      try {
+        if (storage === "workbuddy" || storage === "codebuddy") {
+          // WorkBuddy：/import-local {all:true} 本身就是「扫描本机登录目录 +
+          // 全部入库」一步完成，不用再单独调 scan-local。
+          const r = await api("/api/accounts/import-local", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ all: true }),
+          });
+          // safeJson 返回 {ok,status,data}，data 才是响应体
+          const { ok, data: d } = await safeJson(r);
+          if (!ok) row.note = (d && d.detail) || ("HTTP " + r.status);
+          else {
+            row.imported = d.added || 0;
+            row.skipped = d.skipped || 0;
+            if (d.exists === false) row.note = "本机没有登录目录";
+            else if (!row.imported && !row.skipped) row.note = "本机没有新凭证";
+          }
+        } else if (storage === "qoder") {
+          // Qoder 凭证加密在原生层（扫描不含 token）：不能静默入库，
+          // 只报告发现数量，导入仍走「授权登录」。
+          const r = await api("/api/qoder/scan-local", platformActionOptions(spec));
+          const { ok, data: d } = await safeJson(r);
+          if (!ok) row.note = "扫描失败（HTTP " + r.status + "）";
+          else {
+            row.scanned = (d.items || []).length;
+            row.note = row.scanned
+              ? "发现 " + row.scanned + " 个本机登录，请用「授权登录」逐个导入"
+              : "本机没有 Qoder 登录";
+          }
+        } else {
+          const realm = spec.realm || "";
+          const qs = realm ? "?realm=" + encodeURIComponent(realm) : "";
+          const prefix = platformApiPrefix(spec, storage);
+          const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
+          const { ok, data: d } = await safeJson(r);
+          if (!ok) { row.note = "扫描失败（HTTP " + r.status + "）"; continue; }
+          const items = d.items || [];
+          row.scanned = items.length;
+          if (!items.length) { row.note = "本机没有可读凭证"; continue; }
+          // uid 必须取完整值（uid_full）：脱敏展示值后端匹配不上（实测坑）。
+          const uids = items
+            .map(it => it.uid_full || it.userid || it.uid || it.account_id || it.uid_hint)
+            .filter(Boolean);
+          const r2 = await api(prefix + "/import-local" + qs, platformActionOptions(spec, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(uids.length ? { uids, all: false } : { all: true }),
+          }));
+          const { ok: ok2, data: d2 } = await safeJson(r2);
+          if (!ok2) row.note = "入库失败：" + ((d2 && d2.detail) || ("HTTP " + r2.status));
+          else {
+            row.imported = d2.imported || 0;
+            row.skipped = d2.skipped || 0;
+            if (!row.imported && !row.skipped) {
+              row.note = d2.hint || d2.reason || "没有可导入凭证";
+            }
+          }
+        }
+      } catch (e) {
+        row.note = "异常：" + ((e && e.message) || e);
+      }
+    }
+  } finally {
+    restore();
+  }
+  const totalImported = rows.reduce((s2, r2) => s2 + r2.imported, 0);
+  const table = `<table class="w-full text-sm border-collapse">
+    <thead><tr class="text-left text-slate-500">
+      <th class="py-1.5 pr-2 font-medium">平台</th>
+      <th class="py-1.5 pr-2 font-medium text-right">扫描</th>
+      <th class="py-1.5 pr-2 font-medium text-right">入库</th>
+      <th class="py-1.5 pr-2 font-medium text-right">跳过</th>
+      <th class="py-1.5 font-medium">说明</th>
+    </tr></thead>
+    <tbody>${rows.map(r => `<tr class="border-t">
+      <td class="py-1.5 pr-2 whitespace-nowrap">${esc(r.label)}</td>
+      <td class="py-1.5 pr-2 text-right tnum">${r.scanned || "—"}</td>
+      <td class="py-1.5 pr-2 text-right tnum">${r.imported ? `<b class="text-emerald-600">${r.imported}</b>` : "0"}</td>
+      <td class="py-1.5 pr-2 text-right tnum">${r.skipped || "—"}</td>
+      <td class="py-1.5 text-xs" style="color:var(--fg-muted)">${esc(r.note || "")}</td>
+    </tr>`).join("")}</tbody></table>`;
+  openModal(`<h3 class="font-bold mb-1">一键扫描全部平台 · 结果</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">共入库 ${totalImported} 个账号；已导入的平台其定时任务（签到/保活）会自动补建。</p>
+    ${table}
+    <div class="flex justify-end mt-3"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
+  // 入库结果立刻反映到平台卡片数字与账号列表
+  if (window.WBPlatform) window.WBPlatform.refreshCounts();
+  loadAccounts();
+}
+
+/** 导出全部平台：单文件包含所有平台的备份（或脱敏清单）。 */
+function platformExportAll() {
+  openModal(`<h3 class="font-semibold text-lg mb-1">导出全部平台</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      把所有平台的账号合并导出一个 JSON。「备份」含明文凭证，可用
+      「导入全部平台」原样回灌；「清单」已脱敏，仅用于核对，不能回灌。</p>
+    <div class="flex gap-2 justify-end mt-3">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button onclick="platformExportAllDownload('plain')"
+        class="px-3 py-1.5 rounded-lg border text-sm">导出清单（脱敏）</button>
+      <button onclick="platformExportAllDownload('backup')"
+        class="px-3 py-1.5 rounded-lg btn-primary">导出备份（含凭证）</button>
+    </div>`, "max-w-md");
+}
+
+async function platformExportAllDownload(mode) {
+  try {
+    const r = await api("/api/platforms/export-all?mode=" + encodeURIComponent(mode));
+    const { ok, data: d } = await safeJson(r);
+    if (!ok) { toast("导出失败：" + ((d && d.detail) || r.status), "err"); return; }
+    const platforms = (d && d.platforms) || {};
+    const count = Object.values(platforms).reduce((s2, p2) => s2 + (p2.count || 0), 0);
+    await downloadText(
+      `miraihub-all-platforms-${mode === "plain" ? "plain" : "backup"}-${exportStamp()}.json`,
+      JSON.stringify(d, null, 2), "application/json");
+    toast(`已导出 ${count} 个账号（${Object.keys(platforms).length} 个平台）`, "ok");
+    closeModal();
+  } catch (error) {
+    toast("导出异常：" + ((error && error.message) || error), "err");
+  }
+}
+
+/** 导入全部平台：读取「导出全部平台」的文件，逐平台提交后台导入任务。 */
+function platformImportAll() {
+  openModal(`<h3 class="font-semibold text-lg mb-1">导入全部平台</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-muted)">
+      选择「导出全部平台」生成的 JSON 文件（format=miraihub-all-platforms）。
+      每个平台的账号都会走各自的后台导入任务，可切到其它页面等结果。</p>
+    <input id="impAllFile" type="file" multiple class="upload-file-input" aria-label="选择全平台备份文件" />
+    <div id="impAllResult" class="upload-result hidden" role="status" aria-live="polite"></div>
+    <div class="flex justify-end gap-2 mt-3">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button id="impAllGo" class="px-3 py-1.5 rounded-lg btn-primary">开始导入</button>
+    </div>`, "max-w-xl");
+  $("#impAllGo")?.addEventListener("click", platformImportAllRun);
+}
+
+async function platformImportAllRun() {
+  const go = $("#impAllGo");
+  const result = $("#impAllResult");
+  const show = (m) => { if (result) { result.textContent = m; result.classList.remove("hidden"); } };
+  const files = $("#impAllFile")?.files;
+  if (!files || !files.length) { toast("请先选择备份文件", "err"); return; }
+  // 解析所有文件，聚合出 {storage: accounts[]}（兼容一文件多平台 / 多文件）
+  const byPlatform = {};
+  for (const f of files) {
+    try {
+      const text = await readCredentialFile(f);
+      const obj = JSON.parse((text || "").replace(/^\uFEFF/, "").trim());
+      const platforms = (obj && obj.platforms) || null;
+      if (!platforms) { show(`文件 ${f.name} 不是「导出全部平台」的格式（缺 platforms 字段），已跳过`); continue; }
+      for (const [storage, pack] of Object.entries(platforms)) {
+        const accounts = (pack && pack.accounts) || [];
+        if (!accounts.length) continue;
+        (byPlatform[storage] = byPlatform[storage] || []).push(...accounts);
+      }
+    } catch (e) {
+      show(`文件 ${f.name} 解析失败：` + ((e && e.message) || e));
+    }
+  }
+  const storages = Object.keys(byPlatform).filter(k => byPlatform[k].length);
+  if (!storages.length) { toast("没有解析出任何平台账号", "err"); return; }
+  if (go) { go.disabled = true; go.textContent = "提交中…"; }
+  const jobs = [];
+  try {
+    for (const storage of storages) {
+      const accounts = byPlatform[storage];
+      // 与单平台导入同一分发规则：WB/codebuddy 走 items（auth_json 结构），
+      // 其它平台走 text（JSONL 原文交平台自己的 import_batch）。
+      const isWb = storage === "workbuddy" || storage === "codebuddy";
+      const payload = isWb
+        ? { storage, verify: true,
+            items: accounts.map(x => ({
+              name: typeof x.name === "string" ? x.name : "",
+              auth_json: JSON.stringify(x),
+            })) }
+        : { storage, text: accounts.map(x => JSON.stringify(x)).join("\n") };
+      const r = await api("/api/accounts/import-async", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      // /api/accounts/import-async 返回 job.snapshot()：有 job_id，没有 ok 字段
+      const { ok, data: d } = await safeJson(r);
+      if (!ok || !(d && d.job_id)) {
+        show(`平台 ${storage} 提交失败：` + ((d && d.detail) || ("HTTP " + r.status)));
+        continue;
+      }
+      jobs.push({ storage, job_id: d.job_id });
+    }
+  } finally {
+    if (go) { go.disabled = false; go.textContent = "开始导入"; }
+  }
+  if (!jobs.length) return;
+  closeModal();
+  toast(`已提交 ${jobs.length} 个平台的后台导入，完成后自动刷新`, "ok");
+  pollPlatformImportJobs(jobs);
+}
+
+/** 轮询全平台导入任务，全部结束后汇总并刷新面板（卡片数字 + 账号列表）。 */
+function pollPlatformImportJobs(jobs) {
+  const pending = new Map(jobs.map(j => [j.job_id, j]));
+  const timer = setInterval(async () => {
+    if (!pending.size) { clearInterval(timer); return; }
+    for (const [jobId, job] of Array.from(pending)) {
+      try {
+        const r = await api("/api/accounts/job/" + encodeURIComponent(jobId));
+        const { ok, data: cur } = await safeJson(r);
+        if (!ok || !cur) continue;
+        if (cur.status === "running") continue;
+        pending.delete(jobId);
+        const res = cur.result || {};
+        if (cur.status === "failed") toast(`${job.storage} 导入失败：${cur.error || "未知错误"}`, "err");
+        else toast(`${job.storage} 导入完成：新增 ${res.added || 0} 个`, "ok");
+      } catch (e) { /* 单次查询失败下轮再试 */ }
+    }
+    if (!pending.size) {
+      clearInterval(timer);
+      if (window.WBPlatform) window.WBPlatform.refreshCounts();
+      loadAccounts();
+    }
+  }, 2000);
+}
+
 async function platformImportConfirm(spec, storage, uids) {
   const path = platformImportPath(spec, storage);
   const id = String((spec && (spec.storage_platform || spec.id)) || storage || "").toLowerCase();
@@ -5120,6 +5694,7 @@ async function platformImportConfirm(spec, storage, uids) {
   if (data.imported > 0) {
     toast(`已导入 ${data.imported} 个账号`);
     loadAccounts();
+    if (window.WBPlatform) window.WBPlatform.refreshCounts();
     return;
   }
   // 导入 0 个要**说清原因**，不要静默
@@ -6777,6 +7352,7 @@ async function importOne(file){
     toast(d.skipped ? `该账号已在号池，已跳过` : `已导入 ${d.added||0} 个`,
           d.skipped ? "err" : "ok");
     closeModal(); loadAccounts();
+    if (window.WBPlatform) window.WBPlatform.refreshCounts();
   }
   else toast("导入失败","err");
 }
@@ -6789,6 +7365,7 @@ async function importAll(){
     if(d.errors && d.errors.length) parts.push(`${d.errors.length} 个失败`);
     toast(parts.join("，"));
     closeModal(); loadAccounts();
+    if (window.WBPlatform) window.WBPlatform.refreshCounts();
   }
   else toast("导入失败","err");
   if(d.errors) console.warn(d.errors);
@@ -7703,6 +8280,9 @@ async function submitUpload(){
       toast(message.split("\n")[0],
             (d.status === "failed" || (d.result && (d.result.failed || d.result.errors?.length))) ? "err" : "ok");
       loadAccounts();
+      // 平台卡片上的账号数来自 /api/platforms 缓存，导入完成必须重拉，
+      // 否则「导进去了数字不变」（底部面板数据不刷新的主因之一）。
+      if (window.WBPlatform) window.WBPlatform.refreshCounts();
     },
   }).catch(e => {
     showResult("导入请求失败，请检查服务连接后重试。");
@@ -10068,8 +10648,8 @@ async function renderClientPathCard(storage){
       <div style="margin-top:6px;font-size:11px;color:var(--fg-subtle)">目录名固定，系统会自动在所有盘符与父文件夹中定位；只有自定义布局才需要填写。留空即回到自动发现。</div>
       ${rows}
       <div style="margin-top:6px;display:flex;gap:6px">
-        <button class="console-btn" onclick="saveClientPathOverride('${esc(storage)}')">保存并重新探测</button>
-        <button class="console-btn quiet" onclick="clearClientPathOverride('${esc(storage)}')">清除</button>
+        <button class="console-btn" onclick="saveClientPathOverride(${jsv(storage)})">保存并重新探测</button>
+        <button class="console-btn quiet" onclick="clearClientPathOverride(${jsv(storage)})">清除</button>
       </div>
     </details>`);
 }
@@ -10509,7 +11089,12 @@ async function sentinelInitTraffic(force) {
   fillTrafficNodeIcons(_wbtSentinelTopology, "s-");
   await sentinelPollLogs();
   if (_wbtSentinelTimer) clearInterval(_wbtSentinelTimer);
-  _wbtSentinelTimer = setInterval(sentinelPollLogs, 2000);
+  // 4 秒一次（原来 2 秒）。服务端已有 2 秒合并缓存，前端再密也只是排队。
+  _wbtSentinelTimer = setInterval(() => {
+    if (document.hidden) return;                       // 切到别的窗口就别打了
+    if (document.documentElement.dataset.activeTab !== "gateway") return;
+    sentinelPollLogs();
+  }, 4000);
 }
 
 /** 标题里的平台标识（复用于粒子归因）。 */
@@ -11987,12 +12572,15 @@ function startLogLive() {
   const host = $("#logLiveRecent");
   if (host) host.innerHTML = '<p class="sentinel-empty" style="padding:10px 2px">正在连接实时通道…</p>';
 
-  if (typeof EventSource === "undefined" || !TOKEN) {
-    // 兜底：没有 EventSource 就退回轮询（频率低于原来，减少空转）
+  // 注意：**不能**再判断 `!TOKEN`。令牌移进 HttpOnly Cookie 之后 TOKEN 恒为空，
+  // 加了这一条会让所有现代浏览器都退化成 3 秒轮询 —— 正是"这个接口一直在轮询"
+  // 的根因（SSE 端点用同源 Cookie 鉴权，不需要任何 JS 可读的票据）。
+  if (typeof EventSource === "undefined") {
+    // 兜底：极老的 WebView 没有 EventSource 才轮询，且频率降到 5 秒
     let timer = null;
     const tick = async () => {
       if (document.hidden || document.documentElement.dataset.activeTab !== "logs") {
-        timer = setTimeout(tick, 3000); return;
+        timer = setTimeout(tick, 5000); return;
       }
       try {
         const r = await api("/api/sentinel/traffic?window=3600");
@@ -12003,7 +12591,7 @@ function startLogLive() {
           _logLiveRender(_logLiveMerge([], []), Number(data.running || 0));
         }
       } catch (e) { /* 下一拍再试 */ }
-      timer = setTimeout(tick, 3000);
+      timer = setTimeout(tick, 5000);
     };
     tick();
     _logLiveSource = { close: () => clearTimeout(timer) };
@@ -13662,10 +14250,9 @@ if (!_localConsoleShell) {
   api("/api/accounts/probe").then(r => {
     if (r.ok) { if (!_booted()) enterApp(); return; }
     if (r.status === 401 || r.status === 403) {
-      // token 和 Cookie **都**失效才会走到这里（`require_admin` 两个都认）。
-      // 删掉本地 token 让页面回到干净状态，再刷新由服务端下发登录壳页。
-      if (TOKEN) logout();
-      else showLoginCard();
+      // Cookie 失效（过期 / 被新登录顶掉 / 设备绑定不匹配）。
+      // 不再需要清本地令牌 —— 本地根本没有令牌可清。
+      showLoginCard();
       return;
     }
     // 其它状态：先进应用，由各面板自己提示错误

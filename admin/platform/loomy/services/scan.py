@@ -66,11 +66,15 @@ def mask(value: str, keep: int = 4) -> str:
 
 
 def user_hash() -> str:
-    """`sha256(username)[:12]` —— 与客户端算法一致。"""
-    try:
-        username = os.environ.get("USERNAME") or os.getlogin()
-    except Exception:  # noqa: BLE001
-        username = ""
+    """`sha256(username)[:12]` —— 与客户端算法一致。
+
+    同样不能用 `os.getlogin()`：Linux 服务没有控制终端会抛 errno 6。
+    原实现捕获异常后回落到空串，导致 user_hash 恒等于 sha256("")，
+    扫描定位到的配置路径不对；改用与 Qoder 同一套无终端依赖的取法。
+    """
+    from admin.platform import host_identity
+
+    username = host_identity.current_username()
     return hashlib.sha256(username.encode()).hexdigest()[:12]
 
 

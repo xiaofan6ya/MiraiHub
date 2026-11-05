@@ -56,9 +56,16 @@ _JOB_KEY = "unpack_source"
 
 
 def _guard() -> None:
-    """开发工具开关：关掉时整个路由器不可用。"""
+    """开发工具开关：关掉时整个路由器不可用。
+
+    第三道闸（前两道：生产不 include_router、中间件按前缀 404）：
+    即便有人把路由挂回来了，只要 `fs_ops_allowed()` 为假就一律 404。
+    """
     if not getattr(settings, "DEV_TOOLS", True):
-        raise HTTPException(status_code=404, detail="逆向产物工具已在配置中关闭")
+        raise HTTPException(status_code=404, detail="Not Found")
+    from admin import env_guard
+    if not env_guard.fs_ops_allowed():
+        raise HTTPException(status_code=404, detail="Not Found")
 
 
 def _wb():

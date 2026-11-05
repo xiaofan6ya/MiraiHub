@@ -230,7 +230,18 @@ def _resolve_host_port(args) -> tuple[str, int]:
     #   会报 `error sending request for url (http://127.0.0.1:8790/...)`。
     #   `::` 在 Windows/Linux 上默认双栈，同时接受 IPv4 与 IPv6。
     #   想只绑 IPv4 时显式传 `--host 0.0.0.0` 即可。
-    host = args.host if args.host is not None else os.getenv("ADMIN_HOST", "::")
+    #
+    # **生产例外**：APP_ENV=prod 时默认只绑 127.0.0.1，并拒绝任何非回环地址。
+    # 8790 直连公网意味着 nginx 上那套 TLS / 限流 / IP 封禁全部失效，
+    # 攻击者可以绕过反代直接打应用层（事故报告 R9）。
+    app_env = (os.getenv("APP_ENV", "dev") or "dev").strip().lower()
+    is_prod = app_env == "prod"
+    default_host = "127.0.0.1" if is_prod else "::"
+    host = args.host if args.host is not None else os.getenv("ADMIN_HOST", default_host)
+    if is_prod and host not in ("127.0.0.1", "::1", "localhost"):
+        raise SystemExit(
+            f"[main] APP_ENV=prod 时 ADMIN_HOST 必须是回环地址（当前 {host}）。"
+            "生产只允许 nginx 反代进来。")
     if args.port is not None:
         port = int(args.port)
     else:

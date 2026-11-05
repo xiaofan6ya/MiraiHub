@@ -3,6 +3,8 @@ window.WBGrowthCenter = (() => {
   const e = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const n = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
   let accounts = [], selected = null, data = null, generation = 0, timer = null, pollDeadline = 0;
+  /* 被隐藏的企业版账号数：只用来把空态说清楚，避免「号没了」的误解 */
+  let excludedEnterprise = 0;
   let records = [], recordsMore = false, recordsBefore = null, modalVersion = 0, busy = false;
   const colors = ['var(--gc-heat-0)','var(--gc-heat-1)','var(--gc-heat-2)','var(--gc-heat-3)','var(--gc-heat-4)'];
   const section = key => data?.snapshot?.sections?.[key]?.data || {};
@@ -49,7 +51,12 @@ window.WBGrowthCenter = (() => {
   }
   function render() {
     if (!root()) return;
-    if (!accounts.length) { root().innerHTML=header()+'<div class="gc-card gc-empty">暂无账号。先到账号池通过手机号或授权页面添加账号。</div>'; return; }
+    if (!accounts.length) {
+      const hint = excludedEnterprise
+        ? `企业版账号没有成长任务，已隐藏 ${excludedEnterprise} 个。导入个人版账号后这里会出现内容。`
+        : '暂无账号。先到账号池通过手机号或授权页面添加账号。';
+      root().innerHTML=header()+'<div class="gc-card gc-empty">'+hint+'</div>'; return;
+    }
     if (!data) { root().innerHTML=header()+'<div class="gc-skeleton"></div>'; return; }
     const s=section('streak'), h=section('heatmap'), energy=section('energy'), quota=section('quota'), buddy=section('buddy').buddy;
     const travel=section('travel'), lottery=section('lottery'), profile=section('profile'), checkin=section('checkin');
@@ -78,7 +85,9 @@ window.WBGrowthCenter = (() => {
   async function enter() {
     const g=++generation; clearTimeout(timer);
     try {
-      accounts=(await request('/api/growth-center/accounts')).items||[];
+      const payload = await request('/api/growth-center/accounts');
+      accounts=payload.items||[];
+      excludedEnterprise=Number(payload.excluded_enterprise)||0;
       if(g!==generation) return;
       if(!accounts.some(a=>a.id===selected)) selected=accounts[0]?.id||null;
       render(); if(selected) await select(selected);

@@ -174,3 +174,8 @@ RELEASE-*.md
 
 # ===== 本地备份目录（改代码前的快照，勿入库） =====
 _backup_*/
+
+# 本地测试虚拟环境（依赖可复现安装，不入库）
+_testenv/
+# 运行时生成的主机标识（与机器绑定，不应入库；用 QODER_MACHINE_ID 显式指定）
+admin/data/qoder_machine_id*

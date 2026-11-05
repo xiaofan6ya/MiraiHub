@@ -20,8 +20,8 @@
   transition:border-color .15s ease,box-shadow .15s ease;
 }
 .settings-field input:focus {
-  border-color:var(--brand);
-  box-shadow:0 0 0 3px var(--brand-soft);
+  /* 输入框聚焦不描边（用户要求）：只用轻阴影反馈 */
+  box-shadow:0 1px 5px rgba(15,23,42,.12);
   outline:none;
 }
 .settings-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; min-height:36px; }
@@ -33,14 +33,17 @@
   .settings-section > h3 { padding-top:0; }
   .settings-fields { gap:18px; }
 }
-/* 浅色页面底色：官方软底 #f2fcfa 水洗 + 三处薄荷光斑（比首版更克制）。
-   深色回落石墨纯色底。 */
+/* 浅色页面底色：极淡的品牌蓝水洗 + 两处同色相光斑。
+   ----------------------------------------------------------------------------
+   原来这里铺的是**薄荷绿**（rgba(0,146,115,.10) / #f2fcfa）—— 那是青绿主题
+   时代的残留。主色换成蓝之后，绿色光斑会和蓝色按钮、蓝色选中态同屏打架，
+   整页看着"发脏、串色"。现在光斑与主色同色相（--brand-rgb），只做明度层次，
+   不再引入第二个色相。深色保持纯色底（层级已经由 surface 阶梯表达）。 */
 body {
   background:
-    radial-gradient(620px 420px at 88% -6%, rgba(0,146,115,.10), transparent 65%) fixed,
-    radial-gradient(540px 380px at -6% 34%, rgba(var(--brand-rgb),.08), transparent 60%) fixed,
-    radial-gradient(480px 340px at 72% 106%, rgba(0,146,115,.07), transparent 62%) fixed,
-    linear-gradient(180deg, #f2fcfa 0%, #f7f8f9 38%, #f7f8f9 100%) fixed;
+    radial-gradient(760px 480px at 88% -8%, rgba(var(--brand-rgb),.10), transparent 62%) fixed,
+    radial-gradient(560px 400px at -8% 38%, rgba(var(--brand-rgb),.06), transparent 60%) fixed,
+    linear-gradient(180deg, #f4f7fd 0%, #f6f7f9 40%, #f6f7f9 100%) fixed;
 }
 :root[data-theme="dark"] body { background:var(--bg); }
 /* Neutral utility borders share the account table's theme tokens. */
@@ -58,7 +61,7 @@ body {
    侧边栏导航优化 - 移除滚动条
    ========================================================================== */
 .app-side {
-  background:#f7f8f9;
+  background:var(--surface);
   width:220px;
   padding:24px 12px 16px;
   transition:background .15s ease;
@@ -214,17 +217,31 @@ body {
 }
 .console-btn:active { transform:translateY(0); box-shadow:none; }
 .console-btn.primary {
-  background:#1a1a1a; color:#fff; border-color:transparent;
-  box-shadow:0 1px 2px rgba(0,0,0,.1);
+  background:var(--brand); color:var(--on-brand); border-color:transparent;
+  box-shadow:0 1px 2px rgba(0,0,0,.12);
 }
 .console-btn.primary:hover {
-  background:#333;
+  background:var(--brand-hover);
 }
 .console-btn.primary:active { transform:translateY(0); box-shadow:0 1px 2px rgba(0,0,0,.1); }
-.console-btn.quiet { border-color:transparent; background:transparent; color:var(--fg-muted); }
-.console-btn.quiet:hover { background:var(--surface-2); color:var(--fg); transform:none; box-shadow:none; }
+/* 「文字按钮」也要有边界。
+   原来 quiet = 全透明（无边框无底色），桌面端靠 hover 才能看出是按钮；
+   但 APK/WebView 没有 hover，看起来就是普通文字，用户根本不知道能点。
+   现在给一层很淡的描边 + 表面底：仍然比主按钮弱，但已经"像按钮"。 */
+.console-btn.quiet {
+  border-color:var(--border);
+  background:var(--surface);
+  color:var(--fg-muted);
+}
+.console-btn.quiet:hover { background:var(--surface-2); color:var(--fg); border-color:var(--surface-3); transform:none; box-shadow:none; }
+/* 表格行内按钮保持无框（操作列本身有图标提示，加框会变成"按钮墙"） */
+td .console-btn.quiet, th .console-btn.quiet { border-color:transparent; background:transparent; }
 .console-btn:disabled {
-  opacity:.5; cursor:not-allowed;
+  /* 原来只写 opacity:.5：主按钮禁用时整块蓝被压暗、白字变成灰字，
+     看上去像"文字看不清的坏按钮"。禁用态应该是**中性面 + 弱化文字**。 */
+  opacity:1; cursor:not-allowed;
+  background:var(--surface-2); border-color:var(--border);
+  color:var(--fg-subtle);
   transform:none!important; box-shadow:none!important;
 }
 button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink); outline-offset:3px; }
@@ -430,17 +447,57 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   font-weight:600;
   box-shadow:inset 0 0 0 1px var(--brand-soft);
 }
-.platform-actions {
-  display:flex;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:6px;
+/* 账号池页头的平台下拉 */
+.acc-platform-switch { min-width:170px; max-width:230px; flex:0 1 auto; }
+.acc-platform-switch .ui-select-btn { width:100%; min-height:38px; }
+@media (max-width:720px){
+  .acc-platform-switch { min-width:0; width:100%; max-width:none; }
+}
+
+/* 页头动作条：**一条**横向工具条，窄屏自动换行。
+   ----------------------------------------------------------------------------
+   原来这里是两行竖排（flex-direction:column）：第一行 3 个无边框文字按钮，
+   第二行混着主按钮和文字按钮，两组之间既没有分隔也没有基线对齐 ——
+   视觉上就是"散落的两排按钮"，这是用户说的"布局乱七八糟"。
+   现在：统一 32px 高、6px 间距、组间 1px 竖线、主按钮只有一个。 */
+.platform-head-actions {
+  display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end;
+  gap:6px 10px; min-width:0;
+  /* 关键：`margin-left:auto`。.page-head 是 flex-wrap 容器，按钮组一旦
+     比剩余宽度宽就会整体换到第二行 —— 没有这个 auto margin 时，
+     单独占一行的元素会贴在**最左**（用户截图里按钮"掉到左边"就是这个）。
+     加上之后，无论在第一行还是第二行，它都贴着右边。 */
   margin-left:auto;
 }
+.platform-actions-all,
+.platform-actions {
+  display:flex; align-items:center; flex-wrap:wrap; gap:2px;
+  margin-left:0;
+}
+/* 两个按钮组之间的分隔线：伪元素，免得为一个像素多一个空 div */
+.platform-actions-all { position:relative; padding-right:9px; }
+.platform-actions-all::after {
+  content:""; position:absolute; right:0; top:50%; transform:translateY(-50%);
+  width:1px; height:16px; background:var(--border);
+}
+.platform-actions { padding-left:1px; }
+
+/* 工具条内的按钮比正文按钮矮一档；图标与文字同色，不再忽大忽小 */
+.platform-head-actions .console-btn {
+  height:32px; padding:0 9px; gap:6px; font-size:12px; border-radius:7px;
+}
+.platform-head-actions .console-btn .ui-icon { width:14px; height:14px; }
+.platform-head-actions .console-btn.quiet { color:var(--fg-muted); }
+.platform-head-actions .console-btn.quiet .ui-icon { opacity:.75; }
+.platform-head-actions .console-btn.quiet:hover { color:var(--fg); background:var(--surface-2); }
+.platform-head-actions .console-btn.quiet:hover .ui-icon { opacity:1; }
 @media (max-width:900px) {
   .platform-switch { padding:13px 14px; }
   .platform-cards { grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
-  .platform-actions { margin-left:0; }
+  /* 窄屏：动作条换成整行、左对齐，组间分隔线隐藏（换行后竖线没有意义） */
+  .platform-head-actions { justify-content:flex-start; width:100%; }
+  .platform-actions-all { padding-right:0; }
+  .platform-actions-all::after { display:none; }
 }
 /* ============================================================================
    账户导入卡片优化
@@ -521,8 +578,7 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   transition:border-color .15s ease,box-shadow .15s ease;
 }
 .account-search:focus-within {
-  border-color:var(--brand);
-  box-shadow:0 0 0 3px var(--brand-soft);
+  box-shadow:0 1px 5px rgba(15,23,42,.12);
 }
 .account-search input {
   width:190px; min-width:0; border:0; padding:0;
@@ -1134,8 +1190,9 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 }
 .filter-combobox-panel .ui-select-opt[aria-selected=true],
 .filter-combobox-panel .ui-select-opt.active {
-  background:var(--brand-soft);
-  color:var(--brand-ink);
+  /* 下拉选中项用系统主题蓝（用户指定），不再是淡蓝底+蓝字 */
+  background:var(--blue-main);
+  color:#fff;
   font-weight:500;
 }
 .filter-combobox-empty {
@@ -1261,15 +1318,16 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
   font-weight:600;
   margin-bottom:7px;
 }
-.btn-primary { background:#1a1a1a; }
-  :root[data-theme="dark"] { --bg:#141414; --surface:#1f1f1f; --surface-2:#292929; --surface-3:#353535; --border:#353535; --fg:#ffffff; --fg-muted:rgba(255,255,255,.62); --fg-subtle:rgba(255,255,255,.40); }
+.btn-primary { background:var(--brand); color:var(--on-brand); }
+/* 深色中性面 / 文字三档统一在 index.html 的 :root[data-theme="dark"] 里声明，
+   这里不再重复 —— 两处各写一份正是"深浅串色"的根源之一。 */
 :root[data-theme="dark"] .app-side { background:var(--surface); }
 :root[data-theme="dark"] .side-item.active { background:var(--surface-2); }
 :root[data-theme="dark"] .ui-select-btn, :root[data-theme="dark"] .ui-select-panel, :root[data-theme="dark"] .confirm-box { background:var(--surface); }
 :root[data-theme="dark"] input, :root[data-theme="dark"] textarea { background:var(--surface); color:var(--fg); }
 :root[data-theme="dark"] {
-  --info:#94b5ef; --info-soft:rgba(107,150,226,.12); --info-border:rgba(107,150,226,.25);
-  --purple:#b3a4e8; --purple-soft:rgba(156,136,213,.13); --purple-border:rgba(156,136,213,.26);
+  --info:#8fb4ff; --info-soft:rgba(79,131,241,.14); --info-border:rgba(79,131,241,.28);
+  --purple:#b39cec; --purple-soft:rgba(150,120,220,.14); --purple-border:rgba(150,120,220,.28);
 }
 :root[data-theme="dark"] :is(.bg-blue-50,.bg-blue-100,.bg-sky-50,.bg-sky-100) { background:var(--info-soft); color:var(--info); }
 :root[data-theme="dark"] :is(.text-blue-600,.text-blue-700,.text-sky-600,.text-sky-700) { color:var(--info); }
@@ -1419,7 +1477,7 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .share-address-select { flex:1; min-width:0; max-width:100%; background:var(--surface); color:var(--fg); }
 .share-address-select .ui-select { width:100%; }
 .share-address-select .ui-select-btn { border-color:var(--border); background:var(--surface); color:var(--fg); }
-.share-address-select .ui-select-opt.active { background:var(--brand-soft); color:var(--brand-ink); }
+.share-address-select .ui-select-opt.active { background:var(--blue-main); color:#fff; }
 .mobile-mode .api-share-row > #shareAddressLabel, .mobile-mode .api-share-row > #shareAddressWrap { grid-column:1/-1; width:100%; }
 .mobile-mode #shareAddress .ui-select-opt { min-height:40px; }
 .model-sort { display:inline-flex; align-items:center; gap:5px; color:var(--fg-muted); font-weight:500; white-space:nowrap; }
@@ -1596,7 +1654,8 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .usage-date-filters > .console-btn { height:38px; }
 .usage-date-note { color:var(--fg-subtle); font-size:11px; align-self:center; line-height:1.7; }
 .journal-field .filter-combobox input { padding-right:34px; text-overflow:ellipsis; }
-.journal-field input:focus, .journal-date-button:focus-visible { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
+.journal-field input:focus { outline:0; box-shadow:0 1px 5px rgba(15,23,42,.12); }
+.journal-date-button:focus-visible { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
 .journal-date-button { display:flex; align-items:center; justify-content:space-between; gap:8px; text-align:left; color:var(--fg-subtle); cursor:pointer; font-variant-numeric:tabular-nums; }
 .journal-date-button::after { content:''; width:15px; height:15px; flex-shrink:0; background:currentColor; mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='16' rx='2'/%3E%3Cpath d='M16 3v4M8 3v4M3 11h18'/%3E%3C/svg%3E") center/contain no-repeat; }
 .journal-date-button.has-value { color:var(--fg); }
@@ -1656,12 +1715,13 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .schedule-field .schedule-zone { margin-left:auto; color:var(--fg-subtle); font-size:11px; font-weight:400; }
 .schedule-field > input:not([hidden]), .schedule-interval > input, .schedule-form .ui-select-btn, .schedule-form .journal-date-button { width:100%; min-width:0; min-height:42px; box-sizing:border-box; border:1px solid var(--border); border-radius:9px; padding:10px 12px; color:var(--fg); background:var(--surface); font-size:13px; transition:border-color .15s,box-shadow .15s; }
 .schedule-form input::placeholder { color:var(--fg-subtle); }
-.schedule-form input:not([type=checkbox]):focus, .schedule-form .ui-select-btn:focus-visible, .schedule-form .journal-date-button:focus-visible { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
+.schedule-form input:not([type=checkbox]):focus { outline:0; box-shadow:0 1px 5px rgba(15,23,42,.12); }
+.schedule-form .ui-select-btn:focus-visible, .schedule-form .journal-date-button:focus-visible { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
 .schedule-form .ui-select.open .ui-select-btn { border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
 .schedule-form .ui-select-panel { padding:5px; border-color:var(--border); border-radius:10px; background:var(--surface); box-shadow:var(--sh-pop); }
 .schedule-form .ui-select-opt { min-height:38px; font-size:13px; border-radius:6px; }
 .schedule-form .ui-select-opt:hover, .schedule-form .ui-select-opt.active { background:var(--surface-2); }
-.schedule-form .ui-select-opt.sel { color:var(--brand-ink); background:var(--brand-soft); }
+.schedule-form .ui-select-opt.sel { color:#fff; background:var(--blue-main); }
 .schedule-interval { display:grid; grid-template-columns:minmax(0,1fr) 114px; gap:10px; }
 .schedule-weekdays { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:7px; }
 .schedule-weekday { position:relative; cursor:pointer; }
@@ -1698,7 +1758,7 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .time-picker-column > button:hover { color:var(--brand-ink); background:var(--brand-soft); }
 .time-only-picker .time-picker-column > input { width:70px; height:56px; border-radius:9px; font-size:28px; font-weight:500; appearance:textfield; -moz-appearance:textfield; }
 .date-picker-time input::-webkit-inner-spin-button, .date-picker-time input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
-.date-picker-time input:focus { outline:0; border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
+.date-picker-time input:focus { outline:0; box-shadow:0 1px 5px rgba(15,23,42,.12); }
 .time-picker-colon { font-size:25px; margin-top:22px; color:var(--fg-subtle); }
 .time-picker-zone { margin:0 0 14px; text-align:center; font-size:11px; color:var(--fg-subtle); }
 @media (max-width:480px) {
@@ -1926,10 +1986,14 @@ tbody tr:hover > th { background:transparent!important; }
 }
 
 /* 深色模式下的品牌标签 */
+/* 深色下的品牌标签：**纯主题蓝 + 白字**。
+   原来用 `#9BC0E2 → brand` 的渐变配 `#064e3b`（深绿）文字 ——
+   蓝底绿字，对比度不到 2:1，截图里那种"发脏"的观感就来自这里。 */
 :root[data-theme="dark"] .model-vendor-tag {
-  background:linear-gradient(135deg,#9BC0E2 0%,var(--brand) 100%);
-  color:#064e3b;
-  border-color:var(--brand);
+  background:var(--brand);
+  color:var(--on-brand);
+  border-color:transparent;
+  box-shadow:none;
 }
 
 /* ============================================================================
@@ -2099,8 +2163,7 @@ tbody tr:hover > th { background:transparent!important; }
 }
 .model-search-input:focus {
   outline:none;
-  border-color:var(--brand);
-  box-shadow:0 0 0 3px var(--brand-soft);
+  box-shadow:0 1px 5px rgba(15,23,42,.12);
 }
 .model-search-clear {
   margin-left:-30px;
@@ -2348,6 +2411,44 @@ tbody tr:hover > th { background:transparent!important; }
   margin-bottom:20px;
 }
 /* 栅格/表格这类铺满的元素：左右缩进小一点，但**上边距不能省** */
+/* 自助注册入口卡片 */
+.join-gate-body {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px;
+}
+.join-gate-state { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.join-gate-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--fg-subtle);
+  box-shadow: 0 0 0 3px var(--surface-2);
+  flex: 0 0 auto;
+}
+.join-gate-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.join-gate-meta { font-size: 11.5px; color: var(--fg-subtle); }
+.join-gate-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.join-gate-note {
+  margin: 0 16px 14px; font-size: 11.5px; line-height: 1.7;
+  color: var(--fg-subtle);
+}
+.join-gate-note code {
+  font-family: var(--mono); font-size: 11px;
+  padding: 1px 4px; border-radius: 4px;
+  background: var(--surface-2); color: var(--fg-muted);
+}
+@media (max-width:640px) {
+  .join-gate-body { align-items: stretch; }
+  .join-gate-actions { width: 100%; }
+  .join-gate-actions .console-btn { flex: 1 1 0; }
+}
+
+/* 策略说明（活跃度回温）：跟卡片内其它块同一缩进，字号比正文小一档 */
+.gw-note {
+  margin: 10px 16px 14px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--fg-subtle);
+}
 .card:has(> .sentinel-card-head) > .gw-strategy-grid,
 .card:has(> .sentinel-card-head) > .gw-platform-list,
 .card:has(> .sentinel-card-head) > .sentinel-table-wrap,
@@ -2891,7 +2992,7 @@ tbody tr:hover > th { background:transparent!important; }
 :root[data-theme="dark"] .border-emerald-200 { border-color: rgba(110, 231, 183, 0.20) !important; }
 :root[data-theme="dark"] .text-emerald-600,
 :root[data-theme="dark"] .text-emerald-700 { color: var(--brand-ink) !important; }
-:root[data-theme="dark"] .text-emerald-500 { color: #9BC0E2 !important; }
+:root[data-theme="dark"] .text-emerald-500 { color: var(--ok) !important; }
 :root[data-theme="dark"] .bg-emerald-50 { background: rgba(var(--brand-rgb),0.10) !important; }
 :root[data-theme="dark"] .bg-emerald-100 { background: rgba(var(--brand-rgb),0.16) !important; }
 
@@ -3019,7 +3120,7 @@ tbody tr:hover > th { background:transparent!important; }
   font-family: var(--mono);
 }
 .alert-smtp-quick input:focus {
-  outline: 0; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft);
+  outline: 0; box-shadow: 0 1px 5px rgba(15,23,42,.12);
 }
 .alert-smtp-status {
   grid-column: 1 / -1; margin: 0; font-size: 11.5px; line-height: 1.8;
@@ -3137,7 +3238,8 @@ tbody tr:hover > th { background:transparent!important; }
 .gw-platform-list { display: flex; flex-direction: column; gap: 8px; }
 .gw-platform-row {
   display: grid;
-  grid-template-columns: 30px minmax(90px, 1fr) 90px auto auto;
+  /* 拖拽手柄 | 图标 | 名称 | 位次 | 禁用按钮 */
+  grid-template-columns: 14px 30px minmax(90px, 1fr) 70px auto;
   align-items: center;
   gap: 11px;
   padding: 10px 13px;
@@ -3147,6 +3249,27 @@ tbody tr:hover > th { background:transparent!important; }
   font-size: 12px;
 }
 .gw-platform-row.disabled { opacity: .55; }
+/* 拖拽手柄：纯 CSS 点阵，不依赖图标字体（少一次资源，也不会因图标缺失塌掉） */
+.gw-drag {
+  width: 10px; height: 18px; flex: 0 0 auto;
+  background-image: radial-gradient(currentColor 1.05px, transparent 1.15px);
+  background-size: 5px 6px;
+  background-position: 0 1px;
+  color: var(--fg-subtle);
+  opacity: .45;
+  cursor: grab;
+  transition: opacity .15s ease;
+}
+.gw-platform-row:hover .gw-drag { opacity: .9; }
+.gw-platform-row.dragging {
+  opacity: .6;
+  cursor: grabbing;
+  border-color: var(--brand);
+  background: var(--surface-3);
+}
+.gw-platform-row.dragging .gw-drag { cursor: grabbing; }
+/* 拖动时别让浏览器把按钮当成拖拽起点 */
+.gw-platform-row .gw-toggle { -webkit-user-drag: none; user-select: none; }
 .gw-platform-logo {
   display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px;
@@ -3596,11 +3719,11 @@ tbody tr:hover > th { background:transparent!important; }
 /* 浮层里的 model_id 可点一下复制 —— 常见需求是「我想用某个平台的那个 id」。 */
 /* 同名多平台提醒：只在真的会歧义时出现，不能常态化占位 */
 .model-chip-ambig {
-  font-size: 10.5px; line-height: 1.7; color: #92400e;
-  background: #fffbeb; border: 1px solid #fde68a;
+  font-size: 10.5px; line-height: 1.7; color: var(--warn);
+  background: var(--warn-soft); border: 1px solid rgba(249,115,22,.35);
   border-radius: 6px; padding: 5px 8px; margin-bottom: 7px;
 }
-.model-chip-ambig b { color: #78350f; }
+.model-chip-ambig b { color: var(--fg); font-weight: 600; }
 .model-chip-hint {
   margin-top: 6px; font-size: 10px; color: var(--fg-subtle);
   border-top: 1px dashed var(--border); padding-top: 5px;
@@ -4142,37 +4265,13 @@ tbody tr:hover > th { background:transparent!important; }
 }
 
 /* ============================================================================
-   主题色与深色主题
+   主题色
    ----------------------------------------------------------------------------
-   浅色：用户指定的三档蓝
-        #4176e6  主色（按钮/高亮）
-        #5686fe  hover
-        #c4d3f0  轻底色（tag / 徽标底）
-
-   深色：**不挂主题色**。参考站（workbuddy.cn/app）的深色界面是纯中性灰
-        #141414 / #1f1f1f / #242424 / #313131 + 白色 10% 描边，
-        文字 #d2d3e0，蓝色只出现在极少数图标上。
-        所以深色下 brand 系列取「亮灰白」，强调靠明度对比而不是色相。
-    ========================================================================== */
-:root {
-  --blue-main: #4176e6;      /* 按钮 / 高亮 */
-  --blue-hover: #5686fe;     /* hover 提亮 */
-  --blue-tint: #c4d3f0;      /* 轻底色：tag / 徽标 */
-}
-
-/* ---- 深色主题：中性灰，不用主题色 ---------------------------------------- */
-:root[data-theme="dark"] {
-  --brand: #d2d3e0;
-  --brand-strong: #e6e7ef;
-  --brand-ink: #d2d3e0;
-  --brand-soft: rgba(255, 255, 255, .10);
-  --info: #d2d3e0;
-  --info-soft: rgba(255, 255, 255, .08);
-  --info-border: rgba(255, 255, 255, .12);
-  --ok-soft: rgba(34, 197, 94, .16);
-  --warn-soft: rgba(249, 115, 22, .16);
-  --danger-soft: rgba(248, 113, 113, .16);
-}
+   **唯一来源是 index.html 的 :root / :root[data-theme="dark"]。**
+   这里曾经又声明了一遍 --brand:#d2d3e0（"深色不挂主题色"），于是同一屏上
+   按钮/tag 是灰白、下拉高亮是蓝，还有第三份 --surface 覆盖在 1278 行 ——
+   三套值互相打架，就是用户说的"深浅串色"。现在本文件只写组件规则。
+   ========================================================================== */
 
 /* 平台卡：深色下纯中性面，靠描边区分选中（参考站就是这样） */
 :root[data-theme="dark"] .platform-card {
@@ -4185,13 +4284,13 @@ tbody tr:hover > th { background:transparent!important; }
   border-color: rgba(255, 255, 255, .22);
 }
 :root[data-theme="dark"] .platform-card-logo {
-  background: rgba(255, 255, 255, .08);
-  color: #e6e7ef;
+  background: var(--surface-2);
+  color: var(--fg);
 }
 
 /* 统计卡里的品牌位：深色下用亮灰白，不用蓝 */
-:root[data-theme="dark"] .stat.is-brand .stat-value { color: #e6e7ef; }
-:root[data-theme="dark"] .stat.is-brand { border-color: rgba(255, 255, 255, .14); }
+:root[data-theme="dark"] .stat.is-brand .stat-value { color: var(--brand-ink); }
+:root[data-theme="dark"] .stat.is-brand { border-color: var(--brand-soft); }
 
 /* 徽标：绿/琥珀/红保留语义色，蓝系一律转为中性灰 */
 :root[data-theme="dark"] :is(.bg-emerald-50, .bg-emerald-100, .bg-green-50, .bg-green-100) {
@@ -4199,35 +4298,94 @@ tbody tr:hover > th { background:transparent!important; }
   color: #5BD98F !important;
 }
 :root[data-theme="dark"] :is(.bg-sky-50, .bg-sky-100, .bg-blue-50, .bg-blue-100) {
-  background: rgba(255, 255, 255, .08) !important;
-  color: #d2d3e0 !important;
+  background: var(--info-soft) !important;
+  color: var(--info) !important;
 }
 :root[data-theme="dark"] :is(.bg-indigo-50, .bg-indigo-100, .bg-purple-50, .bg-purple-100) {
-  background: rgba(255, 255, 255, .08) !important;
-  color: #d2d3e0 !important;
+  background: var(--purple-soft) !important;
+  color: var(--purple) !important;
 }
 
 /* 开关：开 = 亮灰白（不发光），关 = 深灰 */
-:root[data-theme="dark"] .model-switch span { background: rgba(255, 255, 255, .16); }
+:root[data-theme="dark"] .model-switch span { background: var(--surface-3); }
 :root[data-theme="dark"] .model-switch input:checked + span {
-  background: rgba(255, 255, 255, .42);
+  background: var(--brand);
   box-shadow: none;
 }
 
-/* 主按钮：深色下用亮灰白面 + 深色文字（对比明确，不引入色相） */
+/* 主按钮：深色下不再用 #d2d3e0 亮灰白块，改跟系统主题蓝
+   （与下拉选中态、登录页同一主题色），白字保证对比度。 */
 :root[data-theme="dark"] .btn-primary,
 :root[data-theme="dark"] .console-btn.primary {
-  background: #d2d3e0;
+  background: var(--blue-main);
   border-color: transparent;
-  color: #141414;
+  color: #fff;
 }
 :root[data-theme="dark"] .btn-primary:hover,
-:root[data-theme="dark"] .console-btn.primary:hover { background: #e6e7ef; }
+:root[data-theme="dark"] .console-btn.primary:hover { background: var(--brand-hover); }
 
-/* 进度条/迷你条：中性亮灰 */
-:root[data-theme="dark"] .pkg-track > i,
-:root[data-theme="dark"] .ov-progress-bar,
-:root[data-theme="dark"] .ov-bar-fill.ok { background: rgba(255, 255, 255, .55); }
+/* 进度条/迷你条：**跟随语义色**，不再一律灰白。
+   原来这里把深色下的所有进度条压成 rgba(255,255,255,.55)，
+   截图里四根灰条就是这么来的 —— 与「刚到期=橙 / 已用尽=红」的语义色
+   同屏时，灰条既不像"已用"也不像"可用"，整块区域显得没上色。
+   现在保留基础色（.pkg-track > i = --brand，soon = --warn-bar，
+   dead = --danger），深色下只把轨道调暗一档。 */
+:root[data-theme="dark"] .pkg-track,
+:root[data-theme="dark"] .ov-progress { background: var(--surface-3); border-color: var(--border); }
+
+/* ---- 深色主题：分段 / tag 切换 ----------------------------------------
+ * 2026-11-05 二次统一：这里原来写死 #2d2d2d / #161616 / #3a3a3a，
+ * 与新调色板（surface #15171d、surface-2 #1b1e25、surface-3 #232730）
+ * 对不上 —— 同一屏会出现两种"深灰"。
+ * 现在容器一律 --surface-2，选中一律 --brand + 白字，和主按钮、下拉选中、
+ * 进度条同一套强调色；不再有任何硬编码色值。 */
+:root[data-theme="dark"] .ov-seg { background:var(--surface-2); border-color:var(--border); }
+:root[data-theme="dark"] .ov-seg button { color:var(--fg-muted); }
+:root[data-theme="dark"] .ov-seg button.active { background:var(--brand); color:var(--on-brand); }
+
+:root[data-theme="dark"] .agent-seg { background:var(--surface-2); }
+:root[data-theme="dark"] .agent-seg button[aria-pressed="true"] {
+  background:var(--surface-3); color:var(--fg); box-shadow:none;
+}
+
+/* 日期：选中用主题蓝（与其它选中态一致），"今天"只描边 */
+:root[data-theme="dark"] .date-picker-days button.selected,
+:root[data-theme="dark"] .date-picker-days button.selected:hover {
+  background:var(--brand); color:var(--on-brand);
+}
+:root[data-theme="dark"] .date-picker-days button[aria-current=date] {
+  box-shadow:inset 0 0 0 1px var(--border); color:var(--fg-muted);
+}
+
+/* 星期 / 开关：容器 --surface-2，开启 --brand */
+:root[data-theme="dark"] .schedule-weekday span {
+  background:var(--surface-2); border-color:var(--border);
+}
+:root[data-theme="dark"] .schedule-weekday input:checked + span {
+  background:var(--brand); border-color:var(--brand); color:var(--on-brand);
+}
+:root[data-theme="dark"] .schedule-switch span {
+  background:var(--surface-3); border-color:var(--border);
+}
+:root[data-theme="dark"] .schedule-switch input:checked + span {
+  background:var(--brand); border-color:var(--brand);
+}
+
+/* 下拉 / 组合框选中项：深色下也统一到系统主题蓝，而不是半透明白 */
+:root[data-theme="dark"] .ui-select-opt.sel,
+:root[data-theme="dark"] .filter-combobox-panel .ui-select-opt[aria-selected=true],
+:root[data-theme="dark"] .filter-combobox-panel .ui-select-opt.active {
+  background:var(--blue-main); color:#fff;
+}
+/* 输入框 hover/focus 的轻阴影：深底上要用深阴影才看得见 */
+:root[data-theme="dark"] input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):hover,
+:root[data-theme="dark"] textarea:hover {
+  box-shadow:0 1px 5px rgba(0,0,0,.5);
+}
+:root[data-theme="dark"] input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):focus,
+:root[data-theme="dark"] textarea:focus {
+  box-shadow:0 1px 5px rgba(0,0,0,.55);
+}
 
 /* 告警横幅：暗红，不用亮块 */
 :root[data-theme="dark"] .ov-alert {
@@ -4259,6 +4417,19 @@ tbody tr:hover > th { background:transparent!important; }
 :root:not([data-theme="dark"]) .platform-card:hover {
   border-color: rgba(65, 118, 230, .45);
   background: rgba(196, 211, 240, .38);
+}
+
+/* 企业版标签：账号行里区分个人版 / 企业版。
+   用品牌淡底 + 品牌字，和"状态"胶囊（绿/灰）区分开 —— 它描述的是账号类型，
+   不是健康状态，颜色上不能抢语义色的含义。 */
+.tag-enterprise{
+  display:inline-flex; align-items:center;
+  padding:0 6px; height:17px; border-radius:5px;
+  font-size:10px; font-weight:600; line-height:1;
+  color:var(--brand-ink);
+  background:var(--brand-soft);
+  border:1px solid color-mix(in srgb, var(--brand) 32%, transparent);
+  white-space:nowrap;
 }
 
 /* ---- 右下角 Toast ------------------------------------------------------- */
@@ -4616,11 +4787,11 @@ button.is-busy:disabled {
 .acc-menu-icon svg { width: 14px; height: 14px; }
 .acc-menu-text { min-width: 0; }
 
-/* 深色主题：菜单用中性面，不引入色相 */
+/* 深色主题：菜单用统一面（--surface），不再写死 #242424 */
 :root[data-theme="dark"] .acc-menu {
-  background: #242424;
-  border-color: rgba(255, 255, 255, .12);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, .55);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--sh-pop);
 }
 :root[data-theme="dark"] .acc-menu-item:hover { background: rgba(255, 255, 255, .08); }
 
@@ -4681,7 +4852,7 @@ button.is-busy:disabled {
 .api-share-grid.is-collapsed { display: none; }
 
 /* 深色主题：折叠标题用中性亮灰 */
-:root[data-theme="dark"] .api-share-toggle { color: #e6e7ef; }
+:root[data-theme="dark"] .api-share-toggle { color: var(--brand-ink); }
 
 /* ============================================================================
    细节打磨（对齐 issue #4 的第 5 点 + 本轮自查）
@@ -4900,3 +5071,50 @@ input.flex-1, select.flex-1, textarea.flex-1, input.w-full, select.w-full {
 .pg-btn,
 .console-btn,
 .btn-primary { transition: transform .1s ease, background .15s ease, color .15s ease, border-color .15s ease; }
+
+
+/* ============================================================================
+   全局 checkbox：主题色自绘
+   ----------------------------------------------------------------------------
+   `.ui-check` 里早就有自绘复选框，但只有用了那个容器的位置才生效；
+   表格里的全选/行选、日志过滤、Key 绑定等仍用浏览器默认控件 ——
+   Windows 上是系统蓝、深色主题下尤其突兀。这里把同一套外观推广到全部原生
+   复选框（`.ui-check` 内的规则选择器更具体，会保留它 18px 的尺寸）。
+   ========================================================================== */
+input[type="checkbox"]:not([data-native]) {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; flex: 0 0 16px; margin: 0;
+  display: inline-grid; place-content: center;
+  vertical-align: middle;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+input[type="checkbox"]:not([data-native])::before {
+  content: ""; width: 9px; height: 9px; transform: scale(0);
+  transition: transform .12s var(--ease-out, cubic-bezier(.38,0,.24,1));
+  background: var(--on-brand);
+  clip-path: polygon(14% 44%, 0 65%, 40% 100%, 100% 16%, 80% 0%, 37% 62%);
+}
+input[type="checkbox"]:not([data-native]):checked,
+input[type="checkbox"]:not([data-native]):indeterminate {
+  background: var(--brand); border-color: var(--brand);
+}
+input[type="checkbox"]:not([data-native]):checked::before { transform: scale(1); }
+input[type="checkbox"]:not([data-native]):indeterminate::before {
+  transform: scale(1); clip-path: none;
+  width: 9px; height: 2px; border-radius: 1px;
+}
+input[type="checkbox"]:not([data-native]):hover { border-color: var(--brand); }
+input[type="checkbox"]:not([data-native]):focus-visible {
+  outline: 0; box-shadow: 0 0 0 3px var(--brand-soft);
+}
+input[type="checkbox"]:not([data-native]):disabled {
+  opacity: .45; cursor: not-allowed; background: var(--surface-2);
+}
+/* 开关类（.model-switch / .schedule-switch）的 input 是视觉隐藏的，别给它画框 */
+.model-switch input[type="checkbox"],
+.schedule-switch input[type="checkbox"],
+.rt-switch input[type="checkbox"] { appearance: none; -webkit-appearance: none; border: 0; background: transparent; }

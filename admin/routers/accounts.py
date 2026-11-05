@@ -1,6 +1,7 @@
 """账号管理：列表 / 新增 / 批量上传 / 扫描本机 / 导入本机 / 刷新余额 / 启用禁用 / 删除 / 注入本机客户端。"""
 import glob
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -373,6 +374,16 @@ def export_accounts(
     rows = q.order_by(Account.id).all()
 
     items = _export_items(rows, body.format)
+    # 2026-11-02 事故的直接出口（7 次全量导出、最大 112043 字节）。
+    # 每次导出都留一条可追溯的审计记录，包含条数与来源；不记录任何凭据内容。
+    import logging as _logging
+    _ip = request.client.host if (request is not None and request.client) else "?"
+    _logging.getLogger("admin.accounts.export").warning(
+        "账号凭证导出 ip=%s ua=%s format=%s all_platforms=%s ids=%s count=%d",
+        _ip,
+        (request.headers.get("user-agent", "")[:160] if request is not None else ""),
+        body.format, bool(getattr(body, "all_platforms", False)),
+        len(getattr(body, "ids", None) or []), len(items))
     return {
         "format": body.format,
         "platform_scope": "all" if body.all_platforms else (platform or "all"),
@@ -636,6 +647,16 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
                     job.set_done(min(start + chunk_size, len(records)),
                                  f"已导入 {agg['added']} 条（更新 {agg['updated']}，失败 {agg['failed']}）")
                 res = agg
+            # 导入成功后**立刻补种**该平台的定时任务（签到/保活/过期清理）：
+            # `ensure_platform_schedules` 对「没有账号的平台」不建任务，
+            # 而它此前只在启动时跑 —— 新导入的平台要重启一次才会有任务，
+            # 表现就是用户反馈的「其它平台的任务没进定时任务」。
+            try:
+                if (res or {}).get("added") or (res or {}).get("updated"):
+                    from admin.scheduler import ensure_platform_schedules
+                    ensure_platform_schedules(db)
+            except Exception:  # noqa: BLE001 - 补种失败不影响导入结果
+                logging.exception("导入后补种平台定时任务失败 storage=%s", storage)
             return res
         finally:
             db.close()
@@ -1814,7 +1835,9 @@ def _refresh_one_account(db, account) -> dict:
     if storage in ("", registry.DEFAULT_PLATFORM):
         # 默认平台：保持原实现（要 AccountSession 拿 balance + 逐包快照）
         original = account.auth_json
-        with backend.AccountSession(original) as session:
+        with backend.AccountSession(
+                original,
+                enterprise_id=(getattr(account, "enterprise_id", "") or "")) as session:
             try:
                 balance = session.fetch_balance()
                 account.balance_total = int(balance.get('total') or 0)
@@ -2212,7 +2235,9 @@ def sync_credits(_: bool = Depends(require_admin), db: Session = Depends(get_db)
         if idx and settings.KEEPALIVE_ACCOUNT_GAP > 0:
             time.sleep(settings.KEEPALIVE_ACCOUNT_GAP)
         try:
-            with backend.AccountSession(a.auth_json) as sess:
+            with backend.AccountSession(
+                    a.auth_json,
+                    enterprise_id=(getattr(a, "enterprise_id", "") or "")) as sess:
                 packages = sess.fetch_credit_details()
                 a.auth_json = sess.updated_json()
             summary = _sync_credit_snapshot(a, packages)

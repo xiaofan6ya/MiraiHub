@@ -214,6 +214,9 @@
   }
 
   function send() {
+    // One report per page lifecycle. Several error/resource callbacks can fire
+    // together; resending the same full snapshot creates a false attack flood.
+    if (rec.sent) return;
     collect();
     if (rec.blocked && rec.blocked.length) {
       try {
@@ -224,16 +227,22 @@
     try { body = JSON.stringify(rec); } catch (e) { return; }
     if (body.length > 60000) body = body.slice(0, 60000);
     rec.sent = true;
+    // 只走 fetch：上报接口现在需要后台会话 + CSRF 双提交头。
+    // `navigator.sendBeacon` 不能带自定义头（CSRF 校验必失败）且会绕过
+    // secure-fetch.js 的统一包装。fetch(keepalive) 在页面卸载时同样能发出。
+    // 本脚本比 secure-fetch.js 先加载，所以这里自己补头，不依赖加载顺序。
     try {
-      var blob = new Blob([body], { type: "application/json" });
-      if (navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, blob)) return;
-    } catch (e) { /* 落到 fetch */ }
-    try {
+      var csrf = "";
+      var m = document.cookie.match(/(?:^|;\\s*)wb_csrf=([^;]*)/);
+      if (m) csrf = decodeURIComponent(m[1]);
+      var headers = { "Content-Type": "application/json" };
+      if (csrf) headers["X-CSRF-Token"] = csrf;
       fetch(ENDPOINT, {
         method: "POST", body: body, keepalive: true,
-        headers: { "Content-Type": "application/json" }
+        credentials: "same-origin",
+        headers: headers
       });
-    } catch (e) { /* 服务端没这个端点也无所谓，UI 上照样能看到 */ }
+    } catch (e) { /* 上报失败不影响页面功能 */ }
   }
 
   var _t = null;

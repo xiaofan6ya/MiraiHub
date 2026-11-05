@@ -102,8 +102,12 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
         status_code=status)
 
 
-#: 上游只认这三个角色。别的角色进来后**不能原样透传**。
-_UPSTREAM_ROLES = frozenset({"system", "user", "assistant"})
+#: 上游（OpenAI 兼容 /chat/completions）接受的角色。
+#: 2026-11-05 修正：官方 3065 客户端（agentApi）打同一上游端点的 498 条
+#: 真实请求体里，`tool` 消息（175 条）与 assistant `tool_calls`（122 条）
+#: **原样透传，490/490 全部 200** —— 之前「上游只认三种角色」的判断是错的，
+#: 把 tool 转成 user 文本反而导致 call 工具调用不生效。
+_UPSTREAM_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
 def normalize_messages(raw) -> list[dict]:
@@ -111,20 +115,22 @@ def normalize_messages(raw) -> list[dict]:
 
     ## 为什么必须做
 
-    上游（Loomy）只认 `system` / `user` / `assistant` 三种角色。
     `developer` 是 OpenAI 较新的角色，DSH 这类 harness 在**开推理时**
-    会用它承载系统提示（还把整段 system prompt 塞进去）。
+    会用它承载系统提示（还把整段 system prompt 塞进去），上游不认，
+    需要归一成 `system`。
 
-    原样透传的后果**不是报错，而是流式永久卡死**：
-    上游静默丢弃这条消息、仍然回 200、但从不发 `finish_reason`，
-    客户端就一直等。
-
-    ## 归一规则
+    ## 归一规则（2026-11-05 起改为**结构化透传**）
 
     * `developer` -> `system`（它本来就是系统提示的语义）
-    * `tool` / `function` -> `user`（老式函数结果，上游无对应角色）
+    * `tool` -> **原样保留**（含 `tool_call_id` / `name`），上游实测接受；
+      老式 `function` 角色没有 call id 结构，降级为 user 文本
+    * assistant 的 `tool_calls` -> **原样保留**（不再压成 JSON 文本块）。
+      之前转文本的后果：模型把上一轮调用读成「一段描述」，
+      参数经常缺引号/少括号，客户端解析失败直接中断
     * 未知角色 -> 丢弃
     * `system` **全部前置**（中途出现的 system 会失去指令权重）
+    * content 数组仍取文本块（上游文本协议）；assistant 工具调用消息的
+      `content: null` 保留 —— 那是标准 OpenAI 形状
     """
     if not isinstance(raw, list):
         return []
@@ -134,25 +140,16 @@ def normalize_messages(raw) -> list[dict]:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "").strip().lower()
-        # 工具结果要**带上调用标识**再转 user：
-        # 只写 content 的话模型看到的是一段孤立文本，不知道它对应哪次调用，
-        # 于是会重复调同一个工具（或干脆不调）。这里包一层可读标记。
-        tool_hint = ""
         if role == "developer":
             role = "system"
-        elif role in ("tool", "function"):
-            role = "user"
-            _tcid = str(item.get("tool_call_id") or item.get("name") or "").strip()
-            _raw_c = item.get("content")
-            _txt = _raw_c if isinstance(_raw_c, str) else ""
-            if not _txt and isinstance(_raw_c, list):
-                _txt = "".join(str(b.get("text") or "") for b in _raw_c
-                               if isinstance(b, dict))
-            tool_hint = ("[tool result%s]\n%s"
-                         % (" for " + _tcid if _tcid else "", _txt))
+        elif role == "function":
+            # 老式 function 角色语义等同工具结果。PR #18 实测上游接受
+            # role=tool，所以归一到 tool 并保留调用标识，不再降级成 user 文本
+            # （降级会让模型把结果当成又一条用户消息，重复发起同一调用）。
+            role = "tool"
         if role not in _UPSTREAM_ROLES:
             continue
-        content = tool_hint or item.get("content")
+        content = item.get("content")
         if isinstance(content, list):
             # 兼容 parts 数组：只取文本块
             parts = []
@@ -162,46 +159,45 @@ def normalize_messages(raw) -> list[dict]:
                 elif isinstance(block, str):
                     parts.append(block)
             content = "".join(parts)
-        if content is None:
-            # ⚠️ `content is None` 不能直接丢：标准 OpenAI 的 assistant
-            # 工具调用消息就是 `{"role":"assistant","content":null,
-            # "tool_calls":[...]}`（协议桥的转换产物正是这个形状）。
-            # 直接丢的话模型看不到自己上一轮调过什么 → 重复调用同一个
-            # 工具，或者把参数写成散文。与 raccoon 的归一层同一处修复。
-            if role != "assistant" or not isinstance(item.get("tool_calls"), list):
-                continue
-        # assistant 发起的工具调用：上游只认纯文本消息，但我们**不能把结构化
-        # 调用压成一句 `name(args); name(args)`** —— 那样模型在下一轮看到的
-        # 是「一段描述」而不是「一次真实调用」，于是它要么重复调同一个工具，
-        # 要么把参数写成散文（实测：跑任务时参数经常缺引号/少括号，客户端
-        # 解析失败直接中断）。
-        #
-        # 改成严格的 JSON 代码块 + 一行说明：模型能明确看出「我上一轮调了
-        # 什么、参数是什么」，工具名与参数都保持原样转义，不会串行化丢失。
+        # content=None 只允许标准 OpenAI 形状
+        # `{"role":"assistant","content":null,"tool_calls":[...]}`；
+        # 其余空消息直接丢，避免上游把空输入当非法请求。
+        _has_calls = isinstance(item.get("tool_calls"), list)
+        if content is None and not (role == "assistant" and _has_calls):
+            continue
+        message = {"role": role, "content": content}
+        if role == "tool":
+            # 工具结果**原样透传**（含调用标识）：上游实测接受 role=tool。
+            # 丢掉 tool_call_id 的话模型不知道结果对应哪次调用，会重复调用。
+            _tcid = item.get("tool_call_id")
+            if _tcid:
+                message["tool_call_id"] = str(_tcid)
+            elif item.get("name"):
+                # function 角色没有 tool_call_id，用 name 兜住配对凭据
+                message["tool_call_id"] = str(item["name"])
+            if item.get("name"):
+                message["name"] = str(item["name"])
         if role == "assistant" and isinstance(item.get("tool_calls"), list):
-            _calls = []
-            for _c in item["tool_calls"]:
-                if not isinstance(_c, dict):
+            # assistant 的工具调用**原样保留**（不再压成 JSON 文本块）：
+            # 官方 3065 客户端就是结构化透传，实测上游全部 200。转文本会让
+            # 模型把调用读成「一段描述」，参数经常缺引号/少括号。
+            # 唯一例外：协议要求 arguments 是字符串；客户端传对象时序列化回去。
+            calls = []
+            for call in item["tool_calls"]:
+                if not isinstance(call, dict):
                     continue
-                _fn = _c.get("function") if isinstance(_c.get("function"), dict) else {}
-                _args = _fn.get("arguments")
-                if isinstance(_args, str):
-                    try:
-                        _args = json.loads(_args)
-                    except Exception:  # noqa: BLE001 - 保留原串，别丢信息
-                        pass
-                _calls.append({"name": _fn.get("name") or "unknown",
-                               "arguments": _args if _args is not None else {}})
-            if _calls:
-                _prev = content if isinstance(content, str) else ""
-                _block = json.dumps(_calls, ensure_ascii=False)
-                content = ("%s\n\n[上一轮你调用过的工具]\n```json\n%s\n```\n"
-                           "这些调用已经执行完毕，结果在下面以 [tool result] 开头给出。"
-                           % (_prev, _block)).strip()
+                c = dict(call)
+                fn = c.get("function")
+                if isinstance(fn, dict) and not isinstance(fn.get("arguments"), str):
+                    fn = dict(fn)
+                    fn["arguments"] = json.dumps(fn.get("arguments"), ensure_ascii=False)
+                    c["function"] = fn
+                calls.append(c)
+            message["tool_calls"] = calls
         if role == "system":
-            systems.append({"role": "system", "content": content})
+            systems.append(message)
         else:
-            others.append({"role": role, "content": content})
+            others.append(message)
     return systems + others
 
 
@@ -317,15 +313,23 @@ def _apply_no_think(body: dict) -> dict:
     # 里塞垃圾，既污染输入，也白白拉低缓存命中。
     if not requested:
         messages = normalize_messages(out.get("messages") or [])
-        for index in range(len(messages) - 1, -1, -1):
-            item = messages[index]
-            if not isinstance(item, dict) or item.get("role") != "user":
-                continue
-            content = item.get("content")
-            if isinstance(content, str) and not content.lstrip().startswith("/no_think"):
-                messages[index] = {**item, "content": "/no_think " + content}
-            break
-        out["messages"] = messages
+        # ⚠️ 归一后为空时**不要回写**。
+        # normalize_messages 会丢弃无法识别的角色；全被丢光还回写，
+        # 就是把空数组发给上游 -> `400 messages 不能为空`（PR #18 定位的
+        # 第二个来源）。保留原始 messages，让上游看到真实输入、报错更准确。
+        if messages:
+            for index in range(len(messages) - 1, -1, -1):
+                item = messages[index]
+                if not isinstance(item, dict) or item.get("role") != "user":
+                    continue
+                content = item.get("content")
+                # 只给真正的用户文本加前缀：空串跳过，避免生成
+                # "/no_think " 这种只有前缀没有内容的消息。
+                if (isinstance(content, str) and content.strip()
+                        and not content.lstrip().startswith("/no_think")):
+                    messages[index] = {**item, "content": "/no_think " + content}
+                break
+            out["messages"] = messages
     return out
 
 

@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# 生产镜像（白名单构建）
+#
+# 与根目录 Dockerfile 的区别不是"更小"，而是**更小的攻击面**：
+#   * 不拷 desktop/、android/、tests/、docs/、backups/、_scratch/、_backup_*
+#   * 不拷 .env / *.db / 日志 / 客户端安装包
+#   * 只保留服务端运行时真正需要的模块
+#
+# 为什么要白名单而不是写 .dockerignore：
+#   .dockerignore 是"排除清单"，新增一个敏感目录时很容易忘记同步；
+#   这里是"包含清单"，新文件默认**不进镜像**，失败方向是安全的。
+#
+# 构建：
+#   docker build -f deploy/Dockerfile.prod -t wb2api:prod .
+# 运行（只绑回环，由宿主机 nginx 反代）：
+#   docker run -d --name wb2api -p 127.0.0.1:8790:8790 \
+#     --env-file /etc/wb2api/prod.env wb2api:prod
+# ---------------------------------------------------------------------------
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    APP_ENV=prod \
+    ADMIN_HOST=127.0.0.1 \
+    ADMIN_DEV_TOOLS=0 \
+    ADMIN_ENABLE_DOCS=0 \
+    ADMIN_ALLOW_FS_OPS=0
+
+# 非 root 运行：即使应用被拿下，也拿不到容器内的 root 权限。
+RUN groupadd -g 10001 app && useradd -u 10001 -g app -s /usr/sbin/nologin app
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+COPY requirements.txt ./
+RUN pip install -i ${PIP_INDEX_URL} -r requirements.txt
+
+# ---- 服务端代码（白名单）----
+COPY admin ./admin
+COPY main.py ./main.py
+# 网关协议适配层：/v1/* 的请求体转换与响应投影
+COPY converter.py responses_adapter.py responses_projection.py \
+     anthropic_adapter.py desensitize.py upstream_compat.py \
+     repository_instructions.py model_metadata.py ./
+# 客户端版本发现被 admin/server.py 的启动日志引用；缺少时降级为兜底版本。
+COPY wb_install.py wb_asar.py ./
+
+# desktop 只拷**只读元数据**：版本号、仓库地址、图标。
+# 明确不拷 app.py / updates.py / runtime.py / apply-update.ps1 ——
+# 那几个模块带着"写脚本并执行 / 下载安装包"的能力，生产不该有这条通道。
+COPY desktop/__init__.py desktop/common.py desktop/version.json ./desktop/
+COPY desktop/assets ./desktop/assets
+
+# 运行期数据目录（数据库、日志、备份）必须挂卷，不能写进镜像层。
+RUN mkdir -p /app/logs /app/backups && chown -R app:app /app
+VOLUME ["/app/logs", "/app/backups"]
+
+USER 10001:10001
+
+EXPOSE 8790
+
+# 健康检查走未鉴权的最小端点，避免把探测流量算进后台鉴权日志。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/api/app/version', timeout=4).status==200 else 1)"
+
+CMD ["python3", "-m", "uvicorn", "admin.server:app", \
+     "--host", "127.0.0.1", "--port", "8790", \
+     "--no-proxy-headers", "--log-level", "info"]

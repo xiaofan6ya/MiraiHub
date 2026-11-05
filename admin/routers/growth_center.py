@@ -40,7 +40,11 @@ def _status(aid):
 @router.get("/accounts")
 def list_accounts(db: Session = Depends(get_db)):
     from admin.scheduler import _account_label
-    rows = db.query(Account).order_by(Account.id).all()
+    all_rows = db.query(Account).order_by(Account.id).all()
+    # 企业版账号不参与成长任务：不进列表，但把数量回给前端 ——
+    # 否则用户只看到「暂无账号」，会以为号丢了。
+    rows = [a for a in all_rows if not (a.enterprise_id or "").strip()]
+    excluded_enterprise = len(all_rows) - len(rows)
     keys = [snapshot_key(a) for a in rows]
     cached = {s.key: s.value for s in db.query(SystemSetting).filter(SystemSetting.key.in_(keys))} if keys else {}
     items = []
@@ -54,7 +58,7 @@ def list_accounts(db: Session = Depends(get_db)):
         items.append({"id": account.id, "name": _account_label(account), "status": account.status,
                       "streak_days": streak,
                       "energy": sections.get("energy", {}).get("data", {}).get("balance")})
-    return {"items": items}
+    return {"items": items, "excluded_enterprise": excluded_enterprise}
 
 
 @router.get("/accounts/{aid}")

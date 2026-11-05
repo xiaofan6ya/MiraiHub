@@ -360,41 +360,88 @@ _STREAM_TICKET_LIMIT = 256              # 票据总量上限（纯内存结构�
 _ACTIVITY_STREAM_LIMIT = 16             # 同时最长连接数
 _activity_stream = {'now': 0}
 
-_stream_tickets: dict[str, float] = {}
+_stream_tickets: dict[str, tuple[float, str]] = {}
 _stream_tickets_lock = threading.Lock()
 
 
-def issue_stream_ticket(now: float | None = None) -> dict:
+def _ticket_bind(request: Request) -> str:
+    """票据绑定摘要 = 会话 sid + 客户端 IP。
+
+    为什么是这两项
+    --------------
+    EventSource 不能带自定义请求头，所以凭证只能进 URL。一张进了 URL 的
+    票据一旦泄露（日志、截图、Referer），必须**换个地方就用不了**：
+      * sid：绑定到签发它的那条会话 —— 退出登录 / 换人登录后自动作废；
+      * IP：绑定到签发时的来源地址 —— 把链接贴到别的机器上用不了。
+    IP 用 `client_ip_from_request`，它只在直连对端是可信反代时才采信
+    X-Real-IP，避免被伪造头绕过。
+    """
+    import hashlib
+
+    from admin.ratelimit import client_ip_from_request
+    from admin.security import decode_admin_token
+
+    sid = ""
+    for tok in (request.headers.get("x-admin-token"),
+                request.cookies.get("admin_session")):
+        if not tok:
+            continue
+        try:
+            sid = decode_admin_token(tok).get("sid") or ""
+        except Exception:  # noqa: BLE001 - 本地壳令牌无 sid，按空处理
+            sid = ""
+        if sid:
+            break
+    ip = client_ip_from_request(request)
+    return hashlib.sha256(f"{sid}|{ip}".encode("utf-8")).hexdigest()[:32]
+
+
+def issue_stream_ticket(request: Request, now: float | None = None) -> dict:
     """签发一张推送票据（调用方必须已通过管理员鉴权）。
 
     EventSource 不能带自定义请求头，而**管理员 JWT 绝不能进 URL** ——
     URL 会进 uvicorn/nginx 访问日志、浏览器历史与 Referer，那等于长期凭据泄漏。
-    所以前端先用请求头换一张 2 分钟有效、只能读这条推送的票据。
+    所以前端先用请求头换一张 2 分钟有效、只能读这条推送、且绑定会话与 IP 的票据。
     """
     now = now if now is not None else time.time()
     token = secrets.token_urlsafe(24)
+    bind = _ticket_bind(request)
     with _stream_tickets_lock:
-        for key, expiry in list(_stream_tickets.items()):
+        for key, (expiry, _b) in list(_stream_tickets.items()):
             if expiry <= now:
                 _stream_tickets.pop(key, None)
         while len(_stream_tickets) >= _STREAM_TICKET_LIMIT:
             _stream_tickets.pop(next(iter(_stream_tickets)), None)
-        _stream_tickets[token] = now + _STREAM_TICKET_TTL
+        _stream_tickets[token] = (now + _STREAM_TICKET_TTL, bind)
     return {'ticket': token, 'expires_in': int(_STREAM_TICKET_TTL)}
 
 
-def stream_ticket_valid(token: str | None, now: float | None = None) -> bool:
-    """票据是否有效（**不消费**：浏览器自动重连时会复用同一个 URL）。"""
+def stream_ticket_valid(token: str | None, request: Request,
+                        now: float | None = None) -> bool:
+    """票据是否有效（**不消费**：浏览器自动重连时会复用同一个 URL）。
+
+    校验三件事：存在、未过期、**绑定匹配**。绑定不匹配直接删除票据 ——
+    一张被别人拿去用的票没有保留价值。
+    """
     if not token:
         return False
     now = now if now is not None else time.time()
     with _stream_tickets_lock:
-        expiry = _stream_tickets.get(token)
-        if expiry is None:
+        entry = _stream_tickets.get(token)
+        if entry is None:
             return False
+        expiry, bind = entry
         if expiry <= now:
             _stream_tickets.pop(token, None)
             return False
+    try:
+        want = _ticket_bind(request)
+    except Exception:  # noqa: BLE001 - 绑定算不出来就按失败处理
+        return False
+    if not secrets.compare_digest(bind, want):
+        with _stream_tickets_lock:
+            _stream_tickets.pop(token, None)
+        return False
     return True
 
 
@@ -439,9 +486,12 @@ def _activity_fetch(key: Optional[str], limit: int) -> dict:
 
 
 @router.get('/requests/ticket')
-def request_activity_ticket(_: bool = Depends(require_admin)):
-    """用**请求头**换一张短票据，供 EventSource 拼进 URL。"""
-    return issue_stream_ticket()
+def request_activity_ticket(request: Request, _: bool = Depends(require_admin)):
+    """用**请求头**换一张短票据，供 EventSource 拼进 URL。
+
+    票据绑定「会话 sid + 来源 IP」，见 `_ticket_bind`。
+    """
+    return issue_stream_ticket(request)
 
 
 @router.get('/usage/stream')
@@ -471,7 +521,7 @@ async def usage_log_stream(
     import asyncio
 
     # 与大屏那张表共用同一套票校验（EventSource 不能带自定义头）
-    if not (ticket and stream_ticket_valid(ticket)):
+    if not (ticket and stream_ticket_valid(ticket, request)):
         raise HTTPException(status_code=401, detail="ticket 无效或已过期")
 
     _POLL_SECONDS = 2.0
@@ -538,7 +588,7 @@ async def request_activity_stream(
     header_token = request.headers.get('x-admin-token')
     if header_token:
         verify_admin_token(header_token)
-    elif not stream_ticket_valid(ticket):
+    elif not stream_ticket_valid(ticket, request):
         raise HTTPException(status_code=401, detail='推送票据无效或已过期')
     limit = max(1, min(100, int(limit or 40)))
 

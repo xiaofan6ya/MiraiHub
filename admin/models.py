@@ -361,7 +361,76 @@ class JoinInvite(Base):
     expires_at = Column(DateTime, nullable=True)
     #: 生成者标识（后台账号名），便于追责与审计。
     created_by = Column(String(120), default="")
+    #: 代次。任何一次 join 总闸 toggle 都会 +1，旧代次的邀请码立即失效。
+    #: 为什么用代次而不是逐条删：漏删一条就是一个长期后门，代次只增不减，
+    #: 天然不会残留（见 admin/join_gate.py）。
+    epoch = Column(Integer, nullable=False, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class JoinTicket(Base):
+    """join 入口的**一次性访问票据**（只存 jti，明文只出现在签发链接里）。
+
+    职责分离：
+      * 票据（本表）：只回答「能不能打开 /join 页面」，一次性、短 TTL；
+      * 邀请码（JoinInvite）：只回答「能不能完成注册」，放在 POST body / 头。
+
+    票据明文走 URL 的 `#fragment`，不随 HTTP 请求上送 —— 不进 nginx access
+    log、不进 Referer、不进浏览器历史里的完整 URL。
+    """
+
+    __tablename__ = "join_tickets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    jti = Column(String(64), nullable=False, unique=True, index=True)
+    epoch = Column(Integer, nullable=False, default=1, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_by = Column(String(120), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdminSession(Base):
+    """后台会话行：JWT 只是运输载体，**权威状态在这张表**。
+
+    为什么必须落库
+    --------------
+    纯无状态 JWT 有两个做不到的事：
+      1. **真实退出** —— JWT 签出去就收不回来，logout 只能靠前端删本地副本；
+      2. **一人一份** —— 同一个令牌可以无限复制，谁拿到谁就是管理员。
+
+    落库之后：`logout` = 置 revoked_at；换人登录 = 吊销该账号的全部旧会话；
+    Cookie 被复制到另一台机器 = 设备绑定不匹配，直接拒。
+
+    安全细节
+    --------
+    * `token_hash` 存 SHA-256 而不是明文：库被拖走也无法反推出可用令牌；
+    * `bind_hash` = SHA-256(设备标识 Cookie)，不落原始设备 ID；
+    * 每次校验都过一遍 `revoked_at IS NULL AND expires_at > now`，不依赖时钟容差。
+    """
+
+    __tablename__ = "admin_sessions"
+    __table_args__ = (
+        Index("ix_admin_sessions_subject_active", "subject", "revoked_at"),
+        Index("ix_admin_sessions_expires", "expires_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #: 会话标识，写进 JWT 的 `sid` 声明。
+    sid = Column(String(64), nullable=False, unique=True, index=True)
+    subject = Column(String(120), nullable=False, default="")
+    #: 完整 JWT 的 SHA-256。同一条令牌只能对应一行，换 token 即换会话。
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    #: 设备绑定摘要（空串 = 未绑定，仅限 CLI/本地壳）。
+    bind_hash = Column(String(64), nullable=False, default="")
+    ip = Column(String(64), default="")
+    ua_hash = Column(String(64), default="")
+    fp = Column(String(64), default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(String(48), default="")
 
 
 class ClientIdentity(Base):

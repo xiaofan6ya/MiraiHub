@@ -21,6 +21,12 @@ if os.getenv("WORKBUDDY_DESKTOP") != "1" and os.getenv("WORKBUDDY_ANDROID") != "
 
 _logger = logging.getLogger(__name__)
 
+#: 运行环境。**必须在所有默认值之前读出来** —— 下面好几项默认值要按环境分叉。
+#:   prod / staging / dev，写错任何一个都按 dev 处理会在生产留下开发面，
+#:   所以 `admin/env_guard.py` 会在启动时再断言一次。
+_APP_ENV = (os.getenv("APP_ENV", "dev") or "dev").strip().lower()
+_IS_PROD = _APP_ENV == "prod"
+
 
 class Settings:
     LOG_REQUEST_PAYLOAD = os.getenv("ADMIN_LOG_REQUEST_PAYLOAD", "0") == "1"
@@ -97,10 +103,49 @@ class Settings:
         _logger.warning("ADMIN_JWT_SECRET 未设置，使用开发弱密钥；生产环境请在 .env 中配置")
         _jwt = "dev-insecure-jwt-secret-change-me"
     JWT_SECRET = _jwt
-    JWT_EXPIRE_HOURS = int(os.getenv("ADMIN_JWT_EXPIRE_HOURS", "24"))
+    # 后台会话有效期（小时）。
+    #
+    # 2026-11-05 从 24 收到 4：令牌即便只存在 HttpOnly Cookie 里，被偷一次
+    # 也意味着 24 小时的全量号池访问权。4 小时足够一次运维班次，超出就重登。
+    # 生产启动断言另有一条「<= 8」的硬上限（见 admin/env_guard.py）。
+    JWT_EXPIRE_HOURS = int(os.getenv("ADMIN_JWT_EXPIRE_HOURS", "4"))
 
-    # 服务监听
-    HOST = os.getenv("ADMIN_HOST", "0.0.0.0")
+    # ---------- 后台会话策略（2026-11-05 加固） ----------
+    #: 是否开启「同一账号只允许一个有效会话」。
+    #:
+    #: 开启后：每次登录都会**吊销此前签发的全部会话**，旧标签页/旧设备立刻失效。
+    #: 这是「同一个凭证只能一个人用」的落点 —— 凭证本身不再是一张可以复制
+    #: 传播的长期票据，而是一条绑定到具体会话行的记录。
+    SESSION_SINGLE = os.getenv("ADMIN_SESSION_SINGLE", "1") != "0"
+    #: 是否把会话绑定到设备标识 Cookie（`wb_device`）。
+    #:
+    #: 换浏览器/清 Cookie 后必须重新登录；把 `admin_session` 复制到另一台
+    #: 浏览器也过不了校验。CLI 走 `X-Admin-Token` 头时不做该绑定。
+    SESSION_BIND_DEVICE = os.getenv("ADMIN_SESSION_BIND_DEVICE", "1") != "0"
+    #: 设备标识 Cookie 有效期（天）。只用于绑定，不承载任何权限。
+    DEVICE_COOKIE_DAYS = int(os.getenv("ADMIN_DEVICE_COOKIE_DAYS", "180"))
+    #: 是否强制 CSRF 双提交校验（Cookie 鉴权的写操作）。
+    CSRF_ENABLED = os.getenv("ADMIN_CSRF_ENABLED", "1") != "0"
+
+    #: join 访问票据签名密钥。生产必须独立配置，**不要**复用 ADMIN_JWT_SECRET：
+    #: 两者生命周期不同（票据 15 分钟、会话 4 小时），共用一把钥匙意味着
+    #: 任一泄露点都会同时打穿两个体系。
+    JOIN_TICKET_SECRET = os.getenv("JOIN_TICKET_SECRET", "")
+    #: join 访问票据 TTL（秒）。
+    #:
+    #: 2026-11-05 从 15 分钟放宽到 24 小时：票据不再是"一次性"，而是
+    #: **有效期内可重复打开**。15 分钟对"发给朋友、对方晚点再点"太苛刻，
+    #: 实际使用中只会逼着管理员反复签发。安全性由「总闸 + 代次 + 短码不可猜」
+    #: 保证：关闸或再开闸都会让旧链接全部失效。
+    JOIN_TICKET_TTL = max(60, min(7 * 86400, int(os.getenv("JOIN_TICKET_TTL", "86400"))))
+    #: 票据换来的访问 Cookie TTL（秒）。过期后重新点一次链接即可。
+    JOIN_ACCESS_TTL = max(60, min(24 * 3600, int(os.getenv("JOIN_ACCESS_TTL", "14400"))))
+
+    # 服务监听。
+    #
+    # 生产默认 127.0.0.1：8790 只允许 nginx 反代进来，不做公网直连。
+    # 本地/桌面/安卓仍默认 0.0.0.0（客户端从本机访问，且需要局域网调试）。
+    HOST = os.getenv("ADMIN_HOST", "127.0.0.1" if _IS_PROD else "0.0.0.0")
     PORT = int(os.getenv("ADMIN_PORT", "8790"))
     # Only these direct peers may supply X-Real-IP / X-Forwarded-For.
     TRUSTED_PROXY_IPS = os.getenv("ADMIN_TRUSTED_PROXY_IPS", "127.0.0.1,::1")
@@ -155,9 +200,10 @@ class Settings:
     #: 逆向产物（客户端源码）管理：后台一键拆包 app.asar、手动指定安装目录。
     #:
     #: **只对开发/测试环境有意义**：生产服务器既没有客户端安装包，也不该在上面
-    #: 放 225MB 的源码。默认开启（本地开发方便），生产部署设为 0 即可整体关闭
-    #: —— 关闭后 /api/app-source/* 全部返回 404，后台也不显示该区域。
-    DEV_TOOLS = os.getenv("ADMIN_DEV_TOOLS", "1") != "0"
+    #: 放 225MB 的源码。默认开启（本地开发方便），生产部署**默认关闭**，
+    #: 且 `admin/env_guard.py` 会在 APP_ENV=prod 时对 1 直接拒绝启动。
+    #: 关闭后 /api/app-source/* 全部返回 404，后台也不显示该区域。
+    DEV_TOOLS = os.getenv("ADMIN_DEV_TOOLS", "0" if _IS_PROD else "1") != "0"
 
     # ---------- 流量治理（限流 / 并发 / 保活） ----------
     #: 单账号最大在途请求数（0 = 不限）。

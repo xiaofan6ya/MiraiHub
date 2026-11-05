@@ -61,8 +61,32 @@ TOP_N = 5
 #: 权重参数（对齐 master 的 weightOf）。
 CREDITS_WEIGHT = 10.0        # 余额占比权重
 EXPIRING_WEIGHT = 8.0        # 快过期积分占比权重
-IDLE_WEIGHT_PER_HOUR = 0.5   # 闲置补偿：每小时未使用 +0.5
-IDLE_WEIGHT_MAX = 5.0        # 闲置补偿封顶
+
+# ---------------------------------------------------------------------------
+# 活跃度回温（2026-11-05 按线上封号数据重做）
+# ---------------------------------------------------------------------------
+# 原实现是「闲置补偿」：每小时未使用 +0.5，封顶 +5 —— 也就是**越久没用越优先**。
+# 线上复盘把这个方向证伪了：同一批 49 个号里被限制的 28 个总请求只有 785，
+# 健康的 21 个是 9922（多 12 倍）；决定性变量不是请求量，而是
+# 「沉默 6 天后突然激活」。上游抓的是账号行为模式，不是调用次数。
+#
+# 现在的模型：
+#   * 24 小时内用过 → 满权重（正常轮转）
+#   * 24h → 168h 线性衰减到 IDLE_MIN_FACTOR（越冷越难被选中）
+#   * 超过 168h → 保持下限，**始终留一条缝**：完全不选它就会永远沉默，
+#     下次被迫启用时仍然是「突然激活」，反而更危险
+#   * 冷号被选中时，在途上限压到 1（见 PoolRuntime.limit_for），
+#     把「回来就并发打满」变成涓流
+IDLE_GRACE_HOURS = float(os.getenv("ADMIN_POOL_IDLE_GRACE_HOURS", "24") or 24)
+IDLE_DECAY_HOURS = float(os.getenv("ADMIN_POOL_IDLE_DECAY_HOURS", "168") or 168)
+IDLE_MIN_FACTOR = max(0.02, min(1.0, float(os.getenv("ADMIN_POOL_IDLE_MIN_FACTOR", "0.22") or 0.22)))
+#: 超过该时长视为「冷号」，回温期只放 1 个在途请求
+COLD_WARMUP_HOURS = float(os.getenv("ADMIN_POOL_COLD_WARMUP_HOURS", "72") or 72)
+COLD_WARMUP_INFLIGHT = max(1, int(os.getenv("ADMIN_POOL_COLD_WARMUP_INFLIGHT", "1") or 1))
+
+#: 兼容旧名字（外部脚本/测试可能引用）；新代码请用 activity_factor()。
+IDLE_WEIGHT_PER_HOUR = 0.0
+IDLE_WEIGHT_MAX = 0.0
 #: 等权重判定容差：权重公式微调后不再位级相等，精确相等比较会让洗牌静默失效。
 WEIGHT_EPSILON = 1e-9
 
@@ -422,14 +446,49 @@ def _weight(credits: int, expiring: int, max_credits: int,
     #    所以「快过期占比」是一个独立的强权重项（与余额多少正交）。
     if credits > 0 and expiring > 0:
         w += float(min(expiring, credits)) / float(credits) * EXPIRING_WEIGHT
-    # 3. 闲置补偿：久未使用的号补位，避免高分号永久垄断流量。
-    lu = _as_utc(last_used)
-    if lu is None:
-        w += IDLE_WEIGHT_MAX  # 从未使用 → 满分
-    else:
-        hours = max(0.0, (now - lu).total_seconds() / 3600.0)
-        w += min(hours * IDLE_WEIGHT_PER_HOUR, IDLE_WEIGHT_MAX)
-    return w
+    # 3. 活跃度：**乘性**回温系数（不是加性补偿）。
+    #    原来的 `+ min(hours*0.5, 5)` 会让「沉默 6 天」的号拿到 +5 —— 比
+    #    余额因子（满值 10）的一半还多，等于主动把它推到最前面，正好复现
+    #    上游判定的「沉默后突然激活」。改成乘法后，冷号只是在同等条件下
+    #    更难被抽到，但不会因为余额高就永远抢不到。
+    return w * activity_factor(last_used, now)
+
+
+def _hours_since(value, now: datetime) -> float | None:
+    ts = _as_utc(value)
+    if ts is None:
+        return None
+    return max(0.0, (now - ts).total_seconds() / 3600.0)
+
+
+def activity_factor(last_used, now: datetime | None = None,
+                    created_at=None) -> float:
+    """活跃度系数（0.02~1.0）。
+
+    锚点优先用 `last_used_at`，没有则用 `created_at` —— 刚导入的号不算
+    「沉默」，否则新号永远排不进来；两个都没有才按下限处理。
+    """
+    now = now or _now_utc()
+    hours = _hours_since(last_used, now)
+    if hours is None:
+        hours = _hours_since(created_at, now)
+    if hours is None:
+        return IDLE_MIN_FACTOR
+    if hours <= IDLE_GRACE_HOURS:
+        return 1.0
+    if hours >= IDLE_DECAY_HOURS:
+        return IDLE_MIN_FACTOR
+    span = max(1e-6, IDLE_DECAY_HOURS - IDLE_GRACE_HOURS)
+    ratio = (hours - IDLE_GRACE_HOURS) / span
+    return 1.0 - (1.0 - IDLE_MIN_FACTOR) * ratio
+
+
+def is_cold(account: Any, now: datetime | None = None) -> bool:
+    """是否处于「冷号回温期」（久未调用，需要限并发）。"""
+    hours = _hours_since(getattr(account, "last_used_at", None), now or _now_utc())
+    if hours is None:
+        hours = _hours_since(getattr(account, "created_at", None), now or _now_utc())
+    return hours is not None and hours >= COLD_WARMUP_HOURS
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +630,11 @@ def expiry_weighted_pick(accounts, *, inflight=None, rand=None, now=None):
         rank = (start + 1 + end) / 2
         for account in ordered[start:end]:
             busy = inflight.count(account.uid or '') if inflight else 0
-            weights.append(1 / (rank * (1 + busy)))
+            # 同一到期档内，再用活跃度调一次：久未调用的号权重更低，
+            # 但它仍在**同一紧迫度档**里，不会抢掉「快过期要先烧」的位置。
+            factor = activity_factor(getattr(account, "last_used_at", None), now,
+                                     getattr(account, "created_at", None))
+            weights.append(factor / (rank * (1 + busy)))
         start = end
     return (rand or random).choices(ordered, weights=weights, k=1)[0] if ordered else None
 
@@ -795,7 +858,15 @@ class PoolRuntime:
 
     def limit_for(self, account: Any) -> int:
         value = getattr(account, "max_in_flight", None)
-        return max(0, int(self.max_in_flight if value is None else value))
+        base = max(0, int(self.max_in_flight if value is None else value))
+        if base <= 0:
+            return base
+        # 冷号回温：久未调用的账号先只放 1 个在途。
+        # 这是抗「沉默后突然激活」的**兜底闸门** —— 即使选号策略把它选中，
+        # 也不会瞬间并发打满；等它重新有了连续调用，自然回到正常上限。
+        if is_cold(account):
+            return min(base, COLD_WARMUP_INFLIGHT)
+        return base
 
     def acquire_account(self, account: Any) -> bool:
         return self.inflight.acquire(account.uid or "", self.limit_for(account))

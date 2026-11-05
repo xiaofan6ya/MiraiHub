@@ -213,8 +213,9 @@ def main():
     assert types[-1] == "message_stop", types[-3:]
 
     # ---- 2) 上游侧：tools / 工具历史 / 归因头到没到 ----
-    # loomy 的归一层（现场实测）把 role=tool 转成带调用标识的 user 文本、
-    # assistant.tool_calls 转成 JSON 块 —— 断言这些标记完整到达上游。
+    # 2026-11-05 起归一层改为**结构化透传**（与官方 3065 客户端同款行为，
+    # 实测上游对 role=tool / assistant.tool_calls 全部 200）：
+    # 不再把工具历史压成 "[tool result ...]" / "[上一轮你调用过的工具]" 文本。
     up_body = CAPTURED["body"]
     if os.getenv("E2E_DEBUG"):
         for i, msg in enumerate(up_body["messages"]):
@@ -222,12 +223,18 @@ def main():
                                      (msg.get("content") or "")[:260]))
     assert up_body["tools"], "tools 定义没到上游"
     assert up_body["tools"][0]["function"]["name"] == "read"
-    blob = json.dumps(up_body["messages"], ensure_ascii=False)
-    assert "[tool result for t1]" in blob, "工具结果标识丢失（模型会重复调工具）"
-    assert "file content" in blob, "工具结果内容丢失"
-    assert "[工具执行出错]" in blob, "is_error 语义丢失"
-    assert "[上一轮你调用过的工具]" in blob, "assistant 工具调用历史被丢弃"
-    assert "path" in blob and "/x" in blob, "上一轮调用参数丢失"
+    tool_msgs = [m for m in up_body["messages"] if m.get("role") == "tool"]
+    assert tool_msgs, "tool 结果消息被丢弃（应结构化透传）"
+    assert tool_msgs[0].get("tool_call_id") == "t1", tool_msgs[0]
+    assert "file content" in str(tool_msgs[0].get("content")), "工具结果内容丢失"
+    assert "[工具执行出错]" in str(tool_msgs[0].get("content")), "is_error 语义丢失"
+    asst = [m for m in up_body["messages"]
+            if m.get("role") == "assistant"
+            and isinstance(m.get("tool_calls"), list)]
+    assert asst, "assistant.tool_calls 没有结构化透传"
+    fn = asst[-1]["tool_calls"][0].get("function") or {}
+    assert fn.get("name") == "read", fn
+    assert "path" in str(fn.get("arguments")), fn
     up_headers = CAPTURED["headers"]
     for h in ("authorization", "token", "traceparent", "chatid", "msgid",
               "turnid", "x-loomy-request-purpose"):
@@ -257,10 +264,10 @@ def main():
     fcs = [o for o in out["output"] if o["type"] == "function_call"]
     assert fcs and fcs[0]["name"] == "read", out["output"]
     up_body = CAPTURED["body"]
-    blob = json.dumps(up_body["messages"], ensure_ascii=False)
-    assert "[tool result for call_1]" in blob, \
-        "responses 输入的 function_call_output 结果没到上游"
-    assert "data" in blob
+    tool_msgs2 = [m for m in up_body["messages"] if m.get("role") == "tool"]
+    assert tool_msgs2, "responses 输入的 function_call_output 结果没到上游"
+    assert any(m.get("tool_call_id") == "call_1" for m in tool_msgs2), tool_msgs2
+    assert any("data" in str(m.get("content")) for m in tool_msgs2), tool_msgs2
     assert up_body["messages"][0]["role"] == "system", "instructions 没转 system"
     # loomy 的思考预算下限会放大 max_tokens（≥ 客户端要求值）
     assert up_body["max_tokens"] >= 64

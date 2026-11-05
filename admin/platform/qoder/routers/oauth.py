@@ -50,9 +50,13 @@ def device_start(realm: str = "cn", _: bool = Depends(require_admin)):
     try:
         session = oauth.DeviceLogin(value)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("生成设备授权链接失败")
-        raise HTTPException(502,
-                            detail="生成授权链接失败：%s" % str(exc)[:120]) from exc
+        logger.exception("生成设备授权链接失败 realm=%s", value)
+        # 不要把原始异常（errno / 路径 / 堆栈）当成用户提示：
+        # 线上曾把 "[Errno 6] No such device or address" 直接糊到弹窗里，
+        # 运维完全看不出该做什么。真正的诊断留在服务端日志。
+        hint = ("生成授权链接失败（%s）。请检查服务端日志；"
+                "如为容器/服务部署可显式设置 QODER_MACHINE_ID。" % type(exc).__name__)
+        raise HTTPException(502, detail=hint) from exc
     _prune()
     _SESSIONS[session.nonce] = session
     payload = session.as_dict()

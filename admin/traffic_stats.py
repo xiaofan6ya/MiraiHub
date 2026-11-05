@@ -23,8 +23,10 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
 import threading
 import time
 
@@ -488,8 +490,35 @@ def record(platform: str, *, outcome: str, status: int = 0,
         logger.debug("流量统计写入失败", exc_info=True)
 
 
+#: 平台枚举缓存。注册表在进程内基本不变，而 `snapshot()` 会被多个面板/
+#: 多标签页轮询 —— 每 2 秒重建一次列表纯属浪费。
+_PLATFORM_IDS_TTL = 60.0
+_platform_ids_cache: dict = {"ts": 0.0, "rows": []}
+
+#: 快照短缓存（秒）。
+#:
+#: 为什么必须缓存：`/api/sentinel/traffic` 会被「平台网关」和「用量日志」
+#: 两个面板各自轮询，前端还有 SSE。没有缓存时每次请求都要
+#:   hgetall × N 平台 + scan_iter 全键空间 + zrangebyscore + hvals(running)
+#: 线上数据量一大，3 秒一次的轮询就变成压死 Redis 和 uvicorn 的那根稻草。
+#: 2 秒窗口：面板本来就是秒级刷新，肉眼看不出差别，但请求量能合并掉一大半。
+_SNAPSHOT_TTL = float(os.getenv("ADMIN_TRAFFIC_CACHE_TTL", "2") or 2)
+_snapshot_cache: dict = {}
+_snapshot_lock = threading.Lock()
+
+
 def _platform_ids() -> list[tuple[str, str]]:
-    """`[(public_id, label)]`，按登记顺序。"""
+    """`[(public_id, label)]`，按登记顺序（带 60 秒缓存）。"""
+    now = time.time()
+    cached = _platform_ids_cache
+    if cached["rows"] and now - cached["ts"] < _PLATFORM_IDS_TTL:
+        return cached["rows"]
+    rows = _platform_ids_now()
+    _platform_ids_cache.update(ts=now, rows=rows)
+    return rows
+
+
+def _platform_ids_now() -> list[tuple[str, str]]:
     try:
         from admin.platform import registry
         from admin.platform.loader import load_platforms
@@ -505,6 +534,29 @@ def _platform_ids() -> list[tuple[str, str]]:
 
 
 def snapshot(window: int = 3600) -> dict:
+    """今日各平台计数 + 最近 `window` 秒的请求明细（带 2 秒合并缓存）。
+
+    返回值是**深拷贝**：调用方（如 sentinel_router 按平台过滤）会就地改
+    `platforms` / `recent` 字段，直接返回缓存对象会被改脏。
+    """
+    win = max(60, int(window))
+    key = (_day(), win)
+    now = time.time()
+    with _snapshot_lock:
+        hit = _snapshot_cache.get(key)
+        if hit and now - hit[0] < _SNAPSHOT_TTL:
+            return copy.deepcopy(hit[1])
+    data = _snapshot_now(win)
+    with _snapshot_lock:
+        # 只留最近几个窗口，避免长跑进程里无限增长
+        if len(_snapshot_cache) > 6:
+            for old in sorted(_snapshot_cache, key=lambda k: _snapshot_cache[k][0])[:3]:
+                _snapshot_cache.pop(old, None)
+        _snapshot_cache[key] = (time.time(), copy.deepcopy(data))
+    return data
+
+
+def _snapshot_now(window: int = 3600) -> dict:
     """今日各平台计数 + 最近 `window` 秒的请求明细。"""
     day = _day()
     since = time.time() - max(60, int(window))

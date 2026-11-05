@@ -116,6 +116,14 @@ def mobile_html(html: str) -> str:
                           '手机号登录或浏览器授权，账号保存在这台手机。', '账号页文案')
     html = _replace_maybe(html, '新版加密、旧版明文及 .info.bak-时间戳备份',
                           '旧版明文及 .info.bak-时间戳备份', '导入说明文案')
+    # 移动端 mobile_js() 删掉了整个 scanLocal 实现，但 index.html 里的
+    # 「扫描本机」按钮还挂着 onclick="scanLocal(this)" —— 点击直接
+    # ReferenceError。改派给 WBPlatform.action('scan')：platformScanLocal
+    # 的 workbuddy 分支有 typeof 守卫，移动端会得到
+    # 「移动端不支持扫描本机」的提示而不是脚本报错。
+    html = _replace_maybe(html, 'onclick="scanLocal(this)"',
+                          "onclick=\"WBPlatform.action('scan')\"",
+                          '「扫描本机」按钮 → 平台动作入口')
     credential_note = ('<p class="text-xs text-slate-500 mb-2">新版 Windows 加密凭证请先在'
                        '电脑账号管理页导出“系统明文备份”后再导入，或使用手机号授权登录。</p>')
     for marker in ('<input id="upFile"', '<textarea id="reauthJson"'):

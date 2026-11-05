@@ -128,7 +128,14 @@ def init_db() -> bool:
         # 全新的表而非老表的加列，所以不需要 _ensure_column。
         #
         # 语义是 fail-closed：表里一张有效凭证都没有 → `/join` 与
-        # `/api/join/*` 整体关闭（见 admin/join_invite.py）。
+        # `/api/join/*` 整体关闭（见 admin/join_gate.py）。
+        #
+        # 2026-11-05 加固：加 `epoch` 代次列。任何一次总闸 toggle 都会 +1，
+        # 旧代次的邀请码立即失效 —— 不需要逐条删，也就不会漏删。
+        _ensure_column("join_invites", "epoch", "INT", "NOT NULL DEFAULT 1")
+        _ensure_index("join_invites", "ix_join_invites_epoch", ("epoch",))
+
+        # admin_sessions / join_tickets 都是新表，create_all 会建。
 
         # 迁移：给 api_keys 表加 key_full 列（若不存在）
         _ensure_column("api_keys", "key_full", "VARCHAR(2048)", "DEFAULT ''")

@@ -126,6 +126,15 @@ SENSITIVE_TERMS: list[str] = [
     "noreply@anthropic.com",
 ]
 
+# Claude Code 的计费指纹行：整行渠道元数据，不是协议字段。
+# 零宽对它无效（上游先归一化零宽再比对），必须**整行删除**。
+# 只匹配「整行都是指纹 KV」的行；后面还有正文时交给 INLINE 删到分号为止。
+_BILLING_LINE_RE = re.compile(
+    r"(?im)^[ \t]*x-anthropic-billing-header[ \t]*:[ \t]*"
+    r"(?:[A-Za-z0-9_.\-]+=[^\s;\n]*;?[ \t]*)+[ \t]*(?:\r?\n|$)")
+_BILLING_INLINE_RE = re.compile(r"(?i)x-anthropic-billing-header[ \t]*:[^;\n]*;?")
+
+
 # 编译成一个大正则，按词长降序，避免短词先吃掉长词。
 # 用 \b 边界 + 忽略大小写。
 _PATTERN = re.compile(
@@ -311,7 +320,17 @@ def _zero_width_split(term: str) -> str:
 
 
 def desensitize_text(text: str) -> str:
-    """对文本中的触发词插入零宽空格。无触发词则原样返回。"""
+    """先删计费指纹行，再对触发词插入零宽空格。
+
+    指纹行是整行渠道样本，插零宽等于没处理（上游会归一化）；
+    删完可能整段为空，此时返回空串，由调用方摘除空 text block。
+    """
+    if not text:
+        return text
+    if _BILLING_LINE_RE.search(text):
+        text = _BILLING_LINE_RE.sub("", text)
+    if _BILLING_INLINE_RE.search(text):
+        text = _BILLING_INLINE_RE.sub("", text)
     if not text:
         return text
     return _PATTERN.sub(lambda m: _zero_width_split(m.group(0)), text)
@@ -492,6 +511,17 @@ def _desensitize_tool_value(value: Any, strip_metadata: bool = False):
     return value
 
 
+
+
+def _content_text(content) -> str:
+    """把 string / content blocks 里的可见文本拼起来，用于判断是否被删空。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(b.get("text") or "") for b in content
+                       if isinstance(b, dict))
+    return ""
+
 def desensitize_messages(messages: Iterable[dict],
                          roles: tuple[str, ...] = ("system",),
                          desensitize_harness_user: bool = False,
@@ -538,15 +568,28 @@ def desensitize_messages(messages: Iterable[dict],
                 new_blocks = []
                 for index, blk in enumerate(content):
                     if isinstance(blk, dict) and blk.get("type") == "text":
+                        before = blk.get("text", "")
                         nb = dict(blk)
                         nb["text"] = '\n\n'.join([
-                            desensitize_text(_prune_runtime_fragments(role, blk.get("text", ""))),
+                            desensitize_text(_prune_runtime_fragments(role, before)),
                             *block_instructions.get(index, []),
                         ])
+                        # 原文非空、处理后为空 = 整块只有指纹行。
+                        # 不留 {"type":"text","text":""} —— 部分上游直接 400。
+                        if before.strip() and not nb["text"].strip():
+                            continue
                         new_blocks.append(nb)
                     else:
                         new_blocks.append(blk)
                 nm["content"] = new_blocks
+        # 整条消息只剩指纹行 -> 连消息一起删。
+        # 空 content 的 system 消息在部分上游会直接 400。
+        before_text = _content_text(m.get("content"))
+        after_text = _content_text(nm.get("content"))
+        if (should_desensitize and before_text.strip()
+                and "x-anthropic-billing-header" in before_text
+                and not after_text.strip()):
+            continue
         out.append(nm)
     return out
 

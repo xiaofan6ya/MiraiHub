@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -246,9 +248,20 @@ def _infer_public_base(request: Request | None) -> str:
     # 去掉可能残留的 userinfo（user@host）
     if "@" in host:
         host = host.rsplit("@", 1)[1]
+    # Host 头来自客户端，必须只接受合法主机名字符。
+    # 否则 `Host: evil.com\x00...` 之类的畸形值会污染上游回调地址，
+    # 变成开放重定向 / 回调劫持面（事故报告 R13 的残留）。
+    if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-:\[\]]*", host):
+        return ""
     bare = host.split(":")[0].strip().lower()
     if bare in _LOOPBACK_HOSTS:
         return ""                              # 回环推导不出公网地址
+    # 可选：运维显式声明可信的对外主机名（逗号分隔，不含端口）。
+    # 配了之后，反代若没有覆写 X-Forwarded-Host，伪造的 Host 也过不了。
+    allowed = [h.strip().lower() for h in
+               (os.environ.get("ADMIN_PUBLIC_HOSTS") or "").split(",") if h.strip()]
+    if allowed and bare not in allowed:
+        return ""
 
     proto = (first("x-forwarded-proto") or "").strip().lower()
     if proto not in ("http", "https"):

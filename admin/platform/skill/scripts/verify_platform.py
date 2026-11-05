@@ -188,11 +188,14 @@ class Client:
                                      method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         with self.opener.open(req, timeout=30) as resp:
-            self.token = json.loads(resp.read().decode())["token"]
+            # 2026-11-05 起 /api/login 不再在响应体里返回令牌：
+            # 凭证只存在于 HttpOnly Cookie，CookieJar 会自动带上。
+            body = json.loads(resp.read() or b"{}")
+            if not body.get("ok"):
+                raise RuntimeError("登录失败：%s" % body)
 
     def get(self, path: str, platform: str = "") -> tuple[int, dict]:
         req = urllib.request.Request(self.base + path)
-        req.add_header("X-Admin-Token", self.token)
         if platform:
             req.add_header("X-Platform", platform)
         try:
@@ -264,7 +267,7 @@ def check_browser(platform_id: str, base: str, user: str, password: str) -> None
           const x = new URLSearchParams({username: u, password: pw});
           const r = await fetch('/api/login',{method:'POST',body:x,
             headers:{'Content-Type':'application/x-www-form-urlencoded'}});
-          localStorage.setItem('wb_admin_token', (await r.json()).token);
+          if (!r.ok) throw new Error('login failed');
         }""", [user, password])
         page.reload(wait_until="domcontentloaded", timeout=60000)
         page.wait_for_function(

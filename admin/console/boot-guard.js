@@ -101,7 +101,12 @@
     }
 
     // ---- 4) 核心脚本是否都到位 ----
-    var need = ["openPhoneLogin", "openUpload", "openExport", "scanLocal", "loadAccounts"];
+    // `scanLocal` 是桌面专属：Android 构建会删掉整个实现，并把按钮改派给
+    // `WBPlatform.action('scan')`（那里对移动端有友好提示）。所以只有页面上
+    // 仍保留 `onclick="scanLocal(...)"` 的按钮（= 桌面构建）时才把它列为必需，
+    // 否则移动端每次都误报「缺少 scanLocal」。
+    var need = ["openPhoneLogin", "openUpload", "openExport", "loadAccounts"];
+    if (document.querySelector('[onclick^="scanLocal("]')) need.push("scanLocal");
     var miss = need.filter(function (k) { return typeof window[k] !== "function"; });
     if (miss.length) {
       console.error("[WB] 核心脚本未加载，缺少：" + miss.join(", "));

@@ -117,14 +117,21 @@
       }
     }
 
+    /* 同一组里只留一个主按钮。
+       授权登录和导入账号都声明了 primary，并排渲染就是两块蓝 —— 视觉上
+       分不出"下一步该点哪个"。这里按声明顺序取第一个，其余降级为
+       普通按钮；两处渲染（页头 / 平台卡）共用本函数，改一处即可。 */
+    var primaryTaken = false;
     return declared
       .map(function (name) {
         var meta = ACTION_META[name] || { label: name, icon: "key" };
+        var isPrimary = Boolean(meta.primary) && !primaryTaken;
+        if (isPrimary) primaryTaken = true;
         return {
           name: name,
           label: meta.label,
           icon: meta.icon,
-          primary: Boolean(meta.primary),
+          primary: isPrimary,
         };
       })
       .filter(function (item) {
