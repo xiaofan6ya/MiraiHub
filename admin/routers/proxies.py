@@ -13,8 +13,16 @@
     POST   /api/proxies/{id}/unblock   手动解除静默
     GET    /api/proxies/status         汇总：可用槽位 / 总并发
 
-安全：返回时**打码** `url` 里的密码段（`http://user:***@host:port`），
-避免面板被截图时把代理账密一起带出去。
+安全（用户明确强调「这个很危险」）：
+
+  · **落库加密**：`url` 存 `enc:v1:...` 密文（`admin/secret_box.py`），
+    key 由 `ADMIN_JWT_SECRET` 派生；换 secret = 旧密文失效（预期行为）。
+  · **出口不落库的选项**：填 `env:PROXY_MAIN` 时直接从环境变量读，
+    库里只有一个引用名，连密文都没有。
+  · **API 永不返回明文**：列表/详情一律打码成 `user:***@host`，
+    没有「查看密码」的接口。要改就整个重填。
+  · **日志脱敏**：`last_error` 写库前过 `secret_box.scrub()`，
+    因为上游错误体经常原样回显含账密的 URL。
 """
 from __future__ import annotations
 
@@ -24,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from admin import proxy_pool
+from admin import proxy_pool, secret_box
 from admin.db import get_db
 from admin.models import ProxyEndpoint
 from admin.security import require_admin
@@ -33,9 +41,31 @@ router = APIRouter(prefix="/api/proxies", tags=["proxies"])
 
 
 def _mask(url: str) -> str:
-    """`scheme://user:pass@host:port` → `scheme://user:***@host:port`。"""
+    """展示用：**先解密再打码**，`scheme://user:pass@host` → `scheme://user:***@host`。
+
+    ## 为什么必须先解密（2026-11-06 踩过）
+
+    库里存的是 `enc:v1:...` 密文。如果直接对密文调 `mask()`，正则匹配不到
+    `user:pass@`，于是整串密文原样吐给前端 —— 面板上显示一串 base64，
+    既看不出是哪个节点，又等于把密文外泄。
+
+    正确顺序是：**解密 → 打码 → 返回**。这样：
+      · 用户能看到 `host:port`（能认出是哪个出口）；
+      · 密码永远是 `***`（面板被截图也不泄）；
+      · 明文只在内存里存在一瞬间，不进响应体。
+
+    对环境变量引用（`env:NAME`）原样显示引用名 —— 名字本身不是秘密。
+    """
     text = str(url or "")
-    return re.sub(r"(://[^:/@]+:)[^@]*(@)", r"\1***\2", text)
+    if not text:
+        return ""
+    if text.startswith(secret_box.ENV_PREFIX):
+        return text
+    plain = secret_box.decrypt(text)
+    if not plain:
+        # 解密失败（密钥轮换 / 数据损坏）：**不要回退显示密文**
+        return "（无法解密，请重新填写）"
+    return secret_box.mask(plain)
 
 
 def _view(row: ProxyEndpoint, now) -> dict:
@@ -114,12 +144,20 @@ def status(pool: str = "", _: bool = Depends(require_admin),
 def create_proxy(body: ProxyIn, _: bool = Depends(require_admin),
                  db: Session = Depends(get_db)):
     url = str(body.url or "").strip()
-    if not (url.startswith("http://") or url.startswith("https://")
-            or url.startswith("socks5://") or url.startswith("socks5h://")):
-        raise HTTPException(400, detail="代理地址必须以 http:// / https:// / socks5:// 开头")
+    # 环境变量引用不校验协议（值在环境里，库里只放引用名）
+    if not url.startswith(secret_box.ENV_PREFIX):
+        if not re.match(r"^(https?|socks5h?)://", url):
+            raise HTTPException(
+                400, detail="代理地址必须以 http:// / https:// / socks5:// 开头，"
+                            "或写成 env:变量名 从环境变量读取")
+    try:
+        stored = (url if url.startswith(secret_box.ENV_PREFIX)
+                  else secret_box.encrypt(url))
+    except Exception as exc:  # noqa: BLE001 - 加密不可用时拒绝存明文
+        raise HTTPException(500, detail="代理地址加密失败，已拒绝以明文保存：%s" % exc) from exc
     row = ProxyEndpoint(
         label=str(body.label or "").strip()[:64],
-        url=url[:512],
+        url=stored[:1024],
         enabled=1 if body.enabled else 0,
         max_concurrency=max(1, min(32, int(body.max_concurrency or 1))),
         pool=str(body.pool or "").strip()[:32],
@@ -142,10 +180,20 @@ def patch_proxy(pid: int, body: ProxyPatch, _: bool = Depends(require_admin),
         row.label = str(body.label or "").strip()[:64]
     if body.url is not None:
         url = str(body.url or "").strip()
-        if url and not re.match(r"^(https?|socks5h?)://", url):
+        if url and not url.startswith(secret_box.ENV_PREFIX) \
+                and not re.match(r"^(https?|socks5h?)://", url):
             raise HTTPException(400, detail="代理地址协议不合法")
         if url:
-            row.url = url[:512]
+            # 打码值（含 `***`）不写回：那是前端把展示值当输入提交了，
+            # 直接落库会把真密码覆盖成 `***`，节点立刻不可用。
+            if "***" in url:
+                raise HTTPException(
+                    400, detail="检测到打码后的地址（含 ***）。修改代理请重新填写完整地址。")
+            try:
+                row.url = (url if url.startswith(secret_box.ENV_PREFIX)
+                           else secret_box.encrypt(url))[:1024]
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, detail="加密失败，已拒绝明文保存：%s" % exc) from exc
     if body.enabled is not None:
         row.enabled = 1 if body.enabled else 0
     if body.max_concurrency is not None:

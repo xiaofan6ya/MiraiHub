@@ -79,13 +79,21 @@ def total_slots(db: Session, pool: str = "") -> int:
 
 
 def expand(url: str) -> str:
-    """把 `{session}` / `{rand}` 占位符换成随机串。
+    """把 `{session}` / `{rand}` 占位符换成随机串，并解开加密/环境变量引用。
 
     轮换型代理（如 `http://user-session-{session}:pass@host:port`）靠会话
     标识切换出口 IP。**每个并发槽要拿到不同的会话**，否则 5 个线程还是
     同一个出口。
+
+    ## 为什么解析放在这里
+
+    库里存的是 `enc:v1:...` 密文（见 `admin/secret_box.py`），
+    只有真正要发请求时才解密 —— 这样密钥不参与列表查询、日志、
+    导出备份这些路径。
     """
-    text = str(url or "").strip()
+    from admin import secret_box
+
+    text = secret_box.resolve(url)
     if not text:
         return ""
     token = uuid.uuid4().hex[:12]
@@ -162,10 +170,14 @@ def mark_blocked(db: Session, endpoint_id: int | None, reason: str = "",
         if row is None:
             return
         row.blocked_until = datetime.utcnow() + timedelta(seconds=max(60, seconds))
-        row.last_error = (reason or "blocked")[:255]
+        # 脱敏后再落库：上游的错误体里经常原样回显请求 URL（含账密），
+        # 直接写进 last_error 就等于把代理凭据存了一份明文。
+        from admin import secret_box
+
+        row.last_error = secret_box.scrub(reason or "blocked")[:255]
         db.commit()
         _logger.warning("代理节点 #%s 进入静默期 %ds：%s",
-                        endpoint_id, seconds, reason or "-")
+                        endpoint_id, seconds, secret_box.scrub(reason or "-"))
     except Exception:  # noqa: BLE001
         db.rollback()
 

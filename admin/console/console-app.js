@@ -639,6 +639,102 @@ async function saveRuntimeConfig() {
   }
 }
 
+/**
+ * 出口代理节点管理（设置页）。
+ *
+ * 为什么要有这个界面：一个出口 IP 上跑几十个号会被上游拉黑，而号池
+ * 几百上千时不可能全从本机一个 IP 出去。节点配好之后，定时任务里
+ * 填「分组名」就能让那个任务走代理。
+ *
+ * 列表里的 `slots` 是**真正生效的并发上限**（Σ max_concurrency），
+ * 不是节点个数 —— 这是最容易误读的地方，所以单独显示。
+ */
+async function loadProxyNodes() {
+  const host = document.getElementById("proxyNodesHost");
+  if (!host) return;
+  try {
+    const { ok, data } = await safeJson(await api("/api/proxies"));
+    if (!ok) throw new Error(data.detail || "加载失败");
+    const items = data.items || [];
+    const summary = data.summary || {};
+    if (!items.length) {
+      host.innerHTML = `<p class="fs-12" style="color:var(--fg-subtle)">还没有配置出口节点，任务会从<b>本机 IP</b> 直连。批量任务建议至少配一个。</p>`;
+      return;
+    }
+    const stateText = { ready: "可用", blocked: "静默中", disabled: "已停用" };
+    const rows = items.map(n => `<tr>
+      <td>${esc(n.label || ("#" + n.id))}</td>
+      <td class="mono fs-12" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${esc(n.url)}</td>
+      <td class="tnum text-right">${n.max_concurrency}</td>
+      <td>${esc(n.pool || "默认")}</td>
+      <td><span class="badge ${n.state === "ready" ? "badge-ok" : "badge-warn"}">${stateText[n.state] || n.state}</span></td>
+      <td class="fs-12" style="color:var(--fg-subtle)">${esc((n.last_error || "").slice(0, 40))}</td>
+      <td class="c-ops">
+        <button class="acc-op-btn" onclick="toggleProxyNode(${n.id},${n.enabled ? 0 : 1})" title="${n.enabled ? "停用" : "启用"}">${n.enabled ? "停" : "启"}</button>
+        ${n.blocked ? `<button class="acc-op-btn" onclick="unblockProxyNode(${n.id})" title="解除静默">解</button>` : ""}
+        <button class="acc-op-btn" onclick="deleteProxyNode(${n.id})" title="删除">删</button>
+      </td></tr>`).join("");
+    host.innerHTML = `
+      <p class="fs-12" style="margin-bottom:8px">
+        共 <b>${summary.total || 0}</b> 个节点，可用 <b>${summary.ready || 0}</b>，
+        静默 <b>${summary.blocked || 0}</b>，停用 <b>${summary.disabled || 0}</b>
+        · <b style="color:var(--brand)">可并发槽位 ${summary.slots || 0}</b>
+      </p>
+      <div class="tbl-wrap" style="max-height:280px;overflow:auto">
+        <table class="tbl"><thead><tr>
+          <th>名称</th><th>地址</th><th class="text-right">并发</th><th>分组</th><th>状态</th><th>最近错误</th><th></th>
+        </tr></thead><tbody>${rows}</tbody></table></div>`;
+  } catch (e) {
+    host.innerHTML = `<p class="fs-12" style="color:var(--danger)">代理节点加载失败：${esc(e.message)}</p>`;
+  }
+}
+
+async function addProxyNode() {
+  const url = ($("#proxyUrl").value || "").trim();
+  const status = $("#proxyStatus");
+  if (!url) { toast("请填写代理地址", "err"); return; }
+  status.textContent = "保存中…";
+  try {
+    const r = await api("/api/proxies", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: ($("#proxyLabel").value || "").trim(),
+        url,
+        max_concurrency: Math.max(1, Math.min(32, Number($("#proxyConc").value) || 1)),
+        pool: ($("#proxyPool").value || "").trim(),
+      }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data.detail && JSON.stringify(data.detail)) || "保存失败");
+    $("#proxyUrl").value = ""; $("#proxyLabel").value = "";
+    toast("已添加出口节点");
+    loadProxyNodes();
+  } catch (e) {
+    toast("添加失败：" + e.message, "err");
+  } finally {
+    status.textContent = "";
+  }
+}
+
+async function toggleProxyNode(id, enabled) {
+  const { ok, data } = await safeJson(await api(`/api/proxies/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }));
+  if (ok) loadProxyNodes(); else toast(data.detail || "操作失败", "err");
+}
+
+async function unblockProxyNode(id) {
+  const { ok } = await safeJson(await api(`/api/proxies/${id}/unblock`, { method: "POST" }));
+  if (ok) { toast("已解除静默"); loadProxyNodes(); }
+}
+
+async function deleteProxyNode(id) {
+  if (!confirm("确定删除这个出口节点？正在使用它的任务会退回直连。")) return;
+  const { ok } = await safeJson(await api(`/api/proxies/${id}`, { method: "DELETE" }));
+  if (ok) loadProxyNodes();
+}
+
 async function loadInvitation() {
   try {
     const {ok, data} = await safeJson(await api('/api/settings/invitation'));
@@ -1352,7 +1448,7 @@ function activateTab(name, opts) {
   if (name === "logs") openLogsPanel();
   if (name === "client") initClientPanel();
   if (name === "alerts") loadAlerts();
-  if (name === "settings") { loadAppSource(); loadInvitation(); loadRuntimeConfig(); }
+  if (name === "settings") { loadAppSource(); loadInvitation(); loadRuntimeConfig(); loadProxyNodes(); }
   // 模型面板：进入时按当前平台重置过滤（见 loadModels 的说明）。
   if (name === "models") { resetModelFilter(); loadModels(); }
   // 定时任务：必须等平台解析完再加载 —— `loadSchedules` 要按平台过滤
@@ -12610,6 +12706,7 @@ function scheduleProxyHTML(data){
 
 
 function scheduleTimingHTML(data){
+  const timing = data.timing || {mode:'preset', time:'09:00', weekdays:[0], monthday:1};
   const modes = [['preset','系统预设'],['interval','固定间隔'],['daily','每天'],['weekly','每周'],['monthly','每月']];
   const minutes = data.interval_minutes || 60;
   const unit = [10080,1440,60,1].find(value => minutes % value === 0);

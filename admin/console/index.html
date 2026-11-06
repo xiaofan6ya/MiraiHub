@@ -2589,6 +2589,29 @@
         </div>
       </div>
       <div class="settings-section">
+        <h3>出口代理节点<span class="runtime-config-sub">一个出口 IP 上跑几十个号会被上游拉黑。这里配好出口，再到「定时任务」里选组名。</span></h3>
+        <div id="proxyNodesHost"><p class="fs-12" style="color:var(--fg-subtle)">加载中…</p></div>
+        <div class="settings-fields">
+          <div class="settings-field"><label for="proxyLabel">名称（可选）</label>
+            <input id="proxyLabel" placeholder="机房A-01 / 住宅-上海" /></div>
+          <div class="settings-field"><label for="proxyUrl">代理地址</label>
+            <input id="proxyUrl" placeholder="http://user:pass@host:port 或 socks5://host:port" autocomplete="off" /></div>
+          <div class="settings-field"><label for="proxyConc">单节点并发</label>
+            <input id="proxyConc" type="number" min="1" max="32" value="1" /></div>
+          <div class="settings-field"><label for="proxyPool">分组（可选）</label>
+            <input id="proxyPool" placeholder="留空 = 默认组" /></div>
+        </div>
+        <div class="settings-actions">
+          <button onclick="addProxyNode()" class="console-btn primary">添加节点</button>
+          <span id="proxyStatus" class="settings-status" role="status"></span>
+        </div>
+        <p class="fs-12" style="color:var(--fg-subtle);margin-top:8px">
+          支持 <code>{session}</code> 占位符（轮换型代理，每个并发槽自动换会话）。
+          可用节点数为 n 时，「并发 0 = 自动」会按 Σ(max_concurrency) 算。
+          地址里的密码在列表里显示为 <code>***</code>。
+        </p>
+      </div>
+      <div class="settings-section">
         <h3>WorkBuddy 邀请绑定</h3>
         <div class="settings-fields">
           <div class="settings-field">
