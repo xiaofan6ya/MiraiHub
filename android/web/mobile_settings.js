@@ -188,8 +188,18 @@ window.WBMobileSettings = (() => {
       el('mobileSpeedTest').disabled = false; el('mobileCheck').disabled = false;
     }
   }
-  const activate = activateTab;
-  activateTab = function(name, options) { activate(name, options); if (name === 'sync' && started) check(); };
+  // activateTab 在 console-app.js（defer，后执行）里才是全局函数；本文件是
+  // 非 defer 注入（先执行），顶层直接取会 ReferenceError 并把整个 IIFE 炸死
+  // —— WBMobileSettings 未定义，安卓设置页整体失效（雷电模拟器冒烟实测）。
+  // 改成轮询等 console-app 就绪后再挂钩，挂不上也不阻塞设置页初始化。
+  (function wrapActivateTab(attempt) {
+    if (typeof activateTab !== 'function') {
+      if (attempt < 100) setTimeout(() => wrapActivateTab(attempt + 1), 50);
+      return;
+    }
+    const activate = activateTab;
+    activateTab = function(name, options) { activate(name, options); if (name === 'sync' && started) check(); };
+  })(0);
   function start() {
     if (started) return;
     started = true;

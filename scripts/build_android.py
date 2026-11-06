@@ -205,6 +205,11 @@ def prepare() -> None:
     shutil.copytree(ROOT / "admin/static", staging / "admin/static")
     shutil.copytree(ROOT / "admin/console", staging / "admin/console")
     shutil.copytree(ROOT / "admin/data", staging / "admin/data")
+    # 平台自带的数据文件（如 trae/data/catalog_*.json）也要进包：
+    # 上面的 rglob 只拷 *.py，这些 json 在真机/模拟器上一律缺文件，
+    # 运行时只能吃「目录加载失败」告警走网络兜底。
+    for platform_data in (ROOT / "admin/platform").glob("*/data"):
+        shutil.copytree(platform_data, staging / platform_data.relative_to(ROOT))
     app_js = staging / "admin/console/console-app.js"
     app_js.write_text(mobile_js(app_js.read_text(encoding="utf-8")), encoding="utf-8")
     print("Mobile console script rewritten (desktop-only sections removed)")

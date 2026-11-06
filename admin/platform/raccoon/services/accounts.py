@@ -540,8 +540,72 @@ def import_record(db: Session, record: dict) -> tuple[Account, bool]:
     return existing, created
 
 
+def _prefetch_probes(accounts: list[Account], *, workers: int = 16) -> dict[int, dict]:
+    """并发预取探活的**纯网络段**（目录 + 积分），不碰数据库 Session。
+
+    为什么：`import_many` 逐条串行 `sync_quota`，每号要等两次上游往返
+    （目录 + 积分），几百个号就是几分钟 —— 与 workbuddy 批量导入同款病根。
+    网络段并发化（默认 16 路）后，判定与落库仍串行走 sync_quota 同款语义。
+
+    返回（按 account.id）：
+      {"kind": "ok", "models": N, "quota": {...}}        # 目录有货 + 积分到手
+      {"kind": "partial", "models": N, "error": {...}}   # 目录 ok、积分挂
+      {"kind": "empty"}                                  # 目录 200 但空
+      {"kind": "other", "error": {...}}                  # 目录非鉴权失败
+    拿不到 token / 意外异常的账号**不进表** —— apply 阶段回退串行
+    `sync_quota`（它会 ensure_token 刷新过期凭证后再探，语义最全）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(account: Account):
+        aid = int(account.id or 0)
+        try:
+            data = credentials_of(account)
+            token = token_of(data)
+            if not token:
+                return aid, None
+            realm = realm_of(account)
+            models_count = len(client.fetch_models(token, realm, aid))
+        except client.UpstreamError as exc:
+            if exc.kind == "auth":
+                # 不能凭这个就禁用：token 可能只是过期了，串行兜底会先刷新。
+                return aid, {"kind": "refresh"}
+            return aid, {"kind": "other", "error": exc.to_dict()}
+        except Exception:
+            return aid, None
+        if not models_count:
+            return aid, {"kind": "empty"}
+        try:
+            quota = client.fetch_points(token, realm, aid)
+            return aid, {"kind": "ok", "models": models_count, "quota": quota}
+        except client.UpstreamError as exc:
+            # 凭证已确认有效，这里只是额度读不到：保留上次快照（partial 语义）。
+            return aid, {"kind": "partial", "models": models_count,
+                         "error": exc.to_dict()}
+        except Exception:
+            return aid, {"kind": "partial", "models": models_count,
+                         "error": {"kind": "unknown", "message": "积分接口异常"}}
+
+    out: dict[int, dict] = {}
+    if not accounts:
+        return out
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(accounts)))) as pool:
+        for aid, result in pool.map(_one, accounts):
+            if result is not None:
+                out[aid] = result
+    return out
+
+
 def import_many(db: Session, records: list[dict]) -> dict:
     """批量导入。逐条独立，一条失败不影响其它。
+
+    节奏改成了两段（2026-11-06，用户反馈「其它平台也一样速度优化一下」）：
+
+      1. **落库段串行**：`import_record` 逐条幂等入库（它自己 commit）；
+      2. **探活段并发**：`_prefetch_probes` 16 路预取目录 + 积分（纯网络，
+         不碰 Session），判定与落库仍按 `sync_quota` 的原语义串行收尾；
+         预取拿不准的（token 过期 / 意外异常）回退串行 `sync_quota`，
+         它会先刷新凭证再探，不会把「只是过期」的号误判成失效。
 
     导入完成后会**同步模型目录**：`/v1/models` 聚合走的是 `model_configs`
     表（`models_router.build_payload`），不同步的话客户端会看到一个空清单，
@@ -556,6 +620,9 @@ def import_many(db: Session, records: list[dict]) -> dict:
     added = updated = 0
     errors: list[str] = []
     notes: list[str] = []
+
+    # ---- 1) 落库（串行；一条失败不影响其它） ----
+    touched: list[Account] = []
     for idx, rec in enumerate(records, 1):
         try:
             account, created = import_record(db, rec)
@@ -563,15 +630,7 @@ def import_many(db: Session, records: list[dict]) -> dict:
                 added += 1
             else:
                 updated += 1
-            result = sync_quota(db, account)
-            if result.get("ok"):
-                pass
-            elif result.get("partial"):
-                if len(notes) < 3:
-                    notes.append("第 %d 条：%s" % (idx, result.get("note") or "额度暂不可读"))
-            else:
-                err = (result.get("error") or {}).get("message") or "探活失败"
-                errors.append("第 %d 条：%s" % (idx, err))
+            touched.append(account)
         except ValueError as exc:
             errors.append("第 %d 条：%s" % (idx, exc))
         except client.UpstreamError as exc:
@@ -592,6 +651,48 @@ def import_many(db: Session, records: list[dict]) -> dict:
             logger.warning("小浣熊导入第 %d 条失败：%s", idx, type(exc).__name__)
             errors.append("第 %d 条：导入失败（%s），详情见服务端日志"
                           % (idx, type(exc).__name__))
+
+    # ---- 2) 探活：网络段并发预取，判定/落库串行收尾 ----
+    probed = _prefetch_probes(touched)
+    for account in touched:
+        result = probed.get(int(account.id or 0))
+        if result is None or result.get("kind") == "refresh":
+            # 拿不到 token / 意外异常 / 目录鉴权拒绝：走原串行路径 ——
+            # sync_quota 会 ensure_token 刷新过期凭证后再探，不会误判。
+            result = sync_quota(db, account)
+            if result.get("ok"):
+                pass
+            elif result.get("partial"):
+                if len(notes) < 3:
+                    notes.append("账号 %s：%s" % (account.id, result.get("note") or "额度暂不可读"))
+            else:
+                err = (result.get("error") or {}).get("message") or "探活失败"
+                errors.append("账号 %s：%s" % (account.id, err))
+            continue
+        kind = result.get("kind")
+        if kind == "ok":
+            apply_quota(account, result.get("quota") or {})
+            # 成功一次就把上一次的错误清掉，否则账号池会一直挂着
+            # 早已过期的 last_err_msg 让人以为号还是坏的。
+            account.last_err_msg = ""
+            account.last_err_at = None
+            db.commit()
+        elif kind == "partial":
+            # 凭证有效（目录可读），积分读不到：保留上次快照，不覆盖成 0。
+            account.last_sync_at = datetime.utcnow()
+            account.credits_synced_at = datetime.utcnow()
+            db.commit()
+            if len(notes) < 3:
+                notes.append("账号 %s：凭证有效（目录可读），积分接口暂不可用；余额沿用上次快照"
+                             % account.id)
+        elif kind == "empty":
+            # 目录「200 但空」不能当作凭证有效，也不禁用（判据不可用）。
+            logger.info("小浣熊账号 %s 目录为空，凭证有效性无法判定", account.id)
+            if len(notes) < 3:
+                notes.append("账号 %s：目录返回空清单，无法判定凭证有效性" % account.id)
+        else:  # "other"：目录非鉴权失败，不动状态，只记错误
+            err = (result.get("error") or {}).get("message") or "探活失败"
+            errors.append("账号 %s：%s" % (account.id, err))
 
     result = {"added": added, "skipped": updated, "errors": errors,
               "notes": notes}

@@ -1,7 +1,54 @@
+<!-- MiraiHub 图标（legacy，API 24-25 直接显示）。
+     与 desktop/assets/app.svg 同稿：「多路汇聚成网关」星形拓扑。
+     石墨底 + 近白线条，不再使用旧品牌的青绿。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp" android:viewportWidth="256" android:viewportHeight="256">
-    <path android:fillColor="#148665" android:pathData="M66,8 L190,8 Q248,8 248,66 L248,190 Q248,248 190,248 L66,248 Q8,248 8,190 L8,66 Q8,8 66,8" />
-    <path android:fillColor="@android:color/transparent" android:strokeColor="#D6FFF0" android:strokeWidth="12" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M55,81 L28,128 L55,175 M201,81 L228,128 L201,175" />
-    <path android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFF" android:strokeWidth="17" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M66,89 L89,168 L128,112 L167,168 L190,89" />
-    <path android:fillColor="#D6FFF0" android:pathData="M119,73 A9,9 0,1 0,137 73 A9,9 0,1 0,119 73" />
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="256" android:viewportHeight="256">
+
+    <!-- 圆角底板：#2A3344 → #12171F（左上→右下） -->
+    <path android:pathData="M66,8 L190,8 A58,58 0 0 1 248,66 L248,190 A58,58 0 0 1 190,248 L66,248 A58,58 0 0 1 8,190 L8,66 A58,58 0 0 1 66,8 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear"
+                android:startX="8" android:startY="8"
+                android:endX="248" android:endY="248"
+                android:startColor="#2A3344" android:endColor="#12171F" />
+        </aapt:attr>
+    </path>
+
+    <!-- 三条入边（不同上游平台），白描边，透明度 .5 -->
+    <group>
+        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
+            android:strokeWidth="11" android:strokeLineCap="round"
+            android:pathData="M56,58 L104,100" />
+        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
+            android:strokeWidth="11" android:strokeLineCap="round"
+            android:pathData="M46,128 L94,128" />
+        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
+            android:strokeWidth="11" android:strokeLineCap="round"
+            android:pathData="M56,198 L104,156" />
+    </group>
+
+    <!-- 汇聚核心（网关本体）：圆角方块旋转 45°，径向白→#BFC9D8 -->
+    <group android:rotation="45" android:pivotX="136" android:pivotY="128">
+        <path android:pathData="M125,102 L147,102 A15,15 0 0 1 162,117 L162,139 A15,15 0 0 1 147,154 L125,154 A15,15 0 0 1 110,139 L110,117 A15,15 0 0 1 125,102 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="radial"
+                    android:centerX="87" android:centerY="77" android:gradientRadius="195"
+                    android:startColor="#FFFFFF" android:endColor="#BFC9D8" />
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- 出边（统一协议对外） -->
+    <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.9"
+        android:strokeWidth="11" android:strokeLineCap="round"
+        android:pathData="M172,128 L214,128" />
+
+    <!-- 三个端点 -->
+    <group android:fillColor="#FFFFFF" android:fillAlpha="0.85">
+        <path android:pathData="M56,58 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
+        <path android:pathData="M46,128 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
+        <path android:pathData="M56,198 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
+    </group>
 </vector>

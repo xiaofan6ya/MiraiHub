@@ -735,7 +735,17 @@ def anthropic_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
         error: dict | None = None
 
         def sse(data: dict) -> bytes:
-            return ("data: %s\n\n" % json.dumps(data, ensure_ascii=False)).encode()
+            # Anthropic SSE **每个事件都要带 `event:` 名字行**，客户端按事件名
+            # 分发（content_block_start / content_block_delta / message_stop…）。
+            # 只发 `data:` 时事件名按 SSE 规范默认成 `message`，Anthropic SDK
+            # 一个分支都匹配不上 —— 最终消息零内容块，Claude Code / Kimi Code
+            # 报「空响应（无内容、无工具调用）」，而网关这边 200、token 也照记。
+            # WorkBuddy 主链路（anthropic_adapter.py）一直带 event: 行，
+            # 只有平台网关这条中继漏了；Responses 那条中继本来就是对的
+            #（见下方 event(name, data)）。
+            event_type = str(data.get("type") or "message")
+            return ("event: %s\ndata: %s\n\n" % (
+                event_type, json.dumps(data, ensure_ascii=False))).encode()
 
         def _close_open() -> list[bytes]:
             nonlocal open_block, open_kind

@@ -1391,7 +1391,13 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
             return None, f"跳过一条：不是有效的客户端凭证（{chk.reason}）"
         if not verify:
             return {"raw": raw, "profile": {}, "balance": {}}, ""
-        probe = wb_login.probe_credential_live(raw)
+        # 轻量档（with_profile=False）：批量导入每号只打**一次**上游
+        # （billing/meter 积分接口）—— 它本身就是鉴权探测（伪造/失效令牌
+        # 在这里就 401 / 令牌失效码），还顺带把真实积分带回来。
+        # 省掉的 fetch_account_profile 是第二段串行往返，几百个号就是
+        # 几分钟（用户反馈「导入太卡太慢」的剩余大头）。防「真凭证套
+        # 别人 uid」的交叉比对保留在单条手工添加，那里不走这个开关。
+        probe = wb_login.probe_credential_live(raw, with_profile=False)
         if not probe.ok:
             return None, f"跳过一条：未通过上游验证（{probe.message}）"
         return ({"raw": raw, "profile": probe.profile or {},
