@@ -89,6 +89,14 @@ def _cache_hit(db: Session, since: datetime, scope_ids=None) -> dict:
     分母只算**有缓存统计之后**的输入 token：早期上游不回传 cached_tokens，
     那些行会把命中率永久拉低（实测能差出几十个百分点）。
     因此单独取最早一条 `cached_tokens > 0` 的时间作为统计起点。
+
+    除总命中率外还给出两样东西，都是缓存卡里“看着空”缺的那部分：
+
+      * `miss_tokens` —— 未命中的输入 token（prompt - cached）。
+        只给命中率不给绝对量，用户无法判断“99% 到底省了多少”；
+      * `by_platform` —— 按平台拆开的命中率。
+        命中率是按平台差异极大的一项（各家 prompt 复用策略不同），
+        混成一个总数字时，一个平台拖后腿会被总量盖住。
     """
     first_cached = _first_cached_at(db)
     start = since
@@ -104,8 +112,9 @@ def _cache_hit(db: Session, since: datetime, scope_ids=None) -> dict:
              func.coalesce(UsageLog.error_kind, "").in_(_OK_KINDS))
     if scope_ids is not None:
         if not scope_ids:
-            return {"cached_tokens": 0, "prompt_tokens": 0, "rate": None,
-                    "note": "当前平台没有流量"}
+            return {"cached_tokens": 0, "prompt_tokens": 0, "miss_tokens": 0,
+                    "rate": None, "samples": 0,
+                    "note": "当前平台没有流量", "by_platform": []}
         row = row.filter(UsageLog.account_id.in_(scope_ids))
     prompt, cached, samples = row.one()
     prompt = int(prompt or 0)
@@ -113,11 +122,83 @@ def _cache_hit(db: Session, since: datetime, scope_ids=None) -> dict:
     return {
         "cached_tokens": cached,
         "prompt_tokens": prompt,
+        # 未命中 = 输入 - 命中。负数只可能是脏数据，钳到 0。
+        "miss_tokens": max(0, prompt - cached),
         # 分母是输入 token；没有样本时给 None 而不是 0（0% 会被读成「测过且为零」）
         "rate": (cached / prompt) if prompt else None,
         "samples": int(samples or 0),
         "note": note,
+        "by_platform": _cache_hit_by_platform(db, start, scope_ids),
     }
+
+
+#: 平台 id → 展示名。这里不查库也不加载平台插件：
+#: 缓存卡只是「哪个平台拖了后腿」的速览，标签不准不影响结论；
+#: 走 registry 拿不到时（`trae` 这种已拆区的落库值）用这张静态表兜底。
+_PLATFORM_LABELS = {
+    "workbuddy": "WorkBuddy",
+    "trae": "Trae",
+    "qoder": "Qoder",
+    "loomy": "Loomy",
+    "raccoon": "小浣熊",
+    "codearts": "CodeArts",
+}
+
+
+def _platform_label_of(pid: str) -> str:
+    key = str(pid or "").strip().lower()
+    if not key:
+        return "未标注平台"
+    try:
+        spec = registry.get(key)
+        if spec is not None and spec.label:
+            return spec.label
+    except Exception:  # noqa: BLE001 - 注册表不可用就退回静态表
+        pass
+    return _PLATFORM_LABELS.get(key, key)
+
+
+def _cache_hit_by_platform(db: Session, since: datetime, scope_ids=None,
+                           limit: int = 6) -> list[dict]:
+    """按平台的缓存命中率（按输入 token 降序，最多 `limit` 条）。
+
+    `usage_logs.platform` 是写入时填的落库平台；历史行可能为空 ——
+    空值单独归成「未标注平台」，**不要**为了补它去 join 账号表：
+    那是 20 万行的额外关联，而这条信息只是给缓存卡做分布参考。
+    """
+    ok = func.coalesce(UsageLog.error_kind, "").in_(_OK_KINDS)
+    query = db.query(
+        UsageLog.platform,
+        func.coalesce(func.sum(UsageLog.prompt_tokens), 0),
+        func.coalesce(func.sum(UsageLog.cached_tokens), 0),
+        func.count(UsageLog.id),
+    ).filter(UsageLog.created_at >= since, ok)
+    if scope_ids is not None:
+        if not scope_ids:
+            return []
+        query = query.filter(UsageLog.account_id.in_(scope_ids))
+    try:
+        rows = query.group_by(UsageLog.platform).all()
+    except Exception:  # noqa: BLE001 - 分组失败不该让整张卡空白
+        logger.debug("按平台统计缓存命中率失败", exc_info=True)
+        return []
+    items = []
+    for pid, prompt, cached, samples in rows:
+        prompt = int(prompt or 0)
+        cached = int(cached or 0)
+        if prompt <= 0:
+            continue
+        items.append({
+            "platform": str(pid or ""),
+            "label": _platform_label_of(pid),
+            "prompt_tokens": prompt,
+            "cached_tokens": cached,
+            "miss_tokens": max(0, prompt - cached),
+            "rate": cached / prompt if prompt else None,
+            "samples": int(samples or 0),
+        })
+    items.sort(key=lambda item: -item["prompt_tokens"])
+    return items[:limit]
 
 
 #: 「最早一条带缓存命中的记录」的记忆值。
@@ -294,8 +375,8 @@ def _ttl_for(days: int) -> float:
     return 45.0
 
 
-def _cache_key(days: int, platform: str, realm: str) -> str:
-    return "%d|%s|%s" % (int(days), platform or "", realm or "")
+def _cache_key(days: int, platform: str, realm: str, section: str = "all") -> str:
+    return "%s|%d|%s|%s" % (section, int(days), platform or "", realm or "")
 
 
 def _cache_get(key: str) -> dict | None:
@@ -323,6 +404,7 @@ def _cache_put(key: str, payload: dict, ttl: float | None = None) -> None:
 
 @router.get("")
 def overview(days: int = Query(default=1, ge=1, le=30),
+             sections: str = Query(default="all"),
              request: Request = None,
              _: bool = Depends(require_admin),
              db: Session = Depends(get_db)):
@@ -331,12 +413,23 @@ def overview(days: int = Query(default=1, ge=1, le=30),
     平台作用域：控制台带 `X-Platform` 时只统计该平台（与其它面板一致）；
     不带则统计全部（老脚本 / curl 行为不变）。
 
+    ## `sections=usage`：只算「区间相关」的那部分
+
+    用量卡上的「今日 / 7 天 / 30 天」是**局部**切换：它只改变「用量」与
+    「缓存命中率」两张卡的数字，左侧「剩余额度」、右侧「账号监测」「平台状态」
+    跟区间毫无关系。可原来切一下 tab 就要重算整份概览（额度 2 条 SQL +
+    今日/窗口/本月 3 次扫描 + 缓存命中 + 账号监测 + 模型/Key 计数），
+    前端还把左侧卡片一起盖上骨架、重新滚一遍数字 —— 观感就是「整页重新加载」。
+
+    现在 `sections=usage` 只算 `window` + `cache` 两段（2 次聚合），
+    其余一概不碰；前端据此只更新那两张卡。
+
     ## 为什么原来要等 10 多秒
 
     这个接口串行跑了 **5 个全表/大范围聚合**（今日、窗口、30 天、
     缓存命中率、账号监测），每个都要扫一遍 `usage_logs`。
     数据量一上来（几万行）总耗时就是 5×单次，前端只能干等 ——
-    用户看到的是「概览一片空白，等十几秒才出来」。现在这 5 段并发跑。
+    用户看到的是「概览一片空白，等十几秒才出来」。
 
     另外默认统计范围改成**今日**（前端 `_ovDays = 1`）：
     30 天窗口要扫 22 万行，而用户打开概览多数只想看「今天怎么样」。
@@ -346,18 +439,41 @@ def overview(days: int = Query(default=1, ge=1, le=30),
     缓存能把这部分直接吃掉；真正的首屏仍然只算一次。
     """
     platform, realm = platform_scope.from_request(request)
+    usage_only = str(sections or "").strip().lower() == "usage"
 
-    # 命中缓存直接返回 —— 3 秒内的重复请求不打数据库
-    _ck = _cache_key(days, platform, realm)
+    # 命中缓存直接返回 —— 短 TTL 内的重复请求不打数据库。
+    # 只切区间时优先复用**整份**缓存里的那两段（它包含更全的字段）。
+    _ck = _cache_key(days, platform, realm, "usage" if usage_only else "all")
     _hit = _cache_get(_ck)
     if _hit is not None:
         return _hit
+    if usage_only:
+        _full = _cache_get(_cache_key(days, platform, realm, "all"))
+        if _full is not None:
+            return _usage_section(_full)
 
     scope_ids = platform_scope.account_ids(db, platform, realm)
 
     today_start = _day_start(0)
     month_start = _day_start(29)
     window_start = _day_start(days - 1)
+
+    # ---- 区间相关的两段：局部刷新只要这两段 ----
+    window = _window(db, window_start, scope_ids) if window_start != today_start \
+        else _window(db, today_start, scope_ids)
+    cache_hit = _cache_hit(db, window_start, scope_ids)
+    if usage_only:
+        payload = {
+            "platform": platform,
+            "realm": realm,
+            "platform_label": platform_scope.label(platform, realm),
+            "window": dict(window, days=days),
+            "cache": cache_hit,
+            "sections": "usage",
+            "now": datetime.utcnow().isoformat() + "Z",
+        }
+        _cache_put(_ck, payload, _ttl_for(days))
+        return payload
 
     # ---- 额度（只算 active）----
     acc_query = db.query(
@@ -404,17 +520,15 @@ def overview(days: int = Query(default=1, ge=1, le=30),
     # MySQL 上是 **1335ms**，比分开查的 494ms 还慢一倍 —— 因为小窗口本来
     # 只扫几千行，合成后每行都要过 18 个聚合表达式。
     today = _window(db, today_start, scope_ids)
-    if window_start == today_start:
-        window = dict(today)
-    else:
-        window = _window(db, window_start, scope_ids)
+    # `window` / `cache_hit` 已经在上面算过（局部刷新共用同一段）；
+    # 命中缓存时 `window` 是从缓存里取的 dict，这里补一次 days 字段。
+    window = dict(window, days=days)
     if window_start == month_start:
         # 30 天口径：两个窗口完全重合，绝不能算两遍
         month = dict(window)
     else:
         month = _cached_month(db, month_start, scope_ids,
                               platform=platform, realm=realm)
-    cache_hit = _cache_hit(db, window_start, scope_ids)
     monitor = _account_monitor(db, scope_ids, platform)
     # ---- 模型 / Key 计数 ----
     model_query = db.query(func.count(ModelConfig.id)).filter(ModelConfig.enabled == 1)
@@ -450,7 +564,26 @@ def overview(days: int = Query(default=1, ge=1, le=30),
                             if int(total_accounts or 0) > 0 else None),
         "cache": cache_hit,
         "monitor": monitor,
+        "sections": "all",
         "now": datetime.utcnow().isoformat() + "Z",
     }
     _cache_put(_ck, payload, _ttl_for(days))
     return payload
+
+
+def _usage_section(full: dict) -> dict:
+    """从整份概览里切出「只切区间会变」的那两段。
+
+    用于「整份缓存还在、但这次只要区间数据」的场景 —— 比重新算一遍便宜得多，
+    而且保证局部刷新与整页刷新拿到的是**同一份数字**（不会因为两次查询
+    中间有新记录而出现「左卡和右卡对不上」）。
+    """
+    return {
+        "platform": full.get("platform", ""),
+        "realm": full.get("realm", ""),
+        "platform_label": full.get("platform_label", ""),
+        "window": full.get("window") or {},
+        "cache": full.get("cache") or {},
+        "sections": "usage",
+        "now": full.get("now") or datetime.utcnow().isoformat() + "Z",
+    }

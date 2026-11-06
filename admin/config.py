@@ -329,6 +329,24 @@ class Settings:
     #: BAN_RECHECK 做真实探测解封 —— 恢复时间对两类错误都可预期。
     ACCOUNT_FAULT_COOL_MINUTES = int(os.getenv("ADMIN_ACCOUNT_FAULT_COOL_MINUTES", "10"))
 
+    #: **11140（账号级授权风控）单独的冷却时长**，默认 2 小时。
+    #:
+    #: ## 为什么和 `ACCOUNT_FAULT_COOL_MINUTES` 分开（2026-11-06）
+    #:
+    #: 原来 11140 和其它 account_fault 一起吃 10 分钟冷却 —— 这个值对
+    #: 「临时限流」够用，对 11140 远远不够。社区两份实测复盘（workbuddy2api
+    #: hub `wb_accounts.py` / panel `pool/degrade.go`）都记录了同一件事：
+    #:
+    #:   > 看到 11140 就换号继续打同一台设备，设备指纹会连坐 ——
+    #:   > 一个请求能遍历整个池子，7 个号在一次任务里全被封。
+    #:
+    #: 11140 是**账号级授权风控**，不是限流。给 10 分钟，等于每 10 分钟就
+    #: 拿同一个号再去撞一次，撞一次加深一次。hub 的口径是固定 2 小时、
+    #: 不吃任何兜底、只有真成功一次才清。
+    #:
+    #: 设为 0 表示立刻回退到旧的「吃 ACCOUNT_FAULT_COOL_MINUTES」。
+    RESTRICTED_COOL_MINUTES = int(os.getenv("ADMIN_RESTRICTED_COOL_MINUTES", "120"))
+
     # ---- 风控预警通知 ----
     #:
     #: 渠道配置格式（一个环境变量装全部，避免十几个变量）：

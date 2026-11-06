@@ -68,7 +68,13 @@ def account_slot(account, db=None):
             if last is not None:
                 remaining = gap - (time.monotonic() - last)
                 if remaining > 0:
-                    time.sleep(remaining)
+                    # 固定间隔是最容易被识别的机器特征之一：连续 100 次
+                    # 都是整 1.0 秒的间隔，直方图是个尖峰。
+                    # 这里给一个对数正态抖动（中位数锚在原 gap，长尾拖出
+                    # 偶发停顿），账号之间的节奏就散开了。
+                    from admin import humanize
+
+                    time.sleep(humanize.human_gap(remaining, floor=remaining * 0.3))
             reason = _reason(account)
         if reason is None:
             # Pace before reserving, so an idle gap does not take capacity away
@@ -138,7 +144,12 @@ def token_slot(account, db, wait_seconds=30):
         with _state_lock:
             last = _last_finished
         if last is not None:
-            time.sleep(max(0, gap - (time.monotonic() - last)))
+            wait = max(0, gap - (time.monotonic() - last))
+            if wait > 0:
+                # 同 `account_slot`：间隔要散开，不要整秒对齐。
+                from admin import humanize
+
+                time.sleep(humanize.human_gap(wait, floor=wait * 0.3))
         reserved = POOL.inflight.acquire_maintenance(uid, drain=True)
         if not reserved:
             yield "inflight"

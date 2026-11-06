@@ -376,7 +376,10 @@ def _attempt(db, request, key, body: dict, realm: str):
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0))
+                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
+                # 额度类失败把余额落成 0，从选号候选里摘掉 ——
+                # 否则冷却到期它又排回来，每次请求都先撞一次「额度已用尽」。
+                zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
             if not exc.retryable():
                 break
@@ -395,7 +398,42 @@ def _attempt(db, request, key, body: dict, realm: str):
             continue
     if last_error is not None:
         raise last_error
-    raise shared.PlatformRejected(
+    raise _no_account_error(db, realm)
+
+
+def _no_account_error(db, realm: str):
+    """「没有可用账号」要分清两种完全不同的原因。
+
+    原来一律回 `503 请先导入并确认状态为启用` —— 号明明有 100 个、只是全都
+    额度用尽时，这句话会把人往「去检查账号状态」的死路上带。这里先数一下
+    该区域到底有没有 active 号、其中多少个余额为 0，再给对应的话术。
+    """
+    try:
+        from admin.models import Account
+
+        query = db.query(Account.id, Account.balance_remain).filter(
+            Account.platform == loomy_accounts.PLATFORM,
+            Account.status == "active")
+        if realm:
+            query = query.filter(Account.domain == realm)
+        rows = query.all()
+    except Exception:  # noqa: BLE001 - 统计不出来就退回通用文案
+        rows = []
+    total = len(rows)
+    empty = sum(1 for _id, balance in rows if int(balance or 0) <= 0)
+    if total and empty >= total:
+        return shared.PlatformRejected(
+            402, "所有 Loomy 账号的积分都已用尽。等下一次余额同步或每日签到"
+                 "刷新到额度后会自动恢复，也可以现在去「账号池」给某个号充值/签到。",
+            kind="quota_exceeded", code="all_quota_exceeded")
+    if total:
+        # 有余额但全在冷却 / 熔断 / 在途占满：这不是"没有号"，是"此刻都不可用"。
+        return shared.PlatformRejected(
+            503, "Loomy 账号都在冷却或用满并发，请稍后重试（%d 个号可用但此刻排不上）"
+                 % total,
+            kind="server_error", code="all_cooling",
+            headers={"Retry-After": "10"})
+    return shared.PlatformRejected(
         503, "Loomy 没有可用账号（请先在控制台导入并确认状态为启用）",
         kind="server_error", code="no_available_account",
         headers={"Retry-After": "3"})
@@ -560,7 +598,8 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0))
+                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
+                zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
             exclude.add(account.id)
             if not exc.retryable():
@@ -596,13 +635,14 @@ async def _forward_stream(body: dict, request):
         _open_stream, db, request, key, body, realm, stats, model)
 
     if chunks is None:
+        # **先算提示文案，再关会话** —— `_no_account_error` 要查库。
+        # 顺序写反会在关闭后的 Session 上查询，异常被上层吞成
+        # 一个没有信息的 500。
+        exhausted = _no_account_error(db, realm) if last_error is None else None
         db.close()
         if last_error is not None:
             return _fail(last_error)
-        raise shared.PlatformRejected(
-            503, "Loomy 没有可用账号（请先在控制台导入并确认状态为启用）",
-            kind="server_error", code="no_available_account",
-            headers={"Retry-After": "3"})
+        raise exhausted
 
     holder: dict = {}
 

@@ -197,6 +197,168 @@ def sync_quota(db: Session, account: Account, *,
     return {"ok": True, "quota": quota}
 
 
+#: 上游 session 的有效期。**客户端登录时传的就是这个值**
+#: （`electron/xfyun/account-service.js` 的 `expire: 14 * 24 * 3600`），
+#: 所以「签发时间 + 14 天」就是这张票的死线。
+SESSION_TTL_SECONDS = 14 * 24 * 3600
+
+
+def session_expires_at(data: dict | None) -> float:
+    """从凭证里推算 session 到期时间（UTC 秒）；算不出来返回 0。
+
+    ## 为什么要自己算（2026-11-06）
+
+    上游**不回传**有效期，我们原来把它记成 `expires_at = 0`（「未知」），
+    结果就是「某天突然一大批号全废了」—— 用户直到调用失败才知道票过期。
+
+    但有效期其实是可以推出来的：
+      * 客户端 `auth-session.json` 里有 `updatedAt`（**写入时间 = 登录时间**，
+        毫秒时间戳）；
+      * 登录接口的 `expire` 是固定的 14 天。
+
+    于是「登录时间 + 14 天」就是死线。优先级：
+      `updatedAt` → `expires_at`（导入时写过）→ `first_seen_at`
+      （我们第一次确认它有效的时间，**保守下界**）。都没有就返回 0，
+      不瞎猜。
+    """
+    payload = data if isinstance(data, dict) else {}
+    for key in ("updatedAt", "updated_at", "first_seen_at"):
+        raw = payload.get(key)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        # 毫秒时间戳（客户端写的是 Date.now()）
+        if value > 1e12:
+            value /= 1000.0
+        if value > 0:
+            return value + SESSION_TTL_SECONDS
+    try:
+        stored = float(payload.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    return stored if stored > 0 else 0.0
+
+
+def stamp_first_seen(data: dict) -> dict:
+    """给没有 `updatedAt` 的老凭证补一个 `first_seen_at` 锚点。
+
+    老数据（导入时还没保留 updatedAt）本来算不出死线。但**只要它现在还能用**，
+    就说明「至少从这一刻起还有 14 天」—— 这是保守下界，比「未知」有用得多：
+    用户至少会收到「这张票最晚 X 号到期」的提醒，而不是某天突然发现全挂了。
+    """
+    payload = dict(data or {})
+    if payload.get("updatedAt") or payload.get("first_seen_at"):
+        return payload
+    payload["first_seen_at"] = int(time.time() * 1000)
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# 密码续期（唯一能真正「延长」session 的方式）
+# ---------------------------------------------------------------------------
+#: 剩余多少天开始自动续期。比预警阈值略早，留出重试余量。
+SESSION_RENEW_BEFORE_DAYS = 3.0
+
+
+def has_password(data: dict | None) -> bool:
+    """这个号存了手机号 + 密码吗（没有就只能等它过期后手动重扫）。"""
+    payload = data if isinstance(data, dict) else {}
+    return bool(str(payload.get("loginid") or "").strip()
+                and str(payload.get("password") or "").strip())
+
+
+def set_password(account: Account, loginid: str, password: str) -> dict:
+    """保存登录凭据（供到期自动续期）。
+
+    ⚠️ 密码是**明文存进 auth_json** 的，和 `loomy2api` 那类工具一致 ——
+    没有密码就没法换新 session（服务端没有 refresh 接口）。导出账号备份时
+    这份凭据会一起被带走，提醒用户按凭据对待。
+    """
+    data = credentials_of(account)
+    data["loginid"] = str(loginid or "").strip()
+    data["password"] = str(password or "")
+    return data
+
+
+def needs_renewal(data: dict | None) -> bool:
+    """该不该现在续期：有密码 + 剩余天数不足阈值（或已过期）。"""
+    if not has_password(data):
+        return False
+    days = session_days_left(data)
+    if days is None:
+        # 算不出死线但有密码 —— 顺手续一次没坏处（幂等：新票还是 14 天）
+        return False
+    return days <= SESSION_RENEW_BEFORE_DAYS
+
+
+def renew_with_password(db: Session, account: Account) -> dict:
+    """用存好的手机号 + 密码重登，换一张新 session。
+
+    这是「自动续期」的全部实现 —— 服务端没有 refresh token，
+    只能用同一套登录接口重新签发一张 14 天的票。
+
+    成功时同时刷新 `updatedAt` / `expires_at`，并把新 session 落库；
+    失败（密码错 / 需要短信二次验证）**不动原凭据**，原票还能用到过期那天。
+    """
+    from admin.platform.loomy.core import xfyun
+
+    data = credentials_of(account)
+    loginid = str(data.get("loginid") or "").strip()
+    password = str(data.get("password") or "")
+    if not loginid or not password:
+        raise ValueError("账号没有保存手机号/密码，无法自动续期")
+
+    # 每个号一个设备标识：首次续期时生成并固定下来，之后一直复用
+    # （与参考实现一致 —— 同一个号换 devid 反而像异常设备）。
+    devid = str(data.get("devid") or "").strip()
+    if not devid:
+        devid = xfyun.new_device_id()
+
+    got = xfyun.login_by_password(loginid, password, devid=devid)
+    now_ms = int(time.time() * 1000)
+    data.update({
+        "token": got["session"],
+        "uid": got.get("userid") or data.get("uid") or "",
+        "phone": got.get("phone") or data.get("phone") or "",
+        "devid": devid,
+        "updatedAt": now_ms,
+        "expires_at": int(now_ms / 1000 + xfyun.SESSION_EXPIRE_SECONDS),
+        "renewed_at": now_ms,
+        "renew_count": int(data.get("renew_count") or 0) + 1,
+    })
+    # 老的 first_seen_at 锚点已经没用了（有真实 updatedAt 了），清掉避免混淆
+    data.pop("first_seen_at", None)
+    account.auth_json = json.dumps(data, ensure_ascii=False)
+    account.status = "active"
+    account.last_err_msg = ""
+    account.session_dead_fails = 0
+    db.commit()
+    return {"ok": True, "session": got["session"][:8] + "…",
+            "days_left": session_days_left(data),
+            "renewed_at": now_ms}
+
+
+def session_days_left(data: dict | None, now: float | None = None) -> float | None:
+    """还剩多少天（负数=已过期；算不出来返回 None）。"""
+    expires = session_expires_at(data)
+    if expires <= 0:
+        return None
+    now = now if now is not None else time.time()
+    return round((expires - now) / 86400.0, 1)
+
+
+#: 剩余多少天算「快到期」—— 提前 3 天足够把号重新扫一遍。
+SESSION_WARN_DAYS = 3.0
+
+
+def _expiring_soon(data: dict | None) -> bool:
+    days = session_days_left(data)
+    return days is not None and days <= SESSION_WARN_DAYS
+
+
 def public_view(account: Account, *, quota: dict | None = None) -> dict:
     """给前端的视图（**不含 token**）。
 
@@ -228,6 +390,16 @@ def public_view(account: Account, *, quota: dict | None = None) -> dict:
         "models": int(models or 0),
         "phone": str(data.get("phone") or ""),
         "has_refresh": False,
+        # 能不能自动续期：只有存了手机号+密码才可以（服务端无 refresh 接口）
+        "renewable": has_password(data),
+        "renew_before_days": SESSION_RENEW_BEFORE_DAYS,
+        "renew_count": int(data.get("renew_count") or 0),
+        # ---- session 有效期（我们按客户端规则自己算的，见 session_expires_at）----
+        # 上游没有 refresh 接口，14 天一到必失效；把死线和剩余天数透出给前端，
+        # 用户在「还剩 3 天」时就能安排重新扫描，而不是某天突然全挂。
+        "session_expires_at": session_expires_at(data) or None,
+        "session_days_left": session_days_left(data),
+        "session_expiring": _expiring_soon(data),
         # 入库时间：**全平台统一字段**，账号池表格直接渲染这一列。
         # 没有它，用户只能靠 id 顺序猜「哪几个是刚导进来的」。
         "created_at": account.created_at.isoformat()
@@ -281,7 +453,14 @@ def import_from_local(db: Session, uids: list[str] | None = None) -> dict:
         "uid": str(creds.get("userid") or ""),
         "phone": str(creds.get("phone") or ""),
         "name": "Loomy %s" % (str(creds.get("phone") or "")[-4:] or "account"),
-        "expires_at": 0,
+        # 保留客户端写入时间：14 天有效期的**唯一锚点**（见 session_expires_at）。
+        # 之前这里丢掉了 updatedAt，结果 expires_at 永远是 0 = 「有效期未知」，
+        # 也就没法提醒「再过几天这张票就废了」。
+        "updatedAt": creds.get("updatedAt"),
+        "expires_at": session_expires_at({
+            "updatedAt": creds.get("updatedAt"),
+            "expires_at": 0,
+        }),
     }
     if uids is not None:
         wanted = {str(u or "").strip() for u in uids}
@@ -330,7 +509,9 @@ def import_record(db: Session, record: dict) -> dict:
         "token": token,
         "uid": uid,
         "phone": str(record.get("phone") or ""),
-        "expires_at": int(record.get("expires_at") or 0),
+        # 保留客户端写入时间 + 推算出的死线（见 session_expires_at）
+        "updatedAt": record.get("updatedAt"),
+        "expires_at": int(session_expires_at(record) or 0),
     }, ensure_ascii=False)
     # 导入的 token 一律标「未验证」：probe 会把它刷成 active/disabled。
     existing.status = "active"
@@ -491,7 +672,9 @@ def import_batch(db: Session, text: str, *, probe: bool = True,
                 "token": token,
                 "uid": uid,
                 "phone": str(rec.get("phone") or ""),
-                "expires_at": int(rec.get("expires_at") or 0),
+                # 同 import_record：留下客户端写入时间与推算死线
+                "updatedAt": rec.get("updatedAt"),
+                "expires_at": int(session_expires_at(rec) or 0),
             }, ensure_ascii=False)
             account.status = "active"
             account.session_dead_fails = 0

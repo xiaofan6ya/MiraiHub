@@ -27,6 +27,10 @@ from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
+# 模块内多处（含 _post_login_automation 的兜底日志）用 _logger；不定义的话
+# 那些 except 分支会再抛一个 NameError，把原始异常盖掉。
+_logger = logging.getLogger("admin.accounts")
+
 
 # ---------------------------------------------------------------------------
 # 导出文件暂存：异步导出在后台线程把 JSONL 写进临时文件，前端凭 token 下载一次
@@ -537,6 +541,32 @@ def probe(_: bool = Depends(require_admin)):
     return {"ok": True}
 
 
+@router.get("/badges")
+def account_badges(request: Request = None, _: bool = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    """侧栏角标用的**极小**汇总（纯 SQL 聚合，不加载任何账号行）。
+
+    为什么要单独一个接口：侧栏「积分到期」那个小圆点在控制台首屏就要亮，
+    而以前它是 `GET /api/accounts` 的 `summary.expiring_accounts` 带出来的 ——
+    那意味着**打开任何一个页面**都要先把全量账号（线上是本地测试数据的 n 倍）
+    拉一遍、再在 Python 里逐行判一遍。这就是「我停在首页却把账号池也加载了」
+    最贵的那一次请求。
+
+    这里只查两个计数，全部走 `status` / `credits_expiring_soon` 两个列：
+    返回体十几字节，代价与账号数线性但**不反序列化任何凭证字段**。
+    真正需要明细的页面（账号池 / 积分到期）照旧走各自的接口。
+    """
+    from admin.platform import scope as platform_scope
+
+    platform, realm = platform_scope.from_request(request)
+    base = db.query(Account).filter(Account.status == "active")
+    if platform:
+        base = platform_scope.filter_accounts(base, db, platform, realm)
+    expiring = base.filter(Account.credits_expiring_soon > 0).with_entities(
+        func.count(Account.id)).scalar() or 0
+    return {"expiring_accounts": int(expiring), "scope": platform or "all"}
+
+
 @router.post("/count")
 def count_accounts(request: Request = None, _: bool = Depends(require_admin),
                    db: Session = Depends(get_db)):
@@ -824,7 +854,8 @@ def _remember_upstream_error(acc: Account, error) -> dict:
     return info
 
 
-def _refresh_balance(acc: Account, with_expiry: bool = False, on_error=None) -> bool:
+def _refresh_balance(acc: Account, with_expiry: bool = False, on_error=None,
+                     proxy: str = "") -> bool:
     """刷新账号余额。
 
     Args:
@@ -832,9 +863,11 @@ def _refresh_balance(acc: Account, with_expiry: bool = False, on_error=None) -> 
             需要多打一次 `fetch_credit_details`（约 0.4s），
             所以只在整点定时任务与「刷新全部」里开 —— 高频路径（登录后收尾）不开，
             但**至少会保留上一次的值**，不会因为不刷新就被清零。
+        proxy: 本次请求的出站出口（空 = 直连）。批量任务按代理槽传入，
+            避免几百个号共用一个 IP 被上游拉黑。
     """
     try:
-        with backend.AccountSession(acc.auth_json) as sess:
+        with backend.AccountSession(acc.auth_json, proxy=proxy) as sess:
             bal = sess.fetch_balance()
             acc.balance_total = int(bal.get("total", 0) or 0)
             acc.balance_remain = int(bal.get("remain", 0) or 0)
@@ -847,6 +880,10 @@ def _refresh_balance(acc: Account, with_expiry: bool = False, on_error=None) -> 
                         on_error(error)
             acc.auth_json = sess.updated_json()  # 回写可能刷新的 token
         acc.last_sync_at = datetime.utcnow()
+        # 只有重载刷新任务读这个字段，用来判断「哪些号本轮该刷」。
+        # 单独一个字段是必须的：`last_sync_at` 会被导入探活 / 签到回写
+        # 一起更新，用它会把「刚导入的号」误判成「刚刷过余额」。
+        acc.balance_synced_at = acc.last_sync_at
         return True
     except Exception as error:
         _remember_upstream_error(acc, error)
@@ -1088,6 +1125,37 @@ def list_accounts(request: Request = None,
     return {"items": items, "summary": summary}
 
 
+def _as_iso(value):
+    """把平台报的到期时间统一成 ISO 字符串。
+
+    ## 为什么要这个兼容层（2026-11-06 踩过）
+
+    一开始这里直接 `expires_at.isoformat()`，因为 WorkBuddy 的实现返回的是
+    `datetime`。后来给 Trae / Qoder / 小浣熊 / CodeArts / Loomy 补
+    `credential_expiry` 时用的是 **epoch 秒**（int），于是账号列表直接
+    500：
+
+        AttributeError: 'int' object has no attribute 'isoformat'
+
+    平台的「到期时间」本质就是时间点，`datetime` 和 epoch 都是合理表达 ——
+    所以应该由**消费方**（这里）统一，而不是要求所有平台迁就一种写法。
+    """
+    if value is None or value == "":
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number <= 0:
+        return None
+    # 上游偶尔给毫秒
+    if number > 1e11:
+        number /= 1000.0
+    return datetime.utcfromtimestamp(number).isoformat() + "Z"
+
+
 def _token_fields(a: Account) -> dict:
     """令牌有效期视图（读时解析，不落库）。
 
@@ -1106,16 +1174,14 @@ def _token_fields(a: Account) -> dict:
     from admin.credential_expiry import credential_expiry
 
     info = credential_expiry(a)
-    expires_at = info.get("expires_at")
-    refresh_at = info.get("refresh_expires_at")
     return {
         "token_supported": bool(info.get("supported")),
         # —— 线一：短期令牌 ——
-        "token_expires_at": expires_at.isoformat() if expires_at else None,
+        "token_expires_at": _as_iso(info.get("expires_at")),
         "token_days_left": info.get("days_left"),
         "token_state": info.get("state"),
         # —— 线二：续期窗口 ——
-        "renewal_expires_at": refresh_at.isoformat() if refresh_at else None,
+        "renewal_expires_at": _as_iso(info.get("refresh_expires_at")),
         "renewal_days_left": info.get("refresh_days_left"),
         "renewal_state": info.get("refresh_state"),
         "renewal_known": info.get("renewal_known", False),
@@ -1495,13 +1561,13 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
         db.rollback()
         errors.append(f"收尾提交失败：{str(exc)[:160]}")
 
-    # ---- 3) 余额补刷：并发（独立 Session），失败只记警告 ----
+    # ---- 3) 余额补刷：后台并发（独立 Session）----
+    # 以前刷新失败会 append 到 errors，前端弹「N 个失败」，可账号其实
+    # 已经落库；现在只记后台日志，HTTP 也不再等上游。
     if needs_refresh:
-        for acc_id, ok, why in _refresh_many(needs_refresh, with_expiry=True,
-                                             workers=min(8, len(needs_refresh))):
-            if not ok:
-                errors.append(f"账号 {acc_id} 余额刷新失败（{why or '上游未返回'}，请稍后刷新）")
-    return {"added": added, "skipped": skipped, "errors": errors}
+        _refresh_pending_async(needs_refresh)
+    return {"added": added, "skipped": skipped, "errors": errors,
+            "refreshing": len(needs_refresh)}
 
 
 @router.get("/duplicates")
@@ -1660,6 +1726,13 @@ def scan_local(request: Request = None, _: bool = Depends(require_admin),
 def _refresh_one_account(acc_id: int, with_expiry: bool = True) -> tuple[int, bool, str]:
     """在工作线程里刷新**一个**账号的余额（独立 Session）。
 
+    ⚠️ 本函数按名字被 tests/test_import_speed.py patch，**不要再定义同名函数**。
+    曾经文件后面还有一个 `_refresh_one_account(db, account)`（批量刷新用），
+    后定义覆盖了这里，导入刷新时 `account` 收到的其实是 `with_expiry`(bool)，
+    直接 `AttributeError: 'bool' object has no attribute 'auth_json'` —— 账号
+    在报错前已 commit，于是「点了导入报错，但号确实进来了」。那个函数现已
+    改名 `_refresh_batch_account`。
+
     ## 为什么必须独立 Session
 
     SQLAlchemy 的 `Session` 不是线程安全的：并发导入时拿主线程那个会话
@@ -1708,17 +1781,55 @@ def _refresh_many(acc_ids: list[int], *, with_expiry: bool = True,
         return list(pool.map(lambda i: _refresh_one_account(i, with_expiry), acc_ids))
 
 
+def _refresh_pending_async(acc_ids: list[int]) -> None:
+    """导入落库之后把余额刷新丢到**后台线程**，HTTP 立即返回。
+
+    ## 为什么不能留在请求里等
+
+    导入本身只是「读本机文件 + 落库」，毫秒级。但余额刷新每号要打
+    `fetch_balance` + `fetch_credit_details` 两次上游往返（实测 ~1.2s，
+    网络差时单次能顶到 15s 超时）。放在请求关键路径上有两个后果：
+
+      1. 上游一慢，浏览器/代理超时 → 前端弹「导入失败」，可账号早就
+         commit 了 —— 正是「报错了但号确实进来了」；
+      2. 上游一抛异常，整个响应变 500，同上。
+
+    对比 Loomy：它的导入是「读明文 auth-session.json + 一次 upsert +
+    一次 points 探活」，单号只有一次上游往返，也没有逐包到期快照。
+    WorkBuddy 这边是两次往返（余额 + 逐包快照），且上游一抖就把整个
+    响应带成 500。让导入只做本地部分、余额交给后台线程后，上游再慢
+    也只影响余额字段，不影响「导入成功」这个事实，也不会再把刷新
+    失败算成导入失败。
+    """
+    if not acc_ids:
+        return
+
+    def _run() -> None:
+        try:
+            for acc_id, ok, why in _refresh_many(
+                    acc_ids, with_expiry=True,
+                    workers=min(8, len(acc_ids))):
+                if not ok:
+                    _logger.warning("导入后余额刷新失败 账号=%s 原因=%s",
+                                    acc_id, why or "上游未返回")
+        except Exception:  # noqa: BLE001 - 后台任务绝不能影响已入库数据
+            _logger.exception("导入后余额刷新异常（不影响已入库账号）")
+
+    threading.Thread(target=_run, name="import-balance-refresh",
+                     daemon=True).start()
+
+
 @router.post("/import-local")
 def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     """把本机登录态目录里的 .info 直接读入号池（服务端读取，不向前端暴露 token）。
 
-    ## 为什么先落库、再并发刷新余额
+    ## 为什么只做「落库」，余额交给后台
 
-    旧实现对**每个文件**串行做 `_refresh_balance(with_expiry=True)`，
-    也就是每个账号 2 次上游往返。20 个号 = 24 秒，几百个号 = 几十分钟，
-    前端一直在等这一个 HTTP 响应，看起来就是「导入卡死」。
-    现在：文件解析/落库照旧（本地操作，毫秒级），余额改为**最多 8 路并发**
-    刷新，单条失败只记一次警告，不拖累整批。
+    旧实现对**每个文件**串行打上游，20 个号 = 24 秒；后来改成 8 路并发，
+    但仍占着 HTTP 响应 —— 上游一慢或一抛异常，响应就变成 500，而账号
+    在报错前已经 commit，用户看到的正是「导入报错、号却进来了」。
+    现在：文件解析/落库同步完成（毫秒级，立即返回），余额交给后台线程，
+    单条失败只记警告，既不等上游，也不会把刷新失败算成导入失败。
     """
     d = _client_auth_dir()
     if not os.path.isdir(d):
@@ -1801,14 +1912,15 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
         pending.append(acc.id)
         added += 1
 
-    # ---- 余额：并发刷新（原来这里是每个文件一次串行上游往返）----
+    # ---- 余额：后台并发刷新，不再占住 HTTP 响应 ----
+    # 落库在上面的 db.commit() 就完成了；以前在这里同步等上游，一旦超时
+    # 或抛异常就 500，前端报「导入失败」而账号其实已经进号池。
     if pending:
-        for acc_id, ok, why in _refresh_many(pending, with_expiry=True,
-                                             workers=min(8, len(pending))):
-            if not ok:
-                errors.append(f"账号 {acc_id} 余额刷新失败（{why or '上游未返回'}，稍后可手动刷新）")
+        _refresh_pending_async(pending)
+    # `refreshed` 保留以兼容旧调用方：同步阶段刷新数恒为 0，
+    # 后台待补的余额条数看 `refreshing`。
     return {"added": added, "updated": updated, "skipped": skipped,
-            "refreshed": len(pending), "errors": errors}
+            "refreshed": 0, "refreshing": len(pending), "errors": errors}
 
 
 @router.get("/{acc_id}/export")
@@ -1902,8 +2014,12 @@ def inject_to_client(acc_id: int, body: InjectIn,
     return result
 
 
-def _refresh_one_account(db, account) -> dict:
-    """按**账号所属平台**刷新它的余额与到期快照。
+def _refresh_batch_account(db, account) -> dict:
+    """按**账号所属平台**刷新它的余额与到期快照（「刷新全部」任务用）。
+
+    原名 `_refresh_one_account`，与导入并发刷新的同名函数撞车 —— Python
+    后定义覆盖前定义，导致 `import-local` 把 bool 当 Account 用而 500。
+    改名后两者各司其职，勿再合并。
 
     ## 为什么必须分派（这是多平台下的关键）
 
@@ -1965,52 +2081,104 @@ def _refresh_one_account(db, account) -> dict:
 
 
 def _run_refresh_batch(ids, job):
+    """批量刷新余额与到期快照（**并发**，见下）。
+
+    ## 为什么不再串行
+
+    原实现是这个形状：
+
+        for account_id in ids:
+            with maintenance.account_slot(account, db):   # 全局单飞 + 账号间 gap
+                ...
+
+    而 `account_slot` 里有**进程级 `_batch_lock`（非阻塞单飞）和
+    `KEEPALIVE_ACCOUNT_GAP` 秒节流** —— 那是给「后台保活」设计的：
+    连续高频刷新 token 是明显的机器特征。但「刷新余额」是用户**主动点的
+    一次批量读操作**（`/points/balance` 之类），既不消耗额度也不改凭证，
+    套上那两把锁的结果就是 **100 个号要 100 秒以上**，前端还只能干等。
+
+    现在：按 `run_account_batch` 并发跑（默认 6 路），
+    **保留真正有意义的保护**：
+      · `_reason()` 跳过 waf / 冷却 / 熔断 / 登录已失效的号；
+      · 每账号一把 `_Lease`，避免同一个号被并行刷两次；
+      · 单号异常收敛成一条失败记录，不打断整批。
+    并发度可用 `ADMIN_REFRESH_CONCURRENCY` 调整。
+    """
+    import os
+
     from admin import maintenance
     from admin.growth_center import identity
     from admin.growth_plan import _Lease
     from admin.scheduler import _account_label
-    detail, seen = [], set()
-    with SessionLocal() as db:
-        job.set_phase('刷新账号余额与到期快照')
-        for account_id in ids:
-            account = db.get(Account, account_id)
-            item = {'account_id':account_id, 'account':_account_label(account) if account else str(account_id),
-                    'ok':False, 'status':'error', 'reason':'账号不存在'}
-            job.beat(item['account'])
-            if account:
-                uid = identity(account)
-                with maintenance.account_slot(account, db) as blocked:
-                    lease = _Lease(db, 'account_refresh:' + uid + ':lease')
-                    if blocked or uid in seen:
-                        item.update(status='skipped', skip_reason=blocked or 'duplicate',
-                                    reason=maintenance.skip_reason_text(blocked) if blocked
-                                    else '同一账号在本轮里重复出现，已跳过')
-                    elif not lease.acquire():
-                        item.update(status='skipped', reason='账号正在刷新，已跳过重复执行')
-                    else:
-                        seen.add(uid)
-                        try:
-                            item.update(_refresh_one_account(db, account))
-                        except Exception as error:
-                            db.rollback()
-                            evidence = _remember_upstream_error(account, error)
-                            db.commit()
-                            item.update(status='error',
-                                        reason=f"本网关：刷新失败；上游 HTTP={evidence['http_status'] or '未记录'} / code={evidence['code'] or '未返回'}；原文：{evidence['raw']}",
-                                        upstream_error=evidence)
-                        finally:
-                            try:
-                                lease.release()
-                            except Exception:
-                                db.rollback()
-            detail.append(item)
+    from admin.platform import shared as platform_shared
+
+    job.set_phase('刷新账号余额与到期快照')
+    ordered = list(dict.fromkeys(int(i) for i in ids if i))
+
+    try:
+        workers = int(os.getenv("ADMIN_REFRESH_CONCURRENCY", "6") or 6)
+    except (TypeError, ValueError):
+        workers = 6
+    workers = max(1, min(16, workers))
+
+    def worker(db, account):
+        uid = identity(account)
+        label = _account_label(account)
+        item = {'account_id': account.id, 'account': label,
+                'ok': False, 'status': 'error', 'reason': '未知错误'}
+        job.beat(label)
+        # 只跳过**真的有理由**的号（waf / 冷却 / 熔断 / 登录失效），
+        # 不再因为「后台批量任务在跑」而整体串行。
+        blocked = maintenance._reason(account)
+        # 冷却中的号要**说清是哪一种冷却**：额度耗尽 vs 风控/熔断。
+        # 原来统一「账号处于冷却/熔断/降权期」，用户看到 56 个号被跳过
+        # 完全不知道是「没钱」还是「被封」，还以为刷新坏了。
+        skip_text = ""
+        if blocked == 'account_cooling':
+            kind = str(getattr(account, 'cool_kind', '') or '')
+            if kind == 'quota' or int(getattr(account, 'balance_remain', 0) or 0) <= 0:
+                skip_text = '额度已耗尽，余额同步到额度后自动恢复，已跳过'
+            else:
+                skip_text = '账号处于冷却期（%s），已跳过' % (kind or '上游限流')
+        lease = _Lease(db, 'account_refresh:' + uid + ':lease')
+        try:
+            if blocked:
+                item.update(status='skipped', skip_reason=blocked,
+                            reason=skip_text or maintenance.skip_reason_text(blocked))
+            elif not lease.acquire():
+                item.update(status='skipped', reason='账号正在刷新，已跳过重复执行')
+            else:
+                try:
+                    item.update(_refresh_batch_account(db, account))
+                except Exception as error:
+                    db.rollback()
+                    evidence = _remember_upstream_error(account, error)
+                    db.commit()
+                    item.update(
+                        status='error',
+                        reason=(f"本网关：刷新失败；上游 HTTP="
+                                f"{evidence['http_status'] or '未记录'} / code="
+                                f"{evidence['code'] or '未返回'}；原文：{evidence['raw']}"),
+                        upstream_error=evidence)
+                finally:
+                    try:
+                        lease.release()
+                    except Exception:
+                        db.rollback()
+        finally:
             job.add_item(item)
+        return item
+
+    detail = platform_shared.run_account_batch(
+        ordered, worker, concurrency=workers, label='refresh-batch')
+
     refreshed = sum(item['status'] == 'refreshed' for item in detail)
     failed = sum(item['status'] == 'error' for item in detail)
     skipped = sum(item['status'] == 'skipped' for item in detail)
-    return {'ok':failed == 0, 'total':len(detail), 'refreshed':refreshed, 'failed':failed,
-            'skipped':skipped, 'detail':detail,
-            'summary':f'刷新完成：共 {len(detail)} 个账号，成功 {refreshed} 个，失败 {failed} 个，跳过 {skipped} 个'}
+    return {'ok': failed == 0, 'total': len(detail), 'refreshed': refreshed,
+            'failed': failed, 'skipped': skipped, 'detail': detail,
+            'summary': f'刷新完成：共 {len(detail)} 个账号，成功 {refreshed} 个，'
+                       f'失败 {failed} 个，跳过 {skipped} 个'}
 
 
 @router.post('/refresh-batch')

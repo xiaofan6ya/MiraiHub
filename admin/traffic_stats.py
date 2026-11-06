@@ -420,8 +420,17 @@ def record(platform: str, *, outcome: str, status: int = 0,
         status = int(status or 0)
         outcome = str(outcome or "")
         timed_out = outcome == "timeout" or status == 504
-        failed = (not timed_out) and (outcome not in ("completed", "ok")
-                                      or status >= 400)
+        # 「中断」= 响应已经开始（2xx 已发给客户端）但流没收完，客户端先断开了。
+        #
+        # 这是**客户端行为**，不是网关失败：用户按了停止、客户端拿够内容就挂断、
+        # 或者工具调用已经拿到结果 —— 这些都会走到这里。以前一律算 error，
+        # 面板上就出现「Loomy 306 次请求 · 306 失败」，而每一条的 status 都是 200。
+        #
+        # 单独计一个 interrupted：需要看「有多少条没跑完」时它还在，
+        # 但不再污染失败率与红色失败数。
+        interrupted = (not timed_out) and outcome == "interrupted" and 200 <= status < 400
+        failed = (not timed_out) and (not interrupted) and (
+            outcome not in ("completed", "ok") or status >= 400)
         # `error` 传的是 error_kind，成功请求会写 "success"/"ok"；
         # 它只用于「为什么失败」的展示，不该把成功记录染成失败色。
         kind = str(error or "").strip().lower()
@@ -456,6 +465,8 @@ def record(platform: str, *, outcome: str, status: int = 0,
                 pipe.hincrby(key, "ok", 0 if (failed or timed_out) else 1)
                 pipe.hincrby(key, "error", 1 if failed else 0)
                 pipe.hincrby(key, "timeout", 1 if timed_out else 0)
+                # 中断单独计数：不计失败，但也不能让它凭空消失
+                pipe.hincrby(key, "interrupted", 1 if interrupted else 0)
                 pipe.hset(key, mapping={"last_at": now, "last_status": status})
                 pipe.expire(key, DAY_TTL)
                 pipe.zadd(RECENT_KEY, {json.dumps(item, ensure_ascii=False): now})
@@ -467,7 +478,7 @@ def record(platform: str, *, outcome: str, status: int = 0,
                 logger.debug("流量统计写 Redis 失败，改写内存", exc_info=True)
         with _lock:
             bucket = _memory_days.setdefault(day, {}).setdefault(platform, {
-                "requests": 0, "ok": 0, "error": 0, "timeout": 0,
+                "requests": 0, "ok": 0, "error": 0, "timeout": 0, "interrupted": 0,
                 "last_at": 0, "last_status": 0})
             bucket["requests"] += 1
             if failed:
@@ -476,6 +487,8 @@ def record(platform: str, *, outcome: str, status: int = 0,
                 bucket["timeout"] += 1
             else:
                 bucket["ok"] += 1
+            if interrupted:
+                bucket["interrupted"] += 1
             bucket["last_at"] = now
             bucket["last_status"] = status
             _memory_recent.append((now, item))
@@ -561,7 +574,7 @@ def _snapshot_now(window: int = 3600) -> dict:
     day = _day()
     since = time.time() - max(60, int(window))
     platforms = []
-    totals = {"requests": 0, "ok": 0, "error": 0, "timeout": 0}
+    totals = {"requests": 0, "ok": 0, "error": 0, "timeout": 0, "interrupted": 0}
     client = _client()
     rows: list[dict] = []
     recent: list[dict] = []
@@ -607,7 +620,7 @@ def _snapshot_now(window: int = 3600) -> dict:
             row["platform"] = key
             merged[key] = row
             continue
-        for field in ("requests", "ok", "error", "timeout"):
+        for field in ("requests", "ok", "error", "timeout", "interrupted"):
             current[field] = int(current.get(field) or 0) + int(row.get(field) or 0)
         if (row.get("last_at") or 0) > (current.get("last_at") or 0):
             current["last_at"] = row["last_at"]
@@ -721,6 +734,8 @@ def _row(platform: str, label: str, data: dict) -> dict:
         "ok": value("ok"),
         "error": value("error"),
         "timeout": value("timeout"),
+        # 2xx 但流没收完（客户端先断开）：不算失败，单独给个数
+        "interrupted": value("interrupted"),
         "last_at": last_at,
         "last_status": value("last_status"),
     }
@@ -741,6 +756,9 @@ def reset() -> None:
         _memory_days.clear()
         _memory_recent.clear()
         _memory_running.clear()
+        # 快照有 2 秒缓存：不清掉的话「清零」之后面板还能看到旧数字，
+        # 排障时会以为没生效（测试里也会串味）。
+        _snapshot_cache.clear()
         _redis = None
         _redis_ready = False
 

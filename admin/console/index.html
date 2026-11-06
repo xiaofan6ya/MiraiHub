@@ -4,6 +4,16 @@
 <meta name="robots" content="noindex, nofollow" />
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    资源版本号（`?v=`）**不要手改**，下面那些值是兜底用的。
+
+    服务端在下发这一页时会把 `/admin/assets/*` 与 `/static/*` 的 `?v=` 全部换成
+    该文件**内容哈希的前 10 位**（见 admin/server.py 的 stamp_asset_urls）：
+      · 内容没变 → URL 不变，浏览器缓存继续命中；
+      · 内容变了 → URL 自动变，立刻生效，不存在「忘了改版本号」；
+      · 源码运行 / EXE / APK 走同一条路径，打包脚本里也不需要再插一步。
+    带正确 `?v=` 的资源响应 `Cache-Control: immutable`，不带或过期的走 `no-cache`。
+  -->
   <title>MiraiHub 管理后台</title>
   <style>
     /* 滚动条占位固定：面板高度不同会让滚动条反复出现/消失，
@@ -28,8 +38,16 @@
        版式全在这里。桌面上这些规则一条都不生效。
        ========================================================================== */
     @media (max-width:640px){
-      /* 账号表原来是"70vh 滚动 + 首列吸附"，卡片化之后不需要了 */
-      #accountTableWrap{ max-height:none; overflow:visible; padding:0; }
+      /* 账号表：**卡片 + 容器内部滚动**。
+         原来是"70vh 滚动 + 首列吸附"，卡片化之后横向吸附没意义了，
+         但"内部滚动"要保留 —— 手机上几十个账号全展开会把整页拉成几屏。 */
+      #accountTableWrap{
+        max-height:calc(100vh - 260px);
+        overflow-y:auto;
+        overscroll-behavior:contain;
+        -webkit-overflow-scrolling:touch;
+        padding:0 2px 0 0;
+      }
 
       table.is-cards{
         display:block; width:100%; min-width:0 !important;
@@ -80,6 +98,48 @@
       table.is-cards td:not(.c-title):not([data-label]):not(.c-ops){
         justify-content:flex-start;
       }
+
+      /* ---- 复合内容单元格：整块占一行 ------------------------------------
+         模型表的第一列是「图标 + 可复制 id + 标签行 + 能力摘要」，
+         「延迟与健康」是一个多行 grid。默认的 `flex + space-between`
+         会把它们拆到左右两头，中间留一大片空白（移动端截图就是这样）。
+         这些单元格改成 block：内部各块保持原有纵向排布。 */
+      table.is-cards td.c-block{
+        display:block; text-align:left !important;
+        padding:6px 0 !important;
+      }
+      table.is-cards td.c-block::before{
+        display:block; margin-bottom:4px;
+        font-size:10px; letter-spacing:.02em;
+      }
+      table.is-cards td.c-block > *{ max-width:100%; }
+      /* 卡片内的可复制调用名：允许换行，不要撑出横向滚动 */
+      table.is-cards .model-call-id{ word-break:break-all; }
+
+      /* ---- 卡片自身：内部滚动 ---------------------------------------------
+         表格在移动端会渲染成几十上百张卡片，全部展开等于把整页拉成几屏长。
+         这里给容器一个高度上限 + 内部滚动，列表再长也只在这块里滚。 */
+      .tbl-wrap-cards{
+        max-height:calc(100vh - 260px);
+        overflow-y:auto;
+        overscroll-behavior:contain;
+        -webkit-overflow-scrolling:touch;
+        padding-right:2px;      /* 给滚动条留位，卡片右下角不被盖住 */
+      }
+
+      /* 模型 / 定时任务 / 日志三张表的滚动容器：手机上卡片化之后
+         **横向不允许再滚**（卡片是通栏的），只保留纵向内部滚动。
+         `min-w`/`min-w-lg` 那些最小宽度也要一并放掉，否则卡片会被撑出横向条。 */
+      .model-table-wrap,
+      .schedule-table-wrap,
+      .log-table-wrap{
+        max-height:calc(100vh - 260px) !important;
+        overflow-x:hidden !important;
+        overflow-y:auto !important;
+        overscroll-behavior:contain;
+        -webkit-overflow-scrolling:touch;
+      }
+      table.tbl.is-cards{ min-width:0 !important; }
     }
 
   </style>
@@ -1020,7 +1080,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261105-ui6" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261106-perf1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261105-ui6" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -1034,7 +1094,7 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261105-ui9"></script>
+<script defer src="/admin/assets/console-app.js?v=20261106-perf1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261105-ui3"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -1192,7 +1252,7 @@
         </div>
 
         <!-- 用量 -->
-        <div class="ov-card">
+        <div class="ov-card" data-ov-scope="usage">
           <div class="ov-card-head">
             <span>用量</span>
             <div class="ov-seg" role="group" aria-label="统计区间">
@@ -1222,9 +1282,12 @@
           <div id="ovUsageFoot" class="ov-usage-foot"></div>
         </div>
 
-        <!-- 缓存命中率（环形图） -->
-        <div class="ov-card">
-          <div class="ov-card-head"><span>缓存命中率</span></div>
+        <!-- 缓存命中率：环图 + 命中/未命中构成 + 分平台，撑满整张卡（截图上这里曾一片空） -->
+        <div class="ov-card" data-ov-scope="usage">
+          <div class="ov-card-head">
+            <span>缓存命中率</span>
+            <span class="ov-note-inline">命中部分不重复计费</span>
+          </div>
           <div class="ov-cache">
             <div id="ovDonut" class="ov-donut"><div class="ov-donut-inner">
               <div id="ovDonutVal" class="ov-donut-val">—</div></div></div>
@@ -1247,6 +1310,10 @@
               </div>
             </div>
           </div>
+          <!-- 命中 / 未命中的构成条：只给百分比看不出「还剩多少没吃到缓存」 -->
+          <div id="ovCacheSplit" class="ov-cache-split"></div>
+          <!-- 分平台命中率：一个平台拖后腿时，总量会把问题盖住 -->
+          <div id="ovCachePlatforms" class="ov-cache-platforms"></div>
           <div id="ovCacheNote" class="ov-note"></div>
         </div>
 
@@ -1887,14 +1954,22 @@
       </div>
       <p class="text-xs text-slate-400 mb-3">提示：未配置任何模型规则时放行全部模型；配置后仅白名单内模型可用，请求不在名单的模型返回「模型不存在」错误。</p>
       <div class="model-search-bar">
-        <span class="model-search-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        </span>
-        <input id="modelSearch" oninput="renderModelPage(1)" placeholder="搜索模型 ID / 备注 / 厂商（如 gpt、豆包、glm）" class="model-search-input" />
-        <button type="button" id="modelSearchClear" class="model-search-clear" onclick="clearModelSearch()" hidden data-tooltip="清除搜索">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-        </button>
-        <span id="modelSearchCount" class="model-search-count"></span>
+        <div class="model-search-left">
+          <!-- 输入框单独一层 relative：清除按钮定位在**这一格内部**，
+               否则会压到右边的「N 个结果」上（截图里就是这么叠起来的）。 -->
+          <div class="model-search-field">
+            <span class="model-search-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            </span>
+            <input id="modelSearch" oninput="renderModelPage(1)" placeholder="搜索模型 ID / 备注 / 厂商（如 gpt、豆包、glm）" class="model-search-input" />
+            <button type="button" id="modelSearchClear" class="model-search-clear" onclick="clearModelSearch()" hidden data-tooltip="清除搜索">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+          </div>
+          <span id="modelSearchCount" class="model-search-count"></span>
+        </div>
+        <!-- 平台芯片：数量随接入平台增长，这一栏**自己横向滚动**，
+             不再把左侧输入框挤扁（见 console.css 的 .model-search-bar） -->
         <span id="modelPlatformFilter" class="model-platform-filter"></span>
       </div>
       <div class="model-display-controls">
@@ -1910,15 +1985,21 @@
         <code id="modelNamePreview" class="model-name-preview"></code>
         <button type="button" id="modelHealthRefresh" onclick="loadModelHealth(true)" class="console-btn quiet" data-tooltip="刷新最近 24 小时模型健康统计"><span class="wb-icon"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>刷新健康状态</button>
       </div>
-      <div class="card overflow-x-auto max-h-[70vh]">
+      <!-- 与「用量日志」同一套表格结构：**卡片不滚、内部数据区滚**。
+           原来 max-h 挂在卡片上、表头又是 sticky，纵向滚动时表头会跟内容叠在
+           一起（行内容从表头下面穿过），横向滚动时表头也跟着跑。
+           现在跟日志表一致：外层 card 只负责圆角裁切，内层负责两个方向滚动。 -->
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto model-table-wrap max-h-[70vh]">
         <table class="tbl min-w">
-          <thead class="bg-slate-50 text-slate-500 text-left sticky top-0">
+          <thead class="bg-slate-50 text-slate-500 text-left">
             <tr id="modelTableHead">
               <th class="px-4 py-3"><button type="button" class="model-sort" data-model-sort="id" onclick="toggleModelSort('id')" data-tooltip="模型 ID：升序 → 降序 → 默认" >模型 ID <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></th><th class="px-4 py-3">平台</th><th class="px-4 py-3 model-mult-column"><button type="button" class="model-sort" data-model-sort="mult" onclick="toggleModelSort('mult')" data-tooltip="倍率：升序 → 降序 → 默认" >倍率 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></th><th class="px-4 py-3 model-busy-column"><button type="button" class="model-sort" data-model-sort="busy" onclick="toggleModelSort('busy')" data-tooltip="繁忙程度：升序 → 降序 → 默认" >繁忙程度 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></th><th class="px-4 py-3"><span>延迟与健康</span><div class="model-health-sorts"><button type="button" class="model-sort" data-model-sort="success" onclick="toggleModelSort('success')" data-tooltip="成功率：升序 → 降序 → 默认" >成功率 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button><button type="button" class="model-sort" data-model-sort="requests" onclick="toggleModelSort('requests')" data-tooltip="次数：升序 → 降序 → 默认" >次数 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button><button type="button" class="model-sort" data-model-sort="p50" onclick="toggleModelSort('p50')" data-tooltip="P50：升序 → 降序 → 默认" >P50 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button><button type="button" class="model-sort" data-model-sort="p95" onclick="toggleModelSort('p95')" data-tooltip="P95：升序 → 降序 → 默认" >P95 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button><button type="button" class="model-sort" data-model-sort="jitter" onclick="toggleModelSort('jitter')" data-tooltip="波动：升序 → 降序 → 默认" >波动 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button><button type="button" class="model-sort" data-model-sort="accounts" onclick="toggleModelSort('accounts')" data-tooltip="可用账号：升序 → 降序 → 默认" >可用账号 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></div></th><th class="px-4 py-3"><button type="button" class="model-sort" data-model-sort="note" onclick="toggleModelSort('note')" data-tooltip="备注：升序 → 降序 → 默认" >备注 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></th><th class="px-4 py-3"><button type="button" class="model-sort" data-model-sort="enabled" onclick="toggleModelSort('enabled')" data-tooltip="状态：升序 → 降序 → 默认" >状态 <span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span></button></th><th class="px-4 py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody id="modelBody"></tbody>
         </table>
+        </div>
       </div>
       <div id="modelPager" class="flex justify-between items-center mt-3 text-sm text-slate-500"></div>
     </section>
@@ -2050,7 +2131,7 @@
         <button onclick="openAddSchedule()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> 新建任务</button>
       </div>
       <div class="card overflow-hidden">
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto schedule-table-wrap max-h-[60vh]">
           <table class="tbl min-w-lg">
             <thead class="bg-slate-50 text-slate-500 text-left"><tr>
               <th class="px-4 py-3">任务名</th><th class="px-4 py-3">类型</th><th class="px-4 py-3">执行周期</th>
@@ -2147,7 +2228,7 @@
       <div class="card mb-4" id="logLiveCard">
         <div class="sentinel-card-head">
           <h3>请求动态</h3>
-          <span id="logLiveHint">每 2 秒刷新</span>
+          <span id="logLiveHint">正在连接实时通道…</span>
         </div>
         <div id="logLivePlatforms" class="live-platform-counts"></div>
         <div id="logLiveRecent" class="live-request-list"></div>

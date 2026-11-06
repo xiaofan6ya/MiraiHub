@@ -216,8 +216,23 @@ def parse_auth_meta(auth_json: str) -> dict:
 class AccountSession:
     """把一个账号的 auth_json 包成可用的后端会话。"""
 
-    def __init__(self, auth_json: str, enterprise_id: str = ""):
+    def __init__(self, auth_json: str, enterprise_id: str = "",
+                 proxy: str = ""):
+        """`proxy` 指定本次会话的出站出口（空 = 直连/走环境变量）。
+
+        ## 为什么要按会话传代理（2026-11-06）
+
+        一个出口 IP 上跑几十个账号，上游会直接把这个 IP 拉黑。而号池
+        动辄几百上千，全从本机一个 IP 出去等于自曝。
+
+        **不能用环境变量 `HTTP_PROXY`**：那是进程级的，多线程并发时
+        改它会让正在跑的请求中途换出口（更可疑），而且线程间互相覆盖。
+        所以出口必须**跟着会话走** —— 每个 worker 线程拿一个自己的
+        AccountSession，也就有了自己的出口。
+        """
         self._http = None
+        #: 本次会话的出站出口（空 = 直连）
+        self.proxy = str(proxy or "").strip()
         #: 本次会话是否发生过 token 刷新（意味着库里那份凭证已经旧了）。
         #: 调用方据此决定要不要 `updated_json()` 回写 —— 只读场景（列表、
         #: 健康检查的失败分支）不该为了一个没变的凭证白跑一次 commit。
@@ -232,9 +247,18 @@ class AccountSession:
         """Reuse TLS connections throughout one account's task run."""
         from admin.upstream_http import ssl_context, upstream_trust_env
         if self._http is None:
+            kwargs = {}
+            if self.proxy:
+                # 显式出口：**同时关掉 trust_env**，否则环境里残留的
+                # HTTP_PROXY 会和这里的代理打架（httpx 会二选一，
+                # 结果就是「明明配了代理却还是从本机 IP 出去」）。
+                kwargs["proxy"] = self.proxy
+                kwargs["trust_env"] = False
             self._http = httpx.Client(timeout=timeout, limits=HTTP_LIMITS,
                                      verify=ssl_context(),
-                                     trust_env=upstream_trust_env())
+                                     trust_env=kwargs.pop("trust_env",
+                                                          upstream_trust_env()),
+                                     **kwargs)
         self._http.timeout = httpx.Timeout(timeout)
         yield self._http
 

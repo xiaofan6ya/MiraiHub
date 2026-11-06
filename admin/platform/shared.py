@@ -225,9 +225,203 @@ def key_scope(key: ApiKey | None) -> tuple[int | None, int | None]:
 
 
 # ---------------------------------------------------------------------------
-# 选号
+# 批量执行（签到 / 保活 / 刷余额这类「每个号一次上游调用」的任务）
 # ---------------------------------------------------------------------------
-#: 后台快照刷新的状态：name -> {"running": bool, "at": monotonic}
+#: 定时批处理的并发度。
+#:
+#: 为什么是 8：这些任务 100% 是**网络等待**（每个号 1~3 次上游 HTTP，几百毫秒
+#: 到几秒），串行时 100 个号就是几分钟；并发到 8 能把墙钟时间压到 1/6 左右，
+#: 又不至于把上游风控和本地连接池打满（实测 16 并发时上游开始回 429，
+#: 反而更慢）。可用 `ADMIN_BATCH_CONCURRENCY` 覆盖。
+def batch_concurrency() -> int:
+    import os
+
+    try:
+        value = int(os.getenv("ADMIN_BATCH_CONCURRENCY", "8") or 8)
+    except (TypeError, ValueError):
+        value = 8
+    return max(1, min(32, value))
+
+
+def iter_account_batches(db: Session, *, storage: str, realm: str = "",
+                         status: str = "active", batch: int = 20):
+    """**按主键分批**产出账号 id 列表（不把整个号池读进内存）。
+
+    ## 为什么不能 `query(Account).all()`
+
+    几千个号一次性 `.all()` 意味着：几千个 ORM 对象常驻（每个还带
+    `auth_json` 几百 KB 的整条凭证）、身份映射不清、后续遍历期间任何
+    关系加载都会再触发查询。号池越大越卡，最终表现为「点一下签到，
+    服务先卡住十几秒」。
+
+    这里用**keyset 分页**（`id > last_id ORDER BY id LIMIT n`），
+    主键索引上走，内存里同时在手的只有一批 id。
+    """
+    from admin.models import Account
+
+    last_id = 0
+    while True:
+        query = (db.query(Account.id)
+                 .filter(Account.platform == storage, Account.id > last_id))
+        if status:
+            query = query.filter(Account.status == status)
+        if realm:
+            query = query.filter(Account.domain == realm)
+        rows = query.order_by(Account.id.asc()).limit(max(1, batch)).all()
+        if not rows:
+            return
+        ids = [int(row[0]) for row in rows]
+        last_id = ids[-1]
+        yield ids
+
+
+def run_account_batch(account_ids, worker, *, concurrency: int | None = None,
+                      label: str = "") -> list[dict]:
+    """在**线程池**里并发处理一批账号；每个任务用**自己的 Session**。
+
+    `worker(session, account)` 负责单个账号的全部动作（含提交），返回一个
+    轻量 dict（**不要返回 ORM 对象** —— 那会把对象挂在使用者线程的身份映射上，
+    跨线程用必炸，且拖住整批对象不释放）。
+
+    异常一律收敛成 `{"ok": False, "error": ...}`，绝不让一个坏号打断整批 ——
+    「批量任务跑到一半整个挂掉」是这类后台作业最常见的事故。
+
+    线程数固定为 `concurrency`（默认见 `batch_concurrency()`）：
+    任务本身是 I/O 等待，线程是廉价且最直接的并发手段，不需要 async 改造；
+    SQLAlchemy 的同步 Session 也**不能跨线程共享**，每任务一个才是对的。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from admin.db import SessionLocal
+    from admin.models import Account
+
+    ids = [int(x) for x in (account_ids or []) if x]
+    if not ids:
+        return []
+    workers = max(1, int(concurrency or batch_concurrency()))
+
+    def one(account_id: int) -> dict:
+        session = SessionLocal()
+        try:
+            account = session.get(Account, account_id)
+            if account is None:
+                return {"account_id": account_id, "ok": False,
+                        "error": "账号已不存在"}
+            result = worker(session, account)
+            if isinstance(result, dict):
+                return result
+            return {"account_id": account_id, "ok": True}
+        except Exception as exc:  # noqa: BLE001 - 单个号失败不能拖垮整批
+            logger.debug("%s 处理账号 %s 失败", label or "batch", account_id,
+                         exc_info=True)
+            return {"account_id": account_id, "ok": False,
+                    "error": ("%s: %s" % (type(exc).__name__, exc))[:200]}
+        finally:
+            try:
+                session.rollback()      # 未提交的改动一律丢弃，避免脏写
+            except Exception:  # noqa: BLE001
+                pass
+            session.close()
+
+    # 线程数不得超过任务数：100 个号配 8 线程没问题，2 个号别开 8 个空转
+    workers = min(workers, len(ids))
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix=(label or "batch")) as pool:
+        # `map` 保持输入顺序，结果天然稳定（前端按账号 id 排就好读）
+        return list(pool.map(one, ids))
+
+
+# ---------------------------------------------------------------------------
+# 凭证有效期（各平台共用的「四态」拼装）
+# ---------------------------------------------------------------------------
+#: 有效期告急阈值（天）。超过这个天数就不再提示。
+RENEWAL_WARN_DAYS = 7.0
+
+
+def parse_auth_json(auth_json) -> dict:
+    """`auth_json`（字符串或已解析的 dict）→ dict，坏数据给空字典。"""
+    if isinstance(auth_json, dict):
+        return auth_json
+    try:
+        data = json.loads(auth_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def credential_window(*, expires_at=None, refresh_expires_at=None,
+                      has_refresh: bool = False,
+                      warn_days: float = RENEWAL_WARN_DAYS,
+                      now: float | None = None) -> dict:
+    """把「到期时间 + 有没有 refresh」摊成 **admin 侧统一消费的四态结构**。
+
+    为什么要这个函数：`admin/credential_expiry.py` 只认识这一份形状。
+    平台各自实现时最容易写歪的两处是「单位」（毫秒当秒）和「状态判定」
+    （过期了还说 ok）—— 统一在这里算，平台只负责从凭证里把 `expires_at`
+    取出来。
+
+    所有时间参数都是 **epoch 秒**（毫秒请先 `seconds_from()` 或自己除 1000）。
+    """
+    now = now if now is not None else time.time()
+
+    def _state(ts):
+        if not ts:
+            return "unknown", None
+        days = round((float(ts) - now) / 86400.0, 1)
+        if days <= 0:
+            return "expired", days
+        return ("expiring" if days <= warn_days else "ok"), days
+
+    state, days_left = _state(expires_at)
+    refresh_state, refresh_days_left = _state(refresh_expires_at)
+    # 「还救不救得回来」：有 refresh 且续期窗口没过
+    renewable = bool(has_refresh) and refresh_state != "expired"
+    return {
+        "supported": True,
+        "expires_at": int(expires_at) if expires_at else None,
+        "days_left": days_left,
+        "state": state,
+        "refresh_expires_at": int(refresh_expires_at) if refresh_expires_at else None,
+        "refresh_days_left": refresh_days_left,
+        "refresh_state": refresh_state,
+        "renewal_known": bool(expires_at or refresh_expires_at),
+        "renewable": renewable,
+        "has_refresh": bool(has_refresh),
+    }
+
+
+def seconds_from(value) -> float:
+    """把上游给的到期时间归一成 **epoch 秒**。
+
+    上游单位极不统一（毫秒 / 秒 / 数字串 / ISO 串都见过）：
+      * 数字 > 1e11 视为毫秒
+      * 数字串走同一规则
+      * 其它按 ISO8601 解析
+    取不到一律返回 0 —— **不要**猜默认值，猜错会让「已过期」显示成「还早」。
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number / 1000.0 if number > 1e11 else number
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    if text.replace(".", "", 1).isdigit():
+        try:
+            return seconds_from(float(text))
+        except ValueError:
+            return 0.0
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
 _SNAPSHOT_REFRESH: dict[str, dict] = {}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 
@@ -417,8 +611,20 @@ def note_success(account: Account | None) -> None:
 
 def note_failure(db: Session, account: Account | None, *, kind: str,
                  detail: str = "", status: int = 0, model: str = "",
-                 public_platform: str = "", cool_seconds: int = 0) -> None:
-    """把失败写回账号，并按需要进哨兵。**不抛异常**。"""
+                 public_platform: str = "", cool_seconds: int = 0,
+                 zero_balance: bool = False) -> None:
+    """把失败写回账号，并按需要进哨兵。**不抛异常**。
+
+    ## `zero_balance`：额度类失败要**落一个 0 到余额列**
+
+    只冷却（`cool_seconds`）是不够的：冷却到期后这个号会重新排进候选，
+    于是每 10 分钟又白撞一次 402 —— 用户看到的就是「又切到那个额度已用尽的号」。
+
+    `balance_remain > 0 OR IS NULL` 才是选号条件（见 `select_account` 的
+    `min_balance`），所以**把余额写成 0 就等于把它从候选里摘掉**，而且不会
+    影响凭证（号还是 active）。等下一次余额同步 / 每日签到刷新出真实额度，
+    `apply_quota` 会把这一列覆盖回正数，号自动回到池子里 —— 不需要人工解禁。
+    """
     if account is None:
         return
     try:
@@ -426,6 +632,10 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
         account.last_err_at = now
         account.last_err_msg = (detail or kind or "")[:255]
         account.err_count = int(account.err_count or 0) + 1
+        if zero_balance:
+            # 只降不升：已经记 0 的保持 0，不要把它改回未知（NULL）——
+            # NULL 会被选号当成「余额未知，放行」，等于又把空号放回队列。
+            account.balance_remain = 0
         if cool_seconds > 0:
             until = now + __import__("datetime").timedelta(seconds=cool_seconds)
             if account.cool_until is None or account.cool_until < until:

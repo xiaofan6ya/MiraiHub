@@ -21,7 +21,8 @@ router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 #: 写死的清单会让新平台的任务永远进不了下拉框。
 TASK_CHOICES = ["refresh_balances", "refresh_credits", "sync_models", "daily_checkin",
                 "refresh_growth_tasks", "run_growth_tasks",
-                "run_growth_plan", "keepalive_tokens", "ban_recheck"]
+                "run_growth_plan", "keepalive_tokens", "ban_recheck",
+                "daily_activity"]
 
 
 def _platform_tasks() -> tuple[dict, dict]:
@@ -86,6 +87,7 @@ TASK_LABELS = {
     "run_growth_plan": "WorkBuddy 成长计划巡检",
     "keepalive_tokens": "token 保活刷新",
     "ban_recheck": "风控封号复核与自动解封",
+    "daily_activity": "每日活跃对话（模拟真人使用）",
 }
 
 
@@ -134,6 +136,12 @@ class ScheduleIn(BaseModel):
     timing: Optional[ScheduleTiming] = None
     enabled: int = 1
     stop_after: Optional[str] = None  # ISO 时间字符串（daily_checkin 用）
+    # ---- 出口代理与并发（2026-11-06）----
+    # 一个出口 IP 上跑几十个号会被上游拉黑；池子几百上千时更必须分散。
+    proxy_pool: str = ""            # 用哪组代理节点（空 = 直连）
+    concurrency: int = Field(default=0, ge=0, le=64)   # 0 = 按代理槽自动
+    time_budget_minutes: int = Field(default=0, ge=0, le=720)   # 0 = 用默认
+    stale_minutes: int = Field(default=0, ge=0, le=10080)       # 0 = 用默认
 
 
 class SchedulePatch(BaseModel):
@@ -144,6 +152,10 @@ class SchedulePatch(BaseModel):
     timing: Optional[ScheduleTiming] = None
     enabled: Optional[int] = None
     stop_after: Optional[str] = None  # ISO 时间字符串（daily_checkin 用）
+    proxy_pool: Optional[str] = None
+    concurrency: Optional[int] = Field(default=None, ge=0, le=64)
+    time_budget_minutes: Optional[int] = Field(default=None, ge=0, le=720)
+    stale_minutes: Optional[int] = Field(default=None, ge=0, le=10080)
 
 
 def _normalize_platform(value: str | None) -> str:
@@ -227,6 +239,12 @@ def list_schedules(_: bool = Depends(require_admin), db: Session = Depends(get_d
             "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
             "last_result": s.last_result or "",
             "stop_after": s.stop_after.isoformat() if s.stop_after else None,
+            # 出口代理与并发：前端要能直接看到「这条任务从哪出去、几个并发」，
+            # 否则配了代理也不知道生效没有。
+            "proxy_pool": str(getattr(s, "proxy_pool", "") or ""),
+            "concurrency": int(getattr(s, "concurrency", 0) or 0),
+            "time_budget_minutes": int(getattr(s, "time_budget_minutes", 0) or 0),
+            "stale_minutes": int(getattr(s, "stale_minutes", 0) or 0),
             "due_soon": bool(s.enabled and (s.next_run_at is None or s.next_run_at <= now)),
         }
         for s in rows
@@ -261,6 +279,10 @@ def create_schedule(body: ScheduleIn, _: bool = Depends(require_admin), db: Sess
         enabled=body.enabled,
         stop_after=_parse_stop_after(body.stop_after),
         next_run_at=datetime.utcnow(),
+        proxy_pool=str(body.proxy_pool or "").strip()[:32],
+        concurrency=max(0, min(64, int(body.concurrency or 0))),
+        time_budget_minutes=max(0, min(720, int(body.time_budget_minutes or 0))),
+        stale_minutes=max(0, min(10080, int(body.stale_minutes or 0))),
     )
     if body.timing is not None:
         _set_timing(s, body.timing)
@@ -298,6 +320,15 @@ def patch_schedule(sid: int, body: SchedulePatch, _: bool = Depends(require_admi
         s.next_run_at = next_run_at(s, datetime.utcnow())
     if "stop_after" in body.__fields_set__:
         s.stop_after = _parse_stop_after(body.stop_after)
+    # ---- 出口代理与并发 ----
+    if body.proxy_pool is not None:
+        s.proxy_pool = str(body.proxy_pool or "").strip()[:32]
+    if body.concurrency is not None:
+        s.concurrency = max(0, min(64, int(body.concurrency)))
+    if body.time_budget_minutes is not None:
+        s.time_budget_minutes = max(0, min(720, int(body.time_budget_minutes)))
+    if body.stale_minutes is not None:
+        s.stale_minutes = max(0, min(10080, int(body.stale_minutes)))
     db.commit()
     return {"id": s.id, "ok": True}
 

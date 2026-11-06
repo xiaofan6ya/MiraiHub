@@ -316,6 +316,35 @@ class CodeArtsGateway:
     def account_ops(self) -> AccountOps:
         return CodeArtsAccountOps(self.realm)
 
+    # ---- 凭证有效期 ----
+    def credential_expiry(self, auth_json) -> dict:
+        """CodeArts 的 STS 临时 AK/SK 到期 + 能否续。
+
+        它的 AK/SK 只有 **6 小时**，但有 `refresh_token` + DPoP 私钥 + PKCE
+        verifier，就能一直续 —— 所以「6 小时」不是死线，续期窗口才是。
+        """
+        from admin.platform import shared
+        from admin.platform.codearts.services import accounts as ca_accounts
+
+        data = shared.parse_auth_json(auth_json)
+        if not data:
+            return shared.credential_window()
+        expires = shared.seconds_from(
+            data.get("expires_at") or data.get("expiresAt")
+            or ca_accounts.expires_at_ms(data) / 1000.0)
+        has_refresh = bool(data.get("refresh_token") or data.get("refreshToken"))
+        refresh_expires = shared.seconds_from(
+            data.get("refresh_expires_at") or data.get("refreshExpiresAt"))
+        return shared.credential_window(
+            expires_at=expires,
+            # 没给续期截止时间时**不要**拿 AK/SK 的 6 小时当续期窗口 ——
+            # 那会让所有 CodeArts 号都显示「即将过期」，纯粹是误报。
+            refresh_expires_at=refresh_expires or None,
+            has_refresh=has_refresh)
+
+    def renewal_guard_days(self) -> int:
+        return 7
+
     def task_runners(self) -> dict:
         from admin.platform.codearts import _task_runners as declared
 

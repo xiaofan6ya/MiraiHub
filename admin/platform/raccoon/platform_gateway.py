@@ -392,6 +392,25 @@ class RaccoonGateway:
     def account_ops(self) -> AccountOps:
         return RaccoonAccountOps(self.realm)
 
+    # ---- 凭证有效期 ----
+    def credential_expiry(self, auth_json) -> dict:
+        """小浣熊的 token 到期 + 能否刷新（有 refresh_token 就能一直续）。"""
+        from admin.platform import shared
+
+        data = shared.parse_auth_json(auth_json)
+        if not data:
+            return shared.credential_window()
+        expires = shared.seconds_from(data.get("expires_at") or data.get("expiresAt"))
+        has_refresh = bool(data.get("refresh_token") or data.get("refreshToken"))
+        refresh_expires = shared.seconds_from(
+            data.get("refresh_expires_at") or data.get("refreshExpiresAt")) or expires
+        return shared.credential_window(
+            expires_at=expires, refresh_expires_at=refresh_expires or None,
+            has_refresh=has_refresh)
+
+    def renewal_guard_days(self) -> int:
+        return 7
+
     def task_runners(self) -> dict:
         from admin.platform.raccoon import _task_runners as declared
         from admin.platform.raccoon.services import tasks

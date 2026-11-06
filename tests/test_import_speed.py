@@ -55,6 +55,50 @@ class RefreshManyTests(unittest.TestCase):
         self.assertEqual(out, [(7, False, "上游未返回余额")])
 
 
+class RefreshNameCollisionTests(unittest.TestCase):
+    """锁住「导入刷新函数不能被同名函数覆盖」这件事。
+
+    2026-11-06 线上事故：提速提交新增 `_refresh_one_account(acc_id,
+    with_expiry)`，但文件后面早就有一个同名的 `_refresh_one_account(db,
+    account)`（刷新全部任务用）。Python 后定义覆盖前定义，import-local
+    把 bool 当成 Account，账号已 commit 却返回 500 —— 「报错了但号进来了」。
+    原来的并发测试用 mock.patch 按名字替换，恰好绕过了覆盖，没能拦住它。
+    """
+    def test_import_refresh_function_is_not_shadowed(self):
+        import inspect
+        from admin.routers import accounts as acc_mod
+
+        self.assertEqual(
+            list(inspect.signature(acc_mod._refresh_one_account).parameters)[:2],
+            ["acc_id", "with_expiry"])
+        self.assertEqual(
+            list(inspect.signature(acc_mod._refresh_batch_account).parameters)[:2],
+            ["db", "account"])
+
+    def test_refresh_one_is_defined_only_once(self):
+        import re
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "admin" / "routers" / "accounts.py").read_text(encoding="utf-8")
+        hits = re.findall(r"^def _refresh_one_account\(", src, re.M)
+        self.assertEqual(len(hits), 1,
+                         "_refresh_one_account 被重复定义，后定义会覆盖导入刷新逻辑")
+
+    def test_pending_refresh_does_not_block_http_response(self):
+        """余额刷新必须离开请求关键路径，否则上游一慢前端又报「导入失败」。"""
+        from admin.routers import accounts as acc_mod
+
+        def slow_one(acc_id, with_expiry=True):
+            time.sleep(SLOW)
+            return acc_id, True, ""
+
+        with mock.patch.object(acc_mod, "_refresh_one_account", slow_one):
+            t0 = time.perf_counter()
+            acc_mod._refresh_pending_async([1, 2])
+            cost = time.perf_counter() - t0
+        self.assertLess(cost, SLOW,
+                        "%.2fs 才返回，余额刷新又回到 HTTP 关键路径了" % cost)
+
+
 class _FakeQuery:
     def filter(self, *a, **k):
         return self

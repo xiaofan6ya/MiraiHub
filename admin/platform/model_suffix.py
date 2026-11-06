@@ -215,3 +215,41 @@ def apply(platform: str, model: str) -> str:
     if text.lower().endswith(SEP + pid.lower()):
         return text
     return "%s%s%s" % (text, SEP, pid)
+
+
+def client_name(model_id: str, storage: str, platform_id: str) -> str:
+    """控制台展示/复制用的「完整调用名」= 可读模型名 + 平台 id 后缀（**总是带**）。
+
+    ## 为什么要和 `/v1/models` 的裸名分开
+
+    `/v1/models` 对**单平台模型**不加后缀（`deepseek-v4.1-flash`），因为网关
+    能按倍率/健康度自己挑落点 —— 那条 id 仍然可调用。但控制台是「一行 =
+    一个平台」，用户照着行复制 id 时，不带后缀就分不清落点：同一个
+    `deepseek-v4.1-flash` 在五个平台都有一份，粘进客户端等于让网关自己猜。
+
+    带后缀的名字网关同样认（`resolve()` 剥掉后缀后精确路由到该平台），
+    而且这正是用户在客户端里配的那一套（`deepseek-v4.1-flash-loomy`）。
+    所以控制台一律给全名。
+
+    ## 参数
+
+        model_id     `model_configs.model_id`（可能是上游缩写，如 `dfmodel`）
+        storage      落库平台（`qoder` / `trae` / `loomy` …）
+        platform_id  对外平台 id（`qoder-intl` / `trae-cn` / `loomy` …）
+
+    区后缀（`:intl`）不进名字 —— 区由平台 id 表达，拼进去会变成
+    `deepseek-v4.1-flash:intl-trae-intl` 这种谁也对不上的名字。
+    """
+    raw = str(model_id or "").strip()
+    if not raw:
+        return raw
+    try:
+        from admin.platform import models_router as mr
+
+        base = mr.readable_model_id(str(storage or "").lower(), raw)
+    except Exception:  # noqa: BLE001 - 映射表读不到就用原始 id
+        base = raw
+    if ":" in base:
+        base = base.split(":")[0]
+    pid = str(platform_id or "").strip()
+    return apply(pid, base) if pid else base

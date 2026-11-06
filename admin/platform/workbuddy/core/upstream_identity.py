@@ -98,6 +98,22 @@ def identity_headers(purpose: str = DEFAULT_PURPOSE) -> dict:
 
     值全部来自客户端参数档案（探测到的真实安装包 / 后台保存值 / 兜底），
     与 UA、桌面指纹同源，因此三者不会互相矛盾。
+
+    ## 2026-11-06 复核：官方 5.9.3 构建头的真实取值
+
+    从 `D:\\WorkBuddy\\resources\\app.asar` 里反出来的原样代码：
+
+        t["X-Product"]      = e.deploymentType?.trim() || "SaaS"
+        t["X-IDE-Type"]     = "WorkBuddy"
+        t["X-IDE-Name"]     = "WorkBuddy"
+        t["X-IDE-Version"]  = n
+        t["X-Private-Data"] = "true"          ← 之前漏了，已补
+        t["User-Agent"]     = `WorkBuddy/${n} WorkBuddy/${n} CLI/${r}`
+
+    注意 `X-Product` 有两个来源，不要混：
+      · **模型/对话请求**用 `SaaS`（部署形态，来自配置 deploymentType）；
+      · 活动 banner 那条独立请求写死 `WorkBuddy`（产品名）。
+    我们走的是前者，所以 `SaaS` 是对的。
     """
     if not enabled():
         return {}
@@ -111,11 +127,38 @@ def identity_headers(purpose: str = DEFAULT_PURPOSE) -> dict:
         "X-IDE-Version": str(base.get("X-IDE-Version") or cprofile.DEFAULTS["desktop_version"]),
         # X-Product 是部署形态（SaaS），不是产品名 —— 档案里已按官方口径取值。
         "X-Product": str(base.get("X-Product") or cprofile.DEFAULTS["product"]),
+        # 官方每个模型请求都带；缺失就是一个官方不会产生的头组合。
+        "X-Private-Data": "true",
         "X-Agent-Intent": DEFAULT_INTENT,
         "X-Agent-Runtime": DEFAULT_RUNTIME,
     }
     if purpose:
         headers["X-Agent-Purpose"] = purpose
+    return headers
+
+
+def account_headers(uid: str = "", enterprise_id: str = "") -> dict:
+    """登录态归属头（官方只在**有值**时才发，所以我们也只发有值的）。
+
+    官方对话请求的组装逻辑：
+
+        a?.uid          && (s["X-User-Id"]      = a.uid)
+        a?.enterpriseId && (s["X-Enterprise-Id"] = a.enterpriseId,
+                            s["X-Tenant-Id"]     = a.enterpriseId)
+
+    个人号通常只有 uid；企业号才有 enterpriseId。
+    **空值绝不要发空串** —— 官方不会发，空串反而是个不存在的组合。
+    """
+    if not enabled():
+        return {}
+    headers: dict = {}
+    uid = str(uid or "").strip()
+    if uid:
+        headers["X-User-Id"] = uid
+    enterprise = str(enterprise_id or "").strip()
+    if enterprise:
+        headers["X-Enterprise-Id"] = enterprise
+        headers["X-Tenant-Id"] = enterprise
     return headers
 
 

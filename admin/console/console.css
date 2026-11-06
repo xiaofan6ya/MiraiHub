@@ -1847,6 +1847,20 @@ button[data-tooltip], a[data-tooltip], [role="button"][data-tooltip] { cursor: p
 .model-capacity-line { margin-top:3px; font-size:10px; color:var(--fg-subtle); letter-spacing:.01em; }
 .model-id-line:hover .wb-mic { color:var(--brand-ink); }
 .model-id-line .model-id-description { min-width:0; }
+
+/* 可复制的**完整调用名**（可读名 + 平台后缀，如 deepseek-v4.1-flash-loomy）。
+ *
+ * 为什么单独一行、还做成可点：用户来这里的目的常常就是「把这个 id 抄走」。
+ * 之前这里显示的是不带后缀的裸名，抄进客户端后网关只能自己挑落点 ——
+ * 同名模型多平台都有一份时，抄的人以为在指定某个平台，实际是随机落点。
+ * 视觉上要像「可以抄的东西」：等宽、浅底、hover 变品牌色，点一下复制。 */
+.model-call-id { display:inline-block; margin-top:4px; max-width:100%;
+  padding:1px 5px; border-radius:4px; cursor:pointer;
+  font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--fg-muted); background:var(--surface-2); border:1px solid var(--line);
+  overflow-wrap:anywhere; }
+.model-call-id:hover { color:var(--brand-ink); border-color:var(--brand); }
+.model-call-id:active { transform:scale(.99); }
 /* 「旧模型」标：官方客户端前端当前不渲染的模型（不在 cli agent 名单内）。
  * 只在「官方同显」关闭、全量展示时才出现在行内，取值沿用 .model-type-tag 体量。 */
 .model-official-tag { display:inline-flex; align-items:center; gap:4px; border:1px solid var(--border); border-radius:4px; padding:2px 5px; font:500 10px/1.3 ui-sans-serif,system-ui,sans-serif; letter-spacing:0; color:var(--fg-muted); background:var(--surface-2); white-space:nowrap; vertical-align:middle; }
@@ -2132,26 +2146,54 @@ tbody tr:hover > th { background:transparent!important; }
 /* ============================================================================
    模型列表搜索栏 + 平台过滤芯片
    ========================================================================== */
+/* ============================================================================
+   模型搜索条：**左右分栏**
+   ----------------------------------------------------------------------------
+   原来一条 flex + flex-wrap：输入框 `flex:1 1 260px` 会和右侧平台芯片抢空间，
+   平台一多就把输入框挤成一条缝 —— 也就是「输入框被右侧 tag 撑开/挤扁」。
+   现在分两栏：
+     · 左栏宽度**只由这里决定**，与右侧芯片数量无关；
+     · 右栏芯片横排 + **内部横向滚动**，平台变多只在自己那一条里滚。
+   ========================================================================== */
 .model-search-bar {
+  display:grid;
+  grid-template-columns:minmax(220px, 340px) minmax(0, 1fr);
+  align-items:center;
+  gap:10px;
+  margin-bottom:12px;
+}
+.model-search-left {
   display:flex;
   align-items:center;
   gap:8px;
-  margin-bottom:12px;
-  flex-wrap:wrap;
+  min-width:0;
+}
+/* 输入框那**一格**：清除按钮相对它定位。
+   注意不能把 relative 挂到 `.model-search-left` 上 —— 那格里还有「N 个结果」，
+   清除按钮会压到文字上（上一版就是这个叠字 bug）。 */
+.model-search-field {
+  position:relative;
+  display:flex;
+  align-items:center;
+  flex:1 1 auto;
+  min-width:0;
 }
 .model-search-icon {
+  position:absolute;
+  left:10px;
   display:inline-flex;
   align-items:center;
   color:var(--fg-subtle);
-  margin-left:10px;
-  margin-right:-30px;
   pointer-events:none;
   z-index:1;
 }
 .model-search-icon svg { width:14px; height:14px; }
 .model-search-input {
-  flex:1 1 260px;
+  /* 宽度由左栏决定：不再 `flex:1 1 260px` 跟右侧争地盘 */
+  flex:1 1 auto;
+  width:100%;
   min-width:0;
+  /* 右侧留 34px 给清除按钮，按钮靠内不贴边 */
   padding:8px 34px 8px 32px;
   border:1px solid var(--border);
   border-radius:8px;
@@ -2166,31 +2208,58 @@ tbody tr:hover > th { background:transparent!important; }
   box-shadow:0 1px 5px rgba(15,23,42,.12);
 }
 .model-search-clear {
-  margin-left:-30px;
+  /* **往里收**：原来 `margin-left:-30px` 让它压在输入框右边缘上，
+     跟文字和边框挤在一起。现在绝对定位在输入框内部、距右边 8px。 */
+  position:absolute;
+  right:8px;
+  top:50%;
+  transform:translateY(-50%);
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  width:20px;
-  height:20px;
+  width:18px;
+  height:18px;
   border:0;
   border-radius:50%;
   background:var(--surface-2);
   color:var(--fg-muted);
   cursor:pointer;
+  transition:background .15s ease,color .15s ease;
 }
-.model-search-clear svg { width:12px; height:12px; }
-.model-search-clear:hover { color:var(--fg); }
+.model-search-clear svg { width:11px; height:11px; }
+.model-search-clear:hover { color:var(--fg); background:var(--border); }
+.model-search-clear[hidden] { display:none; }
 .model-search-count {
   font-size:12px;
   color:var(--fg-subtle);
   white-space:nowrap;
+  flex:0 0 auto;
+  /* 数字变化时不要挤压输入框：给个最小宽度，个位/百位都稳定 */
+  min-width:44px;
+  text-align:right;
 }
+/* 右栏：芯片横排 + 内部横向滚动（平台再多也只滚这一条） */
 .model-platform-filter {
   display:flex;
   align-items:center;
   gap:4px;
-  flex-wrap:wrap;
+  /* 不换行：换成多行会把整条搜索栏撑高，把表格顶下去 */
+  flex-wrap:nowrap;
+  overflow-x:auto;
+  overflow-y:hidden;
+  scrollbar-width:thin;
+  min-width:0;
+  max-width:100%;
+  padding:2px 0;            /* 上下留 2px，避免描边/滚动条被容器裁掉 */
+  /* 右边界渐隐：暗示「还能往右滚」，不用额外加提示文案 */
+  mask-image:linear-gradient(to right, #000 calc(100% - 18px), transparent);
+  -webkit-mask-image:linear-gradient(to right, #000 calc(100% - 18px), transparent);
 }
+.model-platform-filter::-webkit-scrollbar { height:4px; }
+.model-platform-filter::-webkit-scrollbar-thumb {
+  background:var(--border); border-radius:2px;
+}
+.model-platform-filter:empty { display:none; }
 .model-platform-chip {
   display:inline-flex;
   align-items:center;
@@ -2202,6 +2271,8 @@ tbody tr:hover > th { background:transparent!important; }
   color:var(--fg-muted);
   font-size:12px;
   cursor:pointer;
+  white-space:nowrap;
+  flex:0 0 auto;           /* 不被压缩：要滚就滚，不要挤成「…」 */
   transition:border-color .15s ease,color .15s ease,background .15s ease;
 }
 .model-platform-chip span {
@@ -2218,9 +2289,21 @@ tbody tr:hover > th { background:transparent!important; }
   color:var(--brand-ink);
   font-weight:600;
 }
-.model-platform-chip.active span { background:rgba(255,255,255,.3); color:inherit; }
+/* 选中态里的计数徽标：以前是 `rgba(255,255,255,.3)`，在浅底/深底上都像
+   一块脏灰（截图里那种「糊了一层」的感觉）。改成**同色系半透明**：
+   由品牌色自身调出来，深浅主题都跟着走。 */
+.model-platform-chip.active span {
+  background:color-mix(in srgb, var(--brand) 22%, transparent);
+  color:var(--brand-ink);
+}
+:root[data-theme="dark"] .model-platform-chip.active span {
+  background:color-mix(in srgb, var(--brand) 26%, transparent);
+  color:var(--brand-ink);
+}
 @media (max-width:900px) {
-  .model-search-input { flex:1 1 100%; }
+  /* 窄屏：输入框与芯片改为上下两行，各占满宽 —— 但仍然各自独立，
+     不会互相挤（芯片那一行照样自己横向滚动）。 */
+  .model-search-bar { grid-template-columns:minmax(0, 1fr); }
   .trae-import-summary { grid-template-columns:repeat(3,1fr); gap:6px; }
   .trae-import-num { font-size:18px; }
 }
@@ -2819,6 +2902,108 @@ tbody tr:hover > th { background:transparent!important; }
 .ov-dot.ok { background:var(--brand); }
 .ov-dot.warn { background:#f59e0b; }
 .ov-dot.danger { background:var(--danger); }
+
+/* ---- 缓存命中率：命中构成 + 分平台 ------------------------------------------
+   这张卡原来只有「环图 + 4 个数字」，右下大片留白（截图里的空区）。
+   补的三块都来自同一份聚合结果，不额外请求：
+     · 命中/未命中构成条 —— 只给 99% 看不出「还剩多少没吃到」；
+     · 分平台命中率     —— 一个平台拖后腿时总数字会把它盖住；
+     · 底部统计口径说明。
+   纵向用 flex 拉开：card 本身是 column flex，这里让构成条与分平台之间
+   自适应撑满，短数据时也不会缩成一条缝。 */
+.ov-cache-split { margin-top:16px; }
+.ov-cache-split-head,
+.ov-cache-split-foot {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  font-size:11px;
+  color:var(--fg-muted);
+  font-variant-numeric:tabular-nums;
+}
+.ov-cache-split-head { margin-bottom:7px; }
+.ov-cache-split-head > span:first-child { color:var(--brand-ink); font-weight:600; }
+.ov-cache-track {
+  height:8px;
+  border-radius:4px;
+  background:var(--surface-2);
+  border:1px solid var(--border);
+  overflow:hidden;
+}
+.ov-cache-fill {
+  height:100%;
+  border-radius:3px;
+  background:var(--brand);
+  transition:width .45s ease;
+}
+.ov-cache-split-foot { margin-top:7px; }
+.ov-cache-split-foot span { display:inline-flex; align-items:center; gap:5px; }
+.ov-cache-empty {
+  font-size:11px;
+  color:var(--fg-subtle);
+  padding:8px 0;
+}
+
+.ov-cache-platforms {
+  margin-top:16px;
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  /* 让分平台列表吃掉卡片剩余高度：右邻的「账号监测」有 5 条状态条 + 6 行
+     异常账号，两卡同行会被拉到一样高；不给这块 flex-grow 的话，
+     平台数少时卡片下半截就是一块空白（截图里正是这样）。 */
+  flex:1 1 auto;
+  min-height:0;
+}
+.ov-cache-plat-head {
+  display:flex;
+  justify-content:space-between;
+  font-size:10px;
+  letter-spacing:.03em;
+  text-transform:uppercase;
+  color:var(--fg-subtle);
+  margin-bottom:1px;
+}
+.ov-cache-plat {
+  display:grid;
+  grid-template-columns:96px minmax(40px,1fr) 52px 58px;
+  align-items:center;
+  gap:10px;
+  font-size:11px;
+  color:var(--fg-muted);
+  font-variant-numeric:tabular-nums;
+}
+.ov-cache-plat-name {
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--fg);
+}
+.ov-cache-plat-track {
+  height:5px;
+  border-radius:3px;
+  background:var(--surface-2);
+  border:1px solid var(--border);
+  overflow:hidden;
+}
+.ov-cache-plat-track > i {
+  display:block;
+  height:100%;
+  border-radius:2px;
+  background:var(--brand);
+  opacity:.85;
+  transition:width .45s ease;
+}
+.ov-cache-plat-rate { text-align:right; color:var(--fg); font-weight:600; }
+.ov-cache-plat-tok { text-align:right; color:var(--fg-subtle); }
+
+/* 统计口径说明永远贴卡片底部（列表 flex-grow 之后自然落到下面） */
+#ovCacheNote { margin-top:auto; padding-top:10px; }
+
+@media (max-width:640px) {
+  .ov-cache-plat { grid-template-columns:78px minmax(30px,1fr) 46px 52px; gap:7px; }
+}
 
 /* 账号监测 */
 .ov-monitor-bars { display:flex; flex-direction:column; gap:9px; margin-bottom:16px; }
@@ -3571,6 +3756,13 @@ tbody tr:hover > th { background:transparent!important; }
   padding: 0 4px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+/* 「中断」不能跟「失败」一个色：前者是客户端先断开（响应已发出，通常 200），
+   后者才是网关/上游真的出错。用中性灰 + 无底色，视觉上退到背景里。 */
+.live-platform-count em.lpc-cut {
+  color: var(--fg-subtle);
+  background: transparent;
+  padding: 0;
 }
 
 /* ============================================================================
@@ -4562,15 +4754,34 @@ tbody tr:hover > th { background:transparent!important; }
   border-color: color-mix(in srgb, #3B82F6 32%, var(--border));
 }
 
-/* 深色：底用参考站的 #313131 档，不用纯黑，也不发光 */
+/* 深色：**用主题色阶**，不再写死 #313131 / rgba(255,255,255,.10)。
+ *
+ * 原来那两个值是"一套独立的中性灰"，跟页面 #0e1014 → #15171d → #1b1e25
+ * 的明度阶梯对不上：浅色主题下是卡片色，切到深色突然变成一块比页面亮一档、
+ * 又比卡片冷的灰 —— 就是用户说的「脏脏的背景色」。
+ * 现在全部走 token，深浅两套配色自动一致。 */
 :root[data-theme="dark"] .wb-toast {
-  background: #313131;
-  border-color: rgba(255, 255, 255, .10);
-  color: #D2D3E0;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
+  background: var(--surface-3);
+  border-color: var(--border);
+  color: var(--fg);
+  box-shadow: var(--sh-2);
 }
-:root[data-theme="dark"] .wb-toast--ok { border-color: color-mix(in srgb, #40C8AE 34%, #313131); }
-:root[data-theme="dark"] .wb-toast--err { border-color: color-mix(in srgb, #FF5263 38%, #313131); }
+:root[data-theme="dark"] .wb-toast--ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+}
+:root[data-theme="dark"] .wb-toast--ok .wb-toast-icon { color: var(--ok); }
+:root[data-theme="dark"] .wb-toast--err {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+}
+:root[data-theme="dark"] .wb-toast--err .wb-toast-icon { color: var(--danger); }
+:root[data-theme="dark"] .wb-toast--warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+}
+:root[data-theme="dark"] .wb-toast--warn .wb-toast-icon { color: var(--warn); }
+:root[data-theme="dark"] .wb-toast--info {
+  border-color: color-mix(in srgb, var(--info) 40%, var(--border));
+}
+:root[data-theme="dark"] .wb-toast--info .wb-toast-icon { color: var(--info); }
 
 /* ============================================================================
    按钮防呆转圈

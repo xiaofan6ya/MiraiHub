@@ -201,6 +201,21 @@ def init_db() -> bool:
         _ensure_column("account_model_cool", "upstream_error", "TEXT", "NULL")
         _ensure_column("account_model_cool", "reset_source", "VARCHAR(24)", "DEFAULT ''")
         _ensure_column("accounts", "last_picked_at", "DATETIME", "NULL")
+        # 余额/积分快照的「上次刷新时间」：任务靠它判断哪些号是 stale 的，
+        # 而不是每轮把整个池子重新刷一遍（几千个号那样会永远刷不完）。
+        _ensure_column("accounts", "balance_synced_at", "DATETIME", "NULL")
+        _ensure_index("accounts", "ix_accounts_balance_synced",
+                      ("platform", "status", "balance_synced_at"))
+
+        # 迁移：定时任务上的「出口代理 + 并发」配置
+        #
+        # 为什么挂在任务上而不是全局：签到可以慢（当天跑完就行，用 1~2 并发），
+        # 余额刷新要快但不能把 IP 打死（用代理组 + 适度并发）。
+        # 两类任务的节奏完全不同，全局一个值必然顾此失彼。
+        _ensure_column("schedules", "proxy_pool", "VARCHAR(32)", "DEFAULT ''")
+        _ensure_column("schedules", "concurrency", "INT", "DEFAULT 0")
+        _ensure_column("schedules", "time_budget_minutes", "INT", "DEFAULT 0")
+        _ensure_column("schedules", "stale_minutes", "INT", "DEFAULT 0")
 
         # 迁移：熔断 / session-dead 连续计数 / 连败降权 / 快过期积分
         # 这些是「跨重启必须保留」的状态：重启后失忆会导致重新踩同一批雷

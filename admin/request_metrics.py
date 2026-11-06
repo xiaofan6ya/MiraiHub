@@ -527,7 +527,21 @@ class TimingMiddleware:
                   or record.get('upstream_error') not in (None, 'success')):
                 record['outcome'] = 'http_error'
             elif record['terminal_sent'] or (record['response_complete'] and
-                    (not record['streaming'] or record.get('upstream_error') == 'success')):
+                    (not record['streaming'] or record.get('upstream_error') == 'success'
+                     # 流式响应**把整个 body 发完了**（`http.response.body` 带
+                     # `more_body=False` 的那一帧成功送回客户端），2xx、且没有任何
+                     # 错误标记 —— 这就是「正常结束」。
+                     #
+                     # 以前这里只认 `terminal_sent` 或 `upstream_error == 'success'`，
+                     # 而 `mark_terminal()` 只有安卓链路调过：桌面/服务端跑的每一条
+                     # SSE 都落进下面的 `interrupted`，日志页与实时区看到的
+                     # 就是「Loomy 306 次请求，306 次失败」—— 明明每条都是 200。
+                     # 客户端中途挂断不会走到这里：那时 `send()` 会抛，
+                     # `response_complete` 不会置真（分支处理在下面）。
+                     or (200 <= (record.get('status') or 0) < 400
+                         and not record['stream_error']
+                         and not record.get('request_error')
+                         and not record.get('network_error')))):
                 record['outcome'] = 'completed'
             elif record['streaming'] and record['response_complete']:
                 record['outcome'] = 'interrupted'

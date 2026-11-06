@@ -18,7 +18,7 @@ from admin.models import SystemSetting
 from admin import env_guard, session_store
 from admin.routers import (accounts, credits, groups,
                            growth, keys, login as login_router, logs, models,
-                           proxy, schedules, stats, sync)
+                           proxy, proxies, schedules, stats, sync)
 from admin.ratelimit import (client_ip_from_request, clear_failures,
                              is_locked, record_failure)
 from admin.security import (
@@ -329,6 +329,7 @@ app.include_router(accounts.router)
 app.include_router(keys.router)
 app.include_router(models.router)
 app.include_router(proxy.router)
+app.include_router(proxies.router)
 app.include_router(audio.router)
 app.include_router(images.router)
 app.include_router(videos.router)
@@ -887,14 +888,153 @@ def admin_index(request: Request):
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
         return HTMLResponse(_console_shell(index),
                             headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    # 登录页本身不引用任何外部资源（脚本全内联），没有 `?v=` 可打，
+    # 继续用 FileResponse 发原文件即可。
     return FileResponse(STATIC_DIR / "login.html",
                         headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+def _stamped_page(path) -> str:
+    """读一个小页面并把资源 `?v=` 换成内容哈希（注册页用）。
+
+    注册页直接引用 `/static/phone-session.js` 与 `phone-region.css`，
+    而且**原本一个版本号都没写** —— 换了内容照样被浏览器缓存。
+    文件只有几十 KB，每次读一遍不值得做缓存。
+    """
+    try:
+        return stamp_asset_urls(_read_console_html(path))
+    except OSError:
+        return ""
 
 
 #: 控制台 HTML 的内存缓存：键为 (绝对路径, mtime, 大小)。
 #: 每次请求都读 500KB 文件再拼字符串是纯浪费，而这份文件在进程生命周期内
 #: 基本不变（升级会重启进程）。
+#: 注意缓存的是**原始** HTML：资源 `?v=` 每次下发时按当前内容重新盖章
+#: （见 stamp_asset_urls），所以改了 js/css 不必重启、也不必清这个缓存。
 _CONSOLE_SHELL_CACHE: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# 资源版本号：**按内容自动算**，不再手工改 `?v=`
+# ---------------------------------------------------------------------------
+#
+# 以前每个静态资源（console-app.js / console.css / 各面板脚本）的 URL 上都写死
+# 一个 `?v=20261105-ui9` 之类的串，改完代码要**记得**手工加版本，忘了就是
+# 「改了没生效，用户看到的是缓存里的旧文件」，而且一次改动往往要连改
+# index.html 里十几处、还得跟打包脚本对齐。
+#
+# 现在统一由服务端在**下发 HTML 时**把 `/admin/assets/*` 与 `/static/*` 的
+# `?v=` 换成该文件内容的哈希前 10 位：
+#   · 内容不变 → URL 不变 → 浏览器缓存继续命中（不会每次刷新都重下）；
+#   · 内容变了 → URL 变了 → 立刻失效，**不可能忘**；
+#   · 打包/源码/dev 三种情况走同一条代码路径，不需要 build 里再插一步。
+#
+# 代价：每个资源**第一次**被引用时读一遍算哈希（console-app.js 780KB ≈ 2ms），
+# 之后按 (mtime_ns, size) 命中缓存 —— 只有文件真的变了才重算。
+# 内容哈希的 URL 天生可以长缓存，所以这里按「一个文件」算，不做全目录扫描。
+#: 绝对路径 → (mtime_ns, size, 内容哈希前 10 位)
+_ASSET_DIGEST_CACHE: dict = {}
+#: URL 路径 → 磁盘文件。`Path.resolve()` 在 Windows 上要问文件系统，
+#: 一屏 40 个资源引用点每个都 resolve 两次就是几十毫秒 —— 缓存住。
+_ASSET_PATH_CACHE: dict = {}
+_ASSET_REF_RE = None         # 懒编译
+
+
+def _asset_roots() -> list:
+    """参与版本化的资源根目录：`/admin/assets/` 与 `/static/`。"""
+    return [("/admin/assets/", CONSOLE_DIR), ("/static/", STATIC_DIR)]
+
+
+def _asset_file_of(url_path: str):
+    """URL 路径 → 磁盘文件（越界或不存在返回 None）。
+
+    只认 `/admin/assets/...` 与 `/static/...`；`/admin`、`/join` 这类页面路由
+    原样返回 None，因此不会被误加 `?v=`。
+    """
+    if url_path in _ASSET_PATH_CACHE:
+        return _ASSET_PATH_CACHE[url_path]
+    resolved = None
+    for prefix, root in _asset_roots():
+        if not url_path.startswith(prefix):
+            continue
+        relative = url_path[len(prefix):]
+        if not relative or relative.endswith("/"):
+            break
+        try:
+            base = root.resolve()
+            target = (base / relative).resolve()
+        except OSError:
+            break
+        if target != base and not str(target).startswith(str(base) + os.sep):
+            break            # `../` 穿越，绝不返回
+        if target.is_file():
+            resolved = target
+        break
+    _ASSET_PATH_CACHE[url_path] = resolved
+    return resolved
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha1()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(262144), b""):
+                digest.update(chunk)
+    except OSError:
+        # 读不到（并发删 / 权限）就退回时间戳，至少 URL 还能区分新旧
+        try:
+            return "t%x" % int(path.stat().st_mtime)
+        except OSError:
+            return ""
+    return digest.hexdigest()[:10]
+
+
+def asset_digest(path) -> str:
+    """单个资源文件的内容哈希（带 (mtime, size) 缓存）。
+
+    文件内容一变就换 URL —— 这就是「再也不用记着手改 `?v=`」的全部机制。
+    """
+    try:
+        path = Path(path)
+        stat = path.stat()
+    except OSError:
+        return ""
+    cached = _ASSET_DIGEST_CACHE.get(str(path))
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+    digest = _hash_file(path)
+    _ASSET_DIGEST_CACHE[str(path)] = (stat.st_mtime_ns, stat.st_size, digest)
+    return digest
+
+
+def _asset_version_of(url_path: str) -> str:
+    target = _asset_file_of(url_path)
+    return asset_digest(target) if target is not None else ""
+
+
+def stamp_asset_urls(html: str) -> str:
+    """把 HTML 里 `/admin/assets/*` 与 `/static/*` 的 `?v=` 换成内容哈希。
+
+    只动 `src=` / `href=` 的属性值，且只动以 `/` 开头的同源路径 ——
+    外链、`data:`、`#anchor`、页面路由（`/admin`、`/join`）一律原样。
+    """
+    import re as _re
+
+    global _ASSET_REF_RE
+    if _ASSET_REF_RE is None:
+        _ASSET_REF_RE = _re.compile(r'\b(src|href)="(/[^"]*)"')
+    pattern = _ASSET_REF_RE
+
+    def replace(match):
+        attr, url = match.group(1), match.group(2)
+        core = url.split("#", 1)[0].split("?", 1)[0]
+        version = _asset_version_of(core)
+        if not version:
+            return match.group(0)
+        return '%s="%s?v=%s"' % (attr, core, version)
+
+    return pattern.sub(replace, html)
 
 
 def _console_shell(path) -> str:
@@ -912,20 +1052,22 @@ def _console_shell(path) -> str:
     因此没有 JS 或会话过期时行为与原来一致。
     """
     stat = path.stat()
+    # 缓存的是**原始** HTML（读盘 + 完整性校验最贵）；盖章放在缓存之外，
+    # 这样改了 js/css 不用重启进程、也不用等缓存过期。
     key = (str(path), stat.st_mtime_ns, stat.st_size)
-    cached = _CONSOLE_SHELL_CACHE.get(key)
-    if cached is not None:
-        return cached
-    html = _read_console_html(path)
+    html = _CONSOLE_SHELL_CACHE.get(key)
+    if html is None:
+        html = _read_console_html(path)
+        if _console_html_complete(html):
+            _CONSOLE_SHELL_CACHE.clear()
+            _CONSOLE_SHELL_CACHE[key] = html
+    # 静态资源的 `?v=` 由服务端注入内容哈希 —— HTML 里留着的历史版本号会被覆盖
+    html = stamp_asset_urls(html)
     marker = 'lang="zh-CN"'
     if marker in html:
         html = html.replace(marker, marker + ' class="console-authed"', 1)
     elif "<html" in html:
         html = html.replace("<html", '<html class="console-authed"', 1)
-    # 只缓存完整的页面：半截 HTML 一旦进缓存，就会被反复下发给浏览器。
-    if _console_html_complete(html):
-        _CONSOLE_SHELL_CACHE.clear()
-        _CONSOLE_SHELL_CACHE[key] = html
     return html
 
 
@@ -959,14 +1101,28 @@ def _read_console_html(path) -> str:
 
 @app.get("/admin/assets/{file_path:path}")
 def console_asset(file_path: str, request: Request):
-    """控制台私有静态资源（admin/console/*）。无会话一律 404，不暴露存在性。"""
+    """控制台私有静态资源（admin/console/*）。无会话一律 404，不暴露存在性。
+
+    缓存策略跟着 `?v=` 走（版本号由 `stamp_asset_urls()` 注入内容哈希）：
+
+      * URL 里的版本 == 当前文件哈希 → `immutable`，一年有效。
+        这个 URL 天生是内容寻址的，文件一变 URL 就变，长缓存不会拿到旧内容。
+      * 否则（无 version / 手写的旧版本号）→ `no-cache`，每次用 ETag 校验。
+        宁可多一个 304，也不让「改完没生效」再发生一次。
+    """
     if not _console_allowed(request):
         raise HTTPException(status_code=404)
     root = CONSOLE_DIR.resolve()
     target = (root / file_path).resolve()
     if not str(target).startswith(str(root) + os.sep) or not target.is_file():
         raise HTTPException(status_code=404)
-    return FileResponse(target)
+    current = asset_digest(target)
+    supplied = request.query_params.get("v") or ""
+    if current and supplied == current:
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+    else:
+        headers = {"Cache-Control": "no-cache"}
+    return FileResponse(target, headers=headers)
 
 
 @app.get("/join")
@@ -978,7 +1134,10 @@ def join_index(request: Request, db: Session = Depends(get_db)):
     当开关 —— 那套隐式判据会和 `/api/join/*`、`join_invites` 三处漂移。
     现在总闸状态只有一个来源（`admin/join_gate.py`），本函数只负责发文件。
     """
-    return FileResponse(STATIC_DIR / "join.html")
+    # 资源 `?v=` 同样由服务端按内容哈希注入（见 stamp_asset_urls），
+    # 免得改完 phone-session.js / vendor 库还要手工改版本号。
+    return HTMLResponse(_stamped_page(STATIC_DIR / "join.html"),
+                        headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 #: 票据引导页。**这是整个 join 链路里唯一不设门禁的页面**。

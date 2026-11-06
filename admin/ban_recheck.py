@@ -309,7 +309,11 @@ def run_ban_recheck(db) -> dict:
             skipped += 1
             continue
         try:
-            time.sleep(gap)
+            # 固定 gap 会让「N 个号每隔整 3 秒探测一次」形成根号状的尖峰。
+            # 抖动一下：既保留节流，又不留整齐的机器节奏。
+            from admin import humanize as _humanize
+
+            time.sleep(_humanize.human_gap(gap, floor=gap * 0.4))
             trusted = probe_trusted_auth(acc.auth_json)
             if trusted["ok"]:
                 _clear_backoff(acc.id)

@@ -168,42 +168,164 @@ class LoomyAccountOps:
         return loomy_accounts.sync_quota(db, account)
 
     def keepalive(self, db):
-        """保活：探活 + 同步余额。
+        """保活：真探测每张 session 还活着没 + 同步余额 + 报告剩余天数。
 
-        Loomy 的 session **不会续期**（没有 refresh 接口），
-        所以「保活」在这里的实际含义是：
+        ## 先说结论：Loomy 没有可自动化的续期
 
-          1. 每轮探一次 `/points/balance`，确认 session 还能用
-          2. 顺带把余额写回 DB（保活任务跑完，前端数字就是新的）
-          3. session 失效就把账号标 disabled，让选号跳过它
+        我们已经把能试的都试过了（2026-11-06，用真实 session + 正确的
+        讯飞 HMAC-SHA1 签名逐个探测）：
 
-        做不到续期就**不假装能续期** —— 失效会在返回里明确列出，
-        用户需要去客户端重新登录。
+            /session/refresh /login/session/refresh /login/account/refresh
+            /login/account/renew /login/account/keepalive /login/session/keepalive
+            /userinfo/session/refresh /userinfo/session/renew
+            /login/account/expire /login/session/expire ...
+
+        **全部 404**（服务端根本没这些路由），客户端代码里也没有任何
+        refresh 调用点。session 只在登录时签发，有效期写死
+        `expire: 14 * 24 * 3600`。想延长只能在登录那一次传更大的 expire，
+        而那需要手机验证码 —— 无法自动化。
+
+        所以这里做**能做的那部分**，而且做扎实：
+
+          1. **真探测**：用 `/userinfo/query/baseInfo`（客户端自己用的那个
+             接口）确认 session 还在，比原来探积分接口更准，也不消耗额度；
+          2. **算死线**：`updatedAt + 14 天`，把「还剩几天」算出来写回；
+          3. **提前预警**：剩余 ≤3 天在返回里单独列出，前端可以直接提示
+             「这些号 3 天内要重新登录」；
+          4. **失效即禁用**：`100002`/`020002` 是终态，标 disabled 让选号跳过，
+             不再每轮白撞。
         """
-        ok, failed, refreshed = 0, [], 0
-        for account in loomy_accounts.accounts_for(db, self.realm):
+        import time as _time
+
+        from admin.models import Account
+
+        from admin.platform import shared as platform_shared
+
+        ok, refreshed = 0, 0
+        failed: list[dict] = []
+        expiring: list[dict] = []
+        refresh_anchor = 0
+        renewed_count = 0
+        renewable_count = 0
+
+        accounts = [int(row[0]) for row in
+                    (db.query(Account.id)
+                     .filter(Account.platform == loomy_accounts.PLATFORM,
+                             Account.status == "active")
+                     .order_by(Account.id.asc()).all())]
+        if not accounts:
+            return {"ok": True, "probed": 0, "refreshed": 0, "failed": [],
+                    "expiring": [],
+                    "note": "没有 active 的 Loomy 账号"}
+
+        def worker(session, account):
             realm = loomy_accounts.realm_of(account)
+            data = loomy_accounts.ensure_token(session, account)
+            token = loomy_accounts.token_of(data)
+            renewed = False
+            # 必须是**这个任务自己的**变量：并发跑时共享一个外部变量会串号。
+            renew_error = ""
+
+            # ⓞ **到期前自动续期**：有手机号+密码的号，在剩余不足 3 天时
+            #    用 byPwd 重登换一张新 14 天的票。这是唯一能让号池「无人值守
+            #    长期活着」的机制（服务端没有 refresh 接口，实测 404）。
             try:
-                data = loomy_accounts.ensure_token(db, account)
-                token = loomy_accounts.token_of(data)
+                if loomy_accounts.needs_renewal(data):
+                    loomy_accounts.renew_with_password(session, account)
+                    data = loomy_accounts.credentials_of(account)
+                    token = loomy_accounts.token_of(data)
+                    renewed = True
+            except Exception as exc:  # noqa: BLE001 - 续期失败不影响本次探活
+                renew_error = ("%s: %s" % (type(exc).__name__,
+                                           getattr(exc, "message", exc)))[:160]
+
+            try:
+                # ① 真探测：积分接口必须接受 session，能真实回答
+                #    「这张票上游还认不认」。401/100002 才是失效，
+                #    网络抖动不算（否则一次抖动会把好号全禁掉）。
                 points = client.fetch_points_balance(token, realm, account.id)
-                loomy_accounts.apply_quota(account, points)
-                db.commit()
-                refreshed += 1
-                ok += 1
             except client.UpstreamError as exc:
                 if exc.kind == "auth":
-                    # session 真的失效了 —— 标记后前端会显示「已禁用」
+                    # session 真的废了：禁用，别再让它进候选
                     account.status = "disabled"
-                    try:
-                        db.commit()
-                    except Exception:  # noqa: BLE001
-                        db.rollback()
-                failed.append({"account_id": account.id, "account": account.name,
-                               "error": exc.message[:120]})
+                    account.last_err_msg = (exc.message or "")[:255]
+                    session.commit()
+                return {"account_id": account.id, "account": account.name,
+                        "ok": False, "auth_dead": exc.kind == "auth",
+                        "renewed": renewed,
+                        "error": exc.message[:120]}
+            # ② 活着：同步余额（保活跑完前端数字就是新的）
+            quota_ok = False
+            try:
+                loomy_accounts.apply_quota(account, points)
+                session.commit()
+                quota_ok = True
+            except Exception:  # noqa: BLE001 - 余额失败不影响「登录态还活着」
+                session.rollback()
+            # ③ 给老凭证补「首次确认有效」的时间锚点：没有它就永远算不出死线。
+            data = loomy_accounts.credentials_of(account)
+            if not (data.get("updatedAt") or data.get("first_seen_at")):
+                data = loomy_accounts.stamp_first_seen(data)
+                try:
+                    account.auth_json = json.dumps(data, ensure_ascii=False)
+                    session.commit()
+                    refresh_anchor += 1
+                except Exception:  # noqa: BLE001
+                    session.rollback()
+            days = loomy_accounts.session_days_left(data)
+            return {"account_id": account.id, "account": account.name,
+                    "ok": True, "quota": quota_ok, "days_left": days,
+                    "renewed": renewed, "renewable": loomy_accounts.has_password(data),
+                    "renew_error": renew_error if not renewed else ""}
+
+        rows = platform_shared.run_account_batch(
+            accounts, worker, label="loomy-keepalive")
+
+        now = _time.time()
+        for row in rows:
+            if row.get("ok"):
+                ok += 1
+                if row.get("quota"):
+                    refreshed += 1
+                if row.get("renewed"):
+                    renewed_count += 1
+                if row.get("renewable"):
+                    renewable_count += 1
+                days = row.get("days_left")
+                if days is not None and days <= loomy_accounts.SESSION_WARN_DAYS:
+                    expiring.append({"account_id": row.get("account_id"),
+                                     "account": row.get("account"),
+                                     "days_left": days,
+                                     "renewable": row.get("renewable"),
+                                     "renew_error": row.get("renew_error") or ""})
+            else:
+                failed.append({"account_id": row.get("account_id"),
+                               "account": row.get("account"),
+                               "error": row.get("error") or "未知错误"})
+
+        note = ("Loomy 无 refresh 接口（已实测 404）：session 自登录起 14 天有效。"
+                "有手机号+密码的号会在剩余不足 %.0f 天时自动重登续期。"
+                % loomy_accounts.SESSION_RENEW_BEFORE_DAYS)
+        if renewed_count:
+            note += "；本次自动续期 %d 个" % renewed_count
+        if renewable_count:
+            note += "（%d/%d 个号已存密码，可自动续期）" % (renewable_count, ok)
+        elif ok:
+            note += "（当前没有号存密码 —— 到期只能手动重扫）"
+        if refresh_anchor:
+            note += "；为 %d 个老凭证补了有效期锚点" % refresh_anchor
+        if expiring:
+            note += "；有 %d 个号 %.0f 天内到期" % (
+                len(expiring), loomy_accounts.SESSION_WARN_DAYS)
         return {"ok": not failed, "probed": ok, "refreshed": refreshed,
                 "failed": failed,
-                "note": "Loomy 无续期机制，session 失效需在客户端重新登录"}
+                "expiring": expiring,
+                "expiring_count": len(expiring),
+                "anchored": refresh_anchor,
+                "renewed": renewed_count,
+                "renewable": renewable_count,
+                "checked_at": now,
+                "note": note}
 
     def checkin(self, db):
         """每日签到：领取当日赠送额度（5000 积分）。
@@ -363,6 +485,31 @@ class LoomyGateway:
     # ---- 契约 ----
     def account_ops(self) -> AccountOps:
         return LoomyAccountOps(self.realm)
+
+    # ---- 凭证有效期 ----
+    def credential_expiry(self, auth_json) -> dict:
+        """Loomy 的 session 死线 —— **这是唯一不能靠 refresh 救的平台**。
+
+        服务端没有 refresh token（12 个候选端点实测全 404），session 只在
+        登录时签发、固定 14 天。所以：
+          · `renewable` 只有在**存了手机号+密码**时才为 True；
+          · 没有密码的号到期后只能重新扫描/短信重登。
+        """
+        from admin.platform import shared
+
+        data = shared.parse_auth_json(auth_json)
+        if not data:
+            return shared.credential_window()
+        expires = loomy_accounts.session_expires_at(data)
+        return shared.credential_window(
+            expires_at=expires or None,
+            # 续期窗口 = 同一个死线：到点前必须用密码重登，没有别的办法
+            refresh_expires_at=expires or None,
+            # 「能续」= 有密码（有 refresh token 这个概念在 Loomy 不存在）
+            has_refresh=loomy_accounts.has_password(data))
+
+    def renewal_guard_days(self) -> int:
+        return int(loomy_accounts.SESSION_WARN_DAYS)
 
     def task_runners(self) -> dict:
         """本平台的定时任务。

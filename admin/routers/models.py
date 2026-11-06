@@ -519,6 +519,12 @@ def list_aggregate(level: Optional[str] = None,
         for entry in item["platforms"]:
             entry["platform_label"] = _platform_label(
                 entry.get("platform_id") or entry["platform"])
+            # 每条平台明细都给出「完整调用名」：分享面板和聚合视图悬停都是
+            # 直接复制这里 —— 只有 `model_id` 时单平台模型会少掉后缀，
+            # 用户复制过去就分不清落点（同名模型多平台都有）。
+            entry["client_id"] = _client_call_id(
+                entry.get("model_id"), entry.get("platform"),
+                entry.get("platform_id") or entry.get("platform") or "")
     # 展开区之后平台数会变（Qoder 国内 + 国际算两个可调度目标），要重算
     for item in result["items"]:
         item["platform_count"] = len(item["platforms"])
@@ -555,6 +561,22 @@ def _readable_client_id(row, platform_id: str) -> str:
         return base
     pid = str(platform_id or "")
     return base if base.endswith("-" + pid) else "%s-%s" % (base, pid)
+
+
+def _client_call_id(model_id: str, storage: str, platform_id: str) -> str:
+    """控制台展示/复制用的完整调用名（**总是带平台后缀**）。
+
+    与 `_readable_client_id` 的区别只有一处：单区平台（`loomy` / `workbuddy`
+    / `codearts`）也补后缀。`_readable_client_id` 保持 `/v1/models` 口径不变，
+    因为它同时被日志筛选和「按模型名调用」的路径依赖。
+
+        dfmodel      (qoder)      -> deepseek-flash-qoder
+        dfmodel      (qoder-intl) -> deepseek-flash-qoder-intl
+        deepseek-v4.1-flash (loomy) -> deepseek-v4.1-flash-loomy
+    """
+    from admin.platform import model_suffix
+
+    return model_suffix.client_name(model_id, storage, platform_id)
 
 
 @router.get("/configs")
@@ -638,6 +660,14 @@ def list_configs(
                 # `dfmodel-qoder`、客户端显示 `deepseek-flash-qoder`，
                 # 两边对不上，用户不知道该复制哪个。
                 "model_id": _readable_client_id(m, _e["platform"]),
+                # 「完整调用名」：可读模型名 + 平台后缀，**任何平台都带**。
+                #
+                # `model_id` 是 `/v1/models` 那套口径（单平台模型不带后缀），
+                # 拿它当「复制给客户端用」的 id 会丢掉落点 —— 同名模型在多平台
+                # 都有一份时，用户以为在调用某个平台，实际网关按倍率自己挑。
+                # 控制台展示与复制一律用 `client_id`（如 `deepseek-v4.1-flash-loomy`），
+                # 这条名字网关同样认（`model_suffix.resolve` 精确路由）。
+                "client_id": _client_call_id(m.model_id, m.platform, _e["platform"]),
                 # 上游原始 id 单独给出，方便排障时对照
                 "upstream_id": m.model_id,
                 # 能力信息（上下文 / 输出 / 图片 / 推理）：

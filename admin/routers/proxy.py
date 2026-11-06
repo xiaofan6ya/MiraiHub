@@ -1292,7 +1292,10 @@ def _apply_account_policy(db: Session, acc: Account, kind: str, status: int,
         cool_hint = ""
         if kind == "account_fault":
             base = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES)
-            cool_hint = " · 冷却 %d 分钟" % (base if code == "11140" else base * 4)
+            # 11140 单独口径（默认 2 小时），提示里要报它真实生效的时长
+            minutes_hint = ((settings.RESTRICTED_COOL_MINUTES or base)
+                            if code == "11140" else base * 4)
+            cool_hint = " · 冷却 %d 分钟" % minutes_hint
         elif kind == "session_dead":
             cool_hint = " · 登录态需重新授权"
         elif code == "11128":
@@ -1400,7 +1403,13 @@ def _apply_account_policy(db: Session, acc: Account, kind: str, status: int,
         # 这正是「账号冷却没有准信」的成因。
         code = _json_code(msg)
         if code == "11140":
-            minutes = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES)
+            # 11140 是**账号级授权风控**，不是限流。给 10 分钟等于每 10 分钟
+            # 拿同一个号再撞一次，撞一次加深一次 —— 而且期间还会换号继续打
+            # 同一台设备，设备指纹连坐（社区复盘的结论，见
+            # `config.RESTRICTED_COOL_MINUTES` 的注释）。
+            # 默认 2 小时；配 0 回退旧行为。
+            minutes = settings.RESTRICTED_COOL_MINUTES or max(
+                1, settings.ACCOUNT_FAULT_COOL_MINUTES)
         else:
             # 硬失败：给更长的冷却，避免反复用同一个号去打上游
             minutes = max(1, settings.ACCOUNT_FAULT_COOL_MINUTES * 4)

@@ -34,27 +34,80 @@ def timing_of(schedule) -> ScheduleTiming:
     return ScheduleTiming(**json.loads(raw)) if raw else ScheduleTiming()
 
 
+def _daily_jitter_minutes(schedule) -> float:
+    """每日/每周/每月任务的**分钟级**抖动幅度（± 分钟）。
+
+    ## 为什么必须抖（2026-11-06 用户明确要求）
+
+    > 执行任务、每日签到时间随机不再固定时分，分可以变化而不是固定整数区间的。
+
+    原实现每天都是 `09:00:00` 整跑一次。上游看到的是一台准点机器：
+    每天同一分钟、同一个秒、同一批账号一起签到。真人不会这样 ——
+    真人今天 8:47、明天 9:23、后天忘了。
+
+    幅度按周期取：日任务 ±25 分钟，周任务 ±90 分钟，月任务 ±180 分钟。
+    用环境变量 `ADMIN_SCHEDULE_JITTER_MINUTES` 可以整体放大/缩小或关掉（0）。
+    """
+    import os
+
+    override = os.getenv("ADMIN_SCHEDULE_JITTER_MINUTES", "").strip()
+    if override:
+        try:
+            return max(0.0, float(override))
+        except ValueError:
+            pass
+    from admin.schedule_timing import timing_of  # 自身模块，保持局部可读
+
+    mode = timing_of(schedule).mode
+    if mode == "weekly":
+        return 90.0
+    if mode == "monthly":
+        return 180.0
+    return 25.0
+
+
+def _apply_jitter(target: datetime, minutes: float) -> datetime:
+    """给目标时刻加一个**对称**的随机偏移（分钟级，秒也随机）。"""
+    if minutes <= 0:
+        return target
+    import random
+
+    offset = random.uniform(-minutes, minutes)
+    return target + timedelta(minutes=offset,
+                              seconds=random.uniform(-59, 59))
+
+
 def next_run_at(schedule, now: datetime) -> datetime:
     timing = timing_of(schedule)
     if timing.mode == "preset" and schedule.task == "keepalive_tokens":
         from admin.scheduler import _next_keepalive_at
+
         return _next_keepalive_at(now)
     if timing.mode in ("preset", "interval"):
-        return now + timedelta(minutes=schedule.interval_minutes or 60)
+        minutes = schedule.interval_minutes or 60
+        # 区间任务也抖：1440 分钟（日）抖 ±3%（约 ±43 分钟），1 小时抖 ±2 分钟。
+        # 下界 60 秒、上界 45 分钟 —— 抖太狠会让「每小时」变成「每两小时」。
+        spread = max(1.0, min(45.0, minutes * 0.03))
+        return _apply_jitter(now + timedelta(minutes=minutes), spread)
     local = now + timedelta(hours=8)
     hour, minute = map(int, timing.time.split(":"))
+    jitter = _daily_jitter_minutes(schedule)
     if timing.mode == "monthly":
         year, month = local.year, local.month
-        for _ in range(2):
+        for _ in range(3):
             day = min(timing.monthday, calendar.monthrange(year, month)[1])
             target = datetime(year, month, day, hour, minute)
             if target > local:
-                return target - timedelta(hours=8)
+                shifted = _apply_jitter(target, jitter)
+                return (shifted if shifted > local else target) - timedelta(hours=8)
             year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-    for days in range(8):
+    for days in range(9):
         target = (local + timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target > local and (timing.mode == "daily" or target.weekday() in timing.weekdays):
-            return target - timedelta(hours=8)
+            shifted = _apply_jitter(target, jitter)
+            # 关键：抖动不能把时刻拉到「已过去」，否则任务会被判定为当场到期、
+            # 立刻执行 —— 抖了等于没抖。拉回去就退回未抖动的目标。
+            return (shifted if shifted > local else target) - timedelta(hours=8)
     raise ValueError("无法计算下次执行时间")
 
 

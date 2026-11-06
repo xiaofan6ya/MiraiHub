@@ -34,6 +34,16 @@ class Account(Base):
     balance_total = Column(Integer, default=0)
     balance_remain = Column(Integer, default=0)
     last_sync_at = Column(DateTime, nullable=True)
+    #: 余额快照的「上次刷新时间」（2026-11-06）。
+    #:
+    #: 为什么要和 `last_sync_at` 分开：`last_sync_at` 是「任何一次同步」，
+    #: 包括导入时的探活、签到回写、客户端刷新 —— 用它判断「余额是不是
+    #: 该刷了」会把刚导入的号也算成需要刷新。
+    #:
+    #: 这个字段**只由余额刷新任务写**，所以 `balance_synced_at` 落后
+    #: N 分钟 = 这个号确实 N 分钟没刷过余额。几千个号的池子必须靠它
+    #: 做「只刷 stale 的」，否则每轮全量重扫永远刷不完。
+    balance_synced_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     # 稳定性状态机：错误计数 / 冷却 / 防撞号 / 禁用原因
     err_count = Column(Integer, default=0)          # 连续上游 5xx 计数
@@ -326,6 +336,49 @@ class BlockedIP(Base):
     # 没有过期时间就意味着一次误判永久锁死一个正常客户端，而且没人记得去解。
     # 到期后由 `is_blocked_ip()` 视为未封禁，无需额外清理任务。
     expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProxyEndpoint(Base):
+    """出站代理节点（**按并发槽分配，避免一个 IP 打太多号**）。
+
+    ## 为什么必须要有这张表（2026-11-06）
+
+    用户实测反馈：**一个出口 IP 请求多个账号，IP 会被上游拉黑**。
+    而账号池动辄几百上千，全从本机一个 IP 出去，等于把「一个 IP 上
+    有 N 个账号在活动」这件事直接写在脸上。
+
+    有了这张表之后：
+      · 每个节点声明自己允许多少并发（`max_concurrency`）；
+      · 任务按「节点数 × 单节点并发」分配线程，一个节点同时只跑 N 个号；
+      · 某节点被拉黑（403 / 11140 连坐）时置 `blocked_until`，
+        期间不再派发，其它节点继续 —— 不会因为一个 IP 挂掉整批停摆。
+
+    `url` 形如 `http://user:pass@host:port` 或 `socks5://host:port`；
+    支持用 `{session}` 占位符表示「每个并发槽一个会话」（轮换型代理常见）。
+    """
+
+    __tablename__ = "proxy_endpoints"
+    __table_args__ = (
+        Index("ix_proxy_endpoints_enabled", "enabled"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #: 展示名（如「机房A-01」「住宅-上海」）
+    label = Column(String(64), default="")
+    #: 代理地址；`{session}` 会被替换成随机串（轮换型代理）
+    url = Column(String(512), nullable=False)
+    enabled = Column(Integer, nullable=False, default=1)
+    #: 这个出口允许的同时并发数。住宅代理通常 1~2，机房可以 5~10。
+    max_concurrency = Column(Integer, nullable=False, default=1)
+    #: 归属组（空 = 默认组）。任务可以选择用哪一组出口。
+    pool = Column(String(32), default="")
+    #: 最近一次成功 / 失败的时间与原因（排障用）
+    last_ok_at = Column(DateTime, nullable=True)
+    last_error = Column(String(255), default="")
+    #: 被上游拉黑后的静默期（UTC）。期间不派发。
+    blocked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -681,6 +734,25 @@ class Schedule(Base):
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)
     last_result = Column(Text, default="")  # 上次运行结果摘要
+
+    # ---- 出口代理与并发（2026-11-06）----
+    #
+    # 用户实测：一个出口 IP 请求多个账号，IP 会被上游拉黑。
+    # 而池子动辄几百上千，全从本机一个 IP 出去等于自曝。
+    #
+    # 为什么挂在任务上而不是全局：签到和余额刷新的节奏完全不同 ——
+    # 签到可以慢慢来（当天跑完就行，1~2 并发），余额刷新要快但不能把
+    # IP 打死（多出口 + 适度并发）。一个全局值必然顾此失彼。
+    #: 用哪一组代理节点（`proxy_endpoints.pool`）。空 = 直连。
+    proxy_pool = Column(String(32), default="")
+    #: 并发数。0 = 自动（按「可用节点数 × 单节点并发」算，最少 1）。
+    concurrency = Column(Integer, default=0)
+    #: 单轮时间预算（分钟）。0 = 用任务默认。到点就停，剩下的下一轮继续 ——
+    #: 这是「余额刷新卡死/无限循环」的正解：**不追求一轮刷完**。
+    time_budget_minutes = Column(Integer, default=0)
+    #: 只刷「快照超过这么多分钟没更新」的号。0 = 用任务默认。
+    #: 全量重刷在几千个号时永远刷不完，而且对刚刷过的号是纯浪费。
+    stale_minutes = Column(Integer, default=0)
     # 停止领取时间（仅 daily_checkin 任务使用）：到达该时间后不再执行领取请求，
     # 避免活动下线后继续请求触发上游风控。可由活动 end_time 预填或运行中发现 EventEnded 自动写入。
     stop_after = Column(DateTime, nullable=True)
