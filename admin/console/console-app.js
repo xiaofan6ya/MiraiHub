@@ -5332,30 +5332,57 @@ async function platformBeginAuth(spec, storage) {
   const id = String((spec && spec.id) || storage || "").toLowerCase();
 
   // WPS 灵犀：没有设备码 / 扫码换票的公开协议 —— 客户端登录取的是
-  // WPS SSO 的 `wps_sid` Cookie。所以「授权」= 打开网页版登录，
-  // 服务端随后从本机浏览器的 Cookies 库直接读出 wps_sid（不用手抄）。
+  // WPS SSO 的 `wps_sid` Cookie。做法与官方 Magpie 插件一致：
+  // 用一个独立 profile 拉起浏览器打开登录页，登录完成后服务端从那个
+  // profile 的 Cookies 库里读 wps_sid 并**自动入库**（不碰用户浏览器资料）。
   if (id === "wps-lingxi" || id === "wps_lingxi") {
-    let info = {};
+    let begin = {};
     try {
-      const { ok, data } = await safeJson(await api("/api/wps-lingxi/auth/url"));
-      if (ok) info = data || {};
-    } catch (e) { /* 取不到就用下面的默认文案 */ }
-    const url = info.login_url || "https://lingxi.wps.cn";
-    const steps = (info.steps || []).map((s, i) => `<li><b>${i + 1}.</b> ${esc(s)}</li>`).join("");
+      const { ok, data } = await safeJson(await api("/api/wps-lingxi/auth/start", { method: "POST" }));
+      if (!ok) { toast((data && data.reason) || "无法发起授权", "err"); return; }
+      begin = data || {};
+    } catch (e) { toast("发起授权失败：" + (e && e.message ? e.message : e), "err"); return; }
+    if (!begin.auth_id) { toast((begin && begin.reason) || "没有拿到授权会话", "err"); return; }
+    const authId = begin.auth_id;
     openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · WPS 灵犀</h3>
       <p class="text-xs mb-2" style="color:var(--fg-muted);line-height:1.7">
-        灵犀的登录态就是浏览器里的 <code>wps_sid</code> Cookie。在下面这个页面登录一次，
-        回来点「扫描本机」，服务端会<b>直接读取浏览器 Cookies</b>，不用手抄。
+        已用 <b>${esc(begin.browser || "Chrome")}</b> 打开 <code>${esc(begin.url || "https://lingxi.wps.cn")}</code>。
+        在那个窗口里正常登录（手机号 / 微信扫码都行），<b>本页会自动检测并入库</b>，不用回来粘贴任何东西。
       </p>
-      <p class="text-sm mb-2"><a href="${esc(url)}" target="_blank" rel="noopener"
-         style="color:var(--brand);text-decoration:underline">${esc(url)}</a></p>
-      <ol class="text-xs mb-3 pl-4" style="color:var(--fg-muted);line-height:1.9">${steps}</ol>
-      <p class="text-xs mb-3" style="color:var(--fg-subtle)">${esc(info.manual_import || "")}</p>
+      <p id="lingxiAuthStatus" class="text-sm mb-2" style="color:var(--brand)">▸ 等待登录中…（最多 5 分钟）</p>
+      <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+        窗口没弹出来？<a href="${esc(begin.url || "https://lingxi.wps.cn")}" target="_blank" rel="noopener"
+        style="color:var(--brand);text-decoration:underline">手动打开登录页</a>；
+        关掉窗口也不会影响其它功能。
+      </p>
       <div class="flex justify-end gap-2">
-        <button class="console-btn primary" onclick="closeModal();window.__wbLingxiScan&&window.__wbLingxiScan()">已登录，去扫描本机</button>
-        <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+        <button class="console-btn quiet" onclick="closeModal()">收起</button>
       </div>`, "max-w-xl");
-    window.__wbLingxiScan = () => platformScanLocal(spec, storage);
+
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries += 1;
+      const host = $("#lingxiAuthStatus");
+      if (!host) { clearInterval(timer); return; }   // 用户关掉了弹窗
+      if (tries > 100) { clearInterval(timer); host.textContent = "▸ 已超时，请重新发起授权"; return; }
+      try {
+        const { ok, data } = await safeJson(await api("/api/wps-lingxi/auth/poll?auth_id=" + encodeURIComponent(authId)));
+        if (!ok) return;
+        if (data && data.status === "done") {
+          clearInterval(timer);
+          host.textContent = "▸ 登录成功，账号已入库";
+          toast(`已入库：${data.name || data.uid || "灵犀账号"}`);
+          closeModal();
+          loadAccounts();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        } else if (data && data.status === "expired") {
+          clearInterval(timer);
+          host.textContent = "▸ 会话已超时，请重新发起授权";
+        } else if (data && data.remaining_s !== undefined) {
+          host.textContent = "▸ 等待登录中…（剩余 " + data.remaining_s + " 秒）";
+        }
+      } catch (e) { /* 下一轮再试 */ }
+    }, 3000);
     return;
   }
 

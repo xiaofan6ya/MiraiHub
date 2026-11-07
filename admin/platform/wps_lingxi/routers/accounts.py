@@ -154,6 +154,35 @@ def import_batch(body: BatchIn, _: bool = Depends(require_admin),
             "total": len(records), "results": results[:60]}
 
 
+@router.post("/auth/start")
+def auth_start(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """授权登录：拉起一个独立 profile 的浏览器打开灵犀登录页。
+
+    登录完成后由 `/auth/poll` 从该 profile 的 Cookies 库里读 `wps_sid` 并入库
+    —— 不用手抄 Cookie，也不碰用户正在用的浏览器资料。
+    """
+    from admin.platform.wps_lingxi.services import auth as lingxi_auth
+
+    return lingxi_auth.start(db)
+
+
+@router.get("/auth/poll")
+def auth_poll(auth_id: str = "", _: bool = Depends(require_admin),
+              db: Session = Depends(get_db)):
+    from admin.platform.wps_lingxi.services import auth as lingxi_auth
+
+    if not auth_id:
+        raise HTTPException(400, detail="缺少 auth_id")
+    return lingxi_auth.poll(db, auth_id)
+
+
+@router.delete("/auth/{auth_id}")
+def auth_cancel(auth_id: str, _: bool = Depends(require_admin)):
+    from admin.platform.wps_lingxi.services import auth as lingxi_auth
+
+    return lingxi_auth.cancel(auth_id)
+
+
 @router.get("/auth/url")
 def auth_url(_: bool = Depends(require_admin)):
     """授权入口：给出网页版登录地址 + 操作指引（控制台「授权登录」按钮用）。
