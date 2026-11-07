@@ -76,7 +76,8 @@ def install() -> None:
             extra={
                 "task_runners": list(_task_runners().keys()),
                 "actions": ["scan", "import", "export", "checkin",
-                            "refresh-quota", "activity"],
+                            "refresh-quota", "usage", "activity",
+                            "ban-recheck"],
             },
         ))
         logger.debug("WPS 灵犀平台已登记：%s", platform_id)

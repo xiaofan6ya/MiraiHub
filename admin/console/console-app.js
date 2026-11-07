@@ -5027,6 +5027,15 @@ document.addEventListener("wb-platform-action", event => {
       return platformCheckin(spec, storage);
     }
 
+    // 「活跃对话 / 失效复检」：灵犀这类「只签到 + 刷额度会被判成养号」的平台，
+    // 手动补跑一次真实对话（定时任务里也有，这里用于验证和当天补发）。
+    if (action === "activity") {
+      return platformActivity(spec, storage);
+    }
+    if (action === "ban-recheck") {
+      return platformBanRecheck(spec, storage);
+    }
+
     // 授权登录（设备流）：Qoder 的登录态加密在原生层，读不出文件，
     // 只能走设备授权 —— 用户点一次链接就自动拿到可续期的 token。
     if (action === "begin-auth") {
@@ -5858,6 +5867,68 @@ async function platformBeginAuth(spec, storage) {
   }
   const el = statusEl();
   if (el) el.textContent = "授权超时（5 分钟），请重新发起";
+}
+
+/**
+ * 手动补跑一次「每日活跃对话」。
+ *
+ * 为什么要有按钮：签到和刷额度不能替代真实使用 —— 上游看的是账号自己的
+ * 对话行为。定时任务每天会自动跑一遍，这个按钮用于「今天想立刻验证」
+ * 或「自动跑的那次因为概率跳过、想当天补上」。
+ */
+async function platformActivity(spec, storage) {
+  const label = (spec && spec.label) || storage;
+  const prefix = storage === "workbuddy" ? "/api/accounts" : `/api/${storage}`;
+  toast("正在补跑一次活跃对话…");
+  const r = await api(prefix + "/activity", { method: "POST" });
+  if (r.status === 404) {
+    openModal(`<h3 class="font-semibold text-lg mb-2">该平台没有活跃对话接口</h3>
+      <p class="text-sm" style="color:var(--fg-muted)">${esc(label)} 没有实现每日活跃，签到/保活仍按定时任务执行。</p>`);
+    return;
+  }
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`活跃失败：${(data && data.detail) || r.status}`, "err");
+    return;
+  }
+  const items = (data && data.items) || [];
+  const rows = items.map(it => `<tr class="border-t">
+      <td class="py-2 pr-2 text-xs">${esc(it.account || it.account_id || "")}</td>
+      <td class="py-2 px-2 text-xs">${esc(it.status || (it.ok ? "done" : "error"))}</td>
+      <td class="py-2 px-2 text-xs font-mono">${esc(it.model || "—")}</td>
+      <td class="py-2 pl-2 text-xs" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.reason || it.prompt || "—")}</td>
+    </tr>`).join("");
+  openModal(`<h3 class="font-semibold text-lg mb-1">每日活跃 · ${esc(label)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">${esc((data && data.summary) || "")}</p>
+    ${rows ? `<div class="overflow-x-auto" style="max-height:320px"><table class="w-full text-sm">
+      <thead><tr class="text-[10px]" style="color:var(--fg-subtle)">
+        <th class="text-left py-1 pr-2">账号</th><th class="text-left py-1 px-2">结果</th>
+        <th class="text-left py-1 px-2">模型</th><th class="text-left py-1 pl-2">说明</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<p class="text-sm" style="color:var(--fg-muted)">没有可跑的账号（或今天都已活跃过）。</p>`}
+    <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`,
+    "max-w-2xl");
+  loadAccounts();
+}
+
+/** 失效账号复检：Cookie 又有效了就自动恢复（不用人工点「刷新」逐个试）。 */
+async function platformBanRecheck(spec, storage) {
+  const label = (spec && spec.label) || storage;
+  const prefix = storage === "workbuddy" ? "/api/accounts" : `/api/${storage}`;
+  toast("正在复检失效账号…");
+  const r = await api(prefix + "/ban-recheck", { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) {
+    toast(`复检失败：${(data && data.detail) || r.status}`, "err");
+    return;
+  }
+  const recovered = (data && data.recovered) || [];
+  openModal(`<h3 class="font-semibold text-lg mb-1">失效复检 · ${esc(label)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">${esc((data && data.summary) || "复检完成")}</p>
+    ${recovered.length ? `<ul class="text-sm" style="color:var(--fg-muted)">${recovered.map(it => `<li>${esc(it.name || it.account_id)} · 已恢复</li>`).join("")}</ul>` : ""}
+    <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`,
+    "max-w-xl");
+  loadAccounts();
 }
 
 async function platformCheckin(spec, storage) {

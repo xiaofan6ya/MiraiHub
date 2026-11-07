@@ -62,6 +62,11 @@
     // 名字里写清楚，避免用户以为要靠贴 Cookie 才能登录。
     "web-cookie": { label: "用量 Cookie", icon: "cookie" },
     checkin: { label: "签到领取", icon: "gift" },
+    // 每日活跃对话：不是签到也不是刷额度，是真发一条对话维持账号画像。
+    // 只在确实实现了 /api/<storage>/activity 的平台上由后端声明。
+    activity: { label: "活跃对话", icon: "refresh" },
+    // 失效复检：disabled 的号再探一次，能通就自动恢复。
+    "ban-recheck": { label: "失效复检", icon: "refresh" },
     "begin-auth": { label: "授权登录", icon: "key", primary: true },
   };
 
