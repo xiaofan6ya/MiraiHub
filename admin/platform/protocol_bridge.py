@@ -1241,11 +1241,21 @@ def openai_request_to_anthropic(body: dict) -> dict:
     `/v1/responses` 必须先转成 Anthropic 形态再转发。
 
     关键映射（与 `anthropic_to_openai` 严格互逆）：
-      * `role="system"` 消息 → `system`（Anthropic 是顶层字段）；
+      * `role="system"/"developer"` 消息 → `system`（Anthropic 是顶层字段；
+        developer 是 OpenAI 新式系统指令，Codex 系客户端在用）；
       * `role="tool"` 消息 → `role="user"` 里的 `tool_result` 块；
       * assistant 的 `tool_calls` → `tool_use` 块；
       * `tools[].function` → `tools[].input_schema`；
       * `max_tokens`：Anthropic **必填**，缺省 8192（OpenAI 客户端常不带）。
+
+    ## messages 归一后为空必须报错（上游 400 的真实教训，2026-11-07）
+
+    MiniMax 受管端点对空 messages 返回
+    `400 {"error":{"message":"invalid params, messages must not be empty (2013)"}}`。
+    客户端发空 content 数组 / 全部块被丢弃时，归一结果就是空 —— 原实现
+    原样转发，用户看到的只是笼统的「上游错误（HTTP 400）」，完全没法排查。
+    现在归一后为空直接抛 `ValueError`，由入口转成明确的 400。
+    `tools` 归一后为空同理 —— 空数组上游也拒。
     """
     out = {"model": str(body.get("model") or ""),
            "max_tokens": int(body.get("max_tokens") or 8192)}
@@ -1262,7 +1272,7 @@ def openai_request_to_anthropic(body: dict) -> dict:
             if not isinstance(msg, dict):
                 continue
             role = str(msg.get("role") or "user")
-            if role == "system":
+            if role in ("system", "developer"):
                 piece = _openai_content_to_anthropic(msg.get("content"))
                 texts = [b.get("text", "") for b in piece if b.get("type") == "text"]
                 joined = "\n".join(t for t in texts if t)
@@ -1330,6 +1340,11 @@ def openai_request_to_anthropic(body: dict) -> dict:
         out["tool_choice"] = {"type": "any"}
     elif tool_choice == "none":
         out.pop("tools", None)
+    if not out.get("messages"):
+        raise ValueError(
+            "messages 归一后为空：请检查是否只发送了不受支持的内容"
+            "（空 content 数组、纯图片外的空块等都会被丢弃），"
+            "或历史里没有一条 user/assistant 消息")
     return out
 
 

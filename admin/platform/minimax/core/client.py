@@ -110,6 +110,12 @@ def _error_from_anthropic(resp: httpx.Response, tag: str) -> UpstreamError:
         shown = "上游限流，请稍后重试（429）"
     elif kind == "model":
         shown = "模型不存在或不可用（404）"
+    elif resp.status_code == 400 and message:
+        # 400 是请求参数问题：上游 message（如
+        # `invalid params, messages must not be empty (2013)`）不含凭证，
+        # 直接透出 —— 笼统的「上游错误（HTTP 400）」让调用方无从排查
+        # （2026-11-07 实测教训）。
+        shown = "上游拒绝请求（400）：%s" % message
     else:
         shown = "上游错误（HTTP %d）" % resp.status_code
     return UpstreamError(shown, status=resp.status_code, kind=kind,

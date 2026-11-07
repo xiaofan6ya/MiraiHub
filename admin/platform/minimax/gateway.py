@@ -465,9 +465,16 @@ def _passthrough_lines(upstream):
 # ---------------------------------------------------------------------------
 async def chat_completions(request: Request):
     body = await _body_of(request)
+    try:
+        normalized = bridge.openai_request_to_anthropic(body)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"message": str(exc), "type": "invalid_request_error",
+                       "code": "empty_messages"}},
+            status_code=400)
     if body.get("stream"):
-        return await _forward_stream(body, request, anthropic_native=False)
-    return await _forward_openai_via_anthropic(body, request)
+        return await _forward_stream(normalized, request, anthropic_native=False)
+    return await _forward_openai_via_anthropic(normalized, request)
 
 
 async def messages(request: Request):
