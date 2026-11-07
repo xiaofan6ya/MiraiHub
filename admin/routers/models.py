@@ -43,6 +43,15 @@ _probe_lock = threading.Lock()
 
 class ModelToggleIn(BaseModel):
     enabled: bool = True
+    # ---- 以下都是**可选**的单模型配置（不传就不动） ----
+    #: 展示名（用户在控制台与 /v1/models 看到的名字，中文也行）
+    note: Optional[str] = None
+    #: 能力覆盖：context_window / max_output_tokens / supports_images /
+    #: supports_tools / supports_reasoning / reasoning_efforts /
+    #: default_reasoning_effort。传 null 表示「恢复上游默认」。
+    caps: Optional[dict] = None
+    #: 排序权重（小的排前面；不传表示不参与排序）
+    sort: Optional[int] = None
 
 
 class ModelBatchIn(BaseModel):
@@ -633,6 +642,19 @@ def list_configs(
             expanded.append({"row": m, "platform": pid, "realm": realm,
                              "caps": _caps_cache.get(id(m)) or {}})
 
+    # 手调排序：`_override.sort` 小的排前面，没配的排在后面（保持原 id 顺序）。
+    # 这样「把 hy4 顶到第一位」只需要给那一条配 sort，不用改任何全局设置。
+    def _sort_key(entry):
+        raw = (_stored_metadata(entry["row"]).get("_override") or {}) \
+            if isinstance(_stored_metadata(entry["row"]), dict) else {}
+        value = raw.get("sort") if isinstance(raw, dict) else None
+        try:
+            return (0, int(value), entry["row"].id)
+        except (TypeError, ValueError):
+            return (1, 0, entry["row"].id)
+
+    expanded.sort(key=_sort_key)
+
     groups: dict[str, dict] = {}
     for _e in expanded:
         key = _e["platform"]
@@ -676,6 +698,10 @@ def list_configs(
                 "caps": _e.get("caps") or {},
                 "enabled": bool(m.enabled),
                 "note": m.note,
+                # 本站手调的排序权重（None = 没配，按 id 排）
+                "sort": ((_stored_metadata(m).get("_override") or {})
+                         .get("sort") if isinstance(_stored_metadata(m), dict)
+                         else None),
                 "description": m.description or "",
                 "metadata": _stored_metadata(m),
                 "model_type": model_type({"model_id": m.model_id, "metadata": _stored_metadata(m)}),
@@ -1363,7 +1389,21 @@ def _sync_one_platform(db: Session, bundle: dict) -> dict:
                 mc.credits_raw = str(raw_credits)
                 mc.description = _description(
                     m, target_platform, _product_id_of(target_platform))
-                mc.upstream_metadata = json.dumps(metadata(m), ensure_ascii=False)
+                # **保留本站手调覆盖**：同步只刷新「上游原本是什么」，
+                # 不能把运营配好的上下文 / 工具开关 / 推理档位冲掉。
+                keep = {}
+                try:
+                    old = json.loads(mc.upstream_metadata or "{}")
+                    if isinstance(old, dict) and isinstance(old.get("_override"), dict):
+                        keep = old["_override"]
+                except Exception:  # noqa: BLE001
+                    keep = {}
+                fresh = metadata(m)
+                if not isinstance(fresh, dict):
+                    fresh = {}
+                if keep:
+                    fresh["_override"] = keep
+                mc.upstream_metadata = json.dumps(fresh, ensure_ascii=False)
                 if not mc.note:
                     mc.note = m.get("name") or ""
                 updated += 1
@@ -1454,16 +1494,61 @@ def toggle_model(
     _: bool = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """启用/禁用某个模型。"""
+    """改一个模型：启停 / 展示名 / 能力覆盖 / 排序。
+
+    ## 为什么覆盖值要另存 `_override`
+
+    `upstream_metadata` 是**上游目录的原样快照**，每次「从后端同步」都会整段
+    重写。把运营手调的值（压上下文、关工具、只留 high 档）写进去 = 下次同步
+    就丢。所以覆盖值放在同一个 JSON 的 `_override` 子键里，同步时显式保留，
+    读取时由 `_capabilities_of` 叠加在上游值之上。
+
+    `caps` 传 `null`（或某个键传 `null`）表示**恢复上游默认**。
+    """
     mc = db.query(ModelConfig).filter(ModelConfig.id == config_id).first()
     if not mc:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+
     mc.enabled = 1 if body.enabled else 0
-    if body.enabled and mc.note:
-        pass  # keep existing note
+    if body.note is not None:
+        # 展示名允许中文；空字符串 = 回退到 model_id
+        mc.note = str(body.note).strip()[:255]
+
+    meta = _stored_metadata(mc)
+    if not isinstance(meta, dict):
+        meta = {}
+    override = meta.get("_override")
+    if not isinstance(override, dict):
+        override = {}
+
+    if body.caps is not None:
+        if body.caps == {}:
+            override = {}          # 整体恢复默认
+        else:
+            for key, value in body.caps.items():
+                if value is None:
+                    override.pop(key, None)
+                else:
+                    override[key] = value
+    if body.sort is not None:
+        if body.sort == 0:
+            override.pop("sort", None)
+        else:
+            override["sort"] = int(body.sort)
+
+    if override:
+        meta["_override"] = override
+    else:
+        meta.pop("_override", None)
+    mc.upstream_metadata = json.dumps(meta, ensure_ascii=False)
+
     db.commit()
     _invalidate_routing_cache()
-    return {"id": mc.id, "model_id": mc.model_id, "enabled": bool(mc.enabled)}
+    from admin.platform.models_router import _capabilities_of
+
+    return {"id": mc.id, "model_id": mc.model_id, "enabled": bool(mc.enabled),
+            "note": mc.note, "caps": _capabilities_of(mc),
+            "sort": override.get("sort")}
 
 
 @router.post("/batch-toggle")

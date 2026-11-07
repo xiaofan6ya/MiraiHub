@@ -10315,6 +10315,128 @@ schedulePromotionRefresh();
 window.addEventListener('focus',refreshModelPromotions);
 window.addEventListener('pageshow',refreshModelPromotions);
 document.addEventListener('visibilitychange',refreshModelPromotions);
+/**
+ * 单模型配置弹窗。
+ *
+ * 为什么不是「一个表格配所有模型」：上下文、图片、工具、推理档位是
+ * **每个模型各自的能力**，上游给的值也不一样（hy3 只有 low/high，
+ * hy4 只有 high）。共用一个开关会导致：选了上游不认的档位 → 降级或报错，
+ * 关掉工具 → 把支持工具的模型一起废掉。
+ *
+ * 保存走 PATCH /api/models/{id}，只影响这一条；同步目录不会冲掉手调值
+ * （后端把覆盖存在 upstream_metadata._override 里并显式保留）。
+ */
+function modelConfigDialog(id){
+  const m = (_modelData || []).find(x => Number(x.id) === Number(id));
+  if(!m){ toast("模型配置不存在", "err"); return; }
+  const caps = m.caps || {};
+  const efforts = Array.isArray(caps.reasoning_efforts) ? caps.reasoning_efforts : [];
+  const effortOptions = efforts.length ? efforts : ["low","medium","high"];
+  const cur = caps.default_reasoning_effort || effortOptions[0];
+  const boxes = (key, label, hint) => `
+    <label class="flex items-center gap-2 text-sm mb-1" style="cursor:pointer">
+      <input type="checkbox" id="mc_${key}" ${caps[key] ? "checked" : ""}>
+      <span>${label}</span>
+      <span class="text-xs" style="color:var(--fg-subtle)">${hint || ""}</span>
+    </label>`;
+  openModal(`<h3 class="font-semibold text-lg mb-1">模型配置 · ${esc(m.model_id)}</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      ${esc(m.platform_label || m.platform || "")} ·
+      调用名 <code>${esc(m.client_id || m.model_id)}</code>
+      ${caps.overridden ? '<span class="badge bg-amber-100 text-amber-700 ml-1">已手调</span>' : ""}
+    </p>
+    <label class="block text-xs mb-1" style="color:var(--fg-muted)">展示名（用户看到的名字，中文可以）</label>
+    <input id="mc_note" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm"
+           value="${esc(m.note || "")}" placeholder="${esc(m.model_id)}">
+
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div>
+        <label class="block text-xs mb-1" style="color:var(--fg-muted)">上下文（token）</label>
+        <input id="mc_ctx" type="number" min="0" class="w-full border rounded-lg px-3 py-2 text-sm"
+               value="${Number(caps.context_window||0)}">
+      </div>
+      <div>
+        <label class="block text-xs mb-1" style="color:var(--fg-muted)">最大输出（token）</label>
+        <input id="mc_out" type="number" min="0" class="w-full border rounded-lg px-3 py-2 text-sm"
+               value="${Number(caps.max_output_tokens||0)}">
+      </div>
+    </div>
+
+    <div class="mb-3">
+      ${boxes("supports_images","图片输入","上游支持 vision 时才勾")}
+      ${boxes("supports_tools","工具调用","关掉后该模型不再下发 tools")}
+      ${boxes("supports_reasoning","思考推理","")}
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div>
+        <label class="block text-xs mb-1" style="color:var(--fg-muted)">推理档位（默认）</label>
+        <select id="mc_effort" class="w-full border rounded-lg px-3 py-2 text-sm">
+          ${effortOptions.map(x => `<option value="${esc(x)}" ${x===cur?"selected":""}>${esc(x)}</option>`).join("")}
+        </select>
+        <p class="text-[11px] mt-1" style="color:var(--fg-subtle)">
+          上游支持：${esc(efforts.join(" / ") || "未声明")}
+        </p>
+      </div>
+      <div>
+        <label class="block text-xs mb-1" style="color:var(--fg-muted)">排序（小的靠前，0=不参与）</label>
+        <input id="mc_sort" type="number" class="w-full border rounded-lg px-3 py-2 text-sm"
+               value="${m.sort == null ? 0 : Number(m.sort)}">
+      </div>
+    </div>
+
+    <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+      这些只影响这一个模型；「从后端同步」不会覆盖手调值。
+    </p>
+    <div class="flex justify-end gap-2">
+      <button class="console-btn quiet" onclick="modelConfigReset(${m.id})">恢复上游默认</button>
+      <button class="console-btn primary" onclick="modelConfigSave(${m.id})">保存</button>
+      <button class="console-btn quiet" onclick="closeModal()">取消</button>
+    </div>`, "max-w-2xl");
+}
+
+async function modelConfigSave(id){
+  const m = (_modelData || []).find(x => Number(x.id) === Number(id));
+  if(!m) return;
+  const num = el => { const v = Number(($(el)||{}).value); return isFinite(v) && v > 0 ? v : null; };
+  const caps = {
+    context_window: num("#mc_ctx"),
+    max_output_tokens: num("#mc_out"),
+    supports_images: !!($("#mc_supports_images")||{}).checked,
+    supports_tools: !!($("#mc_supports_tools")||{}).checked,
+    supports_reasoning: !!($("#mc_supports_reasoning")||{}).checked,
+    default_reasoning_effort: ($("#mc_effort")||{}).value || null,
+  };
+  const body = {
+    enabled: !!m.enabled,
+    note: ($("#mc_note")||{}).value || "",
+    caps,
+    sort: Number(($("#mc_sort")||{}).value) || 0,
+  };
+  const r = await api(`/api/models/${id}`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const { ok, data } = await safeJson(r);
+  if(!ok){ toast(`保存失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  toast("已保存（只影响这一个模型）");
+  closeModal();
+  loadModels();
+}
+
+async function modelConfigReset(id){
+  if(!await uiConfirm({message:"把这个模型的手调配置清空、恢复上游默认？", title:"恢复默认"})) return;
+  const r = await api(`/api/models/${id}`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({enabled: true, caps: {}, sort: 0}),
+  });
+  const { ok, data } = await safeJson(r);
+  if(!ok){ toast(`恢复失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  toast("已恢复上游默认");
+  closeModal();
+  loadModels();
+}
+
 function modelRow(m) {
   const info=WBModelMetadata.display(m);
   info.kind=m.model_type||info.kind||(/^hunyuan-image-/i.test(m.model_id||'')?'image':'text');
@@ -10390,6 +10512,7 @@ function modelRow(m) {
       <td class="px-4 py-3 col-status">${m.enabled?'<span class="badge bg-emerald-100 text-emerald-700">启用</span>':'<span class="badge bg-slate-100 text-slate-500">禁用</span>'}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
         <button onclick="speedTestModel(${esc(JSON.stringify(m.model_id))}, this)" ${info.kind!=='text'?'disabled':''} class="text-sky-600 hover:text-sky-800 text-sm mr-2 disabled:opacity-30 disabled:cursor-not-allowed" data-tooltip="模型测速" data-tooltip-description="${info.kind==='video'?'视频模型走 /v1/videos 异步任务，不支持文本测速。':info.kind==='image'?'图片模型不支持文本测速，请用生图接口验证。':'发起一次真实短请求，检测延迟与健康。会消耗少量积分。'}"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg></span></button>
+        <button onclick="modelConfigDialog(${m.id})" class="text-slate-500 hover:text-slate-700 text-sm mr-2" data-tooltip="单模型配置" data-tooltip-description="只改这一个模型：展示名 / 上下文 / 最大输出 / 图片 / 工具 / 推理档位 / 排序。同步模型目录不会冲掉这里的手调值。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg></span></button>
         <button onclick="toggleModel(${m.id},${!m.enabled})" class="${m.enabled?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} text-sm mr-2" data-tooltip="${m.enabled?'禁用模型':'启用模型'}" data-tooltip-description="${m.enabled?'禁用后该模型从 /v1/models 与自动选型中移除，已有调用不受影响。':'启用后该模型重新出现在 /v1/models，可用 Key 即可调用。'}">${ic(m.enabled?'ban':'check')}</button>
         <button onclick="deleteModelConfig(${m.id})" class="text-red-500 hover:text-red-700" data-tooltip="移除模型配置" data-tooltip-description="从本地白名单删除该模型。重新同步模型目录会把它加回来。"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span></button>
       </td>

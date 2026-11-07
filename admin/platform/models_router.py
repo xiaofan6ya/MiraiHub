@@ -215,6 +215,37 @@ def _capabilities_of(row) -> dict:
     caps.setdefault("max_output_tokens", 16000)
     caps.setdefault("supports_images", False)
     caps.setdefault("supports_reasoning", False)
+
+    # ---- 最后一层：**本站手调覆盖**（每个模型自己一份） ----
+    #
+    # 上游目录给的是「这个模型**出厂**长什么样」；但不同账号套餐、不同网关
+    # 预算下，运营会想把某个模型的上下文压小、把工具关掉、只留 low 档推理。
+    # 这些是**站点策略**，不该写回 upstream_metadata（同步一刷新就被覆盖），
+    # 所以单独存在 `_override` 里，优先级高于上游值、低于「不存在这个键」。
+    override = md.get("_override")
+    if isinstance(override, dict):
+        merged = 0
+        for key in ("context_window", "max_output_tokens"):
+            value = override.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                caps[key] = int(value)
+                merged += 1
+        for key in ("supports_images", "supports_tools", "supports_reasoning",
+                    "can_disable_thinking"):
+            if isinstance(override.get(key), bool):
+                caps[key] = override[key]
+                merged += 1
+        efforts = override.get("reasoning_efforts")
+        if isinstance(efforts, list):
+            caps["reasoning_efforts"] = [str(x) for x in efforts if str(x).strip()]
+            merged += 1
+        effort = override.get("default_reasoning_effort")
+        if isinstance(effort, str) and effort.strip():
+            caps["default_reasoning_effort"] = effort.strip()
+            merged += 1
+        if merged:
+            # 让前端知道「这不是上游值，是本站调过的」
+            caps["overridden"] = True
     return caps
 
 
