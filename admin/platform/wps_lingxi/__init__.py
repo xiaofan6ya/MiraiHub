@@ -78,7 +78,7 @@ def install() -> None:
             notes="WPS 灵犀（Lingxi / 灵犀 Claw）；Cookie 登录 + 桌面 agent-runtime 通路",
             extra={
                 "task_runners": list(_task_runners().keys()),
-                "actions": ["scan", "import", "export", "checkin",
+                "actions": ["begin-auth", "scan", "import", "export", "checkin",
                             "refresh-quota", "usage", "activity",
                             "ban-recheck"],
             },

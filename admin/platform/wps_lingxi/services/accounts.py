@@ -523,8 +523,60 @@ def client_dirs() -> list[str]:
     return out
 
 
+def _chromium_profile_dbs(root: str) -> list[str]:
+    """取一个 Chromium 系浏览器用户目录下的所有 Cookies 库。
+
+    Chrome / Edge / 360 的结构一致：`<root>/<Default|Profile N>/Network/Cookies`。
+    老版本在 `<profile>/Cookies`。两个都找。
+    """
+    out: list[str] = []
+    if not os.path.isdir(root):
+        return out
+    try:
+        profiles = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for name in profiles:
+        sub = os.path.join(root, name)
+        if not os.path.isdir(sub):
+            continue
+        for rel in (("Network", "Cookies"), ("Cookies",)):
+            path = os.path.join(sub, *rel)
+            if os.path.isfile(path) and path not in out:
+                out.append(path)
+    return out
+
+
+def browser_cookie_dbs() -> list[tuple[str, str]]:
+    """**浏览器**里的 wps/kdocs 登录态 → `[(浏览器名, Cookies 路径)]`。
+
+    这是「授权登录」最省事的一条路：客户端里没有登录态，但用户浏览器里
+    往往已经登着网页版。登录一次网页版，点「扫描本机」就能直接抓 `wps_sid`，
+    不用去 DevTools 手抄 Cookie。
+
+    只读**本机当前用户**的目录（DPAPI 只能解当前用户加密的 blob）。
+    """
+    local = os.getenv("LOCALAPPDATA") or ""
+    roaming = os.getenv("APPDATA") or ""
+    candidates: list[tuple[str, str]] = [
+        ("Chrome", os.path.join(local, "Google", "Chrome", "User Data")),
+        ("Edge", os.path.join(local, "Microsoft", "Edge", "User Data")),
+        ("360极速", os.path.join(local, "360Chrome", "Chrome", "User Data")),
+        ("360安全", os.path.join(roaming, "360se6", "User Data")),
+        ("Brave", os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data")),
+        ("QQ浏览器", os.path.join(local, "Tencent", "QQBrowser", "User Data")),
+        ("Vivaldi", os.path.join(local, "Vivaldi", "User Data")),
+        ("Chromium", os.path.join(local, "Chromium", "User Data")),
+    ]
+    out: list[tuple[str, str]] = []
+    for label, root in candidates:
+        for path in _chromium_profile_dbs(root):
+            out.append((label, path))
+    return out
+
+
 def cookie_dbs() -> list[str]:
-    """Cookie 库候选：`Network/Cookies`、`Cookies`、`Partitions/<n>/…`。"""
+    """Cookie 库候选：客户端本体 + 浏览器里已登录的网页版。"""
     found: list[str] = []
     for root in client_dirs():
         candidates = [os.path.join(root, "Network", "Cookies"),
@@ -543,7 +595,52 @@ def cookie_dbs() -> list[str]:
         for path in candidates:
             if os.path.isfile(path) and path not in found:
                 found.append(path)
+    # 浏览器里已登录的网页版同样可读（Chrome/Edge/360 等 Chromium 系）
+    for _label, path in browser_cookie_dbs():
+        if path not in found:
+            found.append(path)
     return found
+
+
+def _source_of(path: str) -> str:
+    """这条 Cookies 库来自哪里（给扫描结果做来源标注）。"""
+    lowered = path.replace("\\", "/").lower()
+    if "/wps 灵犀/" in lowered or "/lingxi/" in lowered:
+        return "灵犀客户端"
+    marks = (("360chrome", "360极速"), ("360se6", "360安全"),
+             ("qqbrowser", "QQ浏览器"), ("chrome", "Chrome"),
+             ("edge", "Edge"), ("brave", "Brave"), ("vivaldi", "Vivaldi"),
+             ("chromium", "Chromium"))
+    for key, label in marks:
+        if key in lowered:
+            return label
+    return "本机"
+
+
+def _read_cookies_safe(path: str) -> dict:
+    """读 Cookies 库；被浏览器占用时先复制到临时文件再读。
+
+    Chrome/Edge 运行时对 `Cookies` 持独占写锁，直接 open 会
+    `database is locked`。复制一份（含 -wal/-shm）是标准做法。
+    """
+    import shutil
+    import tempfile
+
+    try:
+        return _read_cookies(path)
+    except Exception as exc:  # noqa: BLE001 - 锁或权限问题，走复制
+        logger.debug("灵犀直读 Cookies 失败（%s），改为复制后读取", exc)
+    tmp_dir = tempfile.mkdtemp(prefix="lingxi-cookies-")
+    target = os.path.join(tmp_dir, "Cookies")
+    try:
+        shutil.copyfile(path, target)
+        for suffix in ("-wal", "-shm"):
+            src = path + suffix
+            if os.path.isfile(src):
+                shutil.copyfile(src, target + suffix)
+        return _read_cookies(target)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _dpapi_unprotect(blob: bytes) -> bytes:
@@ -673,11 +770,16 @@ def scan_local() -> dict:
                 if not dirs else
                 "找到客户端目录但没有 Cookies 库（%s），先在灵犀客户端登录一次"
                 % "、".join(dirs))
+        browsers = [label for label, _path in browser_cookie_dbs()]
+        hint += ("；也可以直接在 Chrome / Edge 打开 https://lingxi.wps.cn 登录网页版，"
+                 "再点一次「扫描本机」——会自动读取浏览器里的 wps_sid，不用手抄 Cookie"
+                 if browsers else
+                 "；也可以粘贴 Cookie 导入")
         return {"items": [], "errors": [], "dbs": 0, "can_import": False,
                 "hint": hint}
     for path in dbs:
         try:
-            values = _read_cookies(path)
+            values = _read_cookies_safe(path)
         except Exception as exc:  # noqa: BLE001
             errors.append("%s: %s" % (path, str(exc)[:160]))
             continue
@@ -697,8 +799,17 @@ def scan_local() -> dict:
             "has_plain_credential": True,
             "can_import": True,
             "usable": True,
-            "note": "来自本机灵犀客户端 Cookies",
+            "note": "来自%s 的 Cookies" % _source_of(path),
+            "source": _source_of(path),
         })
+    if not items:
+        # 找到了 Cookies 库但没有 wps_sid：说明浏览器/客户端还没登录过网页版。
+        # 这条提示很关键 —— 否则用户只看到「0 条」，以为扫描坏了。
+        return {"items": [], "errors": errors, "dbs": len(dbs),
+                "can_import": False,
+                "hint": "找到 %d 个 Cookies 库，但里面没有 wps_sid："
+                        "先在 Chrome / Edge 打开 https://lingxi.wps.cn 登录一次，"
+                        "或登录灵犀客户端，再点「扫描本机」" % len(dbs)}
     return {"items": items, "errors": errors, "dbs": len(dbs),
             "can_import": bool(items)}
 
@@ -722,7 +833,7 @@ def import_local(db: Session, *, probe: bool = True,
                     "reason": "本机凭证不在勾选范围内，未导入"}
     for item in scanned:
         try:
-            values = _read_cookies(item["path"])
+            values = _read_cookies_safe(item["path"])
         except Exception as exc:  # noqa: BLE001
             failed.append("%s: %s" % (item["path"], str(exc)[:120]))
             continue

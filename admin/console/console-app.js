@@ -5331,6 +5331,34 @@ async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
 
+  // WPS 灵犀：没有设备码 / 扫码换票的公开协议 —— 客户端登录取的是
+  // WPS SSO 的 `wps_sid` Cookie。所以「授权」= 打开网页版登录，
+  // 服务端随后从本机浏览器的 Cookies 库直接读出 wps_sid（不用手抄）。
+  if (id === "wps-lingxi" || id === "wps_lingxi") {
+    let info = {};
+    try {
+      const { ok, data } = await safeJson(await api("/api/wps-lingxi/auth/url"));
+      if (ok) info = data || {};
+    } catch (e) { /* 取不到就用下面的默认文案 */ }
+    const url = info.login_url || "https://lingxi.wps.cn";
+    const steps = (info.steps || []).map((s, i) => `<li><b>${i + 1}.</b> ${esc(s)}</li>`).join("");
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · WPS 灵犀</h3>
+      <p class="text-xs mb-2" style="color:var(--fg-muted);line-height:1.7">
+        灵犀的登录态就是浏览器里的 <code>wps_sid</code> Cookie。在下面这个页面登录一次，
+        回来点「扫描本机」，服务端会<b>直接读取浏览器 Cookies</b>，不用手抄。
+      </p>
+      <p class="text-sm mb-2"><a href="${esc(url)}" target="_blank" rel="noopener"
+         style="color:var(--brand);text-decoration:underline">${esc(url)}</a></p>
+      <ol class="text-xs mb-3 pl-4" style="color:var(--fg-muted);line-height:1.9">${steps}</ol>
+      <p class="text-xs mb-3" style="color:var(--fg-subtle)">${esc(info.manual_import || "")}</p>
+      <div class="flex justify-end gap-2">
+        <button class="console-btn primary" onclick="closeModal();window.__wbLingxiScan&&window.__wbLingxiScan()">已登录，去扫描本机</button>
+        <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+      </div>`, "max-w-xl");
+    window.__wbLingxiScan = () => platformScanLocal(spec, storage);
+    return;
+  }
+
   // MiniMax Code：官方 OAuth **设备授权流**（与官方客户端同款 PKCE 参数）。
   // 后端 POST account.minimax.cn/oauth2/device/code 拿 verification_uri_complete，
   // 前端把它渲染成二维码（手机上确认后凭证自动入库并续期轮换）。

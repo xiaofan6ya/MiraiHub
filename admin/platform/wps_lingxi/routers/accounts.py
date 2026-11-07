@@ -154,6 +154,29 @@ def import_batch(body: BatchIn, _: bool = Depends(require_admin),
             "total": len(records), "results": results[:60]}
 
 
+@router.get("/auth/url")
+def auth_url(_: bool = Depends(require_admin)):
+    """授权入口：给出网页版登录地址 + 操作指引（控制台「授权登录」按钮用）。
+
+    灵犀没有设备码/扫码换 token 的公开协议（客户端走 WPS SSO，凭据是
+    `wps_sid` Cookie），所以「授权」= 在浏览器登录网页版 → 本机扫描直接抓
+    Cookie。这里把地址和步骤给前端，用户点一下就能开页面。
+    """
+    return {
+        "platform": endpoints.PUBLIC,
+        "mode": "browser-cookie",
+        "login_url": endpoints.BASE,
+        "alternate_urls": [endpoints.KDOCS_BASE],
+        "steps": [
+            "在 Chrome / Edge 打开上面的地址并登录（手机号 / 微信扫码都行）",
+            "回到控制台点「扫描本机」",
+            "扫描结果里勾选该账号，点「导入这些凭证」",
+        ],
+        "hint": "登录态在浏览器 Cookies 里，服务端会直接读取 wps_sid，无需手抄",
+        "manual_import": "也可以在 DevTools → Application → Cookies 复制 wps_sid 粘贴导入",
+    }
+
+
 @router.get("/scan-local")
 @router.get("/scan")
 def scan(_: bool = Depends(require_admin)):
