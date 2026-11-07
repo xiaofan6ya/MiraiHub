@@ -79,6 +79,10 @@ _TASK_FALLBACK_LABEL = {
     "raccoon_expiry_sweep": "过期清扫（标记失效账号）",
     "codearts_checkin": "签到领取权益（CodeArts）",
     "codearts_keepalive": "会话保活（续期 STS 临时凭证）",
+    "wps_lingxi_checkin": "签到领取灵犀智点",
+    "wps_lingxi_keepalive": "会话保活（校验 Cookie + 同步智点）",
+    "wps_lingxi_activity": "每日活跃对话（模拟真人使用）",
+    "wps_lingxi_ban_recheck": "失效账号复检（Cookie 恢复）",
 }
 TASK_LABELS = {
     "refresh_balances": "刷新平台总积分",

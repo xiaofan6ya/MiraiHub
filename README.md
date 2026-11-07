@@ -28,6 +28,7 @@
                      │  └────────────────────────┘  │──► Qoder
                      │   统一鉴权 · 选号 · 计费      │──► Qoder 国际版
                      │   调度 · 重试 · 记账 · 监控    │──► Loomy
+                     │                               │──► WPS 灵犀
                      └──────────────────────────────┘
 ```
 
@@ -316,7 +317,11 @@ MiraiHub/
 │   │   ├── workbuddy/       ┐
 │   │   ├── trae/            │
 │   │   ├── qoder/           ├ 各平台模块（可整目录删除）
-│   │   └── loomy/           ┘
+│   │   ├── loomy/           │
+│   │   ├── raccoon/         │
+│   │   ├── codearts/        │
+│   │   ├── minimax/         │
+│   │   └── wps_lingxi/      ┘
 │   └── console/             管理后台前端
 ├── desktop/                 Windows 桌面版（pywebview）
 ├── android/                 Android 壳
@@ -340,6 +345,10 @@ MiraiHub/
 | Qoder 中国版 | `qoder` | |
 | Qoder 国际版 | `qoder-intl` | |
 | Loomy | `loomy` | 按 token 计量 |
+| 小浣熊 | `raccoon` | 按 token 计量 |
+| CodeArts | `codearts` | 华为云 CodeArts，每日签到领权益 |
+| MiniMax Code | `minimax` | Anthropic Messages 上游 |
+| WPS 灵犀 | `wps-lingxi` | Cookie 登录 + 桌面 agent-runtime 通路 |
 
 接入新平台请读 [admin/platform/skill/SKILL.md](admin/platform/skill/SKILL.md)，
 **不要改 `admin/` 根目录的文件**。

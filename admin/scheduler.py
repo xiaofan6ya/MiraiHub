@@ -2063,6 +2063,11 @@ _TASK_SCHEDULE_META = {
     "keepalive_tokens": ("令牌保活", 360),
     "ban_recheck": ("风控封号复核", 30),
     "daily_activity": ("每日活跃对话", 1440),
+    # WPS 灵犀：签到/保活走默认后缀规则，这里只补两条语义不同的。
+    # 活跃对话必须**每天一次**（360 默认会让一个号一天被用四次，反而更假）；
+    # 失效复检每 2 小时一轮就够，Cookie 过期本来就要人工重粘。
+    "wps_lingxi_activity": ("每日活跃对话", 1440),
+    "wps_lingxi_ban_recheck": ("失效账号复检", 120),
 }
 
 

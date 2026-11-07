@@ -416,6 +416,11 @@ try:
     app.include_router(minimax_accounts_router.router)
 except Exception:  # noqa: BLE001 - minimax 目录被裁剪时降级为不挂载
     logger.exception("MiniMax 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.wps_lingxi.routers import accounts as wps_lingxi_accounts_router
+    app.include_router(wps_lingxi_accounts_router.router)
+except Exception:  # noqa: BLE001 - wps_lingxi 目录被裁剪时降级为不挂载
+    logger.exception("WPS 灵犀管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1" and not env_guard.IS_PROD:
     # 逆向产物管理（任意目录创建 + 递归读取）：**生产不挂载**。
     # 中间件还有一道 404，双保险 —— 见 env_guard.PROD_BLOCKED_PREFIXES。
