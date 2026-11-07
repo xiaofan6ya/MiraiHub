@@ -69,14 +69,16 @@ class QoderAccountOps:
         `QUOTA_TTL`（60 秒）内直接用缓存，超出才拉。
         """
         from admin.models import Account
+        from admin.platform import shared as platform_shared
         from admin.platform.shared import (apply_account_filters,
                                            account_order,
                                            summarize_accounts_sql)
 
         def _base_query():
             q = db.query(Account).filter(Account.platform == "qoder")
-            if self.realm:
-                q = q.filter(Account.domain == self.realm)
+            realm_cond = platform_shared.realm_domain_cond(self.realm)
+            if realm_cond is not None:
+                q = q.filter(realm_cond)
             return q
 
         usage_map = {}
@@ -547,8 +549,10 @@ def _local_ledger(db, realm: str, days: int) -> dict:
     ).filter(UsageLog.platform == "qoder", UsageLog.created_at >= since)
 
     if realm:
+        from admin.platform import shared as platform_shared
         ids = [row[0] for row in db.query(Account.id).filter(
-            Account.platform == "qoder", Account.domain == realm).all()]
+            Account.platform == "qoder",
+            platform_shared.realm_domain_cond(realm)).all()]
         if not ids:
             return {"days": days, "realm": realm, "items": [],
                     "totals": {"requests": 0, "total_tokens": 0}}

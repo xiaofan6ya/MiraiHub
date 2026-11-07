@@ -107,6 +107,34 @@ def open_api(realm: str) -> str:
 MODEL_LIST_PATH = "/algo/api/v2/model/list"
 CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation"
 
+# ---------------------------------------------------------------------------
+# model server 一族（2026-11-07 新对话主链路）
+#
+# 新版客户端（qoder-agent-sdk worker）普通对话走这条：**标准 OpenAI
+# chat.completions 形态 + Bearer 作业令牌，无 COSY 签名、无信封**，
+# SSE 直出 OpenAI chunk。旧的 agent_chat_generation 走账号的 agent
+# flow 路由 —— 账号没在客户端里初始化过 agent 就回
+# 「flow nodes found for router agent_router」，与请求内容无关。
+# （实测：同一账号旧端点 400、新端点正常出流。）
+#
+# 请求体在 OpenAI 之上多一个 `metadata` 块，缺了它上游会把模型判成
+# 「Unsupported model」/「All backends failed」——这是排障时踩过的坑：
+#   metadata.context.client_type = "6"（新版客户端形态，"5" 是旧版）
+#   metadata.business = {product:"qoder_work", type:"agent", scene/...}
+# ---------------------------------------------------------------------------
+MODEL_CHAT_PATH = "/model/v1/chat/completions"
+MODEL_BASE = {
+    "cn": "https://gateway.qoder.com.cn",
+    "intl": "https://api2-v2.qoder.sh",
+}
+#: metadata.context.client_type（新版桌面客户端形态）
+MODEL_CLIENT_TYPE = "6"
+
+
+def model_base(realm: str) -> str:
+    """model server 主机（对话新链路）。"""
+    return MODEL_BASE.get(realm or "cn") or MODEL_BASE["cn"]
+
 
 # ---------------------------------------------------------------------------
 # 头构造

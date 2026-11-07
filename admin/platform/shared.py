@@ -31,7 +31,7 @@ import time
 from datetime import datetime
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, UsageLog
@@ -266,8 +266,9 @@ def iter_account_batches(db: Session, *, storage: str, realm: str = "",
                  .filter(Account.platform == storage, Account.id > last_id))
         if status:
             query = query.filter(Account.status == status)
-        if realm:
-            query = query.filter(Account.domain == realm)
+        realm_cond = realm_domain_cond(realm)
+        if realm_cond is not None:
+            query = query.filter(realm_cond)
         rows = query.order_by(Account.id.asc()).limit(max(1, batch)).all()
         if not rows:
             return
@@ -644,6 +645,30 @@ def kick_background_refresh(name: str, account_ids, worker, *,
     return True
 
 
+def realm_domain_cond(realm: str):
+    """按区过滤账号的 where 条件（**空 domain 通配**），无区时返回 None。
+
+    ## 为什么必须通配空 domain
+
+    分区功能上线前导入的账号 `domain` 是空串 —— 严格相等过滤
+    （`Account.domain == realm`）会让它们在**所有按区读取里隐身**：
+    平台卡计数 0、`select_account` 选不到号（503「没有可用账号」）、
+    调度器批量刷新跳过；而账号池页不按 domain 过滤，两边对不上。
+    2026-11-07 实测误报：Qoder 国际版页面上有号，网关却 503。
+
+    语义：空 domain = 「区域未知」。它在**任何一个区都可用**
+    （发错区会被上游 403 → 冷却换号，与无分区平台的既有行为一致）；
+    显式标了**其它区**的号仍然互不串，不会把国内流量发给国际号。
+    新导入的账号都会写 domain，通配集合只减不增。
+    """
+    if not realm:
+        return None
+    from admin.models import Account
+
+    return or_(Account.domain == realm,
+               func.coalesce(Account.domain, "") == "")
+
+
 def select_account(db: Session, *, storage: str, realm: str = "",
                    key: ApiKey | None = None, model: str = "",
                    exclude_ids=None, now: datetime | None = None,
@@ -682,8 +707,9 @@ def select_account(db: Session, *, storage: str, realm: str = "",
     query = (db.query(Account).populate_existing()
              .filter(Account.platform == storage, Account.status == "active"))
     query = scope_accounts(query, account_id, key_id, key=key)
-    if realm:
-        query = query.filter(Account.domain == realm)
+    realm_cond = realm_domain_cond(realm)
+    if realm_cond is not None:
+        query = query.filter(realm_cond)
     if exclude_ids:
         query = query.filter(~Account.id.in_(exclude_ids))
     if min_balance is not None:

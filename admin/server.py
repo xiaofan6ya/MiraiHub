@@ -282,16 +282,10 @@ async def _start_upstream_connections():
     if os.getenv("WORKBUDDY_ANDROID") == "1":
         from admin import upstream_http
         await upstream_http.start(app, proxy.HTTP_LIMITS)
-    # 套用「设置 → 运行配置」里保存的覆盖值（exe/apk 无 .env，全靠这）。
-    try:
-        from admin.db import SessionLocal
-        from admin.runtime_settings import apply_overrides
-        with SessionLocal() as db:
-            applied = apply_overrides(db)
-        if applied:
-            logging.getLogger("admin.server").info("运行配置已套用 %d 项覆盖", applied)
-    except Exception as exc:  # 库表尚未初始化等情况不影响启动
-        logging.getLogger("admin.server").warning("运行配置套用失败：%s", exc)
+    # 「设置 → 运行配置」的覆盖值不在这里套用：这个 startup 钩子注册在
+    # `_startup` 之前，此刻 init_db 还没跑，首次启动（尤其是全新安装的 APK）
+    # 必然撞上 `no such table: system_settings`，覆盖值要等到下次重启才生效。
+    # 套用动作已挪到 `_startup` 里 init_db 之后，见 `_apply_runtime_overrides`。
 
 
 @app.on_event("shutdown")
@@ -481,6 +475,19 @@ def _startup():
             logger.exception("建表/迁移失败，服务继续启动（数据库可用后重启即可）")
     else:
         logger.error("数据库当前不可用，服务以降级模式启动：请求将返回 503，恢复后自动自愈")
+
+    # 套用「设置 → 运行配置」里保存的覆盖值（exe/apk 没有 .env，全靠这）。
+    # 位置必须在 init_db 之后：首次启动时表还不存在，早跑一次只会打一条
+    # `no such table: system_settings` 的告警，然后覆盖值静默失效到下次重启。
+    if db_ok:
+        try:
+            from admin.runtime_settings import apply_overrides
+            with SessionLocal() as db:
+                applied = apply_overrides(db)
+            if applied:
+                logger.info("运行配置已套用 %d 项覆盖", applied)
+        except Exception as exc:  # 库表异常不影响启动
+            logger.warning("运行配置套用失败：%s", exc)
 
     # 装配流量治理运行态：在途租约上限、会话粘性路由（含后台 GC 线程）。
     # 这些是纯进程内存状态，**不需要数据库**，所以放在 db_ok 判定之外 ——

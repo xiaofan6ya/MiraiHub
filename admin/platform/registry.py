@@ -211,9 +211,22 @@ def normalize_realm(spec: PlatformSpec | None, value: str | None) -> str:
     """把 `CN` / `国内版` / `intl` / `US` / `国际版` 等写法归一到合法 realm 键。
 
     未登记区域的平台恒返回空串（表示「该平台没有区域概念」）。
+
+    ## 固定区平台（2026-11-07 修复）
+
+    Qoder / Trae 是**一区一 spec**（`qoder` / `qoder-intl`），区域在
+    `spec.realm` 上而 `spec.realms` 为空 —— 这分支此前直接返回空串，
+    于是 `shared.realm_of()` 对这类平台**永远拿不到区**：请求明确带着
+    `deepseek-flash-qoder-intl`、dispatch 也解析出了 `realm=intl`，
+    网关 `_realm()` 却落到 `or "cn"` 兜底，所有国际版流量被打进中国版
+    （线上 503「中国版没有可用账号」误报的根因）。固定区平台返回
+    `spec.realm`：它本身就是那个区，与 spec 方法（`PlatformSpec.
+    normalize_realm`）的语义对齐。
     """
-    if spec is None or not spec.realms:
+    if spec is None:
         return ""
+    if not spec.realms:
+        return spec.realm or ""
     raw = str(value or "").strip().lower()
     if not raw:
         return spec.default_realm()

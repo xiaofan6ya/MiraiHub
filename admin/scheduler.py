@@ -216,13 +216,21 @@ def run_refresh_balances(db, schedule=None) -> dict:
 
     started = time.monotonic()
 
-    # ---- 参数：任务上的配置优先，其次环境变量，最后内置默认 ----
-    stale_minutes = int(getattr(schedule, "stale_minutes", 0) or 0) or _env_int(
-        "ADMIN_BALANCE_STALE_MINUTES", 60)
-    budget_minutes = int(getattr(schedule, "time_budget_minutes", 0) or 0) or _env_int(
-        "ADMIN_BALANCE_BUDGET_MINUTES", 8)
-    pool_name = str(getattr(schedule, "proxy_pool", "") or "")
-    configured = int(getattr(schedule, "concurrency", 0) or 0)
+    # ---- 参数：任务显式配置 > 全局默认 > 环境变量 > 内置默认 ----
+    # 全局默认来自「定时任务 → 全局出口与并发」（SystemSetting 单键 JSON，
+    # 2026-11-07 新增）：给所有没单独配置的任务统一出口/节奏，单个任务
+    # 填了值仍然以任务自己的为准。
+    gp = _schedule_global_proxy(db)
+    stale_minutes = (int(getattr(schedule, "stale_minutes", 0) or 0)
+                     or int(gp.get("stale_minutes") or 0)
+                     or _env_int("ADMIN_BALANCE_STALE_MINUTES", 60))
+    budget_minutes = (int(getattr(schedule, "time_budget_minutes", 0) or 0)
+                      or int(gp.get("time_budget_minutes") or 0)
+                      or _env_int("ADMIN_BALANCE_BUDGET_MINUTES", 8))
+    pool_name = (str(getattr(schedule, "proxy_pool", "") or "")
+                 or str(gp.get("proxy_pool") or ""))
+    configured = (int(getattr(schedule, "concurrency", 0) or 0)
+                  or int(gp.get("concurrency") or 0))
 
     slots = proxy_pool.slots(db, pool_name)
     auto = len(slots) if slots else _env_int("ADMIN_BALANCE_CONCURRENCY", 4)
@@ -355,6 +363,26 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, default) or default)
     except (TypeError, ValueError):
         return default
+
+
+def _schedule_global_proxy(db) -> dict:
+    """「全局出口与并发」默认值（SystemSetting 单键 JSON）。
+
+    读不到 / 坏数据一律返回全零 dict —— 零值在调用侧的含义是
+    「这项没配，继续往下落（环境变量 / 内置默认）」。
+    任务执行时才查库（一条主键查询，不在请求热路径上），改完立即生效。
+    """
+    from admin.models import SystemSetting
+
+    try:
+        row = db.query(SystemSetting).filter(
+            SystemSetting.key == "schedule:global_proxy").first()
+        if not row or not row.value:
+            return {}
+        data = json.loads(row.value)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 - 配置读不出来不能挡任务
+        return {}
 
 
 def run_refresh_credits(db, schedule=None) -> dict:
@@ -588,18 +616,31 @@ def _platform_runner(task: str, schedule):
         platform = _platform_of(schedule)
         if not platform:
             return None
+        realm_hint = str(getattr(schedule, "realm", "") or "").strip().lower()
         spec = registry.get(platform)
-        if spec is None:
-            # schedule 存的是**落库平台**（trae / qoder），而 registry 里
-            # 是区级 id（trae-cn / trae-intl）。取不到就按 storage 反查一个区，
-            # 否则 Trae 的签到任务永远「该平台未注册此任务」。
+        # 「platform 是区级 id 还是落库平台名」不能只看 registry 命中：
+        # Qoder 中国版的对外 id 恰好就是落库名 `qoder`（registry 直接命中
+        # cn spec），只看命中会把双区任务锁死在中国版。**storage 等于
+        # platform 本身 = 落库平台名**，才走多区/通配分支。
+        if spec is not None and spec.storage() != platform:
+            # 任务绑的是**区级对外 id**（qoder-intl / trae-cn）：只跑这个区
+            gateway = registry.load_platform_gateway(spec, spec.realm)
+        else:
             candidates = [sp for sp in registry.all_platforms()
                           if sp.storage() == platform]
-            if not candidates:
+            if spec is None and not candidates:
                 return None
-            realm = str(getattr(schedule, "realm", "") or "").strip().lower()
-            spec = next((sp for sp in candidates if sp.realm == realm), candidates[0])
-        gateway = registry.load_platform_gateway(spec, spec.realm)
+            spec = next((sp for sp in candidates if sp.realm == realm_hint), None)
+            if spec is not None:
+                gateway = registry.load_platform_gateway(spec, spec.realm)
+            else:
+                # **多区落库平台 + 任务未绑区（2026-11-07 修复）**：
+                # 此前恒落默认区（qoder→cn），国际版账号的签到/保活整批
+                # 漏跑（Qoder 9 个 intl 号每次 refreshed=0 就是这么来的）。
+                # 不带区实例化，让平台 runner 按**账号自己的区**跑。
+                if spec is None:
+                    spec = candidates[0]
+                gateway = registry.load_platform_gateway(spec, "")
         if gateway is None:
             _logger.debug("平台 %s 没有管理契约，无法取任务", platform)
             return None

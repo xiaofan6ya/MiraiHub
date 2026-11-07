@@ -1080,7 +1080,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261106-perf1" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261107-exp1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261105-ui6" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -1094,7 +1094,7 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261107-mm4"></script>
+<script defer src="/admin/assets/console-app.js?v=20261107-exp1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261105-ui3"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -2128,7 +2128,11 @@
     <section id="panel-schedules" class="hidden">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
         <p class="panel-subtitle">定时统计积分、同步模型、各平台签到与保活。调度线程随服务启动运行，到点自动执行并回填结果。列表按平台分组，不随顶部平台切换隐藏。</p>
-        <button onclick="openAddSchedule()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> 新建任务</button>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="openGlobalScheduleProxy()" class="text-sm px-3 py-1.5 rounded-lg border"
+                  data-tooltip="全局出口与并发" data-tooltip-description="给所有「没单独配置出口/并发」的任务统一默认值；单个任务里填了值仍以任务为准。"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.833 8.875a4.002 4.002 0 1 1 0 6.25"/><circle cx="12" cy="12" r="10"/><path d="m9 9-3 3 3 3"/><path d="m15 9 3 3-3 3"/></svg></span> 全局出口与并发</button>
+          <button onclick="openAddSchedule()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span> 新建任务</button>
+        </div>
       </div>
       <div class="card overflow-hidden">
         <div class="overflow-x-auto schedule-table-wrap max-h-[60vh]">

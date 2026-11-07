@@ -167,8 +167,14 @@ class CodeArtsAccountOps:
                 "note": "CodeArts 支持 refresh_token 续期；续期失败的号需重新登录客户端"}
 
     def checkin(self, db):
-        return {"supported": False,
-                "summary": "CodeArts 没有签到接口；额度来自积分包（按购买/赠送）"}
+        """每日签到：客户端 BenefitService 的权益领取（2026-11-07 还原）。
+
+        「签到」在 CodeArts 上的形态是登录事件触发的**权益/活动领取**
+        （benefit claim + policyCenter welfare），不是独立的 check-in 接口。
+        """
+        from admin.platform.codearts.services import benefit
+
+        return benefit.run_daily_checkin(db, realm=self.realm)
 
     # ---- 额度 / 用量 ----
     def credits(self, db):
@@ -350,6 +356,7 @@ class CodeArtsGateway:
 
         runners = dict(declared())
         runners["codearts_keepalive"] = self.account_ops().keepalive
+        runners["codearts_checkin"] = self.account_ops().checkin
         return runners
 
     def client_probe(self) -> ClientProbe:

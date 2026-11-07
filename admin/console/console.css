@@ -3707,17 +3707,19 @@ tbody tr:hover > th { background:transparent!important; }
   overflow: hidden; text-overflow: ellipsis; }
 .live-platform-counts {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-  gap: 6px;
-  padding: 8px 12px 12px;
+  grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
+  gap: 8px;
+  padding: 10px 12px 12px;
 }
 .live-platform-count {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 6px 9px; border-radius: 8px;
+  gap: 8px; padding: 7px 10px; border-radius: 9px;
   background: var(--surface-2); border: 1px solid var(--border);
   font-size: 11px; color: var(--fg-muted);
-  /* 高度固定：数字换行会把这一个格子撑高，导致整行卡片高度跳动 */
-  min-height: 30px;
+  /* 高度固定：数字换行会把这一个格子撑高，导致整行卡片高度跳动。
+     34px = 名单一行 + 数字一行（含失败徽标）都垂直居中，九宫格里
+     有无失败徽标的卡保持同一高度、同一基线（2026-11-07 打磨）。 */
+  min-height: 34px;
 }
 /* 平台名：允许收缩 + 省略号，不挤压右侧数字 */
 .live-platform-count .lpc-name {
@@ -3726,6 +3728,9 @@ tbody tr:hover > th { background:transparent!important; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: .1px;
 }
 /* 右半区（数字 + 失败数）：**不允许收缩**，否则三位数以上会被挤到换行。
    两个子元素之间给明确间距，避免「29 11 失败」连读成一片。 */
@@ -3743,6 +3748,7 @@ tbody tr:hover > th { background:transparent!important; }
   color: var(--fg);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
+  font-size: 12.5px;
   /* 4 位数起步的宽度，保证 1 位和 4 位都不改变布局 */
   min-width: 2.6em;
   text-align: right;
@@ -5329,3 +5335,81 @@ input[type="checkbox"]:not([data-native]):disabled {
 .model-switch input[type="checkbox"],
 .schedule-switch input[type="checkbox"],
 .rt-switch input[type="checkbox"] { appearance: none; -webkit-appearance: none; border: 0; background: transparent; }
+
+/* ============================================================================
+   面板骨架屏（panel-skeleton）
+   --------------------------------------------------------------------------
+   2026-11-07 修复：这套类设计于 v1.0.2 的单体 index.html，b07a9f0 拆分文件
+   时 CSS 丢失、JS 一直在跑 —— 克隆层没有任何覆盖样式，切页瞬间整块克隆内容
+   直接叠在真实内容上面（智能体页「双份 UI / 加载重影」的根因）。
+   这里按当年 JS 注释里的意图补齐：骨架 = 绝对定位的不透明覆盖层，
+   is-on 时盖住面板，摘除时与 is-skel 同帧撤干净，中间不留过渡。
+   ========================================================================== */
+.panel-skeleton {
+  display: none;
+  position: absolute; inset: 0; z-index: 40;
+  overflow: hidden;
+  background: var(--bg);
+}
+.panel-skeleton.is-on { display: block; }
+.is-skel { position: relative; }
+/* 盖住时把下层真实内容藏起来 —— 否则「骨架 + 已渲染内容」叠成双重影像。
+   用 visibility（不是 display）保证内容仍在原地布局。 */
+.is-skel > *:not(.panel-skeleton) { visibility: hidden; }
+.ps-clone { pointer-events: none; }
+.ps-bar {
+  display: inline-block; vertical-align: middle;
+  border-radius: 4px;
+  background: var(--surface-2);
+  animation: skel-sweep 1.2s infinite;
+}
+.ps-ph-row td { height: 40px; }
+@media (prefers-reduced-motion: reduce) {
+  .ps-bar { animation: none; }
+}
+
+/* ============================================================================
+   图表入场动画（自研 SVG 图表，零依赖版的 ECharts 入场）
+   --------------------------------------------------------------------------
+   donut：整块旋转+淡入，扇区从 0 依次扫出（keyframes 只写 from，
+   to 用元素内联的 stroke-dasharray，动画结束正好落在真实数据上）；
+   图例行按 --i 逐行错峰。trend：折线用 pathLength=1 归一化后从左到右描线。
+   全部尊重 prefers-reduced-motion。
+   ========================================================================== */
+@keyframes wbDonutIn {
+  from { opacity: 0; transform: rotate(-32deg) scale(.94); }
+}
+.donut-anim {
+  animation: wbDonutIn .55s cubic-bezier(.38, 0, .24, 1) both;
+  transform-origin: 50% 50%;
+}
+@keyframes wbArcIn {
+  from { stroke-dasharray: 0 var(--c, 999); }
+}
+.donut-anim .chart-arc {
+  animation: wbArcIn .7s cubic-bezier(.38, 0, .24, 1) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+@keyframes wbRowIn {
+  from { opacity: 0; transform: translateX(6px); }
+}
+.donut-legend tbody tr {
+  animation: wbRowIn .32s ease-out both;
+  animation-delay: calc(var(--i, 0) * 26ms);
+}
+@keyframes wbLineIn {
+  from { stroke-dashoffset: 1; }
+}
+.trend-line {
+  stroke-dasharray: 1;
+  animation: wbLineIn .9s cubic-bezier(.38, 0, .24, 1) both;
+}
+@keyframes wbFadeIn {
+  from { opacity: 0; }
+}
+.trend-area { animation: wbFadeIn .5s ease-out .35s both; }
+.trend-dot { animation: wbFadeIn .3s ease-out calc(.4s + var(--i, 0) * 22ms) both; }
+@media (prefers-reduced-motion: reduce) {
+  .donut-anim, .donut-anim .chart-arc, .donut-legend tbody tr,
+  .trend-line, .trend-area, .trend-dot { animation: none; }
+}

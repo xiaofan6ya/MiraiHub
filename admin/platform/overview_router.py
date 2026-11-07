@@ -339,7 +339,7 @@ def _account_monitor(db: Session, scope_ids=None, platform: str = "") -> dict:
     return buckets
 
 
-#: 概览结果缓存（key -> (过期时间, 结果)）。
+#: 概览结果缓存。
 #:
 #: ## 为什么要它
 #:
@@ -352,9 +352,10 @@ def _account_monitor(db: Session, scope_ids=None, platform: str = "") -> dict:
 #: 又长到足以吃掉同一页面里连续几次请求。
 #:
 #: 只缓存**成功**结果；算失败不写缓存，避免把一次抖动钉死 3 秒。
-_OVERVIEW_CACHE: dict[str, tuple[float, dict]] = {}
+#:
+#: 2026-11-07 起实现收敛到 admin/stats_cache.py（L1 内存 + L2 Redis +
+#: 单飞）—— 此前并发同 key 的首次请求会各自把 1.4s 的聚合各跑一遍。
 _OVERVIEW_TTL = 3.0
-_OVERVIEW_CACHE_LOCK = threading.Lock()
 
 
 def _ttl_for(days: int) -> float:
@@ -379,27 +380,20 @@ def _cache_key(days: int, platform: str, realm: str, section: str = "all") -> st
     return "%s|%d|%s|%s" % (section, int(days), platform or "", realm or "")
 
 
+def _shared_key(key: str) -> tuple:
+    from admin.stats_cache import cache_key
+    return cache_key("overview", (key,))
+
+
 def _cache_get(key: str) -> dict | None:
-    now = time.time()
-    with _OVERVIEW_CACHE_LOCK:
-        hit = _OVERVIEW_CACHE.get(key)
-        if hit is None:
-            return None
-        expires, payload = hit
-        if expires < now:
-            _OVERVIEW_CACHE.pop(key, None)
-            return None
-        return payload
+    from admin.stats_cache import cache_get
+    hit = cache_get(_shared_key(key))
+    return dict(hit) if isinstance(hit, dict) else hit
 
 
 def _cache_put(key: str, payload: dict, ttl: float | None = None) -> None:
-    now = time.time()
-    expires = now + (_OVERVIEW_TTL if ttl is None else ttl)
-    with _OVERVIEW_CACHE_LOCK:
-        # 顺手清理过期项，避免长期运行堆积（key 数量本来就很小）
-        for stale in [k for k, (exp, _) in _OVERVIEW_CACHE.items() if exp < now]:
-            _OVERVIEW_CACHE.pop(stale, None)
-        _OVERVIEW_CACHE[key] = (expires, payload)
+    from admin.stats_cache import cache_put
+    cache_put(_shared_key(key), payload, _OVERVIEW_TTL if ttl is None else ttl)
 
 
 @router.get("")

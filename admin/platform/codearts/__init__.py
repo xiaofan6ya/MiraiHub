@@ -57,13 +57,16 @@ REALM_IDS = {"cn": "codearts"}
 def _task_runners() -> dict:
     """本平台的定时任务。
 
-    只有保活：CodeArts 没有签到（额度是买的积分包），但 STS 凭证 6 小时过期，
+    保活：STS 临时凭证 6 小时过期，有 refresh_token 就能一直续 ——
     **必须**定时续，否则一觉醒来整池都是 401。
+    签到（2026-11-07 新增）：客户端 BenefitService 的权益领取
+    （benefit claim + policyCenter welfare），协议还原见 services/benefit.py。
     """
     from admin.platform.codearts.platform_gateway import CodeArtsAccountOps
 
     ops = CodeArtsAccountOps("cn")
-    return {"codearts_keepalive": ops.keepalive}
+    return {"codearts_keepalive": ops.keepalive,
+            "codearts_checkin": ops.checkin}
 
 
 def install() -> None:
@@ -90,9 +93,8 @@ def install() -> None:
             auth_mode="local-scan",
             extra={
                 "task_runners": list(_task_runners().keys()),
-                # 控制台按钮：扫描 / 导入 / 刷新额度。
-                # **不要**给 checkin —— 上游没有签到，点了只会看到「不支持」。
-                "actions": ["scan", "import", "refresh-quota"],
+                # 控制台按钮：扫描 / 导入 / 签到 / 刷新额度。
+                "actions": ["scan", "import", "checkin", "refresh-quota"],
             },
         ))
         logger.debug("CodeArts 平台已登记：%s", platform_id)

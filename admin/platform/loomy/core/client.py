@@ -255,16 +255,42 @@ def _request(url: str, *, method: str = "GET", body: dict | None = None,
     # 漏了它会把「成功」当失败，抛出的错误信息就是「成功」两字。
     code = str(data.get("code") or "")
     if code and code not in BIZ_OK_CODES:
-        kind = "auth" if code in BIZ_AUTH_CODES else "upstream_business"
         message = str(data.get("desc") or data.get("message") or "上游业务错误")
         # `100001` 这类是业务提示（如「当前未切换到团队」），不算故障
         if code in BIZ_SOFT_CODES:
             return data
+        # ---- 额度耗尽也可能以 HTTP 200 + 业务码的形态出现（2026-11-07）----
+        # 此前一律 upstream_business/auth → retryable()=False → 网关直接
+        # break 抛给客户端，不换下一个号（用户主诉「老是撞到没额度的号
+        # 直接打断」）。识别出额度语义就按 quota_exceeded/402 走：
+        # 冷却 600s + 余额归零 + 换号重试。
+        blob = json.dumps(data, ensure_ascii=False)
+        if _is_quota_message(message) or _is_quota_message(blob):
+            note_sentinel(realm, account_id, "quota_exceeded", code=code,
+                          status=402, detail=message)
+            raise UpstreamError(message or "该账号积分已用尽",
+                                status=402, code=str(code), kind="quota_exceeded",
+                                detail=blob[:400])
+        kind = "auth" if code in BIZ_AUTH_CODES else "upstream_business"
         note_sentinel(realm, account_id, kind, code=code, status=200,
                       detail=message)
         raise UpstreamError(message, status=200, code=code, kind=kind,
                             detail=json.dumps(data, ensure_ascii=False)[:300])
     return data
+
+
+def _is_quota_message(text: str) -> bool:
+    """消息里是否带「积分/额度用尽」语义（中英文都认）。"""
+    t = str(text or "").lower()
+    if not t:
+        return False
+    if ("insufficient" in t and "quota" in t) or "quota_exceeded" in t:
+        return True
+    for kw in ("积分不足", "余额不足", "积分已用", "额度已用", "额度用尽",
+               "积分用尽", "积分余额不足"):
+        if kw in t:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -324,11 +324,24 @@ def _find_dup(db: Session, auth_json: str) -> Account | None:
             .first())
 
 
+#: client（加密 .info）格式只对 WorkBuddy 系有意义：encrypt_credential 要求
+#: auth_json 里有 `auth` 字典并加密其中的 accessToken/refreshToken —— 其它
+#: 平台（qoder/loomy/codearts/…）的凭据结构完全不同，强行走这条路径只会
+#: 409「凭证结构无效」（2026-11-07 修复：此前其它平台单号导出全部报错）。
+_CLIENT_EXPORT_PLATFORMS = ("workbuddy", "codebuddy")
+
+
+def _uses_client_format(platform: str | None) -> bool:
+    return str(platform or "").strip().lower() in _CLIENT_EXPORT_PLATFORMS
+
+
 def _export_items(rows: list[Account], format: str = 'backup') -> list[str]:
     """把账号记录还原成 .info 原文列表。
 
     导出的是 auth_json 原文（与上传接受的格式完全一致），
     因此导出文件可以直接再传回来，不需要额外转换。
+    `format=client` 只对 WorkBuddy 系账号生效：其它平台自动落回
+    backup 原文（逐行按账号自己的平台判断，批量跨平台导出也不报错）。
     """
     items: list[str] = []
     for a in rows:
@@ -339,7 +352,10 @@ def _export_items(rows: list[Account], format: str = 'backup') -> list[str]:
             json.loads(raw)
         except Exception:
             continue  # 跳过损坏记录，避免整个导出失败
-        items.append(_client_export(raw) if format == 'client' else raw)
+        if format == 'client' and _uses_client_format(getattr(a, "platform", None)):
+            items.append(_client_export(raw))
+        else:
+            items.append(raw)
     return items
 
 
@@ -1934,7 +1950,12 @@ def export_one_account(
     _: bool = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Export a single backup or official encrypted .info file."""
+    """Export a single backup or official encrypted .info file.
+
+    `format=client` 只对 WorkBuddy 系账号生效（加密 .info 是 WorkBuddy
+    客户端的文件格式）；其它平台的凭据结构不同，自动落回 **backup 原文**
+    （auth_json 原样，可直接再导入），响应里的 `format` 是**实际格式**。
+    """
     response.headers['Cache-Control'] = 'no-store'
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
@@ -1946,12 +1967,16 @@ def export_one_account(
         json.loads(raw)
     except Exception:
         raise HTTPException(status_code=400, detail="凭据内容不是合法 JSON，无法导出")
+    effective = format
+    if format == 'client' and not _uses_client_format(acc.platform):
+        effective = 'backup'
     return {
         "id": acc.id,
         "name": acc.name,
         "uid": acc.uid,
-        "format": format,
-        "item": _client_export(raw) if format == 'client' else raw,
+        "platform": acc.platform,
+        "format": effective,
+        "item": _client_export(raw) if effective == 'client' else raw,
     }
 
 

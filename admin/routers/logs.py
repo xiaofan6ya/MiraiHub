@@ -41,7 +41,6 @@ import json
 import secrets
 import threading
 import time
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -58,11 +57,13 @@ from sqlalchemy import or_
 from admin.security import require_admin, verify_admin_token
 
 
-_stats_cache_lock = threading.Lock()
-_stats_cache = OrderedDict()
+# ---- 统计缓存：2026-11-07 起收敛到 admin/stats_cache.py（L1 内存 + L2 Redis + 单飞）----
+# 这里只留薄封装：credits.py 等老调用方仍走 `_logs_mod._cached_stats`，
+# process_memory.py 仍读 `stats_cache_status`，实现细节全部在共享模块里。
+from admin import stats_cache as _shared_stats_cache  # noqa: E402
+
 _STATS_CACHE_TTL = 5.0
-_STATS_CACHE_MAX = 128
-#: 单条最重的 IP 聚合查询，重复访问给更长的复用窗口。
+#: 兼容名：旧引用点用它表示「重查询给更长窗口」。
 _STATS_CACHE_TTL_HEAVY = 20.0
 
 
@@ -87,10 +88,6 @@ def _ttl_for_days(days) -> float:
     if d <= 7:
         return 15.0
     return 45.0
-#: 同一个 key 正在重算时，后来者等它的结果而不是各自再打一遍库。
-#: 2 核机器上并发重算同一条聚合查询会把单次 200ms 拖到 1s 以上。
-_stats_inflight = {}
-_stats_inflight_lock = threading.Lock()
 
 
 def _explicit_scope(request) -> tuple[str, str]:
@@ -115,15 +112,14 @@ def _explicit_scope(request) -> tuple[str, str]:
 
 
 def _stats_cache_key(kind, values):
-    return kind, json.dumps(values, sort_keys=True, default=str, separators=(',', ':'))
+    return _shared_stats_cache.cache_key(kind, values)
 
 
 def stats_cache_status():
     """统计结果缓存观测（/api/stats/memory 汇总用）。"""
-    with _stats_cache_lock:
-        return {"name": "logs.stats", "entries": len(_stats_cache),
-                "max_entries": _STATS_CACHE_MAX, "ttl_seconds": _STATS_CACHE_TTL,
-                "inflight": len(_stats_inflight)}
+    status = _shared_stats_cache.stats_cache_status()
+    status["name"] = "logs.stats"
+    return status
 
 
 def _stable_window_start(start, days):
@@ -164,59 +160,17 @@ def _freeze(value):
 
 
 def _stats_cache_get(key):
-    now = time.monotonic()
-    with _stats_cache_lock:
-        entry = _stats_cache.get(key)
-        if entry is None:
-            return None
-        expires, value = entry
-        if expires <= now:
-            _stats_cache.pop(key, None)
-            return None
-        _stats_cache.move_to_end(key)
-        return _freeze(value)
+    hit = _shared_stats_cache.cache_get(key)
+    return _freeze(hit) if hit is not None else None
 
 
 def _stats_cache_put(key, value, ttl=None):
-    with _stats_cache_lock:
-        _stats_cache[key] = (time.monotonic() + (_STATS_CACHE_TTL if ttl is None else ttl),
-                             value)
-        _stats_cache.move_to_end(key)
-        while len(_stats_cache) > _STATS_CACHE_MAX:
-            _stats_cache.popitem(last=False)
+    _shared_stats_cache.cache_put(key, value, _STATS_CACHE_TTL if ttl is None else ttl)
 
 
 def _cached_stats(key, compute, ttl=None):
-    """Single-flight cached aggregation: concurrent identical reads share one run.
-
-    ``compute`` must be pure SQL work — it may run on the caller's session, so
-    a leader that fails just lets the next caller retry.
-    """
-    cached = _stats_cache_get(key)
-    if cached is not None:
-        return cached
-    with _stats_inflight_lock:
-        pending = _stats_inflight.get(key)
-        leader = pending is None
-        if leader:
-            pending = _stats_inflight[key] = threading.Event()
-    if not leader:
-        # Bounded: the leader's own query is already time-limited by the request
-        # deadline, and a broken leader always releases this event.
-        pending.wait(timeout=30.0)
-        cached = _stats_cache_get(key)
-        if cached is not None:
-            return cached
-        # Leader failed or timed out; fall through and compute independently.
-    try:
-        value = compute()
-    finally:
-        if leader:
-            with _stats_inflight_lock:
-                _stats_inflight.pop(key, None)
-            pending.set()
-    _stats_cache_put(key, value, ttl)
-    return value
+    """单飞 + L1/L2 缓存的聚合入口（实现见 admin/stats_cache.py）。"""
+    return _shared_stats_cache.cached(key, compute, ttl)
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 

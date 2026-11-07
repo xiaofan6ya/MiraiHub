@@ -469,8 +469,9 @@ def _has_account(db, spec, key, model: str = "") -> bool:
              .filter(Account.platform == spec.storage(),
                      Account.status == "active"))
     query = scope_accounts(query, account_id, key_id, key=key)
-    if spec.realm:
-        query = query.filter(Account.domain == spec.realm)
+    realm_cond = shared.realm_domain_cond(spec.realm)
+    if realm_cond is not None:
+        query = query.filter(realm_cond)
     query = query.filter(or_(Account.cool_until.is_(None), Account.cool_until <= now))
     query = query.filter(or_(Account.breaker_until.is_(None), Account.breaker_until <= now))
     query = query.filter(or_(Account.degrade_until.is_(None), Account.degrade_until <= now))

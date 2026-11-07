@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_
 from sqlalchemy.orm import Session
 
 from admin.db import get_db
@@ -54,7 +54,17 @@ def model_pool_stats(model: str = Query(default=""),
       不瞎猜。按自然日取样会严重低估（窗口错位）。
     * 剩余额度估算 = Σ max(0, 单账号日额度 - 近 24h 已用)，只算当前可用的号。
       这是**本地推断值**，不是上游承诺；真实额度以上游为准。
+
+    2026-11-07 加共享缓存（10s）：这条要全量扫账号表 + 冷却表 + 两个
+    当日/24h 聚合，此前完全没有缓存，模型池面板每开一次就是一整套。
     """
+    def _compute():
+        return _model_pool_stats_agg(db, model)
+
+    return _shared_cached(_shared_cache_key("model_pool", (model,)), _compute, ttl=10.0)
+
+
+def _model_pool_stats_agg(db: Session, model: str):
     from admin.models import AccountModelCooldown, ModelConfig
     from admin.model_limits import next_cn_midnight
     from admin.routers.proxy import _looks_login_dead
@@ -298,10 +308,27 @@ def _model_display_map(db: Session) -> dict[str, str]:
 
 #: 使用记录聚合的短缓存：一次请求要跑 8 个分组聚合（概览/模型/端点/Key/
 #: 账号/平台/结果/趋势），日志一大就是几十万行的扫描。控制台切换筛选、
-#: 图表重绘、多标签页同时开着时，同一份统计会被反复算 —— 6 秒的缓存
-#: 能把这类"重复劳动"直接消掉，而观测数据的 6 秒滞后没有实际影响。
-_STATS_TTL = 6.0
-_stats_cache: dict[tuple, tuple[float, dict]] = {}
+#: 图表重绘、多标签页同时开着时，同一份统计会被反复算 —— 短缓存能把这类
+#: "重复劳动"直接消掉，而观测数据的短暂滞后没有实际影响。
+#: 2026-11-07 起走 admin/stats_cache.py：L1 内存 + L2 Redis + 单飞
+#: （此前是裸 dict：并发同条件会各自打一遍库，也没有容量上限）。
+from admin.stats_cache import cached as _shared_cached  # noqa: E402
+from admin.stats_cache import cache_key as _shared_cache_key  # noqa: E402
+
+_STATS_TTL = 8.0
+
+
+def _stats_ttl_for_days(days) -> float:
+    """按窗口给 TTL：与 logs.py 同策略 —— 窗口越大、数据变化越慢，留得越久。"""
+    try:
+        d = int(days or 0)
+    except (TypeError, ValueError):
+        return _STATS_TTL
+    if d <= 1:
+        return _STATS_TTL
+    if d <= 7:
+        return 30.0
+    return 60.0
 
 
 @router.get("/usage")
@@ -362,24 +389,62 @@ def usage_stats(
     except Exception:  # noqa: BLE001 - 测试桩可能没有 query_params
         platform = ""
 
-    # ── 短缓存：同一组筛选条件 6 秒内只算一次 ────────────────────────────
+    # ── 短缓存：同一组筛选条件在 TTL 内只算一次（含单飞合并并发） ─────────
     force = False
     try:
         force = (request.query_params.get("refresh") or "") == "1"
     except Exception:  # noqa: BLE001
         force = False
-    cache_key = (days, granularity, key_id, model, account_id, use_case,
-                 start.isoformat() if start else "", end.isoformat() if end else "",
-                 platform, realm)
-    now_ts = time.time()
+    cache_key = _shared_cache_key("usage", (
+        days, granularity, key_id, model, account_id, use_case,
+        start.isoformat() if start else "", end.isoformat() if end else "",
+        platform, realm))
     if not force:
-        cached = _stats_cache.get(cache_key)
-        if cached and now_ts - cached[0] < _STATS_TTL:
-            return cached[1]
+        hit = _stats_cache_get(cache_key)
+        if hit is not None:
+            return hit
+    ttl = _stats_ttl_for_days(days)
 
-    if platform:
-        _platform_filter(filters, db, platform, realm)
+    def _compute():
+        if platform:
+            _platform_filter(filters, db, platform, realm)
+        return _usage_aggregates(db, filters, days=days, granularity=granularity,
+                                 key_id=key_id, model=model, account_id=account_id,
+                                 use_case=use_case, start=start, end=end,
+                                 platform=platform, realm=realm)
 
+    if force:
+        # refresh=1：跳过读缓存直接算，但结果照常写入（后续请求受益）。
+        result = _compute()
+        _stats_cache_put(cache_key, result, ttl)
+        return result
+    return _shared_cached(cache_key, _compute, ttl)
+
+
+def _stats_cache_get(key):
+    from admin.stats_cache import cache_get as _cg
+    hit = _cg(key)
+    # L2（Redis）反序列化出来的是纯 JSON 结构；调用方只读，这里浅拷贝顶层
+    # 与旧实现（_freeze）行为一致，避免缓存值被调用方增删键污染。
+    if isinstance(hit, dict):
+        return dict(hit)
+    if isinstance(hit, list):
+        return list(hit)
+    return hit
+
+
+def _stats_cache_put(key, value, ttl=None):
+    from admin.stats_cache import cache_put as _cp
+    _cp(key, value, _STATS_TTL if ttl is None else ttl)
+
+
+def _usage_aggregates(db, filters, *, days, granularity, key_id, model,
+                      account_id, use_case, start, end, platform, realm):
+    """一次请求的全部聚合（概览/模型/平台/端点/Key/账号/结果/趋势）。
+
+    只做纯 SQL 工作，被 `/usage` 的共享缓存（L1+L2+单飞）包裹 ——
+    缓存命中时这个函数根本不会执行。
+    """
     labels = platform_labels(db)
     model_labels = _model_display_map(db)
 
@@ -473,12 +538,35 @@ def usage_stats(
     key_names = {k.id: k.name for k in db.query(ApiKey).all()}
     account_names = {a.id: a.name or a.uid or f"账号 #{a.id}"
                      for a in db.query(Account).all()}
+    # ── 账号分布：SQL 侧只取 Top 8，其余合并成「其他」────────────────────
+    # 池子上千时把几百行明细全量吐给前端，环形图会挤成一坨（图例每行 2.8%
+    # 的占比毫无信息量），payload 也跟着膨胀。这里在 SQL 里 LIMIT 取大头，
+    # 剩余账号一次 SUM 滚总，前端只画「Top 8 + 其他 N 个账号」。
+    _BY_ACCOUNT_TOP = 8
     by_account = (_ok_filter(_f(db.query(
         UsageLog.account_id, func.count(UsageLog.id),
         func.coalesce(func.sum(UsageLog.total_tokens), 0),
         func.coalesce(func.sum(UsageLog.credits), 0.0))))
         .group_by(UsageLog.account_id)
-        .order_by(func.count(UsageLog.id).desc()).all())
+        .order_by(func.count(UsageLog.id).desc())
+        .limit(_BY_ACCOUNT_TOP).all())
+    by_account_other_row = None
+    if len(by_account) >= _BY_ACCOUNT_TOP:
+        top_ids = [row[0] for row in by_account if row[0] is not None]
+        null_in_top = any(row[0] is None for row in by_account)
+        # NULL（未分配账号）不在 Top 里时要并进「其他」；IN 会把 NULL 行
+        # 过滤掉，所以必须显式补 is_(None) 分支。
+        others_cond = (~UsageLog.account_id.in_(top_ids) if null_in_top
+                       else or_(UsageLog.account_id.is_(None),
+                                ~UsageLog.account_id.in_(top_ids)))
+        others_row = (_ok_filter(_f(db.query(
+            func.count(UsageLog.id),
+            func.coalesce(func.sum(UsageLog.total_tokens), 0),
+            func.coalesce(func.sum(UsageLog.credits), 0.0),
+            func.count(func.distinct(UsageLog.account_id)))))
+            .filter(others_cond).one())
+        if others_row and others_row[0]:
+            by_account_other_row = others_row
     by_result = (_f(db.query(UsageLog.error_kind, func.count(UsageLog.id)))
                  .group_by(UsageLog.error_kind).order_by(func.count(UsageLog.id).desc()).all())
     account_models = []
@@ -593,9 +681,19 @@ def usage_stats(
         ],
         "by_endpoint": _dist(by_endpoint, lambda v: v or "chat"),
         "by_key": _dist(by_key, lambda v: key_names.get(v) or f"#{v}"),
-        "by_account": [{**item, "account_id": row[0]} for row, item in zip(
-            by_account, _dist(by_account, lambda v: account_names.get(v) or
-                             (f"已删除账号 #{v}" if v else "未分配账号")))],
+        "by_account": (
+            [{**item, "account_id": row[0]} for row, item in zip(
+                by_account, _dist(by_account, lambda v: account_names.get(v) or
+                                 (f"已删除账号 #{v}" if v else "未分配账号")))]
+            + ([{
+                "label": f"其他 {int(by_account_other_row[3] or 0)} 个账号",
+                "requests": int(by_account_other_row[0] or 0),
+                "tokens": int(by_account_other_row[1] or 0),
+                "credits": round(float(by_account_other_row[2] or 0), 4),
+                "account_id": None,
+                "others": True,
+            }] if by_account_other_row is not None else [])
+        ),
         "by_result": [{"label": "成功" if kind in _OK_KINDS else kind or "未分类",
                        "requests": int(count)} for kind, count in by_result],
         "account_models": account_models,
@@ -612,9 +710,6 @@ def usage_stats(
             for r in trend_rows
         ],
     }
-    if len(_stats_cache) > 64:
-        _stats_cache.clear()
-    _stats_cache[cache_key] = (now_ts, result)
     return result
 
 
@@ -630,7 +725,20 @@ def usage_filter_options(
 
     只返回**窗口内真实出现过**的值，避免下拉里塞一堆从没用过的模型，
     让人以为「有数据」却筛出空结果。
+
+    2026-11-07 加共享缓存（30s）：这条要跑 3 个 group_by + 全量 Account 表，
+    却在使用记录面板每次切换筛选时都重打一遍；选项晚 30 秒无感知。
     """
+    def _compute():
+        return _usage_filter_options_agg(db, days, start, end)
+
+    return _shared_cached(
+        _shared_cache_key("usage_options", (days, start.isoformat() if start else "",
+                                            end.isoformat() if end else "")),
+        _compute, ttl=30.0)
+
+
+def _usage_filter_options_agg(db, days, start, end):
     filters = _time_filters(days, start, end)
 
     model_labels = _model_display_map(db)

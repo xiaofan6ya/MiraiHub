@@ -96,8 +96,9 @@ def account_ids(db: Session, platform: str, realm: str = "") -> list[int] | None
     if not platform:
         return None
     query = db.query(Account.id).filter(Account.platform == platform)
-    if realm:
-        query = query.filter(Account.domain == realm)
+    realm_cond = _realm_cond(realm)
+    if realm_cond is not None:
+        query = query.filter(realm_cond)
     return [row[0] for row in query.all()]
 
 
@@ -120,8 +121,9 @@ def apply(query, db: Session, platform: str, realm: str = "", column=None):
         return query.filter(column.in_(ids)), False
     from admin.models import Account
     query = query.filter(Account.platform == platform)
-    if realm:
-        query = query.filter(Account.domain == realm)
+    realm_cond = _realm_cond(realm)
+    if realm_cond is not None:
+        query = query.filter(realm_cond)
     return query, False
 
 
@@ -130,9 +132,17 @@ def filter_accounts(query, db: Session, platform: str, realm: str = ""):
     if not platform:
         return query
     query = query.filter(Account.platform == platform)
-    if realm:
-        query = query.filter(Account.domain == realm)
+    realm_cond = _realm_cond(realm)
+    if realm_cond is not None:
+        query = query.filter(realm_cond)
     return query
+
+
+def _realm_cond(realm: str):
+    """按区条件（空 domain 通配，见 shared.realm_domain_cond 的说明）。"""
+    from admin.platform import shared as platform_shared
+
+    return platform_shared.realm_domain_cond(realm)
 
 
 def label(platform: str, realm: str = "") -> str:

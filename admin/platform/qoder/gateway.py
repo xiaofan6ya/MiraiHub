@@ -209,8 +209,11 @@ def _attempt(db, request, key, body: dict, *, realm: str, model_hint: str = ""):
             continue
     if last_error is not None:
         raise last_error
+    # 503 文案带上区域：不带区的报错没法区分「真没号」和「区串了」，
+    # 排障时只能靠猜（2026-11-07 的国际版误报就是这么耗掉的）。
     raise shared.PlatformRejected(
-        503, "Qoder 没有可用账号（请先在控制台导入并确认状态为启用）",
+        503, "Qoder %s没有可用账号（请先在控制台导入并确认状态为启用）"
+             % ("国际版" if realm == "intl" else "中国版"),
         kind="server_error", code="no_available_account",
         headers={"Retry-After": "3"})
 

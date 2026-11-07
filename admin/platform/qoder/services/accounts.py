@@ -108,7 +108,9 @@ def ensure_token(db: Session, account: Account) -> dict:
                                    status=exc.status or 401, kind="auth",
                                    detail=exc.detail) from exc
 
-    data["token"] = str(fresh.get("token") or "")
+    # 设备流续期（deviceToken/refresh）上游返回的是 `device_token`，
+    # 只读 `token` 会把账号 token 刷成空串；作业令牌才是 `token`。
+    data["token"] = str(fresh.get("token") or fresh.get("device_token") or "")
     data["refresh_token"] = str(fresh.get("refresh_token") or refresh)
     exp = fresh.get("expires_at")
     if isinstance(exp, str):

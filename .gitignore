@@ -113,6 +113,8 @@ android/local.properties
 android/**/build/
 *.jks
 *.keystore
+# 安卓签名身份：私钥 + 口令，永不入库（build/ 会被打包脚本清掉，所以放在仓库根）
+android-signing/
 
 
 # Local SQLite databases (runtime data)

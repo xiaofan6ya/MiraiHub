@@ -5,6 +5,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+import uuid
 
 from . import endpoints
 from .cosy import build_auth_headers, encode_body
@@ -295,6 +296,163 @@ def fetch_model_catalog(token: str, realm: str, *, uid: str, name: str = "",
     return request_json(url, action="模型目录查询", headers=headers)
 
 
+def _classify_model_server_error(payload: str, status: int):
+    """把 model server 的错误载荷分类成 (message, status, code, kind)。
+
+    分类规则（2026-11-07 实测）：
+      * `pricingUrl`                    → 无套餐/额度耗尽（quota_exceeded/402），
+        选号层据此冷却 1800s 换号，不再反复撞同一个号；
+      * `agent_router` / `flow nodes`   → 账号 agent 配置未初始化（理论上新
+        链路不会再出现，保留以防上游回退），报错里直接给自愈方法；
+      * `invalid_model_error`           → 模型名不被接受（model_unknown/404）；
+      * 其余                             → upstream_business 原样上抛。
+    """
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    message = str(data.get("message") or data.get("errorMessage") or payload[:200])
+    code = str(data.get("code") or data.get("errorCode") or status)
+    if "pricingUrl" in payload:
+        return "该账号没有可用套餐或额度已耗尽（上游返回定价页）", 402, code, "quota_exceeded"
+    if "agent_router" in payload or "flow nodes" in payload:
+        return ("该账号上游 agent 配置未初始化（用官方 Qoder 客户端登录此账号"
+                "并随便发一条消息即可恢复）"), status, code, "upstream_business"
+    if "invalid_model" in payload:
+        return "模型不存在：%s" % message, 404, code, "model_unknown"
+    return message or "上游业务错误", status, code, "upstream_business"
+
+
+def iter_model_chat_stream(token: str, realm: str, *, body: dict,
+                           timeout: float = 600.0,  # 帧间隔上限（思考静默不掐）
+                           account_id: int = 0):
+    """对话流 · **model server 新链路**（2026-11-07）。
+
+    `POST {model_base}/model/v1/chat/completions`：标准 OpenAI
+    `chat.completion.chunk` SSE，**无信封、无 COSY 签名**，
+    `Bearer <作业令牌>` 直接可用（实测 dt- 令牌 200）。
+
+    body 里必须带 `metadata`（client_type="6" + business 块），
+    缺了上游会把请求判成 Unsupported model / All backends failed
+    —— 组包在 `services.chat.prepare` 里做，这里只负责发与解析。
+    """
+    context = ((body.get("metadata") or {}).get("context") or {})
+    request_id = str(context.get("request_id") or uuid.uuid4())
+    session_id = str(context.get("session_id") or ("sess-" + uuid.uuid4().hex[:16]))
+    base = endpoints.model_base(realm)
+    url = base + endpoints.MODEL_CHAT_PATH
+    encoded = json.dumps(body, ensure_ascii=False).encode()
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "X-Request-ID": request_id,
+        "X-Session-ID": session_id,
+        "User-Agent": "Qoder",
+    }
+    try:
+        resp = _open(url, encoded, headers, timeout, "POST")
+    except urllib.error.HTTPError as exc:
+        # HTTP 层错误（401/403/402/5xx）：同样先过一遍载荷分类——
+        # 「无套餐」可能以 HTTP 402/403 + pricingUrl 载荷出现，
+        # 也可能就是一个裸 402（实测 161 号）。
+        err = _json_error(exc, "对话请求", account_id, realm)
+        payload = getattr(err, "detail", "") or ""
+        if "pricingUrl" in payload or exc.code == 402:
+            raise UpstreamError(
+                "该账号没有可用套餐或额度已耗尽（上游返回定价页）",
+                status=402, code=str(exc.code), kind="quota_exceeded",
+                detail=payload[:400]) from exc
+        raise err from exc
+    except Exception as exc:  # noqa: BLE001
+        note_sentinel(realm, account_id, "network", detail=str(exc)[:200])
+        raise UpstreamError("对话请求网络失败", status=0, kind="network",
+                            detail=str(exc)[:200]) from exc
+
+    with resp:
+        # 标准 SSE 事件聚合：**同一个事件可以拆成多个 `data:` 行**（SSE 规范
+        # 规定以 \n 连接后才是完整载荷）。上游的收尾帧（finish + usage +
+        # telemetry，好几百字符）实测会被拆成 2~3 行 —— 按行单独
+        # json.loads 必然失败丢帧，「usage 永远是空」就是这么来的。
+        # 这里缓冲到空行（事件边界）再整体解析。
+        event_name = ""
+        data_parts: list[str] = []
+
+        def _dispatch():
+            """聚合出当前事件；返回 (payload, is_error_event)。"""
+            nonlocal event_name, data_parts
+            if not data_parts:
+                return "", False
+            payload = "\n".join(data_parts).strip()
+            parts, ev = data_parts, event_name
+            data_parts = []
+            event_name = ""
+            return payload, ev == "error"
+
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+            if line == "":
+                # 空行 = 事件边界：分发缓冲
+                payload, is_err_event = _dispatch()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    logger.debug("model server SSE 非法 JSON 丢弃: %s",
+                                 payload[:120])
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                # 错误帧：`event: error`，或 data.type 带 *_error 后缀
+                # （invalid_model_error / provider_error / upstream_error…），
+                # 或裸 error 键 / pricingUrl 载荷。
+                ctype = str(chunk.get("type") or "")
+                if (is_err_event or chunk.get("error") or ctype == "error"
+                        or ctype.endswith("_error") or "pricingUrl" in payload):
+                    message, status, code, kind = _classify_model_server_error(
+                        payload, 500)
+                    note_sentinel(realm, account_id, kind, code=code,
+                                  status=status, detail=payload[:200])
+                    raise UpstreamError(message, status=status, code=code,
+                                        kind=kind, detail=payload[:400])
+                yield chunk
+                continue
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
+                continue
+            if line.startswith("data:"):
+                data_parts.append(line[5:].strip())
+                continue
+            if data_parts:
+                # **裸续行**（不以 data:/event: 开头）：上游把超长的
+                # finish+usage 帧按固定长度切成裸行续体（实测两帧里就有
+                # 一帧如此），拼回上一个 data 段才是完整 JSON。
+                # 直接字符串拼接（无分隔符）——续行是从 JSON 中间切开的。
+                data_parts[-1] += line
+                continue
+            # 其它字段（id:/retry:/注释行）忽略
+            continue
+        # 流没有以空行收尾时把缓冲里剩的事件也分发掉
+        payload, is_err_event = _dispatch()
+        if payload and payload != "[DONE]":
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                chunk = None
+            if isinstance(chunk, dict):
+                ctype = str(chunk.get("type") or "")
+                if (is_err_event or chunk.get("error") or ctype == "error"
+                        or ctype.endswith("_error") or "pricingUrl" in payload):
+                    message, status, code, kind = _classify_model_server_error(
+                        payload, 500)
+                    raise UpstreamError(message, status=status, code=code,
+                                        kind=kind, detail=payload[:400])
+                yield chunk
+
+
 def iter_chat_stream(token: str, realm: str, *, uid: str, body: dict,
                      name: str = "", email: str = "",
                      machine_id: str = "", timeout: float = 600.0,  # 帧间隔上限（思考静默不掐）
@@ -356,6 +514,29 @@ def iter_chat_stream(token: str, realm: str, *, uid: str, body: dict,
                 message = ""
                 if isinstance(inner, dict):
                     message = str(inner.get("message") or inner.get("msgInfo") or "")
+                # ---- 业务错误分类（2026-11-07）----
+                # 上游把「无套餐/额度耗尽」包成 pricingUrl 载荷（HTTP 仍是
+                # 200），此前落成「对话失败：{json}」——用户看不懂，账号也
+                # 没被当成额度问题冷却，下一轮还被选出来继续撞。
+                # kind=quota_exceeded → 网关 _cool_seconds 给 1800s 冷却，
+                # 池子自动跳过它换别的号。
+                has_pricing = ("pricingUrl" in payload
+                               or (isinstance(inner, dict) and inner.get("pricingUrl")))
+                if has_pricing:
+                    raise UpstreamError(
+                        "该账号没有可用套餐或额度已耗尽（上游返回定价页）",
+                        status=402, code=str(status), kind="quota_exceeded",
+                        detail=payload[:400])
+                # 「flow nodes found for router agent_router」= 上游按账号的
+                # agent 配置路由对话，这个号没有 flow 配置。协议参数怎么改
+                # 都一样（实测），只能用官方 Qoder 客户端登录该号发一条消息
+                # 完成初始化。把做法写进报错，别让用户以为网关坏了。
+                if "agent_router" in payload:
+                    raise UpstreamError(
+                        "该账号上游 agent 配置未初始化（用官方 Qoder 客户端登录"
+                        "此账号并随便发一条消息即可恢复）",
+                        status=int(status), code=str(status),
+                        kind="upstream_business", detail=payload[:400])
                 # 信封里的错误：HTTP 是 200，但业务失败 —— 必须上报，
                 # 否则「额度耗尽」会被渲染成「空回复」，无人知道原因
                 note_sentinel(realm, account_id, "upstream_business",

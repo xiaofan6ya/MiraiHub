@@ -381,12 +381,17 @@ def _attempt(db, request, key, body: dict, realm: str):
                 # 否则冷却到期它又排回来，每次请求都先撞一次「额度已用尽」。
                 zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
-            if not exc.retryable():
+            # **额度耗尽 / 登录失效必须换号，不能把客户端晾在错误上**：
+            # 这两类错都是「号坏了」而不是「请求坏了」，换下一个号就能成。
+            # 它们已在上面的 note_failure 里冷却（额度号余额归零），
+            # 不会死循环 —— 真没号可用时下一轮 select_account 返回 None，
+            # 走 _no_account_error 的分场景文案。
+            if not exc.retryable() and exc.kind not in ("auth", "quota_exceeded"):
                 break
             # **400「请重试」类错误不要立刻换号**：DashScope 的瞬时 400 与
             # 账号无关，换号也一样失败，反而把唯一可用账号排除掉。
             # 先短暂退避、同账号再试一次（上游通常几百毫秒就恢复）。
-            if exc.status == 400:
+            if exc.status == 400 and exc.kind != "quota_exceeded":
                 time.sleep(0.8)
                 continue
             exclude.add(account.id)
@@ -602,7 +607,10 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                 zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
             exclude.add(account.id)
-            if not exc.retryable():
+            # 额度耗尽 / 登录失效：号坏了不是请求坏了，换下一个号
+            # （与非流式 `_attempt` 同口径，见那里的注释）。
+            if (not exc.retryable()
+                    and exc.kind not in ("auth", "quota_exceeded")):
                 break
         except Exception as exc:  # noqa: BLE001
             shared.release(account)

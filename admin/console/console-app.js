@@ -1745,10 +1745,15 @@ function _psBar(width, height) {
 
 /** 把克隆体里的文字换成灰条（宽度按元素自身实测）。 */
 function _psBlankTextNodes(root) {
+  // root 是 .ps-clone（骨架层里的包装 div），真正的骨架层是它的祖先
+  // .panel-skeleton。旧守卫拿 clone 自己跟 closest(".panel-skeleton") 比，
+  // 永远不相等 —— 所有元素都被 continue 跳过，文字从没换成灰条，
+  // 骨架看起来就是「第二份真实内容」（智能体页重影的一半来源）。
+  const sk = root.closest(".panel-skeleton") || root;
   const nodes = root.querySelectorAll("*");
   for (const el of nodes) {
     if (el.classList.contains("ps-bar")) continue;
-    if (el.closest(".panel-skeleton") !== root && el !== root) continue;
+    if (el.closest(".panel-skeleton") !== sk && el !== root) continue;
     // 只处理「叶子」：没有元素子节点、但有文字
     if (el.children.length) continue;
     const text = (el.textContent || "").trim();
@@ -1907,6 +1912,10 @@ function _panelSkeletonFromDom(panel) {
  */
 function panelSkeletonShow(name, force) {
   if (!name || name === "overview") return;      // 概览有自己的加载态
+  // 智能体面板跳过：它本身就是静态外壳 + 自管加载态（侧栏「加载中…」），
+  // 骨架克隆只会复制出第二份外壳；且它的请求不走 api()，骨架只能靠
+  // 1.8s 兜底才收 —— 网慢时用户看到的就是「两套创作台」。
+  if (name === "agent") return;
   const panel = document.getElementById("panel-" + name);
   if (!panel) return;
   const first = !_panelSeen.has(name);
@@ -3343,6 +3352,7 @@ function consoleIcon(name) {
     "fa-stopwatch": "<circle cx=\"12\" cy=\"13\" r=\"8\"/><path d=\"M12 9v4l2.5 2.5M9 2h6\"/>",
     "fa-file-import": "<path d=\"M12 3H4v18h12v-5M9 14h12m-4-4 4 4-4 4\"/>",
     "fa-heart-pulse": "<path d=\"M3 12h4l2-6 4 12 2-6h6\"/>",
+    "fa-calendar-check": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"18\" rx=\"2\"/><path d=\"M16 2v4M8 2v4M3 10h18m-5 4-3 3-2-2\"/>",
     "fa-sliders": "<path d=\"M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0\"/><circle cx=\"16\" cy=\"6\" r=\"2\"/><circle cx=\"10\" cy=\"12\" r=\"2\"/><circle cx=\"18\" cy=\"18\" r=\"2\"/>",
     "fa-ellipsis": "<circle cx=\"5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"19\" cy=\"12\" r=\"1.6\"/>",
     "fa-snowflake": "<path d=\"M12 2v20M4 6l16 12M20 6 4 18\"/><path d=\"m9 4 3 3 3-3M9 20l3-3 3 3\"/>"
@@ -3691,6 +3701,25 @@ function isEnterpriseAccount(a) {
   return !!(a && String(a.enterprise_id || '').trim());
 }
 
+/** 系统通用账号操作（**与平台上游无关**，所有平台的号都该有）。
+ *
+ * 2026-11-07 统一：此前只有 WorkBuddy 的号池行带这套，Trae/Qoder/Loomy/
+ * CodeArts/MiniMax 各自的行渲染器只有 2~3 个平台专属按钮，删除 / 导出
+ * 凭证 / 禁用 / 通用刷新全都没有 —— 用户要删个 Qoder 号得去别处找入口。
+ *
+ * `refreshAcc` 内部已按账号平台分流到 `/api/{storage}/accounts/{id}/refresh`，
+ * 各平台原来的专属刷新按钮（qoderRefresh / loomyRefresh / traeRefresh …）
+ * 打的是**同一个端点**，统一收编成这一个。
+ */
+function commonAccountOps(a) {
+  return [
+    [`refreshAcc(${a.id})`, "fa-rotate", "刷新余额与到期快照", "maintain"],
+    [`exportAcc(${a.id},${jsv(a.name || '')})`, "fa-file-export", "导出登录态", "data"],
+    [`toggleAcc(${a.id},'${a.status === 'active' ? 'disabled' : 'active'}')`, "fa-power-off", "启用/禁用", "danger"],
+    [`delAcc(${a.id})`, "fa-trash", "删除", "danger"],
+  ];
+}
+
 function accOpsHtml(a, ops) {
   // 条目形状：[onclick, icon, tooltip, group]
   const primary = [];
@@ -3862,14 +3891,11 @@ function accRow(a) {
     ops.push([`catTravel(${a.id})`, "fa-cat", "猫猫旅行", "grow"]);
   }
   ops.push(
-    [`refreshAcc(${a.id})`, "fa-rotate", "刷新余额与到期快照", "maintain"],
     [`healthCheckAcc(${a.id})`, "fa-heart-pulse", "三项健康检查：积分、模型列表、真实对话", "maintain"],
     [`openReauthAccount(${a.id})`, "fa-key", "重新登录", "maintain"],
     [`injectAcc(${a.id})`, "fa-right-to-bracket", "注入本机客户端", "maintain"],
     [`WBReview.accountLimit(${a.id})`, "fa-sliders", "账号并发上限", "maintain"],
-    [`exportAcc(${a.id},${jsv(a.name||'')})`, "fa-file-export", "导出登录态", "data"],
-    [`toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')`, "fa-power-off", "启用/禁用", "danger"],
-    [`delAcc(${a.id})`, "fa-trash", "删除", "danger"],
+    ...commonAccountOps(a),
   );
   // data-label 是给**窄屏卡片形态**用的字段名（见 CSS 里的移动端段落）：
   // 窄屏下表格变成卡片，靠 `td::before { content: attr(data-label) }`
@@ -4188,14 +4214,11 @@ function traeRow(a) {
     <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain > 0 ? "var(--ok,#33587F)" : "var(--danger)"}">${fmtCredit(a.balance_remain)}${unit}</td>
     <td class="col-expiry" data-label="凭证到期">${esc(expires)}</td>
     ${accCreatedCell(a)}
-    <td class="c-ops" data-label="操作">${[
-      [`traeRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "刷新 token 与额度"],
-      [`traeTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查：token / 模型 / 真实对话 / 额度"],
-      [`traeClearCooling(${a.id})`, "fa-snowflake", "text-sky-600", "清除冷却与熔断"],
-      [`traeToggle(${a.id},'${a.status === "active" ? "disabled" : "active"}')`, "fa-power-off", "text-slate-500", "启用/禁用"],
-      [`traeDelete(${a.id})`, "fa-trash", "text-red-500", "删除"],
-    ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="acc-op-btn${(title === "删除" || title === "启用/禁用") ? " is-danger" : ""}" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, [
+      [`traeTest(${a.id})`, "fa-heart-pulse", "连通性检查：token / 模型 / 真实对话 / 额度", "maintain"],
+      [`traeClearCooling(${a.id})`, "fa-snowflake", "清除冷却与熔断", "maintain"],
+      ...commonAccountOps(a),
+    ])}</td>
   </tr>`;
 }
 
@@ -4371,12 +4394,10 @@ function qoderRow(a) {
         style="color:${(a.addon_remain || 0) > 0 ? "var(--ok)" : "var(--fg-subtle)"}">${fmtCredit(a.addon_remain)}</td>
     <td class="col-expiry text-xs" data-label="套餐">${plan}</td>
     ${accCreatedCell(a)}
-    <td class="c-ops" data-label="操作">${[
-      [`qoderRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "刷新额度"],
-      [`qoderTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
-    ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
-    ).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, [
+      [`qoderTest(${a.id})`, "fa-heart-pulse", "连通性检查：凭证 / 资料 / 模型 / 额度", "maintain"],
+      ...commonAccountOps(a),
+    ])}</td>
   </tr>`;
 }
 
@@ -4519,12 +4540,10 @@ function loomyRow(a) {
         style="color:var(--fg-muted)">${fmtCredit(a.daily_balance)}</td>
     <td class="text-xs text-right" data-label="登录态有效期">${sessionCell}</td>
     ${accCreatedCell(a)}
-    <td class="c-ops" data-label="操作">${[
-      [`loomyRefresh(${a.id})`, "fa-rotate", "text-indigo-600", "探活并刷新"],
-      [`loomyTest(${a.id})`, "fa-heart-pulse", "text-emerald-600", "连通性检查"],
-    ].map(([fn, icon, color, title]) =>
-      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
-    ).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, [
+      [`loomyTest(${a.id})`, "fa-heart-pulse", "连通性检查", "maintain"],
+      ...commonAccountOps(a),
+    ])}</td>
   </tr>`;
 }
 
@@ -4680,12 +4699,10 @@ function codeartsRow(a) {
         style="color:var(--fg-muted)">${fmtCredit(a.balance_total)}</td>
     <td class="col-expiry text-xs" data-label="套餐">${plan}${pkgNote}</td>
     ${accCreatedCell(a)}
-    <td class="c-ops" data-label="操作">${[
-      [`codeartsRefresh(${a.id})`, "fa-rotate", "刷新凭证与额度"],
-      [`codeartsTest(${a.id})`, "fa-heart-pulse", "分段连通性检查"],
-    ].map(([fn, icon, title]) =>
-      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
-    ).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, [
+      [`codeartsTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
+      ...commonAccountOps(a),
+    ])}</td>
   </tr>`;
 }
 
@@ -4817,14 +4834,21 @@ function minimaxRow(a) {
         style="color:var(--fg-muted)">${fmtCredit(a.balance_total)}</td>
     <td class="col-expiry text-xs" data-label="凭证">${credNote}</td>
     ${accCreatedCell(a)}
-    <td class="c-ops" data-label="操作">${[
-      [`minimaxRefresh(${a.id})`, "fa-rotate", "刷新积分明细"],
-      [`minimaxCheckin(${a.id})`, "fa-calendar-check", "立即签到"],
-      [`minimaxTest(${a.id})`, "fa-heart-pulse", "分段连通性检查"],
-    ].map(([fn, icon, title]) =>
-      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
-    ).join("")}</td>
+    <td class="c-ops" data-label="操作">${accOpsHtml(a, [
+      [`minimaxCheckin(${a.id})`, "fa-calendar-check", "立即签到", "grow"],
+      [`minimaxTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
+      ...commonAccountOps(a),
+    ])}</td>
   </tr>`;
+}
+
+async function minimaxDelete(id) {
+  const yes = await uiConfirm({ title: "删除 MiniMax 账号",
+                                message: "删除后需要重新「扫描本机」或「授权登录」入库，确定继续？" });
+  if (!yes) return;
+  const r = await api(`/api/minimax/accounts/${id}`, { method: "DELETE" });
+  if (r.ok) { toast("已删除"); accReloadActive(); }
+  else toast("删除失败", "err");
 }
 
 async function minimaxRefresh(id) {
@@ -6154,11 +6178,35 @@ async function platformScanAll(btn) {
 }
 
 /** 导出全部平台：单文件包含所有平台的备份（或脱敏清单）。 */
-function platformExportAll() {
-  openModal(`<h3 class="font-semibold text-lg mb-1">导出全部平台</h3>
+async function platformExportAll() {
+  // 平台清单（带账号数）：单平台备份用 —— 账号池的「导出」弹窗只覆盖
+  // 当前平台，平台管理页这里是唯一能按平台挑选的地方（2026-11-07）。
+  let items = [];
+  try {
+    const r = await api("/api/platforms");
+    const { ok, data: d } = await safeJson(r);
+    if (ok && Array.isArray(d.items)) items = d.items;
+  } catch (e) { /* 拉不到就只给「全部平台」 */ }
+  const seen = new Set();
+  const options = [{ value: "", label: "全部平台（整机备份）" }]
+    .concat(items
+      .filter(it => (it.account_count || 0) > 0)
+      .map(it => ({
+        // 选项值 = **落库平台名**（storage_platform），后端按它过滤；
+        // 双区平台（qoder = cn+intl 两区）一个值全含。
+        value: it.storage_platform || it.id,
+        label: `${it.label}（${it.account_count} 个账号）`,
+      }))
+      .filter(o => (seen.has(o.value) ? false : (seen.add(o.value), true))));
+  openModal(`<h3 class="font-semibold text-lg mb-1">导出账号数据</h3>
     <p class="text-xs mb-3" style="color:var(--fg-subtle)">
-      把所有平台的账号合并导出一个 JSON。「备份」含明文凭证，可用
+      按平台导出账号 JSON：可选单个平台或全部平台。「备份」含明文凭证，可用
       「导入全部平台」原样回灌；「清单」已脱敏，仅用于核对，不能回灌。</p>
+    <div class="block text-sm mb-3">导出平台
+      ${uiSelectHTML("pexpPlatformSel", {
+        options, value: "", class: "w-full border rounded-lg px-3 py-2 mt-2 text-sm",
+      })}
+    </div>
     <div class="flex gap-2 justify-end mt-3">
       <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
       <button onclick="platformExportAllDownload('plain')"
@@ -6170,13 +6218,19 @@ function platformExportAll() {
 
 async function platformExportAllDownload(mode) {
   try {
-    const r = await api("/api/platforms/export-all?mode=" + encodeURIComponent(mode));
+    // 选项值已是落库平台名（storage_platform），直接传
+    const platform = uiSelectValue("pexpPlatformSel") || "";
+    const r = await api("/api/platforms/export-all?mode=" + encodeURIComponent(mode)
+      + (platform ? "&platform=" + encodeURIComponent(platform) : ""));
     const { ok, data: d } = await safeJson(r);
     if (!ok) { toast("导出失败：" + ((d && d.detail) || r.status), "err"); return; }
     const platforms = (d && d.platforms) || {};
     const count = Object.values(platforms).reduce((s2, p2) => s2 + (p2.count || 0), 0);
+    if (!count) { toast("该平台没有账号可导出", "err"); return; }
+    const scopeTag = d.platform_scope && d.platform_scope !== "all"
+      ? d.platform_scope : "all-platforms";
     await downloadText(
-      `miraihub-all-platforms-${mode === "plain" ? "plain" : "backup"}-${exportStamp()}.json`,
+      `miraihub-${scopeTag}-${mode === "plain" ? "plain" : "backup"}-${exportStamp()}.json`,
       JSON.stringify(d, null, 2), "application/json");
     toast(`已导出 ${count} 个账号（${Object.keys(platforms).length} 个平台）`, "ok");
     closeModal();
@@ -9005,7 +9059,9 @@ async function openExport() {
       <span class="text-xs text-slate-400">设成正数可只导前 N 个，处理完再导下一批</span>
     </label>
     <div class="text-sm text-slate-600 mb-3">
-      当前平台账号 <b>${total}</b> 个，其中可用 <b>${active}</b> 个
+      导出范围 = <b>当前平台</b>（顶部所选平台，双区平台含全部区域）+ 下方筛选；
+      共 <b>${total}</b> 个账号，其中可用 <b>${active}</b> 个。
+      要导其它平台：切顶部平台后再导，或到「平台管理 → 导出账号数据」按平台挑选。
       <span class="text-xs text-slate-400">（分批写出，带进度条，不会卡住界面）</span>
     </div>
     <div class="flex justify-between gap-2 mt-4">
@@ -9176,8 +9232,11 @@ async function exportAcc(id, name) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return; }
     const safe = String(name || d.name || d.uid || id).replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
-    await downloadText(`${safe || "account"}-${id}.info`, JSON.stringify(JSON.parse(d.item), null, 2));
-    toast(`已导出账号「${name || d.name || id}」`, "ok");
+    // WorkBuddy 系 = 加密 .info（可注入客户端）；其它平台 = backup 原文
+    // （auth_json 原样，可直接再导入）——后端按账号平台决定，看响应里的 format。
+    const ext = d.format === 'client' ? '.info' : '.json';
+    await downloadText(`${safe || "account"}-${id}${ext}`, JSON.stringify(JSON.parse(d.item), null, 2));
+    toast(`已导出账号「${name || d.name || id}」${d.format === 'client' ? '' : '（backup 原文）'}`, "ok");
   } catch(error) { toast(error.message || '文件未保存', 'err'); }
 }
 
@@ -12689,7 +12748,8 @@ function showScheduleResult(id){
       const statusKey = String(d.status || "").trim()
         || (d.already_processed ? "already"
             : (d.ok === false ? "failed" : "claimed"));
-      const statusText = {
+      const statusText = String(d.status_text || "").trim()
+        || {
         claimed: "已领取", already: "今日已领", failed: "失败",
         error: "异常", event_ended: "活动结束", done: "已完成",
         skipped: "跳过", refreshed: "已刷新",
@@ -12764,7 +12824,10 @@ function showScheduleResult(id){
     <div class="flex justify-end mt-3"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
 }
 async function loadSchedules(){
-  const r = await api("/api/schedules"); if(!r.ok) return; const d = await r.json();
+  // 全局出口与并发：和列表并行拉（60s 内存缓存，几乎零成本）。
+  // 单条任务的「跟随全局」摘要要拿它渲染，不拉就显示成「未配置」。
+  const [r] = await Promise.all([api("/api/schedules"), loadGlobalScheduleProxy()]);
+  if(!r.ok) return; const d = await r.json();
   const previous = new Map(_schedules.map(row => [row.id, row.last_result]));
   const all = d.items||[];
   // 平台作用域：任务本身带 `platform`（落库平台）。切到 Trae 时，
@@ -12919,23 +12982,88 @@ function scheduleProxyHTML(data){
   const conc = Number(data.concurrency || 0);
   const budget = Number(data.time_budget_minutes || 0);
   const stale = Number(data.stale_minutes || 0);
+  // 全局默认摘要（2026-11-07）：任务级留空/0 的字段实际生效的是全局值，
+  // 不写出来用户无从知道「这条任务现在到底从哪出去」。
+  const g = _scheduleGlobal || {};
+  const gPool = String(g.proxy_pool || "");
+  const gDesc = gPool ? `代理组 ${gPool}` : (Number(g.concurrency || 0) ? `并发 ${Number(g.concurrency)}` : "直连");
   return `<details class="schedule-help" ${pool||conc||budget||stale ? "open" : ""}>
     <summary><i class="fa-solid fa-network-wired" aria-hidden="true"></i>出口代理与并发 <span class="schedule-zone">${
-      pool ? "代理组 " + esc(pool) : (conc ? "并发 " + conc : "直连")
+      pool ? "代理组 " + esc(pool) : (conc ? "并发 " + conc : "跟随全局（" + esc(gDesc) + "）")
     }</span></summary>
     <div class="schedule-field"><label for="scProxyPool">代理组 <span class="schedule-zone">可选</span></label>
-      <input id="scProxyPool" placeholder="留空 = 直连；填 proxy_endpoints.pool 里的组名" value="${esc(pool)}" />
-      <p class="schedule-hint">在「代理节点」里配好出口后，这里填组名即可让本任务走代理。检测到 IP 被拉黑时该节点会自动静默 30 分钟，其它节点继续。</p></div>
+      <input id="scProxyPool" placeholder="留空 = 跟随全局默认（当前：${esc(gPool || "直连")}）；填 proxy_endpoints.pool 里的组名" value="${esc(pool)}" />
+      <p class="schedule-hint">在「代理节点」里配好出口后，这里填组名即可让本任务走代理。留空时生效的是「全局出口与并发」里的默认值。检测到 IP 被拉黑时该节点会自动静默 30 分钟，其它节点继续。</p></div>
     <div class="schedule-field"><label for="scConc">并发数 <span class="schedule-zone">0 = 自动</span></label>
       <input id="scConc" type="number" min="0" max="64" step="1" value="${conc}" />
-      <p class="schedule-hint">自动 = 各可用代理节点的 max_concurrency 之和（没配代理时用 4）。住宅代理建议 1~2，机房可以 5~10。</p></div>
+      <p class="schedule-hint">自动 = 各可用代理节点的 max_concurrency 之和（没配代理时用 4）。留空/0 时先生效全局默认，再落到自动。住宅代理建议 1~2，机房可以 5~10。</p></div>
     <div class="schedule-field"><label for="scBudget">单轮时间预算（分钟） <span class="schedule-zone">0 = 默认 8</span></label>
       <input id="scBudget" type="number" min="0" max="720" step="1" value="${budget}" />
-      <p class="schedule-hint">到点就停、本轮未完成的下一轮接着刷。几千个号时不要指望一轮刷完，否则就成了「无限循环」。</p></div>
+      <p class="schedule-hint">到点就停、本轮未完成的下一轮接着刷。几千个号时不要指望一轮刷完，否则就成了「无限循环」。0 时先生效全局默认。</p></div>
     <div class="schedule-field"><label for="scStale">只刷超过 N 分钟没更新的号 <span class="schedule-zone">0 = 默认 60</span></label>
       <input id="scStale" type="number" min="0" max="10080" step="1" value="${stale}" />
-      <p class="schedule-hint">刚刷过的号直接跳过。没有这一条，大池子每轮全量重扫永远刷不完。</p></div>
+      <p class="schedule-hint">刚刷过的号直接跳过。没有这一条，大池子每轮全量重扫永远刷不完。0 时先生效全局默认。</p></div>
   </details>`;
+}
+
+/* ---- 全局出口代理与并发（2026-11-07）----
+ * 单个任务上的配置保留不动；这里是「没单独配的任务统一吃这套默认」。
+ * 优先级：任务显式配置 > 全局默认 > 环境变量 > 内置默认。
+ */
+let _scheduleGlobal = null;
+let _scheduleGlobalAt = 0;
+
+async function loadGlobalScheduleProxy(force) {
+  if (!force && _scheduleGlobal && Date.now() - _scheduleGlobalAt < 60000) return _scheduleGlobal;
+  try {
+    const { ok, data } = await safeJson(await api("/api/schedules/global-proxy"));
+    if (ok && data) { _scheduleGlobal = data; _scheduleGlobalAt = Date.now(); }
+  } catch (e) { /* 拉不到就按「未配置全局」渲染 */ }
+  return _scheduleGlobal;
+}
+
+function openGlobalScheduleProxy(){
+  loadGlobalScheduleProxy(true).then(g => {
+    g = g || {};
+    openModal(`
+    <div class="schedule-form">
+    <header class="schedule-form-head"><span class="schedule-form-icon"><i class="fa-solid fa-network-wired" aria-hidden="true"></i></span><div><h3>全局出口与并发</h3><p>所有「没单独配置」的定时任务统一吃这套默认；单个任务里填了值仍以任务为准</p></div></header>
+    <div class="schedule-field"><label for="gProxyPool">默认代理组 <span class="schedule-zone">可选</span></label>
+      <input id="gProxyPool" placeholder="留空 = 直连；填 proxy_endpoints.pool 里的组名" value="${esc(String(g.proxy_pool || ""))}" />
+      <p class="schedule-hint">在「代理节点」里配好出口后填组名。一个出口 IP 上跑几十个号会被上游拉黑；配好后所有余额刷新/签到任务自动分散到该组节点。</p></div>
+    <div class="schedule-field"><label for="gConc">默认并发数 <span class="schedule-zone">0 = 自动</span></label>
+      <input id="gConc" type="number" min="0" max="64" step="1" value="${Number(g.concurrency || 0)}" />
+      <p class="schedule-hint">自动 = 各可用代理节点的 max_concurrency 之和（没配代理时用 4）。住宅代理建议 1~2，机房可以 5~10。</p></div>
+    <div class="schedule-field"><label for="gBudget">默认单轮时间预算（分钟） <span class="schedule-zone">0 = 内置 8</span></label>
+      <input id="gBudget" type="number" min="0" max="720" step="1" value="${Number(g.time_budget_minutes || 0)}" />
+      <p class="schedule-hint">到点就停、本轮未完成的下一轮接着刷，不追求一轮刷完。</p></div>
+    <div class="schedule-field"><label for="gStale">默认只刷超过 N 分钟没更新的号 <span class="schedule-zone">0 = 内置 60</span></label>
+      <input id="gStale" type="number" min="0" max="10080" step="1" value="${Number(g.stale_minutes || 0)}" />
+      <p class="schedule-hint">刚刷过的号直接跳过，大池子才刷得完。</p></div>
+    <footer class="schedule-form-actions">
+      <button type="button" onclick="closeModal()" class="console-btn">取消</button>
+      <button type="button" onclick="submitGlobalScheduleProxy()" class="console-btn primary">保存全局默认</button>
+    </footer></div>`, 'max-w-lg');
+  });
+}
+
+async function submitGlobalScheduleProxy(){
+  const body = {
+    proxy_pool: ($("#gProxyPool") ? $("#gProxyPool").value.trim() : ""),
+    concurrency: Math.max(0, Math.min(64, Number($("#gConc") && $("#gConc").value) || 0)),
+    time_budget_minutes: Math.max(0, Math.min(720, Number($("#gBudget") && $("#gBudget").value) || 0)),
+    stale_minutes: Math.max(0, Math.min(10080, Number($("#gStale") && $("#gStale").value) || 0)),
+  };
+  try {
+    const { ok, data } = await safeJson(await api("/api/schedules/global-proxy", {
+      method: "PUT", body: JSON.stringify(body),
+    }));
+    if (!ok) { toast("保存失败: " + ((data && data.detail) || ""), "err"); return; }
+    _scheduleGlobal = data; _scheduleGlobalAt = Date.now();
+    closeModal();
+    toast("全局出口与并发已保存，下一轮任务执行即生效", "ok");
+    loadSchedules();
+  } catch (e) { toast("保存异常: " + e.message, "err"); }
 }
 
 
@@ -13999,7 +14127,7 @@ function logRow(l) {
        </div>`
     : `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
   const credHtml = l.credits>0
-    ? `<span class="text-emerald-600 font-semibold tnum">${Number(l.credits).toFixed(4)}</span>`
+    ? `<span class="text-emerald-600 font-semibold tnum">${ovCredit(l.credits)}</span>`
     : `<span style="color:var(--fg-subtle)">—</span>`;
   const ttfbColor = ms => ms==null ? 'var(--fg-subtle)' : ms<=3000 ? 'var(--ok)' : ms<=8000 ? '#d97706' : ms<=20000 ? 'var(--warn)' : 'var(--danger)';
   const totalColor = ms => ms==null ? 'var(--fg-subtle)' : ms<=15000 ? 'var(--ok)' : ms<=30000 ? '#d97706' : ms<=60000 ? 'var(--warn)' : 'var(--danger)';
@@ -14150,7 +14278,7 @@ async function loadLogSummary(silent = false) {
     if (usageRevision === _logUsageRevision) _logSummaryDirty = false;
     _logSummarySignature = filterSignature;
     _logSummaryAt = Date.now();
-    if (hint) hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests} · ${fmtCredit(data.total_credits)} 积分${data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : ""}`;
+    if (hint) hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests} · ${ovCredit(data.total_credits)} 积分${data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : ""}`;
     if (!items.length) { box.innerHTML = `<div class="empty">该时间范围内没有账号产生请求。</div>`; return; }
     const maxC = Math.max(1, ...items.map(x => x.credits));
     box.innerHTML = `<table class="tbl" style="min-width:820px">
@@ -14163,7 +14291,7 @@ async function loadLogSummary(silent = false) {
           <td class="font-medium">${esc(x.account_name)}</td>
           <td class="text-right tnum">${fmtNum(x.requests)}</td>
           <td class="text-right tnum" style="color:${x.failed_requests > 0 ? 'var(--danger)' : 'var(--fg-subtle)'}">${x.failed_requests}</td>
-          <td class="text-right tnum font-medium" style="color:var(--warn)">${fmtCredit(x.credits)}</td>
+          <td class="text-right tnum font-medium" style="color:var(--warn)">${ovCredit(x.credits)}</td>
           <td class="text-right tnum" style="color:var(--fg-muted)">${fmtK(x.total_tokens)}</td>
           <td class="text-right tnum font-medium" style="color:${cacheRateOf(x) == null ? 'var(--fg-subtle)' : (cacheRateOf(x) >= 60 ? 'var(--ok)' : cacheRateOf(x) >= 30 ? '#d97706' : 'var(--fg-subtle)')}" data-tooltip="${cacheRateOf(x) == null ? '缓存命中未知' : '缓存命中 ' + fmtK(x.cached_tokens||0) + ' / 输入 ' + fmtK(x.prompt_tokens||0)}" data-tooltip-description="${cacheRateOf(x) == null ? '该平台上游没有返回缓存统计（不是命中率为 0）' : ''}">${cacheRateOf(x) == null ? '—' : cacheRateOf(x).toFixed(2) + '%'}</td>
           <td class="text-right tnum" style="color:var(--fg-muted)">${x.avg_latency_ms ? (x.avg_latency_ms/1000).toFixed(2)+'s' : '—'}</td>
@@ -14503,11 +14631,31 @@ function fmtInt(n) {
  */
 function donutChart(rows, valueKey, opts) {
   const options = opts || {};
-  const items = (rows || []).filter(r => (r.requests || 0) > 0 || (r[valueKey] || 0) > 0);
-  if (!items.length) return `<div class="text-xs text-slate-400 py-8 text-center">暂无数据</div>`;
+  // Top-N 收敛（2026-11-07）：账号/Key 上千时环形图挤成一坨、图例每行
+  // 占比 0.x% 毫无信息量。超过 topN 时只画大头，剩余合并成「其他 N 项」
+  // 一行灰色兜底。后端 /usage 的 by_account 已经在 SQL 侧收敛过一次，
+  // 这里是所有调用方（积分统计等）共用的最后防线。
+  const topN = Math.max(2, Number(options.top) || 10);
+  let data = (rows || []).filter(r => (r.requests || 0) > 0 || (r[valueKey] || 0) > 0);
+  if (!data.length) return `<div class="text-xs text-slate-400 py-8 text-center">暂无数据</div>`;
+  // 「有没有积分列」必须看**合并前**的行 —— 否则无积分的图（如结果分布）
+  // 一旦触发 Top-N 合并，会凭空多出 Token/积分两列 0。
+  const countsOnly = data.every(r => r.credits === undefined);
+  if (data.length > topN) {
+    const sorted = data.slice().sort((a, b) => (Number(b[valueKey]) || 0) - (Number(a[valueKey]) || 0));
+    const rest = sorted.slice(topN);
+    const sumOf = key => rest.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+    const others = {
+      label: `其他 ${rest.length} 项`,
+      requests: sumOf('requests'),
+      platform_label: "", _others: true,
+    };
+    if (!countsOnly) { others.tokens = sumOf('tokens'); others.credits = sumOf('credits'); }
+    data = sorted.slice(0, topN).concat([others]);
+  }
 
+  const items = data;
   const total = items.reduce((s, r) => s + (r[valueKey] || 0), 0);
-  const countsOnly = items.every(r => r.credits === undefined);
   // 平台列：只有「全部平台」口径才显示 —— 已经按平台筛过时，
   // 每一行都写着同一个平台名，纯噪音。调用方通过 showPlatform 控制。
   const showPlatform = options.showPlatform !== false &&
@@ -14522,8 +14670,8 @@ function donutChart(rows, valueKey, opts) {
     const len = frac * C;
     const pct = (frac * 100).toFixed(1);
     const tip = `<b>${esc(r.label)}</b>${showPlatform && r.platform_label ? ' · ' + esc(r.platform_label) : ''}<br>${valueKey === 'requests' ? '请求 '+fmtNum(r.requests) : '积分 '+fmtCredit(r.credits)}（${pct}%）${countsOnly ? '' : '<br>请求 '+fmtNum(r.requests)+' · Token '+fmtNum(r.tokens)}`;
-    const seg = `<circle class="chart-hit" cx="80" cy="80" r="${R}" fill="none"
-        stroke="${_PIE_COLORS[i % _PIE_COLORS.length]}" stroke-width="${SW}"
+    const seg = `<circle class="chart-hit chart-arc" style="--i:${i};--c:${C.toFixed(1)}" cx="80" cy="80" r="${R}" fill="none"
+        stroke="${r._others ? '#64748b' : _PIE_COLORS[i % _PIE_COLORS.length]}" stroke-width="${SW}"
         stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-offset}"
         transform="rotate(-90 80 80)"
         onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()"></circle>`;
@@ -14534,9 +14682,9 @@ function donutChart(rows, valueKey, opts) {
   const legend = items.map((r, i) => {
     const frac = total ? ((r[valueKey] || 0) / total * 100).toFixed(1) : "0.0";
     return `
-    <tr class="border-t hover:bg-slate-50">
+    <tr class="border-t hover:bg-slate-50" style="--i:${i}">
       <td class="donut-legend-name">
-        <span class="donut-legend-dot" style="background:${_PIE_COLORS[i % _PIE_COLORS.length]}"></span>
+        <span class="donut-legend-dot" style="background:${r._others ? '#64748b' : _PIE_COLORS[i % _PIE_COLORS.length]}"></span>
         <span class="donut-legend-body">
           <span class="donut-legend-text">${esc(r.label)}</span>${platformTag(r)}
         </span>
@@ -14550,7 +14698,7 @@ function donutChart(rows, valueKey, opts) {
 
   return `
     <div class="flex items-center gap-3 donut-legend">
-      <svg viewBox="0 0 160 160" class="w-32 h-32 shrink-0">${arcs}</svg>
+      <svg viewBox="0 0 160 160" class="w-32 h-32 shrink-0 donut-anim">${arcs}</svg>
       <div class="flex-1 min-w-0 max-h-56 overflow-auto">
         <table class="donut-legend-table">
           <colgroup>
@@ -14584,8 +14732,10 @@ function trendChart(rows) {
   const line = (key, color) => {
     const pts = rows.map((r, i) => `${x(i)},${y(r[key])}`).join(" ");
     const area = `${PAD},${H - PAD} ${pts} ${x(n - 1)},${H - PAD}`;
-    return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" pointer-events="none"></polyline>
-            <polygon points="${area}" fill="${color}" opacity="0.10" pointer-events="none"></polygon>`;
+    // pathLength=1 把折线长度归一化，CSS 里 stroke-dasharray:1 +
+    // dashoffset 1→0 就是「从左往右描线」的入场动画（wbLineIn）。
+    return `<polyline class="trend-line" pathLength="1" points="${pts}" fill="none" stroke="${color}" stroke-width="2" pointer-events="none"></polyline>
+            <polygon class="trend-area" points="${area}" fill="${color}" opacity="0.10" pointer-events="none"></polygon>`;
   };
 
   const grid = [0, 0.25, 0.5, 0.75, 1].map(f => {
@@ -14604,8 +14754,8 @@ function trendChart(rows) {
     const tip = `<b>${esc(r.bucket)}</b><br>输入 ${fmtNum(r.prompt_tokens)} · 输出 ${fmtNum(r.completion_tokens)}<br>请求 ${fmtNum(r.requests)} · 积分 ${fmtCredit(r.credits)}`;
     const cx = x(i);
     const dots = `
-      <circle cx="${cx}" cy="${y(r.prompt_tokens)}" r="2.5" fill="#3b82f6" pointer-events="none"></circle>
-      <circle cx="${cx}" cy="${y(r.completion_tokens)}" r="2.5" fill="#22c55e" pointer-events="none"></circle>`;
+      <circle class="trend-dot" style="--i:${i}" cx="${cx}" cy="${y(r.prompt_tokens)}" r="2.5" fill="#3b82f6" pointer-events="none"></circle>
+      <circle class="trend-dot" style="--i:${i}" cx="${cx}" cy="${y(r.completion_tokens)}" r="2.5" fill="#22c55e" pointer-events="none"></circle>`;
     return `<g class="chart-hit" onmousemove="showTip(event, ${jsv(tip)})" onmouseleave="hideTip()">
       ${dots}
       <circle cx="${cx}" cy="${H / 2}" r="${Math.max(8, (W - PAD * 2) / Math.max(1, n) / 2)}" fill="transparent"></circle>
