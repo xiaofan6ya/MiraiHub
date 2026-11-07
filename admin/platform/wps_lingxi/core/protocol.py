@@ -136,8 +136,8 @@ def normalize_usage(usage: dict | None) -> dict:
         nested = usage.get("prompt_tokens_details")
         if isinstance(nested, dict):
             cached = _int(nested.get("cached_tokens"))
-    if cached > 0:
-        out["prompt_tokens_details"] = {"cached_tokens": cached}
+    # 0 也要写：0 是「本次没命中缓存」的真实值，缺字段会让调用方以为没透传
+    out["prompt_tokens_details"] = {"cached_tokens": cached}
     reasoning = _int(usage.get("reasoning_tokens"))
     if not reasoning:
         nested = usage.get("completion_tokens_details")
@@ -774,7 +774,13 @@ class FoldAccumulator:
 # Anthropic / Responses 入口翻译
 # ---------------------------------------------------------------------------
 def anthropic_to_openai(body: dict) -> dict:
-    """Anthropic `/v1/messages` → OpenAI `chat/completions`。"""
+    """Anthropic `/v1/messages` → OpenAI `chat/completions`。
+
+    工具也要一起搬：Anthropic 的 `tools[].input_schema` 对应 OpenAI 的
+    `tools[].function.parameters`；assistant 的 `tool_use` 块对应
+    `tool_calls`；user 的 `tool_result` 块对应 `role=tool` 的消息。
+    少搬任何一处，模型就会回「我没有可用的工具」。
+    """
     out: dict = {"model": body.get("model") or ""}
     messages: list[dict] = []
 
@@ -792,26 +798,78 @@ def anthropic_to_openai(body: dict) -> dict:
             continue
         role = str(item.get("role") or "user")
         content = item.get("content")
+        texts: list[str] = []
+        tool_calls: list[dict] = []
+        tool_results: list[dict] = []
         if isinstance(content, list):
-            parts = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 kind = block.get("type")
                 if kind == "text":
-                    parts.append(str(block.get("text") or ""))
+                    texts.append(str(block.get("text") or ""))
+                elif kind == "tool_use":
+                    tool_calls.append({
+                        "id": str(block.get("id") or "call_%d" % len(tool_calls)),
+                        "type": "function",
+                        "function": {
+                            "name": str(block.get("name") or ""),
+                            "arguments": json.dumps(block.get("input") or {},
+                                                    ensure_ascii=False),
+                        },
+                    })
                 elif kind == "tool_result":
                     inner = block.get("content")
-                    if isinstance(inner, str):
-                        parts.append(inner)
-                    elif isinstance(inner, list):
-                        parts.append("".join(
-                            str(part.get("text") or "") for part in inner
-                            if isinstance(part, dict)))
-            content = "".join(parts)
+                    if isinstance(inner, list):
+                        inner = "".join(str(part.get("text") or "")
+                                        for part in inner
+                                        if isinstance(part, dict))
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": str(block.get("tool_use_id") or ""),
+                        "content": inner if isinstance(inner, str) else "",
+                    })
+            content = "".join(texts)
+        # 工具结果回应的是上一条 assistant 的 tool_calls，必须先落
+        messages.extend(tool_results)
+        if tool_calls and role == "assistant":
+            messages.append({"role": "assistant",
+                             "content": content if isinstance(content, str) else "",
+                             "tool_calls": tool_calls})
+            continue
         if content is None or (isinstance(content, str) and not content.strip()):
             continue
         messages.append({"role": role, "content": content})
+
+    # 工具定义：Anthropic `input_schema` → OpenAI `function.parameters`
+    tools: list[dict] = []
+    for tool in (body.get("tools") or []):
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        schema = tool.get("input_schema")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+        tools.append({"type": "function",
+                      "function": {"name": name,
+                                   "description": str(tool.get("description") or ""),
+                                   "parameters": schema}})
+    if tools:
+        out["tools"] = tools
+        choice = body.get("tool_choice")
+        if isinstance(choice, dict):
+            kind = str(choice.get("type") or "")
+            if kind == "any":
+                out["tool_choice"] = "required"
+            elif kind == "tool" and choice.get("name"):
+                out["tool_choice"] = {"type": "function",
+                                      "function": {"name": str(choice["name"])}}
+            elif kind == "auto":
+                out["tool_choice"] = "auto"
+        elif isinstance(choice, str) and choice in ("auto", "any", "none"):
+            out["tool_choice"] = "required" if choice == "any" else choice
 
     out["messages"] = messages
     for src, dst in (("max_tokens", "max_tokens"),
@@ -821,9 +879,37 @@ def anthropic_to_openai(body: dict) -> dict:
         if body.get(src) is not None:
             out[dst] = body[src]
     return out
+def _cached_tokens(usage: dict) -> int:
+    """上游给过的缓存命中 token；没有就 0，不编造。"""
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        try:
+            return int(details.get("cached_tokens") or 0)
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(usage.get("cached_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _anthropic_usage(usage: dict) -> dict:
+    """OpenAI usage → Anthropic usage。
+
+    Anthropic 把缓存命中放在 `cache_read_input_tokens`，不是
+    `prompt_tokens_details`。上游给 0 就写 0，不假装命中。
+    """
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    cached = _cached_tokens(usage)
+    out = {"input_tokens": prompt, "output_tokens": completion}
+    if cached:
+        out["cache_read_input_tokens"] = cached
+    return out
 
 
 def openai_to_anthropic(result: dict, model: str) -> dict:
+    """OpenAI 结果 → Anthropic `/v1/messages` 响应（含 tool_use 块）。"""
     choices = result.get("choices") or []
     first = choices[0] if choices else {}
     message = first.get("message") or {}
@@ -831,22 +917,55 @@ def openai_to_anthropic(result: dict, model: str) -> dict:
     if not isinstance(text, str):
         text = ""
     usage = result.get("usage") or {}
+
+    content_blocks: list[dict] = []
+    if text.strip():
+        content_blocks.append({"type": "text", "text": text})
+    for index, call in enumerate(message.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        raw_args = fn.get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args) if raw_args.strip() else {}
+            except Exception:  # noqa: BLE001 - 上游偶尔给半截 JSON
+                parsed = {"_raw": raw_args}
+        elif isinstance(raw_args, dict):
+            parsed = raw_args
+        else:
+            parsed = {}
+        content_blocks.append({
+            "type": "tool_use",
+            "id": str(call.get("id") or "toolu_%d" % index),
+            "name": str(fn.get("name") or ""),
+            "input": parsed,
+        })
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
+
+    finish = first.get("finish_reason")
+    if message.get("tool_calls") or finish == "tool_calls":
+        stop_reason = "tool_use"
+    elif finish in (None, "stop"):
+        stop_reason = "end_turn"
+    elif finish == "length":
+        stop_reason = "max_tokens"
+    else:
+        stop_reason = str(finish)
+
     return {
         "id": result.get("id") or ("msg_%d" % int(time.time())),
         "type": "message",
         "role": "assistant",
         "model": model or result.get("model") or "",
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": ("end_turn"
-                        if first.get("finish_reason") in (None, "stop")
-                        else str(first.get("finish_reason"))),
+        "content": content_blocks,
+        "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                  "output_tokens": int(usage.get("completion_tokens") or 0)},
+        "usage": _anthropic_usage(usage),
     }
-
-
 def responses_request_to_openai(body: dict) -> dict:
+    """Responses 请求 → OpenAI chat 请求（含 instructions / tools）。"""
     model = str(body.get("model") or "")
     raw = body.get("input")
     messages: list[dict] = []
@@ -855,6 +974,32 @@ def responses_request_to_openai(body: dict) -> dict:
     elif isinstance(raw, list):
         for item in raw:
             if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "")
+            if kind == "function_call_output":
+                messages.append({"role": "tool",
+                                 "tool_call_id": str(item.get("call_id") or ""),
+                                 "content": str(item.get("output") or "")})
+                continue
+            if kind == "function_call":
+                # Responses 的 function_call 必须变成 assistant.tool_calls，
+                # 否则后面的 role=tool 会「没有对应的 tool_calls」——
+                # 上游直接回 AI服务异常（502）。
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": str(item.get("call_id") or item.get("id") or "call_0"),
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("name") or ""),
+                            "arguments": (item.get("arguments")
+                                          if isinstance(item.get("arguments"), str)
+                                          else json.dumps(item.get("arguments") or {},
+                                                          ensure_ascii=False)),
+                        },
+                    }],
+                })
                 continue
             role = item.get("role") or "user"
             content = item.get("content")
@@ -866,6 +1011,10 @@ def responses_request_to_openai(body: dict) -> dict:
                 messages.append({"role": role, "content": content})
     if not messages:
         messages.append({"role": "user", "content": ""})
+    instructions = body.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        messages.insert(0, {"role": "system", "content": instructions})
+
     out = {"model": model, "messages": messages}
     if body.get("max_output_tokens") is not None:
         out["max_tokens"] = body["max_output_tokens"]
@@ -873,34 +1022,93 @@ def responses_request_to_openai(body: dict) -> dict:
         out["max_tokens"] = body["max_tokens"]
     if body.get("temperature") is not None:
         out["temperature"] = body["temperature"]
+
+    tools: list[dict] = []
+    for tool in (body.get("tools") or []):
+        if not isinstance(tool, dict):
+            continue
+        if str(tool.get("type") or "function") != "function":
+            continue
+        name = str(tool.get("name") or (tool.get("function") or {}).get("name") or "")
+        if not name:
+            continue
+        params = tool.get("parameters")
+        if not isinstance(params, dict):
+            params = (tool.get("function") or {}).get("parameters")
+        if not isinstance(params, dict):
+            params = {"type": "object", "properties": {}}
+        tools.append({"type": "function",
+                      "function": {"name": name,
+                                   "description": str(tool.get("description") or ""),
+                                   "parameters": params}})
+    if tools:
+        out["tools"] = tools
+        choice = body.get("tool_choice")
+        if isinstance(choice, str) and choice in ("auto", "required", "none"):
+            out["tool_choice"] = choice
+        elif isinstance(choice, dict) and choice.get("name"):
+            out["tool_choice"] = {"type": "function",
+                                  "function": {"name": str(choice["name"])}}
     return out
+def _responses_usage(usage: dict) -> dict:
+    """OpenAI usage → Responses usage（缓存命中放 input_tokens_details）。"""
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    total = int(usage.get("total_tokens") or (prompt + completion))
+    details = {"cached_tokens": _cached_tokens(usage)}
+    return {"input_tokens": prompt,
+            "input_tokens_details": details,
+            "output_tokens": completion,
+            "total_tokens": total}
 
 
 def openai_to_responses(result: dict, model: str) -> dict:
+    """OpenAI 结果 → Responses 对象（含 function_call 输出项）。"""
     choices = result.get("choices") or []
     first = choices[0] if choices else {}
     message = first.get("message") or {}
     text = message.get("content") or ""
     usage = result.get("usage") or {}
     rid = "resp_" + str(result.get("id") or int(time.time()))
+
+    output_items: list[dict] = []
+    if isinstance(text, str) and text.strip():
+        output_items.append({
+            "type": "message", "id": "msg_" + rid[-12:], "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text,
+                         "annotations": []}],
+        })
+    for index, call in enumerate(message.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        raw_args = fn.get("arguments")
+        output_items.append({
+            "type": "function_call",
+            "id": "fc_" + str(call.get("id") or index)[-12:],
+            "call_id": str(call.get("id") or ""),
+            "name": str(fn.get("name") or ""),
+            "arguments": (raw_args if isinstance(raw_args, str)
+                          else json.dumps(raw_args or {}, ensure_ascii=False)),
+            "status": "completed",
+        })
+    if not output_items:
+        output_items.append({
+            "type": "message", "id": "msg_" + rid[-12:], "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "", "annotations": []}],
+        })
+
     return {
         "id": rid,
         "object": "response",
         "created_at": result.get("created") or int(time.time()),
         "status": "completed",
         "model": model or result.get("model") or "",
-        "output": [{
-            "type": "message", "id": "msg_" + rid[-12:], "status": "completed",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": text,
-                         "annotations": []}],
-        }],
-        "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
-                  "output_tokens": int(usage.get("completion_tokens") or 0),
-                  "total_tokens": int(usage.get("total_tokens") or 0)},
+        "output": output_items,
+        "usage": _responses_usage(usage),
     }
-
-
 def estimate_tokens(text: str) -> int:
     """粗估 token：中文约 1.5 字/token，英文约 4 字符/token。"""
     return max(1, int(len(text or "") / 2.2))

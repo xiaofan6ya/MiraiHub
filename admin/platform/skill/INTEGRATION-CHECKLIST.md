@@ -419,3 +419,29 @@ sid = pool.stable_session_id(
 > `chat_id = "gwchat-" + uuid4().hex[:16]`、Qoder `build_upstream_body()` 里
 > `session_id = "sess-" + uuid4().hex[:16]`、`proxy._turn_headers()` 在客户端
 > 没给会话标识时留空 —— 三处都等于"每请求新会话"。详见 FIXED-BUGS 五·补47。
+
+---
+
+## 对话链路验收：harness_chat.py（必须跑，不是可选）
+
+「能回一句话」不算通过。新平台接入后，必须用真实模型跑一遍**工具闭环 + 用量核对**：
+
+`ash
+python admin/platform/skill/scripts/harness_chat.py \
+  --platform wps-lingxi \
+  --model deepseek-v4.1-flash-wps-lingxi \
+  --user ADMIN_USER --password ADMIN_PASS
+`
+
+它会依次验证三条协议，每条都做**两轮**（发起工具调用 → 把工具结果喂回去）：
+
+| 断言 | 为什么必须有 |
+|---|---|
+| 返回 	ool_calls / 	ool_use / unction_call | 只吐字说明工具没透传，用户拿到的就是「我没有工具」 |
+| 工具参数是合法 JSON | 结构压平没做对时上游只回「AI服务异常」 |
+| 工具结果回灌后给出最终答复 | 证明 	ool / 	ool_result / unction_call_output 能正确回传 |
+| prompt/completion/total tokens > 0 | 用量真的从上游回来了 |
+| 缓存命中字段存在（0 也算） | 0 是「没命中」的真实值；**缺字段**说明没透传 |
+
+退出码 0 = 全绿。建议把这一步写进平台目录的 README（记录当时的模型与结果），
+下次改协议层时可以对照回归。
