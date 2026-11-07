@@ -494,6 +494,97 @@ def _note_of(dropped: int) -> dict:
 # ---------------------------------------------------------------------------
 # 上游请求体
 # ---------------------------------------------------------------------------
+def normalize_messages(messages: list) -> list[dict]:
+    """把各家客户端的 messages 收成上游只认的形状。
+
+    ## 为什么必须收
+
+    不同客户端发过来的消息「方言」不一样，而上游 agent-runtime 只认
+    `system / user / assistant / tool` 这四种 role、只认字符串 content：
+
+      * **`role: "developer"`** —— OpenAI 新规范（o 系列 / 新 SDK 都这么发）。
+        DSH 这类客户端首发就是 developer 角色，上游直接回 400「参数错误」。
+        处理：并入 `system`（语义等价，上游没有 developer 这一档）。
+      * **content 是块数组**（`[{"type":"text","text":...}]`）—— 上游要字符串，
+        传数组同样 400。处理：抽出 text 拍平。
+      * **`tool` 消息缺 `tool_call_id`** —— 上游按「找不到对应调用」拒绝。
+      * 多余的字段（`name` / `cache_control` / `annotations`）上游不认，
+        一律丢掉，只留它认识的键。
+
+    这条链路的历史教训与 MiniMax 平台完全一致（见 1.0.7 的 developer 根因修复）：
+    **别指望客户端守上游的规矩，网关负责翻译。**
+    """
+    out: list[dict] = []
+    systems: list[str] = []
+
+    def _text_of(content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    kind = str(block.get("type") or "")
+                    if kind in ("text", "input_text", "output_text"):
+                        value = block.get("text")
+                        if isinstance(value, str) and value:
+                            parts.append(value)
+                    elif isinstance(block.get("content"), str):
+                        parts.append(block["content"])
+            return "\n".join(parts)
+        if isinstance(content, dict):
+            value = content.get("text")
+            return value if isinstance(value, str) else json.dumps(
+                content, ensure_ascii=False)
+        return str(content)
+
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip().lower()
+        if role in ("developer", "system"):
+            text = _text_of(item.get("content")).strip()
+            if text:
+                systems.append(text)
+            continue
+        if role not in ("user", "assistant", "tool"):
+            role = "user"
+        text = _text_of(item.get("content"))
+        msg: dict = {"role": role, "content": text}
+        if role == "assistant":
+            calls = item.get("tool_calls")
+            if isinstance(calls, list) and calls:
+                cleaned = []
+                for index, call in enumerate(calls):
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    args = fn.get("arguments")
+                    if not isinstance(args, str):
+                        args = json.dumps(args if args is not None else {},
+                                          ensure_ascii=False)
+                    cleaned.append({
+                        "id": str(call.get("id") or "call_%d" % index),
+                        "type": "function",
+                        "function": {"name": str(fn.get("name") or ""),
+                                     "arguments": args},
+                    })
+                if cleaned:
+                    msg["tool_calls"] = cleaned
+        elif role == "tool":
+            msg["tool_call_id"] = str(item.get("tool_call_id") or "")
+        out.append(msg)
+
+    # system 合并成一条放最前面（上游对多条 system 的处理不一致）
+    if systems:
+        out.insert(0, {"role": "system", "content": "\n\n".join(systems)})
+    return out
+
+
 def build_agent_body(body: dict, *, client_type: str = "",
                      session_mode: str = "") -> dict:
     """客户端请求 → 上游 agent-runtime 请求体。
@@ -505,7 +596,7 @@ def build_agent_body(body: dict, *, client_type: str = "",
     return dict(
         {"stream": True, "model": model},
         **{
-            "messages": body.get("messages") or [],
+            "messages": normalize_messages(body.get("messages") or []),
             **({"tools": body["tools"]} if body.get("tools") else {}),
             **({"tool_choice": body["tool_choice"]}
                if body.get("tool_choice") is not None and body.get("tools") else {}),
