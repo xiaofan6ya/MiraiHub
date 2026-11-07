@@ -299,6 +299,11 @@ try:
     app.include_router(loomy_accounts_router.router)
 except Exception:  # noqa: BLE001 - loomy 目录被裁剪时降级为不挂载
     logger.exception("Loomy 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.freebuff.routers import accounts as freebuff_accounts_router
+    app.include_router(freebuff_accounts_router.router)
+except Exception:  # noqa: BLE001 - freebuff 目录被裁剪时降级为不挂载
+    logger.exception("Freebuff 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1":
     from admin.routers import app_source
     app.include_router(app_source.router)

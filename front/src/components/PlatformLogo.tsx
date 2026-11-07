@@ -17,6 +17,15 @@ const RASTER: Record<string, { src: string }> = {
   loomy: { src: loomy256 },
 }
 
+/**
+ * 补充品牌矢量（彩色）：上游只有位图/固定色素材时放这里。
+ * freebuff 用官方 icon.svg 的两个 polygon（品牌绿，自带配色，深浅色通用）。
+ */
+const EXTRA: Record<string, string> = {
+  freebuff:
+    '<svg viewBox="0 0 77.18 77.19" aria-hidden="true"><polygon points="77.18 0 77.18 19.3 19.3 19.3 19.3 77.19 0 77.19 0 0 77.18 0" fill="#22c55e"></polygon><polygon points="63.62 24.89 63.62 44.19 44.32 44.19 44.32 77.19 25.03 77.19 25.03 24.89 63.62 24.89" fill="#16a34a"></polygon></svg>',
+}
+
 /** 平台 id → 图标 key：同产品的多个区共用同一图标 */
 const ALIASES: Record<string, string> = {
   trae: 'trae',
@@ -30,6 +39,8 @@ const ALIASES: Record<string, string> = {
   loomy: 'loomy',
   'loomy-cn': 'loomy',
   'loomy-intl': 'loomy',
+  freebuff: 'freebuff',
+  'freebuff-cn': 'freebuff',
 }
 
 /** 兜底：九宫格轮廓（不用「加号」，避免被误解为「新建平台」） */
@@ -39,7 +50,7 @@ const FALLBACK =
 function resolveIcon(id?: string): string {
   const key = String(id ?? '').toLowerCase()
   const k = ALIASES[key] ?? key
-  return ICONS[k] ?? (RASTER[k] ? `<img src="${RASTER[k].src}" alt="" loading="lazy" decoding="async" />` : FALLBACK)
+  return ICONS[k] ?? EXTRA[k] ?? (RASTER[k] ? `<img src="${RASTER[k].src}" alt="" loading="lazy" decoding="async" />` : FALLBACK)
 }
 
 interface Props {

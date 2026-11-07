@@ -19,6 +19,7 @@ BUILTIN = (
     "admin.platform.trae",
     "admin.platform.qoder",
     "admin.platform.loomy",
+    "admin.platform.freebuff",
 )
 
 _loaded: list[str] = []
