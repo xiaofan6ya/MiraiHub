@@ -56,8 +56,17 @@
 | 账号池 11 项 | ✅ 导入 / 导出 / 探活 / 健康检查 / 用量 |
 | 本机客户端扫描 | ✅ Windows（DPAPI + AES-256-GCM）/ macOS（明文 `value` 列） |
 | 每日签到 | ✅ 任务中心 `daily_check_in`，奖励按**领前/领后余额差**计算 |
+| 每日活跃对话 | ✅ `wps_lingxi_activity`：每天真发一条办公场景对话（串行 + 抖动 + 85% 概率 + 偶尔追问），记账进 `usage_logs` |
+| 会话保活 | ✅ `wps_lingxi_keepalive`：校验 Cookie + 同步智点（上游没有 refresh 接口，保活只能到这一步） |
+| 失效复检 | ✅ `wps_lingxi_ban_recheck`：disabled 的号探活通过即恢复 |
+| 用量详情 | ✅ 上游 `credits/balance` + `credits/transaction_summary` + 本地按模型聚合 |
+| 使用日志 | ✅ 上游 `agents/run_records` + 本地 `usage_logs`（两份可对照） |
 | 一次性任务 | ⚠️ 只领 `status=claimable` 的；需要「做动作」的（专家模式 / 建群 / 下载客户端）如实跳过 |
 | Cookie 刷新 | ❌ 上游没有 refresh 接口 —— 过期只能重新粘贴 |
+
+> **为什么保活必须带「活跃对话」**：签到只证明点过按钮，刷智点只证明有人查了余额。
+> 上游看的是账号自己的对话行为 —— 只有管理接口、没有一条对话的号，正是最典型的
+> 「机器在养号」形状。所以 `wps_lingxi_activity` 不是可选项。
 
 ---
 
@@ -77,8 +86,14 @@ GET  /api/wps-lingxi/scan                 扫描本机（不含 Cookie）
 POST /api/wps-lingxi/import               导入单条
 POST /api/wps-lingxi/import-batch         批量导入（数组 / JSON / JSONL）
 POST /api/wps-lingxi/import-local         导入本机账号
-POST /api/wps-lingxi/keepalive            全量探活
+POST /api/wps-lingxi/keepalive            全量探活 + 同步智点
 POST /api/wps-lingxi/checkin              签到
+POST /api/wps-lingxi/activity             补跑一次「每日活跃对话」
+POST /api/wps-lingxi/ban-recheck          失效账号复检
+GET  /api/wps-lingxi?page_size=200        账号列表（控制台「用量明细」入口）
+GET  /api/wps-lingxi/usage/detail?days=30 用量详情（上游流水 + 本地聚合）
+GET  /api/wps-lingxi/usage/logs?days=7    使用日志（本地账本；source=both 对照上游）
+GET  /api/wps-lingxi/{id}/request-usage   单个账号的上游调用明细
 GET  /api/wps-lingxi/export?reveal=0      导出（默认脱敏）
 GET  /api/wps-lingxi/usage?days=30        用量
 ```
