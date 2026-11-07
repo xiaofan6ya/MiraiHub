@@ -317,8 +317,14 @@ def _first_text(result: dict) -> str:
 # ---------------------------------------------------------------------------
 # 批量入口（定时任务）
 # ---------------------------------------------------------------------------
-def run_daily_activity(db, realm: str = "", *, limit: int | None = None) -> dict:
-    """给该平台每个启用账号发一条自然对话（**串行 + 抖动**）。"""
+def run_daily_activity(db, realm: str = "", *, limit: int | None = None,
+                       force: bool = False) -> dict:
+    """给该平台每个启用账号发一条自然对话（**串行 + 抖动**）。
+
+    `force=True` 用于**手动点按钮**：跳过「今天没打开」的概率掷骰 ——
+    用户既然点了「活跃对话」，就是要现在发一条，不是来看「概率跳过」的。
+    「今天已经活跃过」仍然跳过（补发没有意义，只会多一条机器特征）。
+    """
     if not _enabled():
         return {"task": TASK_NAME, "ok": True, "done": 0, "skipped": 0,
                 "failed": 0, "summary": "每日活跃已关闭（ADMIN_WPS_LINGXI_ACTIVITY=0）"}
@@ -333,7 +339,8 @@ def run_daily_activity(db, realm: str = "", *, limit: int | None = None) -> dict
         return {"task": TASK_NAME, "ok": True, "total": 0,
                 "summary": "没有启用的 WPS 灵犀账号"}
 
-    probability = _probability()
+    # 手动触发时不做「今天没打开」的概率跳过；定时任务仍按概率走。
+    probability = 1.0 if force else _probability()
     gap = _gap_seconds()
     done = skipped = failed = 0
     detail: list[dict] = []

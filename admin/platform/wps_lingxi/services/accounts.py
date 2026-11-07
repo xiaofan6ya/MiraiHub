@@ -350,6 +350,125 @@ def import_record(db: Session, record, *, probe: bool = True) -> dict:
             "account_id_label": account_key, "probe": probe_result}
 
 
+def import_batch(db: Session, text: str, *, on_progress=None,
+                 probe: bool = True) -> dict:
+    """批量导入：控制台「导入账号」粘贴框 / 备份文件走的入口。
+
+    ## 为什么必须接受「裸 Cookie 行」
+
+    灵犀的凭证形态就是一串 `wps_sid=…; uid=…`，用户从 DevTools 复制出来
+    根本不会是 JSON。所以这里按「逐条猜」的顺序解析：
+
+      1. 整段是 JSON 数组 → 每条一个记录；
+      2. 整段是 JSON 对象 → 可能是 `{"accounts":[...]}` 包装，也可能是单条；
+      3. 逐行 JSON（JSONL，导出文件的形态）；
+      4. 逐行**裸 Cookie**（含 `wps_sid=` 的行）—— 粘贴最常见的形式。
+
+    上游探测失败**不阻断落库**（`import_record` 自己会带原因），
+    这样「Cookie 可能过期但先存着」的用法也能成立。
+    """
+    import json as _json
+
+    records: list = []
+    body = (text or "").strip()
+    if not body:
+        return {"ok": False, "added": 0, "updated": 0, "failed": 0, "total": 0,
+                "errors": ["没有内容"]}
+
+    parsed = None
+    try:
+        parsed = _json.loads(body)
+    except Exception:  # noqa: BLE001 - 不是整段 JSON，走逐行解析
+        parsed = None
+
+    if isinstance(parsed, list):
+        records = [item for item in parsed if isinstance(item, (dict, str))]
+    elif isinstance(parsed, dict):
+        inner = parsed.get("accounts") or parsed.get("items")
+        if isinstance(inner, list):
+            records = [item for item in inner if isinstance(item, (dict, str))]
+        else:
+            records = [parsed]
+    else:
+        for line in body.splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line in ("[", "]"):
+                continue
+            try:
+                item = _json.loads(line)
+            except Exception:  # noqa: BLE001 - 就当裸 Cookie 行
+                if "wps_sid=" in line or line.count("=") >= 1:
+                    records.append(line)
+                continue
+            if isinstance(item, (dict, str)):
+                records.append(item)
+
+    total = len(records)
+    added = updated = failed = 0
+    errors: list[str] = []
+    for index, record in enumerate(records, 1):
+        try:
+            # 先判断这条是新增还是更新（import_record 按 uid/account_key 幂等）
+            existed = False
+            try:
+                existing = _existing_of(db, record)
+                existed = existing is not None
+            except Exception:  # noqa: BLE001
+                existed = False
+            result = import_record(db, record, probe=probe)
+            if result.get("ok"):
+                if existed:
+                    updated += 1
+                else:
+                    added += 1
+            else:
+                # 落库了但探活失败：算「导入成功、探活失败」，如实记一条
+                if existed:
+                    updated += 1
+                else:
+                    added += 1
+                error = (result.get("error") or {}).get("message") \
+                    if isinstance(result.get("error"), dict) else result.get("error")
+                if error and len(errors) < 200:
+                    errors.append("%s：%s" % (result.get("uid") or "?", error))
+        except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
+            failed += 1
+            if len(errors) < 200:
+                errors.append(str(exc)[:160])
+        if callable(on_progress):
+            try:
+                on_progress(index, total,
+                            "已导入 %d/%d（新增 %d，更新 %d，失败 %d）"
+                            % (index, total, added, updated, failed))
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {"ok": failed == 0, "added": added, "updated": updated,
+            "failed": failed, "total": total, "errors": errors}
+
+
+def _existing_of(db: Session, record):
+    """这条记录是不是已经在库里（用来区分新增 / 更新）。"""
+    raw = record
+    if isinstance(record, dict):
+        raw = (record.get("cookie") or record.get("credential")
+               or record.get("wps_sid") or record.get("sid") or record.get("raw") or "")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    parsed = protocol.parse_cookie(raw)
+    uid = parsed["uid"]
+    if uid:
+        row = db.query(Account).filter(Account.platform == PLATFORM,
+                                       Account.uid == uid).first()
+        if row is not None:
+            return row
+    key = parsed["account_id"]
+    if key:
+        return db.query(Account).filter(Account.platform == PLATFORM,
+                                        Account.name == key).first()
+    return None
+
+
 def export_records(db: Session, realm: str = "", *, reveal: bool = False) -> dict:
     """导出账号。
 
@@ -538,7 +657,13 @@ def _read_cookies(path: str) -> dict:
 
 
 def scan_local() -> dict:
-    """扫描本机灵犀客户端登录态（**不返回 Cookie 明文**）。"""
+    """扫描本机灵犀客户端登录态（**不返回 Cookie 明文**）。
+
+    返回字段按控制台的通用扫描渲染对齐（`showScanResult`）：
+    顶层 `can_import`，每项 `uid` / `name` / `has_plain_credential` / `path` /
+    `realm`。少了 `can_import` 就不会出现「导入这些凭证」按钮，
+    少了 `has_plain_credential` 行首就没有勾选框 —— 表现都是「啥也不能干」。
+    """
     items: list[dict] = []
     errors: list[str] = []
     dbs = cookie_dbs()
@@ -548,7 +673,8 @@ def scan_local() -> dict:
                 if not dirs else
                 "找到客户端目录但没有 Cookies 库（%s），先在灵犀客户端登录一次"
                 % "、".join(dirs))
-        return {"items": [], "errors": [], "dbs": 0, "hint": hint}
+        return {"items": [], "errors": [], "dbs": 0, "can_import": False,
+                "hint": hint}
     for path in dbs:
         try:
             values = _read_cookies(path)
@@ -558,26 +684,43 @@ def scan_local() -> dict:
         sid = values.get("wps_sid") or ""
         if len(sid) < 16:
             continue
+        uid = values.get("uid") or ""
         items.append({
             "path": path,
             "host": values.get("_host") or "",
-            "uid": values.get("uid") or "",
+            "uid": uid,
+            "name": ("wps-" + uid) if uid else "灵犀客户端登录态",
+            "realm": "cn",
             "sid_tail": sid[-4:],
             "has_sid": True,
+            # 控制台的勾选框与「导入这些凭证」按钮都看这两个字段
+            "has_plain_credential": True,
+            "can_import": True,
             "usable": True,
+            "note": "来自本机灵犀客户端 Cookies",
         })
-    return {"items": items, "errors": errors, "dbs": len(dbs)}
+    return {"items": items, "errors": errors, "dbs": len(dbs),
+            "can_import": bool(items)}
 
 
-def import_local(db: Session, *, probe: bool = True) -> dict:
-    """把扫描到的本机登录态导入账号池。"""
+def import_local(db: Session, *, probe: bool = True,
+                 uids: list[str] | None = None) -> dict:
+    """把扫描到的本机登录态导入账号池（可按 uids 只导勾选的）。"""
     if not cookie_dbs():
         return {"ok": False, "imported": 0,
                 "reason": "没有找到 WPS 灵犀客户端 Cookie 库",
                 "hint": "先在灵犀客户端登录，或改用「粘贴 Cookie」导入"}
+    wanted = {str(item).strip() for item in (uids or []) if str(item).strip()}
     imported = 0
     failed: list[str] = []
-    for item in scan_local().get("items") or []:
+    scanned = scan_local().get("items") or []
+    if wanted:
+        scanned = [item for item in scanned
+                   if str(item.get("uid") or "") in wanted]
+        if not scanned:
+            return {"ok": False, "imported": 0,
+                    "reason": "本机凭证不在勾选范围内，未导入"}
+    for item in scanned:
         try:
             values = _read_cookies(item["path"])
         except Exception as exc:  # noqa: BLE001

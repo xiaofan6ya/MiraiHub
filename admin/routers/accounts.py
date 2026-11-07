@@ -116,6 +116,8 @@ def _platform_import_module(storage: str):
         "loomy": "admin.platform.loomy.services.accounts",
         "raccoon": "admin.platform.raccoon.services.accounts",
         "minimax": "admin.platform.minimax.services.accounts",
+        "wps-lingxi": "admin.platform.wps_lingxi.services.accounts",
+        "wps_lingxi": "admin.platform.wps_lingxi.services.accounts",
     }
     modname = mapping.get((storage or "").lower())
     if not modname:
@@ -653,6 +655,24 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
                 # 幂等，分块结果与整包等价，但能一边导一边报进度。
                 records = _parse_backup_records(body.text)
                 if not records:
+                    # 有的平台凭证**不是 JSON**：灵犀的就是一行 `wps_sid=…`，
+                    # 用户在控制台粘贴框里粘的也是这一段。解析不出记录时把原文
+                    # 整段交给平台 import_batch，由平台自己决定认不认 ——
+                    # 否则「粘贴 Cookie 导入」会 100% 报「没有解析出任何账号记录」。
+                    raw_text = (body.text or "").strip()
+                    if raw_text and hasattr(mod, "import_batch"):
+                        try:
+                            part = mod.import_batch(db, raw_text) or {}
+                        except Exception as exc:  # noqa: BLE001 - 单批失败要如实回
+                            return {"ok": False, "added": 0, "updated": 0,
+                                    "failed": 0, "total": 0,
+                                    "errors": [str(exc)[:160]]}
+                        return {"ok": bool(part.get("ok", True)),
+                                "added": int(part.get("added") or 0),
+                                "updated": int(part.get("updated") or 0),
+                                "failed": int(part.get("failed") or 0),
+                                "total": int(part.get("total") or 0),
+                                "errors": list(part.get("errors") or [])[:200]}
                     return {"ok": False, "added": 0, "updated": 0, "failed": 0,
                             "total": 0,
                             "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}

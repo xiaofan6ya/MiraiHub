@@ -154,15 +154,31 @@ def import_batch(body: BatchIn, _: bool = Depends(require_admin),
             "total": len(records), "results": results[:60]}
 
 
+@router.get("/scan-local")
 @router.get("/scan")
 def scan(_: bool = Depends(require_admin)):
+    """扫描本机灵犀客户端登录态。
+
+    路径 `scan-local` 是控制台「扫描本机」按钮的通用约定
+    （见 `platformScanLocal`），`scan` 是早期别名，两个都留着。
+    """
     return lingxi_accounts.scan_local()
 
 
+class ImportLocalIn(BaseModel):
+    #: 只导入勾选的 uid；为空 + all=true 则全量（控制台「导入这些凭证」）。
+    uids: list[str] | None = None
+    all: bool = True
+
+
 @router.post("/import-local")
-def import_local(probe: bool = False, _: bool = Depends(require_admin),
+def import_local(body: ImportLocalIn | None = None, probe: bool = False,
+                 _: bool = Depends(require_admin),
                  db: Session = Depends(get_db)):
-    return lingxi_accounts.import_local(db, probe=probe)
+    payload = body or ImportLocalIn()
+    return lingxi_accounts.import_local(
+        db, probe=probe,
+        uids=None if payload.all and not payload.uids else (payload.uids or []))
 
 
 @router.post("/keepalive")
@@ -211,8 +227,10 @@ def activity(realm: str = "", limit: int = 0, _: bool = Depends(require_admin),
     from admin.platform.wps_lingxi.platform_gateway import WpsLingxiAccountOps
 
     ops = WpsLingxiAccountOps(_realm_or_400(realm))
+    # force=True：用户手动点了「活跃对话」，就不该被 85% 概率掷骰跳过
     return lingxi_activity.run_daily_activity(db, ops.realm,
-                                              limit=int(limit) or None)
+                                              limit=int(limit) or None,
+                                              force=True)
 
 
 @router.post("/ban-recheck")
