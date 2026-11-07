@@ -335,6 +335,15 @@ def upsert(db: Session, record: dict) -> tuple[Account, bool]:
         db.add(account)
     db.commit()
     db.refresh(account)
+    # 入库后自动补刷额度（后台线程，不占请求；余额/到期写统一列），
+    # 用户进面板就能看到余额而不是 0 —— WorkBuddy 导入早有此行为，
+    # Trae 这边原来只落库不刷新，用户得手动点一次「刷新额度」。
+    try:
+        from admin.platform import shared as _shared
+        _shared.schedule_import_refresh(
+            "trae-intl" if realm == "intl" else "trae-cn", [account.id])
+    except Exception:  # noqa: BLE001 - 补刷排队失败不影响导入结果
+        pass
     return account, created
 
 

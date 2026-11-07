@@ -71,6 +71,9 @@
     // CodeArts：素材取自客户端 `resources/build/icon.png`（512×512 RGBA），
     // 紫色圆角底 + 白色图形 —— 自带底色，深浅主题都能直接用，tone=color。
     codearts: { src: "/admin/assets/logos/codearts-256.png", tone: "color" },
+    // MiniMax：素材取自客户端 asar `out/assets/logo/agentLogo.png`
+    // （128×128 RGBA 蓝渐变章鱼）放大到 256。自带底色，tone=color。
+    minimax: { src: "/admin/assets/logos/minimax-256.png", tone: "color" },
   };
 
   /* 兜底：不要用「加号」（看着像「新建平台」）。 */
@@ -102,6 +105,10 @@
     // CodeArts 只有一个区域（华为云 cn-north-4）
     codearts: "codearts",
     "codearts-cn": "codearts",
+    // MiniMax Code（中国站；国际版凭证走同一平台，domain 区分）
+    minimax: "minimax",
+    "minimax-cn": "minimax",
+    "minimax-en": "minimax",
   };
 
   function resolve(id) {

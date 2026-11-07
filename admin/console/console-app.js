@@ -3950,6 +3950,7 @@ function accReloadActive() {
   const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
   if (storage === "loomy") return loadLoomyAccounts(spec);
   if (storage === "codearts") return loadCodeArtsAccounts(spec);
+  if (storage === "minimax") return loadMinimaxAccounts(spec);
   if (storage === "trae") return loadTraeAccounts(spec);
   if (storage === "qoder") return loadQoderAccounts(spec);
   return loadAccounts();
@@ -4070,6 +4071,9 @@ async function loadAccounts() {
   }
   if (storage === "codearts") {
     return loadCodeArtsAccounts(platform);
+  }
+  if (storage === "minimax") {
+    return loadMinimaxAccounts(platform);
   }
   const r = await api("/api/accounts?" + accListQS()); if (!r.ok) return;
   // 从 Trae 切回默认平台时把表头/脚注还原（两平台列语义不同，必须显式复位）
@@ -4709,6 +4713,147 @@ async function codeartsTest(id) {
     <pre class="text-xs" style="background:var(--surface-2);padding:12px;border-radius:8px">${esc(lines.join("\n"))}</pre>`);
 }
 
+// ---- MiniMax Code（Anthropic 协议上游，积分 = 签到 credit details 求和）----
+
+async function loadMinimaxAccounts(platform) {
+  const r = await api("/api/minimax/accounts?" + accListQS());
+  const body = $("#accBody");
+  if (!r.ok) {
+    if (body) {
+      body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
+        <strong>读取 MiniMax 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+    }
+    return;
+  }
+  const d = await r.json();
+  const items = d.items || [];
+  _accData = items;
+  const active = items.filter(a => a.status === "active");
+  const remain = active.reduce((sum, i) => sum + (i.balance_remain || 0), 0);
+  const total = active.reduce((sum, i) => sum + (i.balance_total || 0), 0);
+
+  $("#overview").innerHTML = `
+    ${statCard("账号总数", items.length, { icon: "fa-users", iconColor: "text-slate-400",
+        sub: `启用 ${active.length}` + (items.length - active.length ? ` · 已禁用 ${items.length - active.length}` : "") })}
+    ${statCard("可用积分", fmtCredit(remain), { icon: "fa-wallet", iconColor: "text-slate-400",
+        tone: "brand", sub: `累计发放 ${fmtCredit(total)} · 签到积分 30 天有效` })}
+    ${statCard("可用模型", 4, { icon: "fa-cube", iconColor: "text-slate-400",
+        sub: "M2.7 / M2.7-highspeed / M3 / M3.1-Flash" })}
+    ${statCard("上游协议", "Anthropic Messages", { icon: "fa-plug", iconColor: "text-slate-400",
+        sub: "agent.minimax.cn · Bearer OAuth（自动续签）" })}`;
+
+  const headCount = $("#accHeadCount");
+  if (headCount) headCount.textContent = items.length;
+  const headBreak = $("#accHeadBreak");
+  if (headBreak) headBreak.textContent = `（启用 ${active.length}）`;
+
+  const head = $("#accTableHead");
+  if (head) {
+    head.innerHTML = `${pickAllTh()}<th class="col-name">账号</th><th class="col-status">状态</th>
+      <th class="col-balance text-right">可用积分</th><th class="col-extra text-right">累计发放</th>
+      <th class="col-expiry">凭证</th><th class="col-created">入库时间</th>
+      <th class="col-ops text-right">操作</th>`;
+    setAccOpsWidth(140);
+  }
+  const foot = $("#accFootNote");
+  if (foot) foot.textContent = "可用积分 = credit/details 各包 remaining_amount 求和（签到积分 30 天有效，仅 MiniMax Code 可用）";
+  const footHint = $("#accFootHint");
+  if (footHint) footHint.textContent = "凭证到期前 7 天自动用 refresh_token 续签（minimax_keepalive）";
+
+  accServerTabs({ total: items.length,
+    active: active.length,
+    disabled: items.filter(a => a.status !== "active").length });
+
+  if (body) {
+    body.innerHTML = items.map(a => withPick(minimaxRow(a), a.id)).join("") ||
+      `<tr><td colspan="8"><div class="account-empty">
+        <strong>还没有 MiniMax 账号</strong>点上方「扫描本机」（需 MiniMax Code 客户端登录过）或「授权登录」扫码。</div></td></tr>`;
+  }
+  const pager = $("#accPager");
+  if (pager) pager.innerHTML = "";
+  setSideDot("#sideExpiringDot", 0);
+}
+
+function minimaxRow(a) {
+  const ok = a.status === "active";
+  const status = !ok
+    ? '<span class="badge badge-warn">已禁用</span>'
+    : '<span class="badge badge-ok">已启用</span>';
+  const err = (a.last_err && ok)
+    ? `<small style="color:var(--danger)" data-tooltip="最近错误" data-tooltip-description="${esc(a.last_err)}">${esc(String(a.last_err).slice(0, 34))}</small>`
+    : "";
+  let credText = "—", credTone = "var(--fg-muted)";
+  if (a.expires_at_ms) {
+    const left = a.expires_at_ms - Date.now();
+    credText = left <= 0 ? "已过期（待续签）"
+      : `剩 ${a.expires_in_days ?? Math.round(left / 86400e3)} 天`;
+    credTone = left <= 0 ? "var(--danger)"
+      : (left < 7 * 86400e3 ? "var(--warn, #b45309)" : "var(--fg-muted)");
+  }
+  const credNote = a.has_refresh
+    ? `<div><small style="color:${credTone}">${esc(credText)} · refresh_token ✓</small></div>`
+    : `<div><small style="color:var(--danger)">无 refresh_token（无法自动续签）</small></div>`;
+
+  return `<tr>
+    <td class="c-name">
+      <div class="nm">
+        <b data-tooltip="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
+        <span class="c-uid" data-tooltip="MiniMax 用户/凭证标识" data-tooltip-description="${esc(a.uid || "（未提供）")}">${esc((a.uid || "—").slice(0, 12))}</span>
+        <span class="c-uid">${a.realm === "en" ? "国际版" : "中国版"}</span>
+        ${err}
+      </div>
+    </td>
+    <td class="col-status" data-label="状态">${status}</td>
+    <td class="tnum text-right font-medium" data-label="可用积分"
+        style="color:${a.balance_remain > 0 ? "var(--brand)" : "var(--danger)"}">${fmtCredit(a.balance_remain)}</td>
+    <td class="tnum text-right" data-label="累计发放"
+        style="color:var(--fg-muted)">${fmtCredit(a.balance_total)}</td>
+    <td class="col-expiry text-xs" data-label="凭证">${credNote}</td>
+    ${accCreatedCell(a)}
+    <td class="c-ops" data-label="操作">${[
+      [`minimaxRefresh(${a.id})`, "fa-rotate", "刷新积分明细"],
+      [`minimaxCheckin(${a.id})`, "fa-calendar-check", "立即签到"],
+      [`minimaxTest(${a.id})`, "fa-heart-pulse", "分段连通性检查"],
+    ].map(([fn, icon, title]) =>
+      `<button onclick="${fn}" class="acc-op-btn" data-tooltip="${title}" aria-label="${title}">${consoleIcon(icon)}</button>`
+    ).join("")}</td>
+  </tr>`;
+}
+
+async function minimaxRefresh(id) {
+  const r = await api(`/api/minimax/accounts/${id}/refresh`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (ok) {
+    toast(`已刷新：可用 ${fmtCredit(data.remain)} / 累计 ${fmtCredit(data.total)}`);
+    accReloadActive();
+  } else {
+    toast((data && data.detail) || "刷新失败", "err");
+  }
+}
+
+async function minimaxCheckin(id) {
+  const r = await api(`/api/minimax/accounts/${id}/checkin`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (ok) {
+    toast(`签到完成：+${fmtCredit(data.points || 0)} 积分`);
+    accReloadActive();
+  } else {
+    toast((data && data.detail) || "签到失败", "err");
+  }
+}
+
+async function minimaxTest(id) {
+  toast("正在检查（凭证 → 用户 → 对话）…");
+  const r = await api(`/api/minimax/accounts/${id}/test`, { method: "POST" });
+  const { ok, data } = await safeJson(r);
+  if (!ok) { toast((data && data.detail) || "检查失败", "err"); return; }
+  const steps = data.steps || {};
+  const lines = Object.keys(steps).map(k =>
+    `${k}: ${steps[k].ok ? "✓" : "✗"} ${steps[k].message || steps[k].name || ""}`);
+  openModal(`<h3 class="font-semibold text-lg mb-3">连通性检查 · MiniMax #${id}</h3>
+    <pre class="text-xs" style="background:var(--surface-2);padding:12px;border-radius:8px">${esc(lines.join("\n"))}</pre>`);
+}
+
 async function qoderRefresh(id) {
   const r = await api(`/api/qoder/accounts/${id}/refresh`, { method: "POST" });
   const { ok, data } = await safeJson(r);
@@ -5146,6 +5291,76 @@ async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
 
+  // MiniMax Code：官方 OAuth **设备授权流**（与官方客户端同款 PKCE 参数）。
+  // 后端 POST account.minimax.cn/oauth2/device/code 拿 verification_uri_complete，
+  // 前端把它渲染成二维码（手机上确认后凭证自动入库并续期轮换）。
+  if (id === "minimax") {
+    let begin;
+    try {
+      begin = await api("/api/minimax/device/start", { method: "POST" });
+    } catch (e) {
+      toast("开始设备授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok, data } = await safeJson(begin);
+    if (!ok || !data || !data.auth_id) {
+      toast("开始设备授权失败：" + ((data && data.detail) || "未返回授权会话"), "err");
+      return;
+    }
+    const qrSrc = "/api/minimax/auth/qr.svg?value=" + encodeURIComponent(data.qr_value || "");
+    openModal(`<h3 class="font-semibold text-lg mb-1">扫码授权 · MiniMax Code</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted)">
+        用<b>微信</b>或<b>MiniMax App</b> 扫码，或访问
+        <a href="${esc(data.verification_uri || "")}" target="_blank" rel="noopener" style="color:var(--brand)">官方授权页</a>
+        输入用户码 <b>${esc(data.user_code || "")}</b> 并确认登录。
+        确认后凭证自动入库（有效期 5 分钟）。</p>
+      <div class="flex flex-col items-center gap-3 py-2">
+        <img src="${qrSrc}" alt="授权二维码" width="220" height="220"
+             onerror="this.replaceWith(Object.assign(document.createElement('div'),{style:'width:220px;height:120px;display:flex;align-items:center;justify-content:center;color:var(--danger);font-size:12px;text-align:center;padding:8px;border:1px solid var(--line);border-radius:12px'},{textContent:'二维码渲染失败，请点上方链接手动授权'}))"
+             style="background:#fff;border-radius:12px;padding:8px;border:1px solid var(--line)">
+        <div id="minimaxAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待授权确认…</div>
+      </div>
+      <div class="flex justify-end mt-2">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+      </div>`, "max-w-sm");
+    const intervalMs = Math.max(1500, (data.interval || 3) * 1000);
+    const statusEl = () => $("#minimaxAuthStatus");
+    const modalGone = () => {
+      const m = $("#modal");
+      return !m || m.classList.contains("hidden");
+    };
+    const tick = async () => {
+      if (modalGone()) return;
+      let st = null;
+      try {
+        const r = await api("/api/minimax/device/poll?auth_id=" + encodeURIComponent(data.auth_id));
+        st = (await safeJson(r)).data;
+      } catch (e) { /* 网络抖动：下一轮再试 */ }
+      const status = (st && st.status) || "pending";
+      const el = statusEl();
+      if (status === "done") {
+        if (el) { el.textContent = "✅ 授权成功，账号已入库"; el.style.color = "var(--success)"; }
+        toast("MiniMax 授权成功，账号已入库");
+        accReloadActive();
+        window.WBPlatform && window.WBPlatform.refreshCounts && window.WBPlatform.refreshCounts();
+        setTimeout(() => { if (!modalGone()) closeModal(); }, 900);
+        return;
+      }
+      if (status === "denied" || status === "failed") {
+        if (el) { el.textContent = "授权失败：" + ((st && st.error) || "已拒绝或过期"); el.style.color = "var(--danger)"; }
+        return;
+      }
+      if (status === "expired") {
+        if (el) { el.textContent = "授权已过期，请重新发起"; el.style.color = "var(--danger)"; }
+        return;
+      }
+      if (el && status === "pending") el.textContent = "等待授权确认…";
+      setTimeout(tick, intervalMs);
+    };
+    setTimeout(tick, intervalMs);
+    return;
+  }
+
   // 小浣熊：官方 IAM 小程序**扫码授权**（免客户端/免滑块/免短信）。
   // 后端调官方 /api/iam/v1/auth/mp/qrcode 创建会话并返回二维码内容；
   // 用户手机扫码确认后，轮询即拿到已入库的账号 —— 滑块与验证码
@@ -5169,10 +5384,11 @@ async function platformBeginAuth(spec, storage) {
         请用<b>微信</b>或<b>商汤小浣熊 App</b> 扫描下方二维码，并在手机上确认登录。
         确认后凭证自动入库，全程无需客户端与短信验证码。</p>
       <p class="text-[11px] mb-2" style="color:var(--fg-subtle);line-height:1.5">
-        注：上游对扫码会话可能要求 IAM 二次确认（返回 200901）。若提示「未完成确认」，
-        请在客户端登录一次后改用「扫描本机 / 导入文件」入库 —— 那两条路拿到的凭证可直接调用。</p>
+        注：扫码会话若需 IAM 二次确认（200901），服务端会自动补确认后入库；
+        仅当补确认仍失败时才需要改用「扫描本机 / 导入文件」。</p>
       <div class="flex flex-col items-center gap-3 py-2">
         <img src="${qrSrc}" alt="授权二维码" width="220" height="220"
+             onerror="this.replaceWith(Object.assign(document.createElement('div'),{style:'width:220px;height:120px;display:flex;align-items:center;justify-content:center;color:var(--danger);font-size:12px;text-align:center;padding:8px;border:1px solid var(--line);border-radius:12px'},{textContent:'二维码渲染失败（服务端缺 qrcode 库或网关错误），请查看服务日志并重启后重试'}))"
              style="background:#fff;border-radius:12px;padding:8px;border:1px solid var(--line)">
         <div id="raccoonAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待扫码…</div>
       </div>

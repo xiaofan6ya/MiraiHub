@@ -470,6 +470,7 @@ def import_batch(db: Session, text: str, *, probe: bool = True,
     added = updated = 0
     errors: list[str] = []
     total = len(items)
+    refresh_ids: list[int] = []
     for index, item in enumerate(items, start=1):
         try:
             payload = item.get("credential") if isinstance(item.get("credential"), dict) else item
@@ -498,6 +499,7 @@ def import_batch(db: Session, text: str, *, probe: bool = True,
             _account, created = _upsert(db, data, name=str(item.get("name") or ""))
             if created:
                 added += 1
+                refresh_ids.append(int(_account.id or 0))
             else:
                 updated += 1
         except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
@@ -513,6 +515,14 @@ def import_batch(db: Session, text: str, *, probe: bool = True,
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         errors.append("收尾提交失败：%s" % str(exc)[:160])
+    # 批量导入只有这里落库（import_record/import_local 是同步刷额度），
+    # 新建的号排队后台补刷，面板进来就能看到余额
+    if refresh_ids:
+        try:
+            from admin.platform import shared as _shared
+            _shared.schedule_import_refresh(PLATFORM, refresh_ids)
+        except Exception:  # noqa: BLE001 - 补刷排队失败不影响导入结果
+            pass
     return {"ok": True, "added": added, "updated": updated,
             "total": total, "errors": errors[:50]}
 

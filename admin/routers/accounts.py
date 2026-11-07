@@ -115,6 +115,7 @@ def _platform_import_module(storage: str):
         "qoder": "admin.platform.qoder.services.accounts",
         "loomy": "admin.platform.loomy.services.accounts",
         "raccoon": "admin.platform.raccoon.services.accounts",
+        "minimax": "admin.platform.minimax.services.accounts",
     }
     modname = mapping.get((storage or "").lower())
     if not modname:
@@ -1806,9 +1807,11 @@ def _refresh_pending_async(acc_ids: list[int]) -> None:
 
     def _run() -> None:
         try:
+            from admin.platform import shared as _platform_shared
             for acc_id, ok, why in _refresh_many(
                     acc_ids, with_expiry=True,
-                    workers=min(8, len(acc_ids))):
+                    workers=min(_platform_shared.import_refresh_concurrency(),
+                                len(acc_ids))):
                 if not ok:
                     _logger.warning("导入后余额刷新失败 账号=%s 原因=%s",
                                     acc_id, why or "上游未返回")

@@ -417,6 +417,11 @@ try:
     app.include_router(codearts_accounts_router.router)
 except Exception:  # noqa: BLE001 - codearts 目录被裁剪时降级为不挂载
     logger.exception("CodeArts 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.minimax.routers import accounts as minimax_accounts_router
+    app.include_router(minimax_accounts_router.router)
+except Exception:  # noqa: BLE001 - minimax 目录被裁剪时降级为不挂载
+    logger.exception("MiniMax 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1" and not env_guard.IS_PROD:
     # 逆向产物管理（任意目录创建 + 递归读取）：**生产不挂载**。
     # 中间件还有一道 404，双保险 —— 见 env_guard.PROD_BLOCKED_PREFIXES。

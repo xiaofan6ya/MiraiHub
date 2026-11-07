@@ -133,6 +133,63 @@ def begin() -> dict:
     }
 
 
+def _web_auth_request(path: str, token: str, body: dict | None = None) -> dict:
+    """调官方 web auth 接口（信封 `{code:<数字>, data:...}`，与 IAM v1 不同）。
+
+    返回整个 payload（不拆 data —— `iam/confirm` 的成功判定要看 `code==0`），
+    HTTP/解析失败抛 RuntimeError。`path` 形如 `/iam/confirm`。
+    """
+    base = SITE_ORIGIN + "/api/web/auth/v1"
+    data = (json_dumps(body) if body is not None else "{}").encode("utf-8")
+    req = urllib.request.Request(base + path, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", "Bearer " + str(token or ""))
+    req.add_header("Origin", SITE_ORIGIN)
+    req.add_header("Referer", SITE_ORIGIN + "/login")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            payload = json_loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("web/auth HTTP %s %s" % (exc.code, detail)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("web/auth 网络错误（%s）" % type(exc).__name__) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("web/auth 响应不是对象")
+    return payload
+
+
+def iam_confirm(token: str) -> bool:
+    """补 IAM 确认（官方客户端收到 200901 时自动做的那一步）。
+
+    ## 协议出处
+
+    官方客户端 `accountRequests.js`：业务接口返回 `code==200901` 且票据是
+    IAM 会话时，先 `POST /api/web/auth/v1/iam/confirm`（body `{}`、Bearer
+    扫码票），成功（信封 `code===0`）后**重试原接口**。wb2api 原来漏了这步，
+    扫码成功但目录探活 200901 → 只能提示用户「去客户端登录一次」。
+
+    返回确认是否成功（失败只记日志，交由调用方决定是否重试/报错）。
+    """
+    try:
+        payload = _web_auth_request("/iam/confirm", token, {})
+    except RuntimeError as exc:
+        logger.warning("IAM 确认请求失败：%s", exc)
+        return False
+    code = payload.get("code")
+    if code in (0, "0"):
+        return True
+    logger.warning("IAM 确认被拒绝：code=%s message=%s",
+                   code, payload.get("message"))
+    return False
+
+
 def poll(db, auth_id: str) -> dict:
     """轮询扫码状态；`success` 时直接入库并返回账号摘要。"""
     with _lock:
@@ -171,17 +228,38 @@ def poll(db, auth_id: str) -> dict:
                 # **把能用的凭证覆盖成不能用的**：账号还在，但刷新余额报错、
                 # 对话 502，用户只会看到「授权成功了却什么都用不了」。
                 #
-                # 这里用最便宜的目录接口探一次：不通就不落库，把原因回给前端。
+                # 这里用最便宜的目录接口探一次；收到 200901 时**照官方客户端
+                # 的做法补一次 `iam/confirm` 再重试**（此前直接放弃入库，
+                # 用户只能改走客户端扫描/导入）。
                 from admin.platform.raccoon.core import client as raccoon_client
 
+                models: list | None = None
+                confirm_failed = False
+                first_error: Exception | None = None
                 try:
                     models = raccoon_client.fetch_models(token, "cn", None)
                 except raccoon_client.UpstreamError as exc:
+                    if getattr(exc, "kind", "") == "confirm" and iam_confirm(token):
+                        try:
+                            models = raccoon_client.fetch_models(token, "cn", None)
+                        except raccoon_client.UpstreamError as retry_exc:
+                            confirm_failed = True
+                            first_error = retry_exc
+                        except Exception:  # noqa: BLE001 - 重试的意外异常按确认失败处理
+                            confirm_failed = True
+                    if models is None and not confirm_failed:
+                        sess["status"] = "failed"
+                        sess["error"] = str(exc.message or "扫码会话不可用")
+                        sess["confirm_required"] = (getattr(exc, "kind", "") == "confirm")
+                        logger.warning("扫码会话验证失败 auth_id=%s kind=%s",
+                                       auth_id, getattr(exc, "kind", ""))
+                        return _public(sess)
+                if confirm_failed:
                     sess["status"] = "failed"
-                    sess["error"] = str(exc.message or "扫码会话不可用")
-                    sess["confirm_required"] = (getattr(exc, "kind", "") == "confirm")
-                    logger.warning("扫码会话验证失败 auth_id=%s kind=%s",
-                                   auth_id, getattr(exc, "kind", ""))
+                    sess["error"] = ("扫码成功且已补 IAM 确认，会话仍不可用（%s）；"
+                                     "请改用客户端凭证扫描/导入"
+                                     % getattr(first_error, "message", ""))
+                    sess["confirm_required"] = True
                     return _public(sess)
                 if not models:
                     sess["status"] = "failed"

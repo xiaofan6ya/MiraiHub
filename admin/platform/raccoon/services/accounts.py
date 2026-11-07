@@ -537,6 +537,14 @@ def import_record(db: Session, record: dict) -> tuple[Account, bool]:
     existing.last_sync_at = datetime.utcnow()
     db.commit()
     db.refresh(existing)
+    # 入库后自动补刷积分（后台线程）：扫码/导入落库只写凭证，余额列
+    # 原来保持 0，用户进面板还得手动点一次「刷新余额」。与 WorkBuddy
+    # 导入补刷同语义；重复导入（凭证未变）也排一次，成本可忽略。
+    try:
+        from admin.platform import shared as _shared
+        _shared.schedule_import_refresh(PLATFORM, [existing.id])
+    except Exception:  # noqa: BLE001 - 补刷排队失败不影响导入结果
+        pass
     return existing, created
 
 

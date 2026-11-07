@@ -30,6 +30,9 @@ hidden += ['uvicorn.logging', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.h
            'converter', 'anthropic_adapter', 'responses_adapter', 'responses_projection',
            'desensitize', 'upstream_compat', 'repository_instructions', 'model_metadata', 'wb_install', 'wb_asar', 'wb_envcheck',
            'webview.platforms.edgechromium', 'webview.platforms.winforms', 'clr', 'pythonnet',
+           # 小浣熊扫码授权二维码（raccoon webauth 在函数内 import，EXE 里缺了
+           # 就是「二维码出不来」—— 2026-11-07 排查结论，见 webauth.qr_svg）
+           'qrcode', 'qrcode.image.svg', 'qrcode.image.pil', 'qrcode.main', 'qrcode.util',
            # Tray shell: pystray loads its backend lazily, so collect them explicitly.
            'pystray._win32', 'pystray._util', 'PIL.Image', 'PIL.ImageDraw', 'PIL._tkinter_finder']
 a = Analysis([str(root / 'desktop_entry.py')], pathex=[str(root)], datas=datas, hiddenimports=hidden,

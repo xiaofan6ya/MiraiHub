@@ -345,6 +345,15 @@ def _upsert(db: Session, payload: dict) -> Account:
     existing.last_sync_at = datetime.utcnow()
     db.commit()
     db.refresh(existing)
+    # 入库后自动补刷额度（后台线程）：导入/授权落库原来只写凭证，
+    # 余额保持 0，用户得手动点一次「刷新额度」。
+    try:
+        from admin.platform import shared as _shared
+        _shared.schedule_import_refresh(
+            "qoder-intl" if payload.get("realm") == "intl" else "qoder",
+            [existing.id])
+    except Exception:  # noqa: BLE001 - 补刷排队失败不影响导入结果
+        pass
     return existing
 
 

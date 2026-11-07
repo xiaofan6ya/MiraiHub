@@ -9,6 +9,8 @@ python-multipart
 tzdata
 PyJWT
 cryptography
+# 小浣熊扫码授权二维码（raccoon webauth qr.svg 服务端渲染）
+qrcode>=7.4
 # 从 .env 读取配置
 python-dotenv
 # 版本检查（浏览器后台与桌面版共用）

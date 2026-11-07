@@ -1200,3 +1200,349 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
     return StreamingResponse(
         relay(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# OpenAI 请求 → Anthropic 上游（MiniMax Code 等 Anthropic 协议上游用）
+# ---------------------------------------------------------------------------
+def _openai_content_to_anthropic(content) -> list:
+    """OpenAI content（str / parts）→ Anthropic content blocks。"""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    blocks = []
+    if not isinstance(content, list):
+        return blocks
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = str(part.get("type") or "text")
+        if ptype == "text":
+            text = str(part.get("text") or "")
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif ptype == "image_url":
+            url = str((part.get("image_url") or {}).get("url") or "")
+            if url.startswith("data:"):
+                head, _, b64 = url.partition(",")
+                media = head[5:].split(";")[0] or "image/png"
+                blocks.append({"type": "image", "source": {
+                    "type": "base64", "media_type": media, "data": b64}})
+            elif url:
+                blocks.append({"type": "image", "source": {
+                    "type": "url", "url": url}})
+    return blocks
+
+
+def openai_request_to_anthropic(body: dict) -> dict:
+    """OpenAI Chat Completions 请求 → Anthropic Messages 请求。
+
+    MiniMax Code 的受管端点（`/mavis/api/v1/llm/v1/messages`）是标准
+    Anthropic Messages 协议 —— 入口 `/v1/chat/completions` 与
+    `/v1/responses` 必须先转成 Anthropic 形态再转发。
+
+    关键映射（与 `anthropic_to_openai` 严格互逆）：
+      * `role="system"` 消息 → `system`（Anthropic 是顶层字段）；
+      * `role="tool"` 消息 → `role="user"` 里的 `tool_result` 块；
+      * assistant 的 `tool_calls` → `tool_use` 块；
+      * `tools[].function` → `tools[].input_schema`；
+      * `max_tokens`：Anthropic **必填**，缺省 8192（OpenAI 客户端常不带）。
+    """
+    out = {"model": str(body.get("model") or ""),
+           "max_tokens": int(body.get("max_tokens") or 8192)}
+    if body.get("temperature") is not None:
+        out["temperature"] = body["temperature"]
+    if body.get("top_p") is not None:
+        out["top_p"] = body["top_p"]
+    if body.get("stop"):
+        out["stop_sequences"] = (body["stop"] if isinstance(body["stop"], list)
+                                 else [body["stop"]])
+    system = body.get("system")
+    if isinstance(body.get("messages"), list):
+        for msg in body["messages"]:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "user")
+            if role == "system":
+                piece = _openai_content_to_anthropic(msg.get("content"))
+                texts = [b.get("text", "") for b in piece if b.get("type") == "text"]
+                joined = "\n".join(t for t in texts if t)
+                if joined:
+                    system = joined if not system else "%s\n%s" % (system, joined)
+                continue
+            if role == "tool":
+                blocks = [{"type": "tool_result",
+                           "tool_use_id": str(msg.get("tool_call_id") or ""),
+                           "content": _openai_content_to_anthropic(msg.get("content"))
+                           or [{"type": "text", "text": ""}]}]
+                out.setdefault("messages", []).append(
+                    {"role": "user", "content": blocks})
+                continue
+            if role == "assistant":
+                blocks = _openai_content_to_anthropic(msg.get("content"))
+                calls = msg.get("tool_calls")
+                if isinstance(calls, list):
+                    for call in calls:
+                        if not isinstance(call, dict):
+                            continue
+                        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                        args = fn.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args) if args.strip() else {}
+                            except ValueError:
+                                args = {"_raw": args}
+                        blocks.append({"type": "tool_use",
+                                       "id": str(call.get("id") or ""),
+                                       "name": str(fn.get("name") or "unknown"),
+                                       "input": args if isinstance(args, dict) else {}})
+                if blocks:
+                    out.setdefault("messages", []).append(
+                        {"role": "assistant", "content": blocks})
+                continue
+            blocks = _openai_content_to_anthropic(msg.get("content"))
+            if blocks:
+                out.setdefault("messages", []).append(
+                    {"role": "user", "content": blocks})
+    if system:
+        out["system"] = system
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        converted = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            fn = tool.get("function") if isinstance(tool.get("function"), dict) else None
+            if fn is None:
+                continue
+            schema = fn.get("parameters")
+            converted.append({
+                "name": str(fn.get("name") or ""),
+                "description": str(fn.get("description") or ""),
+                "input_schema": schema if isinstance(schema, dict) else {"type": "object"},
+            })
+        if converted:
+            out["tools"] = converted
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        fn = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
+        out["tool_choice"] = {"type": "tool", "name": str(fn.get("name") or "")}
+    elif tool_choice == "required":
+        out["tool_choice"] = {"type": "any"}
+    elif tool_choice == "none":
+        out.pop("tools", None)
+    return out
+
+
+#: Anthropic stop_reason → OpenAI finish_reason
+STOP_OF_ANTHROPIC = {"end_turn": "stop", "stop_sequence": "stop",
+                     "max_tokens": "length", "tool_use": "tool_calls",
+                     "refusal": "stop"}
+
+
+def anthropic_message_to_openai(message: dict, model: str) -> dict:
+    """Anthropic message（非流式）→ OpenAI chat.completion。"""
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    texts = []
+    reasoning = []
+    tool_calls = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = str(block.get("type") or "")
+        if btype == "text":
+            texts.append(str(block.get("text") or ""))
+        elif btype == "thinking":
+            reasoning.append(str(block.get("thinking") or ""))
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": str(block.get("id") or ("call_%d" % len(tool_calls))),
+                "type": "function",
+                "function": {"name": str(block.get("name") or "unknown"),
+                             "arguments": json.dumps(block.get("input") or {},
+                                                     ensure_ascii=False)},
+            })
+    text = "".join(texts)
+    usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+    cached = int(usage.get("cache_read_input_tokens") or 0)
+    prompt = int(usage.get("input_tokens") or 0) + cached
+    completion = int(usage.get("output_tokens") or 0)
+    message_out = {"role": "assistant",
+                   "content": text if text else None}
+    if reasoning:
+        message_out["reasoning_content"] = "".join(reasoning)
+    if tool_calls:
+        message_out["tool_calls"] = tool_calls
+    out = {
+        "id": str(message.get("id") or ("chatcmpl-" + uuid.uuid4().hex[:20])),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model or str(message.get("model") or ""),
+        "choices": [{
+            "index": 0,
+            "message": message_out,
+            "finish_reason": STOP_OF_ANTHROPIC.get(
+                str(message.get("stop_reason") or ""), "stop"),
+        }],
+        "usage": {"prompt_tokens": prompt,
+                  "completion_tokens": completion,
+                  "total_tokens": prompt + completion,
+                  **({"prompt_tokens_details": {"cached_tokens": cached}}
+                     if cached else {})},
+    }
+    base = message.get("base_resp")
+    if isinstance(base, dict) and base.get("status_code") not in (0, None, ""):
+        out["base_resp"] = base
+    return out
+
+
+class AnthropicUpstreamAggregator:
+    """聚合 Anthropic SSE 事件 → 产出 OpenAI chunk。
+
+    供 `anthropic_upstream_stream_relay` 使用：每处理一个事件产出对应
+    的 OpenAI chunk；流结束时 `finish()` 补 finish_reason + usage + [DONE]。
+
+    覆盖：message_start（role 帧 + input tokens）、text_delta → content、
+    thinking_delta → reasoning_content、tool_use 的 input_json_delta →
+    tool_calls 分槽拼接（`index` 对齐 Anthropic 的块序）、message_delta
+    的 stop_reason 与 output_tokens、error 事件 → OpenAI error 帧。
+    """
+
+    def __init__(self, model: str, *, prefix: str = "gw") -> None:
+        self.model = model
+        self.msg_id = "chatcmpl-%s_%s" % (prefix, uuid.uuid4().hex[:16])
+        self.created = int(time.time())
+        self.usage = {}
+        self.stop_reason = ""
+        self.tool_index = -1
+
+    def chunk(self, delta: dict, finish=None) -> bytes:
+        payload = {"id": self.msg_id, "object": "chat.completion.chunk",
+                   "created": self.created, "model": self.model,
+                   "choices": [{"index": 0, "delta": delta,
+                                "finish_reason": finish}]}
+        return ("data: %s\n\n" % json.dumps(payload, ensure_ascii=False)).encode()
+
+    def usage_chunk(self) -> bytes:
+        cached = int(self.usage.get("cache_read_input_tokens") or 0)
+        prompt = int(self.usage.get("input_tokens") or 0) + cached
+        completion = int(self.usage.get("output_tokens") or 0)
+        payload = {"id": self.msg_id, "object": "chat.completion.chunk",
+                   "created": self.created, "model": self.model,
+                   "choices": [],
+                   "usage": {"prompt_tokens": prompt,
+                             "completion_tokens": completion,
+                             "total_tokens": prompt + completion,
+                             **({"prompt_tokens_details": {"cached_tokens": cached}}
+                                if cached else {})}}
+        return ("data: %s\n\n" % json.dumps(payload, ensure_ascii=False)).encode()
+
+    def feed(self, event_name: str, data: dict) -> list:
+        """处理一个 Anthropic SSE 事件，返回要下发的 OpenAI chunk 列表。"""
+        etype = event_name or str(data.get("type") or "")
+        out = []
+        if etype == "message_start":
+            message = data.get("message") if isinstance(data.get("message"), dict) else {}
+            if isinstance(message.get("usage"), dict):
+                self.usage = dict(message["usage"])
+            out.append(self.chunk({"role": "assistant", "content": ""}))
+        elif etype == "content_block_start":
+            block = data.get("content_block") if isinstance(data.get("content_block"), dict) else {}
+            if str(block.get("type") or "") == "tool_use":
+                self.tool_index += 1
+                out.append(self.chunk({"tool_calls": [{
+                    "index": self.tool_index,
+                    "id": str(block.get("id") or ""),
+                    "type": "function",
+                    "function": {"name": str(block.get("name") or ""),
+                                 "arguments": ""}}]}))
+        elif etype == "content_block_delta":
+            delta = data.get("delta") if isinstance(data.get("delta"), dict) else {}
+            dtype = str(delta.get("type") or "")
+            if dtype == "text_delta":
+                text = str(delta.get("text") or "")
+                if text:
+                    out.append(self.chunk({"content": text}))
+            elif dtype == "thinking_delta":
+                thinking = str(delta.get("thinking") or "")
+                if thinking:
+                    out.append(self.chunk({"reasoning_content": thinking}))
+            elif dtype == "input_json_delta":
+                partial = str(delta.get("partial_json") or "")
+                if partial:
+                    out.append(self.chunk({"tool_calls": [{
+                        "index": max(self.tool_index, 0),
+                        "function": {"arguments": partial}}]}))
+        elif etype == "message_delta":
+            delta = data.get("delta") if isinstance(data.get("delta"), dict) else {}
+            self.stop_reason = str(delta.get("stop_reason") or "")
+            if isinstance(data.get("usage"), dict):
+                self.usage.update(data["usage"])
+        elif etype == "error":
+            err = data.get("error") if isinstance(data.get("error"), dict) else {}
+            payload = {"error": {"message": str(err.get("message") or "upstream error"),
+                                 "type": str(err.get("type") or "upstream_error")}}
+            out.append(("data: %s\n\n" % json.dumps(payload, ensure_ascii=False)).encode())
+        return out
+
+    def finish(self) -> list:
+        out = [self.chunk({}, STOP_OF_ANTHROPIC.get(self.stop_reason, "stop"))]
+        out.append(self.usage_chunk())
+        out.append(b"data: [DONE]\n\n")
+        return out
+
+
+def anthropic_upstream_stream_relay(inner, model: str, *, prefix: str = "gw") -> StreamingResponse:
+    """Anthropic 上游 SSE → OpenAI chunk SSE 中继。
+
+    与 `anthropic_stream_relay` 方向相反：inner 产的是 **Anthropic 事件流**
+    （`event: xxx` + `data: {...}`），MiniMax Code 这类 Anthropic 协议上游
+    的 `_forward_stream` 用它把流翻译给 OpenAI 客户端。
+
+    解析约定与 `_iter_sse_lines` 一致：按行切分，`event:` 行携带事件名，
+    `data:` 行携带负载；`message_stop` 终止并补齐尾帧。
+    """
+    aggregator = AnthropicUpstreamAggregator(model, prefix=prefix)
+
+    async def relay():
+        event_name = ""
+        async for line in _iter_sse_lines(inner):
+            text = line.decode("utf-8", "replace").strip()
+            if not text:
+                event_name = ""
+                continue
+            if text.startswith("event:"):
+                event_name = text[6:].strip()
+                continue
+            if text.startswith(":"):
+                yield text.encode() + b"\n\n"
+                continue
+            if not text.startswith("data:"):
+                continue
+            payload = text[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if str(data.get("type") or event_name) == "message_stop":
+                break
+            if str(data.get("type") or event_name) == "ping":
+                # Anthropic 的 ping 事件 → OpenAI SSE 注释帧：
+                # 上游慢思考/排队期间客户端也要看得到「链路活着」。
+                yield b": ping\n\n"
+                event_name = ""
+                continue
+            for piece in aggregator.feed(event_name, data):
+                yield piece
+            event_name = ""
+        for piece in aggregator.finish():
+            yield piece
+
+    return StreamingResponse(
+        relay(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

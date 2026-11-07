@@ -28,7 +28,7 @@
 ## 成本
 
 按最便宜的模型算，一个号一天一条 64 token 的回复，101 个号
-一天不到 1 万分（Loomy）/ 几美分（WorkBuddy）。比起被封号重新搞号，
+一天不到 1 万分（Loomy）/ 几美分（默认平台）。比起被封号重新搞号，
 这个成本可以忽略。
 
 ## 和 `ban_recheck` 的区别
@@ -67,7 +67,7 @@ DEFAULT_MAX_TOKENS = 64
 #: > 调用一下客户端的真实技能啊专家啥的，但是不带入 chat 之类的上下文会污染
 #:
 #: 只用纯聊天保活，账号画像会变成「一个只会闲聊的号」—— 那也不像真的在用
-#: Loomy/WorkBuddy 的人（真人会写文档、做 PPT、设定时任务、装技能）。
+#: Loomy/默认平台的人（真人会写文档、做 PPT、设定时任务、装技能）。
 #: 所以池子里按约 1/3 混入这些**客户端本身就有的用法**。
 #:
 #: 注意：这些都是**单轮、无上下文**的请求，不会在账号里留下长期会话，
@@ -316,8 +316,8 @@ def _is_foreign_credential(account) -> bool:
 
     ## 判据不要自己编，直接复用唯一权威来源
 
-    国际版的真实标识在 `auth_json["auth"]["domain"]`，取值为
-    `workbuddy.ai / www.workbuddy.ai / codebuddy.ai / www.codebuddy.ai`。
+    国际版的真实标识在 `auth_json["auth"]["domain"]`，取值为官方域名
+    （默认平台客户端写入的 `*.ai` 域，判据在 `admin/post_login.py`）。
     顶层那个 `domain` 字段是**平台 realm**（cn/intl），不是这里要的东西。
 
     `admin/post_login.py::_resource_region_issue()` 已经把这个判断写死了，
@@ -419,6 +419,7 @@ def run_daily_activity(db, *, limit: int | None = None,
     """
     from admin.models import Account
     from admin import backend
+    from admin.platform import registry as platform_registry
 
     if not _enabled():
         return {"ok": True, "done": 0, "skipped": 0, "failed": 0,
@@ -427,8 +428,9 @@ def run_daily_activity(db, *, limit: int | None = None,
     started = time.perf_counter()
     now = datetime.utcnow()
 
-    query = db.query(Account).filter(Account.platform == "workbuddy",
-                                     Account.status == "active")
+    query = db.query(Account).filter(
+        Account.platform == platform_registry.DEFAULT_PLATFORM,
+        Account.status == "active")
     if only_account_ids:
         query = query.filter(Account.id.in_([int(i) for i in only_account_ids]))
     accounts = query.order_by(Account.id.asc()).all()

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -424,6 +425,161 @@ def seconds_from(value) -> float:
 
 _SNAPSHOT_REFRESH: dict[str, dict] = {}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
+
+
+def import_refresh_concurrency() -> int:
+    """导入后自动刷余额的并发数（环境变量 `ADMIN_IMPORT_REFRESH_CONCURRENCY`）。
+
+    单账号刷新 = 1~2 次上游往返（实测 WorkBuddy ~1.2s/号），12 并发
+    可以把 100 个号的导入补刷压到 ~15 秒内。可调上限钳到 24：再高
+    上游会开始返回限流，反而拖慢整体。
+    """
+    raw = os.environ.get("ADMIN_IMPORT_REFRESH_CONCURRENCY", "").strip()
+    try:
+        value = int(raw) if raw else 12
+    except ValueError:
+        value = 12
+    return max(1, min(value, 24))
+
+
+#: 正在排队补刷的账号 id —— 同一个号一次导入只排一队，避免重复打上游
+_IMPORT_REFRESH_QUEUED: set[int] = set()
+_IMPORT_REFRESH_LOCK = threading.Lock()
+#: 合批窗口：逐条 import_record 的批量导入在窗口内合并成一个后台批次，
+#: 否则 500 条 = 500 个线程 × 线程池，纯浪费
+_IMPORT_REFRESH_PENDING: dict[str, list[int]] = {}
+_IMPORT_REFRESH_COALESCE_SEC = 0.75
+
+
+def _spawn_import_refresh(platform_id: str, fresh: list[int]) -> None:
+    """真正的后台批次（独立线程 + 线程池 + 独立 Session）。"""
+
+    def _refresh_one(session, account_id: int) -> None:
+        from admin.platform import registry as _registry
+
+        spec = _registry.get(platform_id)
+        if spec is None:
+            raise RuntimeError("平台未注册：%s" % platform_id)
+        gateway = _registry.load_platform_gateway(spec, spec.realm)
+        if gateway is None:
+            raise RuntimeError("平台未实现管理契约：%s" % platform_id)
+        # 标准入口是 AccountOps.refresh（各平台余额口径不同，契约 §AccountOps）；
+        # 个别平台把 refresh 直接挂在 gateway 上 —— 两种都认。
+        ops = (gateway.account_ops()
+               if hasattr(gateway, "account_ops") else None)
+        if ops is not None and hasattr(ops, "refresh"):
+            ops.refresh(session, account_id, force=True)
+        elif hasattr(gateway, "refresh"):
+            gateway.refresh(session, account_id, force=True)
+        else:
+            raise RuntimeError("平台未实现 refresh：%s" % platform_id)
+
+    def _run() -> None:
+        from admin.db import SessionLocal
+
+        try:
+            workers = min(import_refresh_concurrency(), len(fresh))
+            from concurrent.futures import ThreadPoolExecutor
+
+            def one(account_id: int) -> None:
+                for attempt in (1, 2):
+                    try:
+                        with SessionLocal() as session:
+                            _refresh_one(session, account_id)
+                            session.commit()
+                        break
+                    except Exception:  # noqa: BLE001 - 单号失败不拖垮整批
+                        if attempt == 2:
+                            logger.warning("导入后余额刷新失败 平台=%s 账号=%s",
+                                           platform_id, account_id, exc_info=True)
+                        else:
+                            time.sleep(2.0)
+                    finally:
+                        with _IMPORT_REFRESH_LOCK:
+                            _IMPORT_REFRESH_QUEUED.discard(account_id)
+
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="import-refresh") as pool:
+                list(pool.map(one, fresh))
+        except Exception:  # noqa: BLE001 - 后台任务绝不冒泡
+            logger.exception("导入后余额刷新异常（不影响已入库账号）")
+            with _IMPORT_REFRESH_LOCK:
+                _IMPORT_REFRESH_QUEUED.difference_update(fresh)
+
+    threading.Thread(target=_run, name="import-refresh-%s" % platform_id,
+                     daemon=True).start()
+
+
+def schedule_import_refresh(platform_id: str, account_ids, *,
+                            with_retry: bool = True) -> int:
+    """账号入库落库之后，把余额刷新丢到后台线程，HTTP 立即返回。
+
+    ## 为什么需要它
+
+    「扫描本机 / 导入文件」落库时只写凭证，余额列是列默认值 0 —— 各平台
+    只有 WorkBuddy 自己实现了导入后补刷（`accounts.py:_refresh_pending_async`），
+    Trae / 小浣熊等平台的导入是「纯落库」，用户进面板看到的就是 0，还得
+    手动点一次「刷新余额」。这里提供一个**框架层**的通用补刷：平台自己
+    不用再写线程池，挂一行调用即可。
+
+    ## 刷新走谁
+
+    调**该平台自己**的 `platform_gateway.refresh(db, account_id, force=True)`
+    （Gateway 契约 §AccountOps）——各平台的余额口径不同（Trae 是美元额度、
+    小浣熊是积分、MiniMax 是签到积分），框架层不认识任何一家的接口，
+    只负责调度。平台没实现管理契约时安静返回 0（不报错）。
+
+    约束：
+      * **独立 Session**：SQLAlchemy Session 不能跨线程共享；
+      * **去重**：同一个号已在补刷队列时不重复排队；
+      * **合批**：`_IMPORT_REFRESH_COALESCE_SEC` 窗口内同平台的多次调用
+        合并成一个后台批次（批量导入是逐条 `import_record` 的）；
+      * **重试**：单号失败重试 1 次（导入的凭证刚落库，第一次可能撞上
+        上游冷启动）；重试仍失败只记日志，绝不冒泡；
+      * **并发可配**：`ADMIN_IMPORT_REFRESH_CONCURRENCY`（默认 12）。
+
+    返回实际排入补刷的账号数。`with_retry=False` 预留给调用方自带重试的
+    场景（当前内部批次恒定重试，参数仅为签名兼容保留）。
+    """
+    del with_retry  # 见 docstring：批次内恒定重试一次
+    ids = []
+    for value in (account_ids or []):
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return 0
+
+    flush_at = time.monotonic() + _IMPORT_REFRESH_COALESCE_SEC
+    del flush_at
+    with _IMPORT_REFRESH_LOCK:
+        fresh = [i for i in ids if i not in _IMPORT_REFRESH_QUEUED]
+        _IMPORT_REFRESH_QUEUED.update(fresh)
+        if fresh:
+            _IMPORT_REFRESH_PENDING.setdefault(platform_id, []).extend(fresh)
+            scheduled = len(_IMPORT_REFRESH_PENDING[platform_id])
+        else:
+            scheduled = 0
+    if not fresh:
+        return 0
+
+    def _flush() -> None:
+        with _IMPORT_REFRESH_LOCK:
+            batch = _IMPORT_REFRESH_PENDING.pop(platform_id, [])
+        if batch:
+            _spawn_import_refresh(platform_id, batch)
+
+    if scheduled == len(fresh):
+        # 本平台当前没有待触发的批次 —— 由这次调用在窗口结束后触发；
+        # 已有排队中的批次则等它一起带走（合批）。
+        def _timer() -> None:
+            time.sleep(_IMPORT_REFRESH_COALESCE_SEC)
+            _flush()
+
+        threading.Thread(target=_timer, daemon=True,
+                         name="import-refresh-timer-%s" % platform_id).start()
+    return len(fresh)
 
 
 def kick_background_refresh(name: str, account_ids, worker, *,
