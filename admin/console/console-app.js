@@ -5315,15 +5315,14 @@ async function platformBeginAuth(spec, storage) {
       return;
     }
     const qrSrc = "/api/minimax/auth/qr.svg?value=" + encodeURIComponent(data.qr_value || "");
+    const authUrl = data.verification_uri_complete || data.verification_uri || "";
     openModal(`<h3 class="font-semibold text-lg mb-1">扫码授权 · MiniMax Code</h3>
       <p class="text-xs mb-2" style="color:var(--fg-muted);line-height:1.7">
-        <b>①</b> 扫下方二维码，或点 <a href="${esc(data.verification_uri_complete || data.verification_uri || "")}"
-           target="_blank" rel="noopener" style="color:var(--brand)">打开官方授权页</a><br>
-        <b>②</b> 在页面<b>先用手机号登录</b>（验证码登录即可，未登录时页面只显示登录框 —— 这是官方流程，不是坏了）<br>
-        <b>③</b> 登录后页面会出现「确认授权」，确认后凭证<b>自动入库并开始自动续签</b>（有效期 5 分钟，超时重新发起）</p>
-      <p class="text-[11px] mb-3" style="color:var(--fg-subtle)">
-        用户码 <b style="font-size:15px;letter-spacing:1px">${esc(data.user_code || "")}</b>
-        （若页面要求输入，填这个码） · 也可以用装了 MiniMax App 且已登录的手机扫，App 内直接确认</p>
+        已在新标签<b>自动打开官方授权页</b>（链接已带授权码，无需手填）。<br>
+        <b>①</b> 在页面<b>先用手机号登录</b>（验证码即可；未登录时页面只显示登录框 —— 官方流程如此，不是坏了）<br>
+        <b>②</b> 登录后点页面的「确认授权」→ 本页轮询<b>自动入库并开始自动续签</b>（授权 5 分钟内有效，超时点重试）<br>
+        页面没开出来？<a href="${esc(authUrl)}" target="_blank" rel="noopener" style="color:var(--brand)">手动打开授权页</a>
+        · 或用装了 MiniMax App 且已登录的手机扫码（用户码 <b>${esc(data.user_code || "")}</b>）</p>
       <div class="flex flex-col items-center gap-3 py-2">
         <img src="${qrSrc}" alt="授权二维码" width="220" height="220"
              onerror="this.replaceWith(Object.assign(document.createElement('div'),{style:'width:220px;height:120px;display:flex;align-items:center;justify-content:center;color:var(--danger);font-size:12px;text-align:center;padding:8px;border:1px solid var(--line);border-radius:12px'},{textContent:'二维码渲染失败，请点上方链接手动授权'}))"
@@ -5333,6 +5332,8 @@ async function platformBeginAuth(spec, storage) {
       <div class="flex justify-end mt-2">
         <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
       </div>`, "max-w-sm");
+    // 用户手势内同步打开授权页（带 code），不会被弹窗拦截
+    if (authUrl) window.open(authUrl, "_blank", "noopener");
     const intervalMs = Math.max(1500, (data.interval || 3) * 1000);
     const statusEl = () => $("#minimaxAuthStatus");
     const modalGone = () => {
@@ -5356,12 +5357,19 @@ async function platformBeginAuth(spec, storage) {
         setTimeout(() => { if (!modalGone()) closeModal(); }, 900);
         return;
       }
-      if (status === "denied" || status === "failed") {
-        if (el) { el.textContent = "授权失败：" + ((st && st.error) || "已拒绝或过期"); el.style.color = "var(--danger)"; }
-        return;
-      }
-      if (status === "expired") {
-        if (el) { el.textContent = "授权已过期，请重新发起"; el.style.color = "var(--danger)"; }
+      if (status === "denied" || status === "failed" || status === "expired") {
+        const reason = (st && st.error)
+          || (status === "expired" ? "授权已过期（5 分钟）" : "已拒绝或已过期");
+        if (el) {
+          el.innerHTML = "授权未完成：" + esc(reason)
+            + '　<button id="minimaxAuthRetry" class="px-2 py-0.5 rounded border text-xs" style="color:var(--brand)">重新发起授权</button>';
+          el.style.color = "var(--danger)";
+          const retry = document.getElementById("minimaxAuthRetry");
+          if (retry) retry.addEventListener("click", () => {
+            closeModal();
+            platformBeginAuth(window.WBPlatform && window.WBPlatform.spec(), "minimax");
+          });
+        }
         return;
       }
       if (el && status === "pending") el.textContent = "等待授权确认…";
