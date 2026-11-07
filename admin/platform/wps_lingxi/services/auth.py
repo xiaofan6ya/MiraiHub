@@ -63,6 +63,125 @@ def _profile_db(profile: str) -> str:
     return os.path.join(profile, "Default", "Network", "Cookies")
 
 
+# ---------------------------------------------------------------------------
+# CDP 读 Cookie（主路径）
+# ---------------------------------------------------------------------------
+#
+# 为什么必须走 CDP：新版 Chromium（Edge 127+ / Chrome 127+）给 Cookie 上了
+# **App-Bound Encryption**（密文前缀 `v20`），密钥绑在浏览器自己的服务上，
+# DPAPI + AES-GCM 解不开 —— 直接读 Cookies 库只会拿到空结果，表现就是
+# 「登录完了也不入库」。CDP 的 `Network.getAllCookies` 由浏览器自己解好再给，
+# 这是官方 Magpie 插件用的同一条路。
+def _devtools_port(profile: str, timeout: float = 15.0) -> int:
+    """等 `DevToolsActivePort` 出现并读出端口。"""
+    path = os.path.join(profile, "DevToolsActivePort")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    first = (handle.readline() or "").strip()
+                if first.isdigit():
+                    return int(first)
+            except OSError:
+                pass
+        time.sleep(0.4)
+    return 0
+
+
+def _cdp_cookies(profile: str) -> list[dict]:
+    """通过 CDP 拿该 profile 当前所有 Cookie（浏览器已解密的明文）。"""
+    port = _devtools_port(profile, timeout=5.0)
+    if not port:
+        return []
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/json/list" % port,
+                                    timeout=5) as resp:
+            targets = _json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - 浏览器还在起，下一轮再说
+        return []
+    if not isinstance(targets, list):
+        return []
+    pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    if not pages:
+        return []
+    target = next((t for t in pages if "lingxi" in str(t.get("url") or "")
+                   or "wps.cn" in str(t.get("url") or "")), pages[0])
+
+    try:
+        import websocket  # websocket-client
+    except Exception:  # noqa: BLE001 - 没装就退回直读 Cookies 库
+        logger.debug("没有 websocket-client，跳过 CDP")
+        return []
+
+    ws = None
+    try:
+        ws = websocket.create_connection(target["webSocketDebuggerUrl"],
+                                         timeout=5, suppress_origin=True)
+        ws.send(_json.dumps({"id": 1, "method": "Network.enable"}))
+        ws.send(_json.dumps({"id": 2, "method": "Network.getAllCookies"}))
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            raw = ws.recv()
+            if not raw:
+                continue
+            try:
+                frame = _json.loads(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if frame.get("id") != 2:
+                continue
+            cookies = ((frame.get("result") or {}).get("cookies")
+                       or frame.get("cookies") or [])
+            return [c for c in cookies if isinstance(c, dict)]
+    except Exception:  # noqa: BLE001 - CDP 失败不致命，退回直读
+        logger.debug("CDP 读 Cookie 失败", exc_info=True)
+        return []
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return []
+
+
+def _cookies_of(session: dict) -> dict:
+    """当前浏览器会话里的 `wps_sid` / `uid`（CDP 优先，直读兜底）。"""
+    values: dict = {}
+    for cookie in _cdp_cookies(session.get("profile") or ""):
+        name = str(cookie.get("name") or "")
+        domain = str(cookie.get("domain") or "").lower()
+        if name not in ("wps_sid", "uid"):
+            continue
+        if "wps.cn" not in domain and "kdocs" not in domain:
+            continue
+        value = str(cookie.get("value") or "").strip()
+        if not value:
+            continue
+        if name == "wps_sid":
+            # 同名 Cookie 多个域时优先 wps.cn
+            if values.get("wps_sid") and "wps.cn" not in domain:
+                continue
+            values["wps_sid"] = value
+        elif "uid" not in values:
+            values["uid"] = value
+    if values.get("wps_sid"):
+        return values
+
+    # 兜底：老版本 Chromium（无 App-Bound Encryption）直接读库也能解
+    db_path = _profile_db(session.get("profile") or "")
+    if os.path.isfile(db_path):
+        try:
+            return lingxi_accounts._read_cookies_safe(db_path) or {}  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
 def _kill(session: dict) -> None:
     proc = session.get("proc")
     if proc is not None:
@@ -108,7 +227,7 @@ def start(db, *, browser: str = "") -> dict:
     url = endpoints.BASE
     try:
         proc = subprocess.Popen(
-            [exe, "--user-data-dir=%s" % profile, "--no-first-run",
+            [exe, "--user-data-dir=%s" % profile, "--remote-debugging-port=0", "--no-first-run",
              "--no-default-browser-check", "--disable-features=Translate",
              url],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -136,30 +255,27 @@ def poll(db, auth_id: str) -> dict:
         return {"status": "expired",
                 "reason": "授权会话不存在或已超时，请重新发起"}
 
-    db_path = _profile_db(session["profile"])
-    if os.path.isfile(db_path):
+    # CDP 优先（新版 Chromium 的 Cookie 用 App-Bound Encryption，
+    # 直接读库解不开）；拿不到再退回直读 Cookies 库。
+    values = _cookies_of(session)
+    sid = (values or {}).get("wps_sid") or ""
+    if len(sid) >= 16:
+        raw = "wps_sid=%s" % sid
+        if values.get("uid"):
+            raw += "; uid=%s" % values["uid"]
         try:
-            values = lingxi_accounts._read_cookies_safe(db_path)  # noqa: SLF001
-        except Exception:  # noqa: BLE001 - 登录中库还没写完，下次再读
-            values = {}
-        sid = (values or {}).get("wps_sid") or ""
-        if len(sid) >= 16:
-            raw = "wps_sid=%s" % sid
-            if values.get("uid"):
-                raw += "; uid=%s" % values["uid"]
-            try:
-                result = lingxi_accounts.import_record(db, raw, probe=True)
-            except Exception as exc:  # noqa: BLE001
-                return {"status": "error", "reason": str(exc)[:160]}
-            with _LOCK:
-                _SESSIONS.pop(auth_id, None)
-            threading.Thread(target=_kill, args=(session,), daemon=True).start()
-            logger.info("灵犀授权成功入库 acc=%s", result.get("account_id"))
-            return {"status": "done",
-                    "account_id": result.get("account_id"),
-                    "uid": result.get("uid"),
-                    "name": result.get("account_id_label"),
-                    "probe": result.get("probe")}
+            result = lingxi_accounts.import_record(db, raw, probe=True)
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": str(exc)[:160]}
+        with _LOCK:
+            _SESSIONS.pop(auth_id, None)
+        threading.Thread(target=_kill, args=(session,), daemon=True).start()
+        logger.info("灵犀授权成功入库 acc=%s", result.get("account_id"))
+        return {"status": "done",
+                "account_id": result.get("account_id"),
+                "uid": result.get("uid"),
+                "name": result.get("account_id_label"),
+                "probe": result.get("probe")}
 
     elapsed = time.time() - float(session.get("started") or 0)
     return {"status": "pending", "elapsed_s": int(elapsed),
