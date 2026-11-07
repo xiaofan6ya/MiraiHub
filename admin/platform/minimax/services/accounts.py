@@ -83,14 +83,17 @@ def accounts_for(db: Session, realm: str = "") -> list[Account]:
 
 def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
     """按 (platform, uid) 幂等写入。同 uid 只更新凭证。"""
-    uid = str(payload.get("uid") or "")
+    # uid 归一：record key 可能带 service 前缀 + NUL（com.minimax...\0<account>），
+    # 只取 \0 后的账号段，避免不可见字符进库
+    uid = str(payload.get("uid") or "").split("\0", 1)[-1].strip()
+    payload["uid"] = uid
     realm = normalize_region(payload.get("realm"))
     existing = None
     if uid:
         existing = (db.query(Account)
                     .filter(Account.platform == PLATFORM,
                             Account.uid == uid).first())
-    if existing is None and uid:
+    if existing is None:
         # 老记录可能 uid 为空但 token 同值 —— 用 token 前缀兜底认领
         tok = str(payload.get("token") or "")
         for row in accounts_for(db, realm):
@@ -148,19 +151,32 @@ def import_record(db: Session, record: dict) -> tuple[Account, bool]:
     return account, created
 
 
-def import_local(db: Session, realm: str = "") -> dict:
-    """扫描本机 ~/.minimax 凭证并入库；可按区域收窄。"""
+def import_local(db: Session, realm: str = "",
+                 uids: list[str] | None = None) -> dict:
+    """扫描本机 ~/.minimax 凭证并入库；可按区域 / uid 收窄。
+
+    `uids` 来自通用扫描弹窗的勾选框（`uid_full`）——为空时导入全部
+    （与其它平台「不勾就全导」语义一致）。返回带 `imported` 键，
+    与通用导入确认弹窗的判定对齐。
+    """
     files = paths.credential_files()
     if realm:
         want = normalize_region(realm)
         files = [f for f in files if f["realm"] == want]
     if not files:
-        return {"added": 0, "updated": 0, "errors": [
-            "未在本机找到 MiniMax Code 登录态（%s）" % paths.auth_home()]}
+        return {"imported": 0, "added": 0, "updated": 0, "scanned": 0,
+                "reason": "未在本机找到 MiniMax Code 登录态（%s）"
+                          % paths.auth_home()}
     added = updated = 0
+    scanned = 0
     errors: list[str] = []
     for entry in files:
         for record in paths.read_records(entry["path"]):
+            scanned += 1
+            if uids:
+                account_id = str(record.get("uid") or "")
+                if account_id not in uids:
+                    continue
             try:
                 _account, created = _upsert(db, record)
                 added += 1 if created else 0
@@ -172,7 +188,15 @@ def import_local(db: Session, realm: str = "") -> dict:
                     pass
             except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
                 errors.append("跳过一条：%s" % str(exc)[:120])
-    return {"added": added, "updated": updated, "errors": errors}
+    imported = added + updated
+    result = {"imported": imported, "added": added, "updated": updated,
+              "scanned": scanned}
+    if errors:
+        result["errors"] = errors
+    if not imported and not errors:
+        result["reason"] = ("勾选的凭证没有匹配到本机登录态"
+                            if uids else "本机登录态里没有可用凭证")
+    return result
 
 
 def import_batch(db: Session, text: str) -> dict:
@@ -223,7 +247,11 @@ def import_batch(db: Session, text: str) -> dict:
 # 凭证续期与额度
 # ---------------------------------------------------------------------------
 def ensure_token(db: Session, account: Account) -> dict:
-    """拿可用 token：过期（提前 60s）且带 refresh_token 时先续签落库。"""
+    """拿可用 token：过期（提前 60s）且带 refresh_token 时先续签落库。
+
+    续签成功后把新票**回写官方客户端 auth.json**（轮换票互踢的根治，
+    见 paths.write_back_credential）。
+    """
     data = credentials_of(account)
     expires = int(data.get("expires_at_ms") or 0)
     fresh_ok = expires and expires > time.time() * 1000 + 60_000
@@ -233,8 +261,9 @@ def ensure_token(db: Session, account: Account) -> dict:
     if not refresh:
         if token_of(data):
             return data
-        raise client.UpstreamError("凭证缺 access_token 与 refresh_token",
-                                   kind="auth")
+        raise client.UpstreamError(
+            "凭证缺 access_token 与 refresh_token（请重新扫码授权或扫描本机）",
+            kind="auth")
     grant = client.refresh_credentials(refresh, realm_of(account))
     data = dict(data)
     data["access_token"] = grant["access_token"]
@@ -244,7 +273,15 @@ def ensure_token(db: Session, account: Account) -> dict:
     account.auth_json = json.dumps(data, ensure_ascii=False)
     account.last_sync_at = datetime.utcnow()
     db.commit()
-    logger.info("MiniMax 账号 %s 凭证已续期", account.id)
+    try:
+        paths.write_back_credential(
+            realm_of(account),
+            access_token=grant["access_token"],
+            refresh_token=data["refresh_token"],
+            expires_at_ms=int(data["expires_at_ms"] or 0))
+    except Exception:  # noqa: BLE001 - 回写失败不影响续签本身
+        pass
+    logger.info("MiniMax 账号 %s 凭证已续期（已回写客户端 auth.json）", account.id)
     return data
 
 

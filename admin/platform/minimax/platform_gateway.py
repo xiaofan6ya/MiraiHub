@@ -62,13 +62,23 @@ def _run_checkin(db: Session, schedule=None) -> dict:
 
 
 def _run_keepalive(db: Session, schedule=None) -> dict:
-    """续签保活：到期前 7 天内（或已过期）的账号逐个 refresh_token 换新。"""
+    """续签保活：access 票临期（< 2 小时）的账号逐个 refresh_token 换新。
+
+    ## 窗口为什么是 2 小时而不是「7 天」
+
+    MiniMax 的 access 票只有 ~11 小时寿命，refresh 是**轮换票**（旧票
+    连同 refresh 一起立即吊销）。按 7 天窗口 = 每次 keepalive 都续签 =
+    每 6 小时无谓轮换一次，还会与官方客户端互相踢掉对方的票（客户端
+    持有的 refresh 失效就掉登录）。收窄到 2 小时：空闲期提前换好新票、
+    避免在线请求撞上续签延迟，又不制造多余轮换。续签后新票会**回写
+    官方客户端 auth.json**（paths.write_back_credential）。
+    """
     import time as _time
 
     from admin.platform.shared import run_account_batch
 
     rows = minimax_accounts.accounts_for(db)
-    horizon = _time.time() * 1000 + 7 * 86400 * 1000
+    horizon = _time.time() * 1000 + 2 * 3600 * 1000
     ids = []
     for row in rows:
         if row.status != "active":
@@ -79,7 +89,7 @@ def _run_keepalive(db: Session, schedule=None) -> dict:
             ids.append(int(row.id or 0))
     if not ids:
         return {"ok": True, "checked": len(rows), "renewed": 0,
-                "summary": "没有临期凭证"}
+                "summary": "没有临期凭证（<2 小时）"}
 
     renewed = {"n": 0}
 
@@ -98,12 +108,20 @@ def _run_keepalive(db: Session, schedule=None) -> dict:
         account.auth_json = json_dumps(data)
         account.last_sync_at = utcnow()
         session.commit()
+        try:
+            paths.write_back_credential(
+                minimax_accounts.realm_of(account),
+                access_token=grant["access_token"],
+                refresh_token=data["refresh_token"],
+                expires_at_ms=int(data["expires_at_ms"] or 0))
+        except Exception:  # noqa: BLE001 - 回写失败不影响续签
+            pass
         renewed["n"] += 1
         return {"ok": True}
 
     run_account_batch(ids, worker, label="minimax-keepalive")
     return {"ok": True, "checked": len(rows), "renewed": renewed["n"],
-            "summary": "续签 %d 个账号" % renewed["n"]}
+            "summary": "续签 %d 个账号（已回写客户端）" % renewed["n"]}
 
 
 def _run_refresh_quota(db: Session, schedule=None) -> dict:

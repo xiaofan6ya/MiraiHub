@@ -4758,7 +4758,7 @@ async function loadMinimaxAccounts(platform) {
   const foot = $("#accFootNote");
   if (foot) foot.textContent = "可用积分 = credit/details 各包 remaining_amount 求和（签到积分 30 天有效，仅 MiniMax Code 可用）";
   const footHint = $("#accFootHint");
-  if (footHint) footHint.textContent = "凭证到期前 7 天自动用 refresh_token 续签（minimax_keepalive）";
+  if (footHint) footHint.textContent = "access 票是短周期凭证：到期前自动用 refresh_token 换新（minimax_keepalive 每 6 小时巡检兜底）";
 
   accServerTabs({ total: items.length,
     active: active.length,
@@ -4782,17 +4782,24 @@ function minimaxRow(a) {
   const err = (a.last_err && ok)
     ? `<small style="color:var(--danger)" data-tooltip="最近错误" data-tooltip-description="${esc(a.last_err)}">${esc(String(a.last_err).slice(0, 34))}</small>`
     : "";
-  let credText = "—", credTone = "var(--fg-muted)";
+  let credText = "—", credTone = "var(--fg-muted)", credTip = "";
   if (a.expires_at_ms) {
     const left = a.expires_at_ms - Date.now();
-    credText = left <= 0 ? "已过期（待续签）"
-      : `剩 ${a.expires_in_days ?? Math.round(left / 86400e3)} 天`;
-    credTone = left <= 0 ? "var(--danger)"
-      : (left < 7 * 86400e3 ? "var(--warn, #b45309)" : "var(--fg-muted)");
+    // access 票是**短周期凭证**（官方约 11 小时一换），不是账号有效期 ——
+    // 按小时展示；到期前 ensure_token / minimax_keepalive 会拿 refresh_token
+    // 自动换新，所以正常状态永远显示「自动续签」，只剩异常（无 refresh）才吓人。
+    const hours = Math.max(0, Math.round(left / 3600e3 * 10) / 10);
+    credText = left <= 0 ? "已过期（待续签）" : `access 票约 ${hours} 小时`;
+    credTip = left <= 0
+      ? "access 票已过期：有 refresh_token 时下一次调用会自动续签"
+      : "access 票为短周期凭证，到期前自动用 refresh_token 换新（无需人工处理）";
+    credTone = left <= 0
+      ? (a.has_refresh ? "var(--warn, #b45309)" : "var(--danger)")
+      : "var(--fg-muted)";
   }
   const credNote = a.has_refresh
-    ? `<div><small style="color:${credTone}">${esc(credText)} · refresh_token ✓</small></div>`
-    : `<div><small style="color:var(--danger)">无 refresh_token（无法自动续签）</small></div>`;
+    ? `<div><small style="color:${credTone}" data-tooltip="${esc(credTip || "凭证到期前自动续签")}" data-tooltip-description="${esc(credTip || "到期前自动用 refresh_token 换新 access 票")}">${esc(credText)} · 自动续签 ✓</small></div>`
+    : `<div><small style="color:var(--danger)" data-tooltip="没有 refresh_token，access 票过期后无法自动续签" data-tooltip-description="需要重新扫码授权或重新扫描本机凭证入库">无 refresh_token（无法自动续签）</small></div>`;
 
   return `<tr>
     <td class="c-name">

@@ -62,16 +62,32 @@ def list_accounts(realm: str = "", _: bool = Depends(require_admin),
                       for row in minimax_accounts.accounts_for(db, realm)]}
 
 
+class ImportLocalIn(BaseModel):
+    """通用扫描确认弹窗的导入入参（`platformImportConfirm` 发 `{uids, all}`）。"""
+    uids: list[str] = []
+    all: bool = False
+    realm: str = ""
+
+
 @router.get("/scan-local")
-def scan_local(_: bool = Depends(require_admin)):
-    return {"platform": PUBLIC, "items": paths.discover(),
-            "auth_home": paths.auth_home()}
+def scan_local(realm: str = "", _: bool = Depends(require_admin)):
+    items = paths.discover()
+    if realm:
+        want = paths.normalize_region(realm)
+        items = [it for it in items if it.get("realm") == want]
+    return {"platform": PUBLIC, "items": items,
+            "can_import": bool(items),
+            "auth_home": paths.auth_home(),
+            "hint": "MiniMax 客户端登录态是明文 auth.json，勾选后直接入库"
+                    if items else "未找到登录态：请先在 MiniMax Code 客户端登录一次"}
 
 
 @router.post("/import-local")
-def import_local(body: ImportIn, _: bool = Depends(require_admin),
+def import_local(body: ImportLocalIn, _: bool = Depends(require_admin),
                  db=Depends(get_db)):
-    result = minimax_accounts.import_local(db, body.realm)
+    result = minimax_accounts.import_local(
+        db, body.realm,
+        uids=None if (body.all or not body.uids) else body.uids)
     result["platform"] = PUBLIC
     return result
 

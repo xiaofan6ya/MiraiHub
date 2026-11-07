@@ -101,7 +101,9 @@ def _error_from_anthropic(resp: httpx.Response, tag: str) -> UpstreamError:
         payload = None
     kind = _classify(resp.status_code, text)
     if kind == "auth":
-        shown = "凭证无效或已过期（上游 %d）" % resp.status_code
+        shown = ("凭证无效或已被轮换吊销（上游 401）：请在 MiniMax 客户端登录一次后"
+                 "「扫描本机」重新入库，或用「授权登录」重新扫码 —— "
+                 "轮换票一旦被其它端续签，旧 access/refresh 一并作废")
     elif kind == "quota":
         shown = "账号额度/积分不足（上游 %d）" % resp.status_code
     elif kind == "rate":

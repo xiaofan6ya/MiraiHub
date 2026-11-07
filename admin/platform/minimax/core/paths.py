@@ -63,7 +63,7 @@ def read_records(path: str) -> list[dict]:
     """读一个 auth.json 的全部 records，归一成导入记录。
 
     每条：{"token", "refresh_token", "expires_at_ms", "realm", "source",
-           "client_id", "scopes", "audience", "account_key"}
+           "client_id", "scopes", "audience", "account_key", "uid"}
     解析失败/空文件返回 []（不抛 —— 扫描要的就是「能拿多少拿多少」）。
     """
     try:
@@ -90,6 +90,10 @@ def read_records(path: str) -> list[dict]:
         token = str(cred.get("accessToken") or "")
         if not token:
             continue
+        # record key 形如 `com.minimax.mcode.oauth.prod.cn\0<account>`：
+        # `\0` 前是 service 名，**后半段才是账号标识**。整串当 uid 会把
+        # 不可见的 NUL 带进前端/日志，且每次扫描展示成一坨乱码。
+        account_id = str(key or "").split("\0", 1)[-1].strip()
         out.append({
             "token": token,
             "refresh_token": str(cred.get("refreshToken") or ""),
@@ -99,23 +103,34 @@ def read_records(path: str) -> list[dict]:
             "scopes": cred.get("scopes") if isinstance(cred.get("scopes"), list) else [],
             "audience": str(cred.get("audience") or ""),
             "account_key": str(key or ""),
+            "uid": account_id,
             "source": "local-scan",
         })
     return out
 
 
 def discover() -> list[dict]:
-    """扫描本机全部 MiniMax 登录态（不含敏感字段原文，供列表展示）。"""
+    """扫描本机全部 MiniMax 登录态（不含敏感字段原文，供列表展示）。
+
+    字段对齐通用扫描弹窗（`showScanResult`）的判定：
+      * `has_plain_credential` / `file` —— 「可导入」的判定键（明文 auth.json）；
+      * `uid_full` —— 勾选框 data-uid 用的完整 uid（导入按它过滤）；
+      * `uid` —— 展示用短标识。
+    """
     items = []
     for entry in credential_files():
         for record in read_records(entry["path"]):
             token = record["token"]
+            uid = record["uid"] or ("mm-" + hashlib_short(token))
             items.append({
-                "uid": record["account_key"] or ("mm-" + hashlib_short(token)),
+                "uid": uid[:18] + ("…" if len(uid) > 18 else ""),
+                "uid_full": uid,
                 "name": "MiniMax %s" % ("国际版" if record["realm"] == "en" else "中国版"),
                 "realm": record["realm"],
                 "expires_at_ms": record["expires_at_ms"],
                 "has_refresh": bool(record["refresh_token"]),
+                "has_plain_credential": True,
+                "file": entry["path"],
                 "path": entry["path"],
                 "token_tail": token[-6:] if len(token) > 6 else "",
             })
@@ -125,3 +140,58 @@ def discover() -> list[dict]:
 def hashlib_short(token: str) -> str:
     import hashlib
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def write_back_credential(realm: str, *, access_token: str,
+                          refresh_token: str, expires_at_ms: int,
+                          build_env: str = "prod") -> bool:
+    """把网关续签后的**新票回写官方客户端 auth.json**。
+
+    ## 为什么要回写（互踢问题的根治）
+
+    MiniMax 的 OAuth 是**轮换票**：`oauth2/token` 每次续签都会发新票并
+    **立即吊销旧票**（access 与 refresh 一同作废）。官方客户端和网关各持
+    一份票，任何一方续签，另一方手里的票就全失效 —— 表现为「客户端突然
+    掉登录」或「网关 401 invalid_grant」。
+
+    续签只发生在网关时（ensure_token / keepalive），把新票写回客户端的
+    `auth/prod/<env>/<region>/mcode-public/auth.json`（与客户端自己的
+    file-store 同结构），双方共享最新票源。客户端正在运行时它内存态可能
+    覆盖本文件 —— 那就让客户端赢（客户端下次续签后，网关扫描/续期会再
+    拿到新票），不会造成额外损坏。
+    """
+    path = auth_file(realm, build_env)
+    try:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+        else:
+            payload = {"schemaVersion": 1, "records": {}}
+        records = payload.get("records")
+        if not isinstance(records, dict) or not records:
+            # 客户端从未写过该文件 / 结构变了：不要造一份假的记录键，
+            # 放弃回写（丢的是「回写」这个优化，不是数据）。
+            return False
+        # 单记录文件（实测一台机器一个登录态）：更新第一条匹配 client 的记录
+        for key, cred in records.items():
+            if not isinstance(cred, dict):
+                continue
+            if str(cred.get("clientId") or "") == "mcode-public" \
+                    or str(key or "").startswith("com.minimax.mcode"):
+                cred["accessToken"] = access_token
+                cred["refreshToken"] = refresh_token
+                cred["expiresAtMs"] = int(expires_at_ms)
+                cred["tokenType"] = "Bearer"
+                break
+        else:
+            return False
+        import tempfile
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 - 回写是优化，失败不影响网关自身续签
+        return False
