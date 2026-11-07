@@ -340,6 +340,10 @@ def device_poll_token(realm: str, device_code: str, code_verifier: str) -> dict:
 
     返回 {"status": "pending"/"slow_down"} 或
     {access_token, refresh_token, expires_in, ...}（成功）。
+
+    上游是标准 RFC 8628：pending 时返回 **HTTP 400**
+    `{"error":"authorization_pending"}`（实测 2026-11-07），slow_down 同形。
+    `_oauth_post` 已把它归一成 `{"status": ...}` —— 两个名字都要认。
     """
     payload = _oauth_post(account_base(realm) + "/oauth2/token", {
         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -347,8 +351,9 @@ def device_poll_token(realm: str, device_code: str, code_verifier: str) -> dict:
         "client_id": endpoints.OAUTH_CLIENT_ID,
         "code_verifier": code_verifier,
     })
-    if payload.get("status") in ("pending", "slow_down"):
-        return {"status": payload["status"]}
+    if payload.get("status") in ("pending", "slow_down", "authorization_pending"):
+        return {"status": "pending" if payload["status"] == "authorization_pending"
+                else payload["status"]}
     access = str(payload.get("access_token") or "")
     if not access:
         raise UpstreamError("授权未返回 access_token", kind="upstream")

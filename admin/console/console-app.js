@@ -5316,16 +5316,19 @@ async function platformBeginAuth(spec, storage) {
     }
     const qrSrc = "/api/minimax/auth/qr.svg?value=" + encodeURIComponent(data.qr_value || "");
     openModal(`<h3 class="font-semibold text-lg mb-1">扫码授权 · MiniMax Code</h3>
-      <p class="text-xs mb-3" style="color:var(--fg-muted)">
-        用<b>微信</b>或<b>MiniMax App</b> 扫码，或访问
-        <a href="${esc(data.verification_uri || "")}" target="_blank" rel="noopener" style="color:var(--brand)">官方授权页</a>
-        输入用户码 <b>${esc(data.user_code || "")}</b> 并确认登录。
-        确认后凭证自动入库（有效期 5 分钟）。</p>
+      <p class="text-xs mb-2" style="color:var(--fg-muted);line-height:1.7">
+        <b>①</b> 扫下方二维码，或点 <a href="${esc(data.verification_uri_complete || data.verification_uri || "")}"
+           target="_blank" rel="noopener" style="color:var(--brand)">打开官方授权页</a><br>
+        <b>②</b> 在页面<b>先用手机号登录</b>（验证码登录即可，未登录时页面只显示登录框 —— 这是官方流程，不是坏了）<br>
+        <b>③</b> 登录后页面会出现「确认授权」，确认后凭证<b>自动入库并开始自动续签</b>（有效期 5 分钟，超时重新发起）</p>
+      <p class="text-[11px] mb-3" style="color:var(--fg-subtle)">
+        用户码 <b style="font-size:15px;letter-spacing:1px">${esc(data.user_code || "")}</b>
+        （若页面要求输入，填这个码） · 也可以用装了 MiniMax App 且已登录的手机扫，App 内直接确认</p>
       <div class="flex flex-col items-center gap-3 py-2">
         <img src="${qrSrc}" alt="授权二维码" width="220" height="220"
              onerror="this.replaceWith(Object.assign(document.createElement('div'),{style:'width:220px;height:120px;display:flex;align-items:center;justify-content:center;color:var(--danger);font-size:12px;text-align:center;padding:8px;border:1px solid var(--line);border-radius:12px'},{textContent:'二维码渲染失败，请点上方链接手动授权'}))"
              style="background:#fff;border-radius:12px;padding:8px;border:1px solid var(--line)">
-        <div id="minimaxAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待授权确认…</div>
+        <div id="minimaxAuthStatus" class="text-sm" style="color:var(--fg-muted)">等待你在授权页登录并确认…</div>
       </div>
       <div class="flex justify-end mt-2">
         <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
