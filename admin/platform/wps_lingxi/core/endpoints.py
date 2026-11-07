@@ -33,7 +33,14 @@ import hashlib
 import os
 import uuid
 
-PLATFORM = "wps_lingxi"
+#: 落库平台标识 = 对外平台 id。
+#:
+#: 这里刻意**不用下划线**：控制台是按 `Account.platform` 拼管理接口前缀的
+#: （`/api/${storage}/accounts/{id}/refresh`、`/api/${storage}?page_size=…`）。
+#: 如果落库写 `wps_lingxi`、路由挂 `/api/wps-lingxi`，点「刷新余额」和
+#: 「用量明细」都会 404 —— 而且 404 会伪装成「功能没做」。
+#: 让 id 与 storage 相同（和 minimax / codearts 一致），前缀天然对齐。
+PLATFORM = "wps-lingxi"
 PUBLIC = "wps-lingxi"
 
 BASE = "https://lingxi.wps.cn"

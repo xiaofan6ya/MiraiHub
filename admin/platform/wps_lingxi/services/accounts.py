@@ -219,6 +219,9 @@ def public_view(account: Account) -> dict:
         "id": account.id,
         "name": account.name,
         "uid": account.uid,
+        # 控制台按这个字段拼管理接口前缀（/api/<platform>/accounts/{id}/refresh），
+        # 缺了它会退化成 WorkBuddy 的 /api/accounts，点「刷新余额」必然报凭证结构不符。
+        "platform": PLATFORM,
         "realm": realm_of(account),
         "status": getattr(account, "status", "") or "",
         "balance_remain": int(getattr(account, "balance_remain", 0) or 0),

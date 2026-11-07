@@ -36,10 +36,13 @@ from admin.platform.registry import PlatformSpec
 
 logger = logging.getLogger("admin.platform.wps_lingxi")
 
-PLATFORM = "wps_lingxi"
+PLATFORM = "wps-lingxi"
 #: 落库区域（单一区域，没有多区）
 REALMS = ("cn", )
 #: 区域 -> 对外平台 id
+#:
+#: 落库标识与对外 id 相同，理由见 `core/endpoints.PLATFORM` 的注释：
+#: 控制台按 `Account.platform` 拼 `/api/<platform>/...`，两者必须一致。
 REALM_IDS = {"cn": "wps-lingxi"}
 
 
