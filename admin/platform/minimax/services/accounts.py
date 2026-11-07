@@ -70,6 +70,8 @@ def public_view(account: Account) -> dict:
         "has_refresh": bool(refresh_token_of(data)),
         "last_sync_at": account.balance_synced_at.isoformat()
         if account.balance_synced_at else None,
+        "created_at": account.created_at.isoformat()
+        if account.created_at else None,
         "last_err": account.last_err_msg or "",
     }
 
@@ -82,11 +84,23 @@ def accounts_for(db: Session, realm: str = "") -> list[Account]:
 
 
 def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
-    """按 (platform, uid) 幂等写入。同 uid 只更新凭证。"""
-    # uid 归一：record key 可能带 service 前缀 + NUL（com.minimax...\0<account>），
-    # 只取 \0 后的账号段，避免不可见字符进库
+    """按 (platform, uid) 幂等写入。同 uid 只更新凭证。
+
+    ## uid 必须是官方 user_id（同一账号只许一行）
+
+    MiniMax 的账号有两个标识：auth.json record key 的 account_key
+    （opaque 串，随客户端安装而异）与 **profile 的数字 user_id（权威）**。
+    两个来源（本机扫描 / 设备授权）若各用各的标识，同一个真实账号就会
+    落成两行 —— 一行活票一行死票。规则：
+      * 扫描路径在入库前先 fetch_profile 把 uid 解析成 user_id；
+      * 匹配顺序：uid → token → account_key 血缘（认领旧行并把 uid
+        改写成 user_id，完成迁移）；
+      * 命中后若池内还有同 uid 的**其它行**（历史双命名空间残留），
+        一并合并删除 —— 同一真实账号只保留一行。
+    """
     uid = str(payload.get("uid") or "").split("\0", 1)[-1].strip()
     payload["uid"] = uid
+    account_key = str(payload.get("account_key") or "").strip()
     realm = normalize_region(payload.get("realm"))
     existing = None
     if uid:
@@ -94,20 +108,43 @@ def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
                     .filter(Account.platform == PLATFORM,
                             Account.uid == uid).first())
     if existing is None:
-        # 老记录可能 uid 为空但 token 同值 —— 用 token 前缀兜底认领
         tok = str(payload.get("token") or "")
         for row in accounts_for(db, realm):
-            if tok and token_of(credentials_of(row)) == tok:
+            row_uid = str(row.uid or "").split("\0", 1)[-1].strip()
+            if tok and row_uid and token_of(credentials_of(row)) == tok:
                 existing = row
                 break
+    if existing is None and account_key:
+        # 血缘认领：旧行可能记着 account_key（老版本扫描入库），uid 还是
+        # opaque 串 —— 认领它并把 uid 迁移成 user_id
+        for row in accounts_for(db, realm):
+            if credentials_of(row).get("account_key") == account_key:
+                existing = row
+                break
+        if existing is None:
+            for row in accounts_for(db, realm):
+                row_uid = str(row.uid or "").split("\0", 1)[-1].strip()
+                if account_key and row_uid == account_key:
+                    existing = row
+                    break
     created = existing is None
     if existing is None:
         existing = Account(platform=PLATFORM, uid=uid, status="active",
                            domain=realm)
         db.add(existing)
+    elif uid and existing.uid != uid:
+        existing.uid = uid  # 血缘/令牌认领的旧行：uid 迁移到权威 user_id
+    # 合并残留：同 uid 的其它行（历史双命名空间造成的重复）删掉，
+    # 它们的凭证要么已死、要么与本行相同，保留 uid 权威行
+    if uid:
+        duplicates = (db.query(Account)
+                      .filter(Account.platform == PLATFORM,
+                              Account.uid == uid,
+                              Account.id != existing.id).all())
+        for dup in duplicates:
+            db.delete(dup)
     existing.name = clean_display_name(
         str(payload.get("name") or existing.name or uid or "MiniMax Code"))
-    existing.uid = uid or existing.uid or ""
     existing.domain = realm
     existing.auth_json = json.dumps(payload, ensure_ascii=False)
     if created:
@@ -151,6 +188,25 @@ def import_record(db: Session, record: dict) -> tuple[Account, bool]:
     return account, created
 
 
+def _resolve_uid_via_profile(token: str, realm: str,
+                             fallback: str) -> tuple[str, str, str]:
+    """用 token 拉一次 profile，把 uid 统一到**官方数字 user_id**。
+
+    返回 (uid, name, account_id)；profile 拉不到时回落 (fallback, "", "")。
+    本机扫描与设备授权两条入库路径共用它 —— 双命名空间（account_key vs
+    user_id）会让同一真实账号落成两行，一行活票一行死票。
+    """
+    try:
+        profile = client.fetch_profile(token, realm)
+        uid = str(profile.get("user_id") or "")
+        name = str(profile.get("user_name") or "")
+        if uid:
+            return uid, name, str(profile.get("user_id") or "")
+    except Exception:  # noqa: BLE001 - 死票/离线时仍允许入库（回落标识）
+        pass
+    return fallback, "", ""
+
+
 def import_local(db: Session, realm: str = "",
                  uids: list[str] | None = None) -> dict:
     """扫描本机 ~/.minimax 凭证并入库；可按区域 / uid 收窄。
@@ -174,10 +230,17 @@ def import_local(db: Session, realm: str = "",
         for record in paths.read_records(entry["path"]):
             scanned += 1
             if uids:
-                account_id = str(record.get("uid") or "")
-                if account_id not in uids:
+                scan_uid = str(record.get("uid") or "")
+                if scan_uid not in uids:
                     continue
             try:
+                # uid 统一到官方 user_id（profile 一次往返，失败回落 account_key）
+                uid, profile_name, _ = _resolve_uid_via_profile(
+                    record["token"], record["realm"],
+                    str(record.get("uid") or ""))
+                record["uid"] = uid
+                if profile_name:
+                    record["name"] = profile_name
                 _account, created = _upsert(db, record)
                 added += 1 if created else 0
                 updated += 0 if created else 1

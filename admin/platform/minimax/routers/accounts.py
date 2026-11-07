@@ -276,6 +276,16 @@ def device_poll(auth_id: str, _: bool = Depends(require_admin),
               "realm": realm, "source": "device-auth"}
     account, _created = minimax_accounts.import_record(db, record)
     db.commit()
+    # 新票回写官方客户端 auth.json（轮换票互踢根治的一部分）：
+    # 客户端与网关共享同一张活票，谁续签谁都同步
+    try:
+        paths.write_back_credential(
+            realm,
+            access_token=token,
+            refresh_token=str(grant.get("refresh_token") or ""),
+            expires_at_ms=int(grant.get("expires_at_ms") or 0))
+    except Exception:  # noqa: BLE001 - 回写失败不影响入库
+        pass
     with _DEVICE_LOCK:
         sess = _device_sessions.get(auth_id)
         if sess is not None:
