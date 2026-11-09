@@ -5823,6 +5823,17 @@ async function platformBeginAuth(spec, storage) {
     return;
   }
 
+  // 腾讯 Marvis：QQ / 微信 OAuth。
+  //
+  // 为什么不能走下面的通用「设备码」兜底：那条路要求**服务端**把凭证轮询回来，
+  // 而 QQ / 微信的授权码只会落在**用户浏览器的地址栏**里（重定向到
+  // `marvis_oauth?code=…`），服务端拿不到 —— 必须让用户把那条地址粘回来。
+  // 所以这里走「二维码 + 粘贴回调」的形态，与 Trae 的手动提交同一思路。
+  if (id === "marvis") {
+    await marvisBeginAuth(spec);
+    return;
+  }
+
   const start = await api(`/api/${storage}/device/start?realm=${encodeURIComponent(realm)}`,
                           { method: "POST" });
   const { ok, data } = await safeJson(start);
@@ -5922,6 +5933,169 @@ async function platformBeginAuth(spec, storage) {
   }
   const el = statusEl();
   if (el) el.textContent = "授权超时（5 分钟），请重新发起";
+}
+
+/**
+ * 腾讯 Marvis 授权登录：二维码 + 回调粘贴。
+ *
+ * 流程（QQ / 微信 OAuth 的固有形态，绕不过去）：
+ *
+ *   1. `POST /api/marvis/auth/start` 拿授权地址 + 二维码地址；
+ *   2. 用户手机扫码（或点链接）登录；
+ *   3. 浏览器跳到 `…/marvis_oauth?code=…` —— **页面打不开是正常的**，
+ *      它是上游 API，不是网页。让用户把地址栏那条整段复制回来；
+ *   4. `POST /api/marvis/auth/submit` 换登录态并入库。
+ *
+ * 为什么不自动完成第 3 步：授权码落在用户浏览器里，服务端拿不到；
+ * 让服务端驱动无头浏览器去登 QQ / 微信要做滑块 + 设备校验，成功率极低，
+ * 还要把用户密码交给网关 —— 不做。
+ */
+async function marvisBeginAuth(spec) {
+  const label = esc((spec && spec.label) || "腾讯 Marvis");
+  let state = { loginType: "QC", authId: "", url: "", qr: "" };
+
+  const loginTypeBtn = (key, text) => `
+    <button type="button" data-mv-type="${key}"
+      class="px-3 py-1.5 rounded-lg border text-xs ${state.loginType === key
+        ? "console-btn primary" : "quiet"}">${text}</button>`;
+
+  function render() {
+    const host = document.getElementById("marvisAuthBody");
+    if (!host) return;
+    host.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs" style="color:var(--fg-muted)">登录方式</span>
+        ${loginTypeBtn("QC", "QQ 扫码")}
+        ${loginTypeBtn("WX", "微信扫码")}
+        <span style="flex:1"></span>
+        <button type="button" id="marvisAuthReload" class="console-btn quiet text-xs">换一张</button>
+      </div>
+
+      <div class="flex gap-4 items-start mb-3">
+        <div style="flex:0 0 auto;padding:8px;background:#fff;border-radius:10px;border:1px solid var(--border)">
+          <img id="marvisQr" src="${esc(state.qr || "")}" alt="登录二维码"
+               style="width:176px;height:176px;display:block" />
+        </div>
+        <div class="text-xs" style="color:var(--fg-muted);line-height:1.9">
+          <p class="m-0 mb-1"><b>① 用手机${state.loginType === "WX" ? "微信" : "QQ"}扫左边的码</b></p>
+          <p class="m-0 mb-1">扫不了就点下面这条链接，在浏览器里登录：</p>
+          <p class="m-0 mb-2" style="word-break:break-all">
+            <a href="${esc(state.url || "#")}" target="_blank" rel="noopener"
+               style="color:var(--brand);text-decoration:underline">${esc(state.url || "")}</a>
+          </p>
+          <p class="m-0" style="color:var(--warn)">
+            登录后浏览器会跳到一条 <code>marvis_oauth?code=…</code> 的地址，
+            <b>页面打不开是正常的</b> —— 它就是上游接口，不是网页。
+          </p>
+        </div>
+      </div>
+
+      <form id="marvisCallbackForm" style="padding-top:10px;border-top:1px dashed var(--border)">
+        <label class="block text-xs mb-1" style="color:var(--fg-muted)">
+          ② 把那条打不开的地址<b>整段</b>粘到这里（只贴 <code>code=</code> 后面的也认）
+        </label>
+        <textarea id="marvisCallback" rows="3" class="w-full text-xs"
+          style="padding:8px;border:1px solid var(--border);border-radius:8px;resize:vertical;background:var(--bg);color:var(--fg)"
+          placeholder="https://yybadaccess.3g.qq.com/marvis_client_login/marvis_oauth?login_type=QC&amp;code=…"
+          spellcheck="false" autocomplete="off"></textarea>
+        <div class="flex items-center justify-between mt-2">
+          <span id="marvisAuthStatus" class="text-xs" style="color:var(--fg-subtle)"></span>
+          <button id="marvisCallbackSubmit" type="submit" class="console-btn primary">提交并入库</button>
+        </div>
+      </form>`;
+
+    host.querySelectorAll("[data-mv-type]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        state.loginType = btn.getAttribute("data-mv-type");
+        startAuth();
+      });
+    });
+    const reload = document.getElementById("marvisAuthReload");
+    if (reload) reload.addEventListener("click", startAuth);
+
+    const form = document.getElementById("marvisCallbackForm");
+    if (form) {
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        await submitCallback();
+      });
+    }
+  }
+
+  async function startAuth() {
+    const statusEl = () => document.getElementById("marvisAuthStatus");
+    try {
+      const response = await api("/api/marvis/auth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ login_type: state.loginType }),
+      });
+      const { ok, data } = await safeJson(response);
+      if (!ok) {
+        toast("发起授权失败：" + apiErrText(data, response.status, "请稍后重试"), "err");
+        return;
+      }
+      state = { loginType: state.loginType, authId: data.auth_id || "",
+                url: data.url || data.authorize_url || "", qr: data.qr || "" };
+      render();
+      const el = statusEl();
+      if (el) el.textContent = "等待扫码…";
+    } catch (error) {
+      toast("发起授权失败：" + (error && error.message ? error.message : error), "err");
+    }
+  }
+
+  async function submitCallback() {
+    const statusEl = () => document.getElementById("marvisAuthStatus");
+    const box = document.getElementById("marvisCallback");
+    const value = ((box && box.value) || "").trim();
+    if (!value) { toast("先把回调地址粘进来", "err"); return; }
+    if (!state.authId) { toast("授权会话已失效，点「换一张」重新开始", "err"); return; }
+
+    const el = statusEl();
+    if (el) el.textContent = "正在换取登录态…";
+    try {
+      const response = await api("/api/marvis/auth/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auth_id: state.authId, callback: value }),
+      });
+      const { ok, data } = await safeJson(response);
+      if (!ok) {
+        const detail = (data && (data.message || data.detail)) || response.status;
+        if (el) { el.style.color = "var(--danger)"; el.textContent = "失败：" + detail; }
+        toast("授权失败：" + detail, "err");
+        return;
+      }
+      const account = (data && data.account) || {};
+      if (el) {
+        el.style.color = "var(--success, #33587F)";
+        el.textContent = "已入库：" + (account.name || account.openid || "Marvis 账号");
+      }
+      toast("授权完成，账号已添加");
+      // 与其它平台一致：先显式切到该平台再刷，避免「数据进来了但列表还是空的」
+      try {
+        if (window.WBPlatform && typeof window.WBPlatform.select === "function") {
+          await window.WBPlatform.select(spec && spec.id ? spec.id : "marvis", "cn");
+        }
+      } catch (error) { /* 切平台失败也要刷 */ }
+      await new Promise(resolve => setTimeout(resolve, 600));
+      loadAccounts();
+      if (window.WBPlatform) window.WBPlatform.refreshCounts();
+      setTimeout(() => closeModal(), 900);
+    } catch (error) {
+      if (el) { el.style.color = "var(--danger)"; el.textContent = "失败：" + error; }
+      toast("授权失败：" + (error && error.message ? error.message : error), "err");
+    }
+  }
+
+  openModal(`<h3 class="font-semibold text-lg mb-2">授权登录 · ${label}</h3>
+    <div id="marvisAuthBody"></div>
+    <div class="flex justify-end mt-3">
+      <button onclick="closeModal()" class="console-btn quiet">关闭</button>
+    </div>`, "max-w-2xl");
+
+  await startAuth();
 }
 
 /**
