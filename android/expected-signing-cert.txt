@@ -1,0 +1,7 @@
+# Android 发布签名证书的 SHA-256（公钥指纹，不是秘密，可以提交）
+#
+# 打包前 scripts/android_signing.py --verify 会做比对：
+# 不一致 = APK 换了签名 = 老用户必须卸载重装（会丢本地账号库）。
+# 只有在**故意**更换签名身份时才允许更新本文件（--rotate）。
+alias=workbuddy2api
+sha256=0F850D0E5B5DC35A84F1CACDCA284673BB11F94CC0BB646B2435D2375B68C3B9

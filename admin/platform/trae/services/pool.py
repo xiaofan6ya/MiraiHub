@@ -182,7 +182,21 @@ def credentials(db: Session, account: Account, *, force_refresh: bool = False) -
     if not isinstance(data, dict):
         raise client.UpstreamError("bad_credential", "账号凭证损坏，请重新导入", None)
     if force_refresh or not client.token_of(data) or client.is_expired(data):
-        fresh = client.refresh_account(data)
+        try:
+            fresh = client.refresh_account(data)
+        except client.UpstreamError as exc:
+            # **刷新失败必须落库**：国际版的 refresh token 一旦被判
+            # `20101 refresh token is invalid`，这条凭证就再也换不出新 token，
+            # 账号只能重新登录。以前这里直接往上抛，`last_err_msg` 与
+            # `session_dead_fails` 都不动 —— 账号永远显示 active、
+            # 日志里只有一行「上游模型清单同步失败」，看不出真因。
+            account.last_err_msg = ("refresh: %s" % exc.message)[:255]
+            account.last_err_at = _now()
+            try:
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+            raise
         data.update(fresh)
         data["realm"] = client.normalize_realm(data.get("realm"))
         account.auth_json = json.dumps(data, ensure_ascii=False)
@@ -457,15 +471,36 @@ def refresh_quota(db: Session, account: Account, *, force: bool = False) -> dict
     try:
         creds = credentials(db, account, force_refresh=force)
     except client.UpstreamError as exc:
-        return {"ok": False, "error": exc.to_dict()}
+        # 换 token 失败 **必须落到账号上**：以前这里直接 return，
+        # `last_err_msg` 一直是空的，控制台看不出「这个号要重新登录」，
+        # 只能从日志里猜。走一遍 note_failure 才有「连续 3 次 → disabled」。
+        note_failure(db, account, exc)
+        return {"ok": False, "error": exc.to_dict(),
+                "models_synced": 0, "models_error": exc.message[:200],
+                "credential_ok": False}
     realm = client.normalize_realm(account.domain or creds.get("realm"))
     synced = 0
+    models_error = ""
     try:
         rows = client.fetch_model_list(creds, realm)
         synced = catalog.note_live_rows(
             realm, [{**row, "source": "upstream"} for row in rows])
     except client.UpstreamError as exc:
-        logger.info("trae 上游模型清单同步失败 realm=%s: %s", realm, exc.detail[:120])
+        models_error = "%s %s" % (exc.code or "?", exc.message[:160])
+        if exc.kind == "auth":
+            # **鉴权失败不是「清单暂时拿不到」**：它说明这个号的 access token
+            # 已死、refresh token 也换不动（国际版实测会回
+            # `{"code":1001,... not able to authenticate you}` +
+            # `20101 refresh token is invalid`）。以前只记一行 info，
+            # 于是每轮同步都静默失败、账号还是 active、面板还显示旧模型。
+            # 现在交给 note_failure：尝试刷新一次，刷不动累计失败次数并置 disabled。
+            note_failure(db, account, exc)
+            logger.warning("trae 账号 %s(%s) 凭证已失效，模型清单无法同步：%s",
+                           account.id, realm, exc.message[:120])
+        else:
+            # 非鉴权类（网络抖动 / 上游 5xx）属于可恢复：info 一行足够。
+            logger.info("trae 上游模型清单同步失败 realm=%s: %s",
+                        realm, exc.message[:120])
 
     # 客户端目录（权威）：覆盖上面那批旧模型
     desktop = desktop_catalog.read_models(realm)
@@ -477,6 +512,8 @@ def refresh_quota(db: Session, account: Account, *, force: bool = False) -> dict
 
     info = trae_accounts.sync_quota(db, account)
     return {"ok": True, "models_synced": synced,
+            "models_error": models_error,
+            "credential_ok": "auth" not in (models_error or ""),
             "desktop_models": len(desktop["models"]),
             "desktop_error": desktop["error"], **info}
 

@@ -13,3 +13,7 @@ cryptography==42.0.8
 python-dotenv==1.1.0
 packaging==25.0
 tzdata==2026.5
+# 小浣熊扫码授权的二维码（raccoon webauth /auth/qr.svg 服务端渲染）。
+# 纯 Python、无原生依赖，Chaquopy 能直接装；**漏了它 APK 里二维码就渲染不出来**
+# （前端表现为「商汤二维码不显示」）。
+qrcode==8.2

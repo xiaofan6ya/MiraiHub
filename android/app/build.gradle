@@ -18,11 +18,15 @@ android {
         ndk { abiFilters 'arm64-v8a' }
     }
     if (System.getenv('WB_ANDROID_KEYSTORE')) {
+        // 签名身份由 scripts/android_signing.py 统一管理（一次生成、长期复用）：
+        // keystore / 密码 / 别名全部从环境变量注入，别名不再写死 ——
+        // 写死时一旦脚本换了别名，gradle 会拿「别名不存在」的 keystore
+        // 签出一个空签名包，装上去直接 INSTALL_PARSE_FAILED_NO_CERTIFICATES。
         signingConfigs {
             release {
                 storeFile file(System.getenv('WB_ANDROID_KEYSTORE'))
                 storePassword System.getenv('WB_ANDROID_STORE_PASSWORD')
-                keyAlias 'workbuddy2api'
+                keyAlias (System.getenv('WB_ANDROID_KEY_ALIAS') ?: 'workbuddy2api')
                 keyPassword System.getenv('WB_ANDROID_KEY_PASSWORD')
             }
         }

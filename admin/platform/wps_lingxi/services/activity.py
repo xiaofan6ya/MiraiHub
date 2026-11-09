@@ -55,7 +55,15 @@ DEFAULT_PROBABILITY = 0.85
 #: 号与号之间的基准间隔（秒），会再叠 humanize 抖动。
 DEFAULT_GAP_SECONDS = 2.6
 #: 单次对话的 max_tokens：太小像探针，太大烧智点。
-DEFAULT_MAX_TOKENS = 96
+#:
+#: **不能只按「答案长度」算**：灵犀这批模型会先输出 reasoning_content 再出
+#: content，而 `max_tokens` 同时管两者。实测 `max_tokens=96` 时 completion
+#: 正好吃满 96 个 token、content 一个字符都没有 —— 表现就是
+#: 「灵犀每日活跃：失败 1 个」而 usage 里 completion_tokens == max_tokens。
+#: 320 是「思考 + 一段短答」都能装下的最小安全值，成本仍可忽略。
+DEFAULT_MAX_TOKENS = 320
+#: 兜底重试的 max_tokens（第一次因 `finish_reason=length` 截断时用）。
+RETRY_MAX_TOKENS = 640
 #: 追问概率（同一 run 内再发一句，成本不变，画像更真）。
 FOLLOW_UP_PROBABILITY = 0.20
 
@@ -247,6 +255,19 @@ def activate_account(db, account, *, prompt: str | None = None,
             pass
         result = client.collect(cookie, run, payload, model=model)
 
+        # **截断重试**：reasoning 把 max_tokens 吃满时上游只回
+        # `finish_reason=length` + 空 content，这不是「上游没答」，
+        # 是预算给少了。同一个 run 内补一次更大的预算即可，不额外计费。
+        if not _first_text(result) and _truncated(result):
+            bigger = max(RETRY_MAX_TOKENS, tokens * 2)
+            retry_body = {"model": model,
+                          "messages": [{"role": "user", "content": text}],
+                          "max_tokens": bigger, "stream": False}
+            retry_payload, _, _ = protocol.prepare_agent_body(dict(retry_body))
+            logger.info("灵犀活跃被 max_tokens 截断，提额重试 acc=%s %d->%d",
+                        account.id, tokens, bigger)
+            result = client.collect(cookie, run, retry_payload, model=model)
+
         # 偶尔追问一句：同一 run 内多一轮，成本不变，画像更像真人
         follow_up = ""
         if humanize.human_probability(FOLLOW_UP_PROBABILITY):
@@ -266,10 +287,16 @@ def activate_account(db, account, *, prompt: str | None = None,
 
         answer = _first_text(result)
         if not answer:
+            # 到这里说明**提额重试之后**仍然没有 content、也没有 reasoning：
+            # 不再是「预算给少了」，如实记 truncation 便于后续区分。
+            kind = "truncated" if _truncated(result) else "empty"
             _record_usage(db, account, model, result, prompt=text,
-                          started=started, error="empty")
+                          started=started, error=kind)
             return {"account_id": account.id, "ok": False, "status": "error",
-                    "model": model, "reason": "上游返回 200 但内容为空"}
+                    "model": model,
+                    "reason": ("上游把 max_tokens 全用在思考上、没有正文"
+                               if kind == "truncated" else "上游返回 200 但内容为空"),
+                    "kind": kind}
     except client.UpstreamError as exc:
         _record_usage(db, account, model, result, prompt=text,
                       started=started, error=exc.kind or "upstream")
@@ -300,18 +327,40 @@ def activate_account(db, account, *, prompt: str | None = None,
 
 
 def _first_text(result: dict) -> str:
+    """从聚合结果里取「模型真的产出了什么」。
+
+    **必须把 `reasoning_content` 也算作产出**：灵犀这批模型默认先思考，
+    思考段落落在 `reasoning_content` 里。只认 `content` 时，一个正常回答了
+    问题的号会被判成「上游返回 200 但内容为空」—— 这正是
+    「灵犀每日活跃：完成 0 个，失败 1 个」的直接成因（usage 里
+    completion_tokens 正好等于 max_tokens，一个字都没落进 content）。
+    """
     try:
         choices = result.get("choices") or []
         message = (choices[0] or {}).get("message") or {}
         content = message.get("content")
-        if isinstance(content, str):
+        if isinstance(content, str) and content.strip():
             return content.strip()
         if isinstance(content, list):
-            return "".join(str(block.get("text") or "") for block in content
-                           if isinstance(block, dict)).strip()
+            joined = "".join(str(block.get("text") or "") for block in content
+                             if isinstance(block, dict)).strip()
+            if joined:
+                return joined
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
     except Exception:  # noqa: BLE001
         return ""
     return ""
+
+
+def _truncated(result: dict) -> bool:
+    """这次回答是不是被 max_tokens 截断（`finish_reason=length`）。"""
+    try:
+        choice = (result.get("choices") or [{}])[0] or {}
+        return str(choice.get("finish_reason") or "").strip().lower() == "length"
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------------------

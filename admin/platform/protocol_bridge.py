@@ -130,7 +130,7 @@ def with_pings(source, *, interval: float = PING_INTERVAL_S,
 # Anthropic 请求 → OpenAI 请求
 # ---------------------------------------------------------------------------
 def _tool_result_text(content) -> str:
-    """Anthropic tool_result 的 content → 纯文本。"""
+    """Anthropic tool_result 的 content → 纯文本（**图片块除外**）。"""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -142,11 +142,41 @@ def _tool_result_text(content) -> str:
                 if block.get("type") == "text":
                     parts.append(str(block.get("text") or ""))
                 elif block.get("type") == "image":
-                    parts.append("[图片结果，已省略]")
+                    # 图片在这里**不再被丢掉**：调用方会用
+                    # `_tool_result_images()` 把它取出来提升到 user 消息顶层。
+                    parts.append("[图片]")
             elif isinstance(block, str):
                 parts.append(block)
         return "".join(parts)
     return str(content)
+
+
+def _tool_result_images(content) -> list[dict]:
+    """从 Anthropic `tool_result.content` 里取出 image 块 → OpenAI image_url 块。
+
+    ## 为什么必须提出来（issue #31）
+
+    Claude Code 的 `Read` 工具读图时，图片是以
+    `tool_result.content = [{type:"text"},{type:"image"}]` 的形状回传的。
+    OpenAI 的 `role="tool"` 消息**只接受字符串 content**，图片塞不进去，
+    所以老实现给了一块 `[图片结果，已省略]` 占位符 —— 模型看到的是
+    「一张图被省略了」，自然答不出图里写了什么（实测回
+    `Sorry, I can't help with that.`）。
+
+    正确做法（与 Anthropic 的等价语义一致）：把 image 块**提升到所属
+    user 消息的 content 顶层**，紧跟在 tool 消息之后。上游看到的顺序是
+    「工具结果 → 一张图 → 用户提问」，与客户端的真实意图完全相同。
+    """
+    out: list[dict] = []
+    if not isinstance(content, list):
+        return out
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        url = _anthropic_image_url(block.get("source"))
+        if url:
+            out.append({"type": "image_url", "image_url": {"url": url}})
+    return out
 
 
 def anthropic_tools_to_openai(raw) -> list[dict]:
@@ -272,11 +302,19 @@ def anthropic_to_openai(body: dict) -> dict:
                         "tool_call_id": str(block.get("tool_use_id") or ""),
                         "content": txt,
                     })
+                    # 工具结果里的图片（Claude Code `Read` 读图）：
+                    # 提升到紧随其后的 user 消息顶层，不能丢。
+                    images.extend(_tool_result_images(raw))
                 # thinking / redacted_thinking / server_tool_use 等块：
                 # 上游不可复用，丢弃（下一轮历史里保留会破坏上游配对）。
             text = "".join(texts)
             if tool_results and role == "user":
-                # 工具结果先走；该消息里同时带的正文作为一条 user 消息
+                # **工具结果必须紧跟在 assistant 的 tool_calls 之后**：
+                # OpenAI 要求 `tool` 消息的 `tool_call_id` 与上一条 assistant
+                # 的 tool_calls 配对，中间插一条 user 消息会直接 400。
+                messages.extend(tool_results)
+                # 工具结果里的图片**排在 tool 消息之后**：语义是
+                # 「工具返回了这个文件 → 这是文件内容 → 用户接着提问」。
                 if text.strip() or images:
                     user_msg: dict = {"role": "user", "content": text or None}
                     if images:
@@ -286,7 +324,6 @@ def anthropic_to_openai(body: dict) -> dict:
                                 if text else [])
                         user_msg["content"].extend(images)
                     messages.append(user_msg)
-                messages.extend(tool_results)
                 continue
             if tool_uses:
                 msg: dict = {"role": "assistant" if role != "user" else "assistant"}

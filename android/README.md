@@ -32,7 +32,7 @@ python scripts/build_android.py --gradle C:\Tools\gradle-8.11.1\bin\gradle.bat -
 
 Gradle/Maven 优先使用阿里镜像，纯 Python 依赖使用清华镜像，Android 编译扩展由 Chaquopy 提供匹配架构的 wheels。全部运行依赖构建时装入 APK，不在手机上执行 pip 安装。
 
-产物 `dist/android/miraihub-版本-android-arm64.apk` 与 `.apk.sha256`。`build/android-signing/` 自动生成并保存本机签名密钥，必须自行备份此目录，后续覆盖更新使用同一密钥；不得提交到 Git。公开 APK 发布可使用现有 GitHub Releases，但构建时必须保留此签名身份。版本来源与桌面端共享 `desktop/version.json`。
+产物 `dist/android/miraihub-版本-android-arm64.apk` 与 `.apk.sha256`。签名身份由 `scripts/android_signing.py` 统一管理，材料在仓库根的 `android-signing/`（`release.jks` + `signing.json`），**必须自行备份、不得提交到 Git**；后续覆盖更新必须使用同一身份，否则老用户只能卸载重装（会丢本地账号库）。证书指纹登记在 `android/expected-signing-cert.txt`（公钥指纹，可提交）。打包前可单独校验：`python scripts/android_signing.py --verify`。公开 APK 发布可使用现有 GitHub Releases，但构建时必须保留此签名身份。版本来源与桌面端共享 `desktop/version.json`。
 
 `--prepare-only` 生成精简的 Python/静态资源目录，便于独立验证。不要把整个项目或本机 `.env` 当成 Chaquopy 的源目录。
 

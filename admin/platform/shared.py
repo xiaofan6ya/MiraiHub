@@ -451,6 +451,18 @@ _IMPORT_REFRESH_LOCK = threading.Lock()
 _IMPORT_REFRESH_PENDING: dict[str, list[int]] = {}
 _IMPORT_REFRESH_COALESCE_SEC = 0.75
 
+#: 额度类失败（402）在「上游确实发过配额」的号上，用**降级窗口**隔离多久。
+#:
+#: 为什么不直接清零余额：一次瞬时 402 就把 `balance_remain` 写成 0，
+#: 会让这个号永久退出候选集（`balance_total` 却还是 4800）——
+#: 攒够几十个之后整个平台就只剩「所有账号额度已用尽」。
+#: 降级窗口是可恢复的隔离：窗口内不选它，到期后给一次机会，
+#: 期间任何一次余额同步都会把真实数字写回来。
+#:
+#: 30 分钟：比 600 秒的普通冷却长得多（能挡住「每 10 分钟白撞一次 402」），
+#: 又不至于让一个只是被限流的号停摆一整天。
+QUOTA_DEGRADE_SECONDS = 1800
+
 
 def _spawn_import_refresh(platform_id: str, fresh: list[int]) -> None:
     """真正的后台批次（独立线程 + 线程池 + 独立 Session）。"""
@@ -817,7 +829,36 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
         if zero_balance:
             # 只降不升：已经记 0 的保持 0，不要把它改回未知（NULL）——
             # NULL 会被选号当成「余额未知，放行」，等于又把空号放回队列。
-            account.balance_remain = 0
+            #
+            # ⚠️ **但「额度类失败」不等于「这个号没额度」**（2026-11-09 实测）：
+            # 一次瞬时的 402（并发打满 / 单模型限额 / 上游限流）就会把
+            # `balance_remain` 永久写成 0，而 `balance_total` 还是 4800。
+            # 于是号池里几十个号全被这一行摘掉，请求直接回
+            # 「所有账号的积分都已用尽」—— 用户看到的正是
+            # 「账号池这么多账号都没额度了吗」。
+            #
+            # ## 判据：`balance_total` 是「上游发过多少配额」
+            #
+            # `apply_quota()` 写的是 `balance_remain = balance_total = available`。
+            # 所以 **`balance_total > 0` 而 `balance_remain == 0` 只可能来自
+            # 这里的清零**，上游同步永远不会产生这个组合。
+            #
+            # 规则因此变成：
+            #   · 有配额痕迹（total > 0）→ **不动余额**（那是事实数据），
+            #     改用**降级窗口**（`degrade_until`）把它挪出候选集；
+            #     窗口到期 + 下次余额同步就能回来，不会永久判死；
+            #   · 没有配额痕迹 → 才降成 0（这个号上游确实没给钱）。
+            granted = int(account.balance_total or 0) > 0
+            current = int(account.balance_remain or 0)
+            if not granted or current <= 0:
+                account.balance_remain = 0
+            else:
+                # 降级窗口是**可恢复**的隔离：冷却到期它会回来，
+                # 但每次 402 都重新续 30 分钟，不会变成「每 10 分钟白撞一次」。
+                until = now + __import__("datetime").timedelta(
+                    seconds=QUOTA_DEGRADE_SECONDS)
+                if account.degrade_until is None or account.degrade_until < until:
+                    account.degrade_until = until
         if cool_seconds > 0:
             until = now + __import__("datetime").timedelta(seconds=cool_seconds)
             if account.cool_until is None or account.cool_until < until:

@@ -32,11 +32,30 @@ def _fs_guard() -> None:
     prod 黑名单是「外层 404」，这里是「路由内再兜一层」：即便有人把
     `/api/maintenance/*` 从黑名单里摘掉、或误以 dev 部署到公网，
     没有显式 `ADMIN_ALLOW_FS_OPS=1` 也一律 404。
+
+    ## 非 prod 但未放行 → 409 + 能照着做的说明（2026-11-09）
+
+    以前这里不区分「生产封禁」与「运维没放行」，两种情况都回 404。
+    于是一个用 sqlite 跑在服务器上（`python main.py`，没设
+    `WORKBUDDY_DESKTOP`）的部署：控制台看得见「恢复备份」按钮，
+    点下去只拿到 `Not Found` —— 用户完全不知道这是能力开关，
+    以为功能坏了（issue #28 就是这个）。
+
+    现在：
+      · 生产环境仍回 **404**（对攻击面保持不可探测）；
+      · 非生产但未放行回 **409**，并把要设的环境变量写进 detail。
     """
     from admin import env_guard
 
-    if not env_guard.fs_ops_allowed():
+    if env_guard.fs_ops_allowed():
+        return
+    if env_guard.IS_PROD:
         raise HTTPException(404, detail="Not Found")
+    raise HTTPException(
+        409,
+        detail="本机文件操作与数据库恢复已默认关闭。如需在控制台做备份恢复 / "
+               "重启服务，请在启动环境里设置 ADMIN_ALLOW_FS_OPS=1 后重启"
+               "（临时排障用，用完请改回 0）。")
 
 router = APIRouter(prefix="/api/maintenance", tags=["maintenance"], dependencies=[Depends(require_admin)])
 
@@ -182,6 +201,12 @@ def _backup_location(db: Session) -> dict:
             pass
     backup_dir = _read_backup_dir(db)
     default_dir = _default_backup_dir()
+    try:
+        from admin import env_guard
+
+        fs_ops = env_guard.fs_ops_allowed()
+    except Exception:  # noqa: BLE001 - 读不到按关闭处理
+        fs_ops = False
     writable = True
     try:
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
@@ -192,6 +217,9 @@ def _backup_location(db: Session) -> dict:
         writable = False
     return {"ok": True, "database": engine.dialect.name,
             "backup_supported": engine.dialect.name == "sqlite",
+            # 前端据此决定「恢复备份 / 重启」按钮是否可点：
+            # 关掉时给出灰按钮 + 明确提示，而不是让用户点了才拿到错误。
+            "fs_ops": fs_ops,
             "db_exists": exists, "db_size": size,
             "db_path": db_path,
             "backup_dir": backup_dir,

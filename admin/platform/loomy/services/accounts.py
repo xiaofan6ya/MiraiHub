@@ -107,6 +107,40 @@ def select(db: Session, realm: str = "", mark_picked: bool = False) -> Account |
     return None
 
 
+def export_record(account: Account, *, reveal: bool = False) -> dict:
+    """单个号 → 可导出记录（与 `import_record` 对称）。
+
+    `reveal=True` 时带上 `token`（完整登录态），导出的 JSONL 能直接喂回
+    `/api/loomy/import-batch` 完成「换机器搬号池」。
+    `reveal=False` 只给台账字段：uid / 手机号打码 / 余额 / 到期时间，
+    不含任何可用于登录的东西 —— 这种文件发给别人也不会泄号。
+    """
+    data = credentials_of(account)
+    token = token_of(data)
+    record: dict = {
+        "platform": PLATFORM,
+        "realm": realm_of(account),
+        "uid": str(account.uid or data.get("uid") or ""),
+        "status": getattr(account, "status", "") or "",
+        "balance_remain": int(getattr(account, "balance_remain", 0) or 0),
+        "balance_total": int(getattr(account, "balance_total", 0) or 0),
+        "session_expires_at": session_expires_at(data) or None,
+    }
+    phone = str(data.get("phone") or "")
+    if phone:
+        record["phone"] = phone if reveal else (
+            phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else "***")
+    if reveal:
+        if not token:
+            return {}
+        record["token"] = token
+        if data.get("password"):
+            record["password"] = data["password"]
+        if data.get("loginid"):
+            record["loginid"] = data["loginid"]
+    return record
+
+
 def apply_quota(account: Account, quota: dict) -> None:
     """写回统一列。
 
@@ -195,6 +229,69 @@ def sync_quota(db: Session, account: Account, *,
         account.cool_kind = "quota"
     db.commit()
     return {"ok": True, "quota": quota}
+
+
+#: 「余额被误清零」的自愈重同步最小间隔（秒）。
+#: 一次请求最多修几个号，避免把一次 402 放大成 50 次积分接口调用。
+HEAL_MIN_INTERVAL = 30.0
+HEAL_MAX_ACCOUNTS = 8
+_heal_lock: dict[str, float] = {}
+
+
+def heal_stale_zero(db: Session, realm: str = "",
+                    limit: int = HEAL_MAX_ACCOUNTS) -> dict:
+    """把「余额是 0 但上游确实发过配额」的号重新同步一次。
+
+    ## 为什么需要它（2026-11-09 实测）
+
+    `shared.note_failure(zero_balance=True)` 历史上只要碰到一次 402 就把
+    `balance_remain` 写成 0。于是号池里出现大量
+    `balance_remain = 0` 而 `balance_total = 4800` 的号 —— 它们**其实有额度**，
+    只是被那一次失败永久摘出了候选集。等所有号都被这么摘掉之后，
+    请求就统一回「所有 Loomy 账号的积分都已用尽」，
+    而用户在控制台看到的是「号池这么多账号，怎么可能都没额度」。
+
+    这里按 `balance_total > 0 and balance_remain <= 0` 挑出这类号，
+    重新拉一次 `/points/balance`（`apply_quota` 会把真实数字写回来），
+    号自动回池。带最小间隔与数量上限，热路径上不会变成风暴。
+    """
+    now = time.time()
+    stamp_key = "global"
+    last = _heal_lock.get(stamp_key) or 0.0
+    if now - last < HEAL_MIN_INTERVAL:
+        return {"ok": True, "skipped": True, "healed": 0, "attempted": 0}
+    query = db.query(Account).filter(
+        Account.platform == PLATFORM,
+        Account.status == "active",
+        Account.balance_total > 0,
+        Account.balance_remain <= 0)
+    if realm:
+        query = query.filter(Account.domain == realm)
+    # 从没同步过的优先：`IS NULL` 排在前面（用布尔表达式，不用
+    # `NULLS FIRST` —— MySQL 不认那个语法，SQLAlchemy 会原样发出去）。
+    rows = query.order_by(Account.last_sync_at.is_(None).desc(),
+                          Account.last_sync_at.asc()).limit(
+        max(1, int(limit))).all()
+    if not rows:
+        return {"ok": True, "skipped": False, "healed": 0, "attempted": 0}
+    _heal_lock[stamp_key] = now
+    healed, failed = 0, 0
+    for account in rows:
+        try:
+            result = sync_quota(db, account, with_models=False)
+        except Exception:  # noqa: BLE001 - 单个号失败不影响其余
+            db.rollback()
+            failed += 1
+            continue
+        if result.get("ok") and int(account.balance_remain or 0) > 0:
+            healed += 1
+        else:
+            failed += 1
+    if healed:
+        logger.info("Loomy 余额自愈：%d 个被误清零的号已恢复（%d 个仍然无额度）",
+                    healed, failed)
+    return {"ok": True, "skipped": False, "healed": healed,
+            "attempted": len(rows), "failed": failed}
 
 
 #: 上游 session 的有效期。**客户端登录时传的就是这个值**

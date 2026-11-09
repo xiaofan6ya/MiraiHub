@@ -306,15 +306,43 @@ def cancel(auth_id: str) -> dict:
 
 
 def qr_svg(qr_value: str) -> str:
-    """二维码内容 → SVG 字符串（`qrcode` 库已随生产环境安装）。"""
-    import qrcode
-    import qrcode.constants
-    import qrcode.image.svg
+    """二维码内容 → SVG 字符串。
+
+    ## 依赖缺失必须说清楚（issue #25「商汤二维码不显示」）
+
+    `qrcode` 是纯 Python 包，但历史上**只写进了 `requirements.txt`**：
+    · 桌面 EXE 走 `requirements-desktop-lock.txt`（锁文件里没有它）
+      → 打出来的 exe 里 `import qrcode` 直接 ImportError；
+    · 安卓 APK 走 `android/requirements.txt`（同样没有）
+      → 手机上二维码永远是空白。
+    两处依赖都已补上。这里再兜一层：缺库时抛一个**带安装命令**的错误，
+    而不是让前端只看到一句「渲染失败」。
+    """
+    try:
+        import qrcode
+        import qrcode.constants
+        import qrcode.image.svg
+    except ImportError as exc:  # pragma: no cover - 取决于部署环境
+        raise RuntimeError(
+            "缺少 qrcode 库，无法生成扫码授权二维码。"
+            "请在当前运行环境执行 `pip install \"qrcode>=7.4\"`（安卓包需重新打包）后重启服务。"
+            "原始错误：%s" % exc)
 
     img = qrcode.make(qr_value, image_factory=qrcode.image.svg.SvgPathImage,
                       border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
     out = img.to_string()
     return out.decode("utf-8") if isinstance(out, bytes) else out
+
+
+def qr_available() -> bool:
+    """当前环境能不能渲染二维码（供 `/meta` / 诊断面板显示）。"""
+    try:
+        import qrcode  # noqa: F401
+        import qrcode.image.svg  # noqa: F401
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _jwt_claims(token: str) -> dict:

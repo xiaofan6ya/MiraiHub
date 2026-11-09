@@ -75,7 +75,10 @@ def install() -> None:
             "task_runners": list(_task_runners().keys()),
             # Loomy 凭证是明文 JSON —— 扫描即导入，用户零操作。
             # checkin：每日签到领 5000 积分（POST /points/first-login，幂等）。
-            "actions": ["scan", "import", "refresh-quota", "checkin"],
+            # **export**：导出号池（备份 / 脱敏两档）。缺它时控制台只有
+            # 「导入账号」没有「导出」，用户没法把号池搬去另一台机器
+            # （issue #25 报的「loomy 只有导入」）。
+            "actions": ["scan", "import", "export", "refresh-quota", "checkin"],
         },
         ))
         logger.debug("Loomy 平台已登记：%s", platform_id)

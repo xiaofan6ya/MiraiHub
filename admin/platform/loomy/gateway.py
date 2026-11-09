@@ -407,16 +407,24 @@ def _attempt(db, request, key, body: dict, realm: str):
 
 
 def _no_account_error(db, realm: str):
-    """「没有可用账号」要分清两种完全不同的原因。
+    """「没有可用账号」要分清三种完全不同的原因。
 
     原来一律回 `503 请先导入并确认状态为启用` —— 号明明有 100 个、只是全都
-    额度用尽时，这句话会把人往「去检查账号状态」的死路上带。这里先数一下
-    该区域到底有没有 active 号、其中多少个余额为 0，再给对应的话术。
+    额度用尽时，这句话会把人往「去检查账号状态」的死路上带。
+
+    ## 三种原因（2026-11-09 补第三种）
+
+    1. **确实都没额度**：`balance_remain <= 0` 且上游从没发过配额；
+    2. **都在冷却 / 在途**：号是好的，此刻排不上；
+    3. **余额被误清零**：`balance_remain <= 0` 但 `balance_total > 0` ——
+       这类号**其实有额度**，是被历史上的一次 402 写死的。
+       必须先尝试自愈重同步，再把结果如实说出来，不能笼统回「都没额度了」。
     """
     try:
         from admin.models import Account
 
-        query = db.query(Account.id, Account.balance_remain).filter(
+        query = db.query(Account.id, Account.balance_remain,
+                         Account.balance_total).filter(
             Account.platform == loomy_accounts.PLATFORM,
             Account.status == "active")
         if realm:
@@ -425,8 +433,38 @@ def _no_account_error(db, realm: str):
     except Exception:  # noqa: BLE001 - 统计不出来就退回通用文案
         rows = []
     total = len(rows)
-    empty = sum(1 for _id, balance in rows if int(balance or 0) <= 0)
-    if total and empty >= total:
+    empty = [rid for rid, balance, _total
+             in ((r[0], r[1], r[2]) for r in rows) if int(balance or 0) <= 0]
+    stale = [rid for rid, balance, granted
+             in ((r[0], r[1], r[2]) for r in rows)
+             if int(balance or 0) <= 0 and int(granted or 0) > 0]
+
+    # 有「被误清零」的号就先修一批，修好了立刻让调用方重试，
+    # 而不是把错误话术甩给用户。
+    if stale:
+        try:
+            healed = loomy_accounts.heal_stale_zero(db, realm)
+        except Exception:  # noqa: BLE001 - 自愈失败不能盖住原始错误
+            healed = {"healed": 0}
+            logger.debug("Loomy 余额自愈失败", exc_info=True)
+        if int(healed.get("healed") or 0) > 0:
+            raise shared.PlatformRejected(
+                503,
+                "Loomy 号池刚恢复 %d 个「余额被误判为 0」的账号，请立即重试。"
+                % int(healed.get("healed") or 0),
+                kind="server_error", code="balances_healed",
+                headers={"Retry-After": "1"})
+
+    if total and len(empty) >= total:
+        # 全是 0：再区分「上游确实没给配额」与「我们没同步过」。
+        if stale:
+            return shared.PlatformRejected(
+                402,
+                "Loomy 有 %d 个账号余额显示为 0，其中 %d 个上游其实发过配额，"
+                "正在重新同步余额（约 1 分钟内生效）。若仍失败，"
+                "请在「账号池」里对这些号点一次「同步余额」。"
+                % (total, len(stale)),
+                kind="quota_exceeded", code="all_quota_exceeded_stale")
         return shared.PlatformRejected(
             402, "所有 Loomy 账号的积分都已用尽。等下一次余额同步或每日签到"
                  "刷新到额度后会自动恢复，也可以现在去「账号池」给某个号充值/签到。",

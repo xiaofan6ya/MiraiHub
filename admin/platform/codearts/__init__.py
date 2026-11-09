@@ -93,8 +93,11 @@ def install() -> None:
             auth_mode="local-scan",
             extra={
                 "task_runners": list(_task_runners().keys()),
-                # 控制台按钮：扫描 / 导入 / 签到 / 刷新额度。
-                "actions": ["scan", "import", "checkin", "refresh-quota"],
+                # 控制台按钮：扫描 / 导入 / 导出 / 签到 / 刷新额度。
+                # `export` 端点 `/api/codearts/export` 早就实现了，但这里
+                # 一直没声明 —— 于是控制台不渲染「导出」按钮，用户看到的是
+                # 「codearts 只有账号导入」（issue #25）。
+                "actions": ["scan", "import", "export", "checkin", "refresh-quota"],
             },
         ))
         logger.debug("CodeArts 平台已登记：%s", platform_id)

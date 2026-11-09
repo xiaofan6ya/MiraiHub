@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -103,6 +104,35 @@ class ImportLocalIn(BaseModel):
     """
 
     uids: list[str] | None = None
+
+
+@router.get("/export")
+def export(realm: str = "", reveal: int = 0, _: bool = Depends(require_admin),
+           db: Session = Depends(get_db)):
+    """导出号池（issue #25：Loomy 之前只有导入、没有导出）。
+
+    `reveal=0`（默认）导出**脱敏清单**：只有 uid / 手机号打码 / 余额 /
+    到期时间 —— 可以直接发给别人做台账。
+    `reveal=1` 导出**完整凭证**（含 session token）：只能自己留档，
+    等于把这个号的登录态交出去。
+
+    输出 JSONL（每行一条），与 `/import-batch` 完全对称 ——
+    导出的文件可以直接喂回导入，实现「换机器搬号池」。
+    """
+    from admin.platform.loomy.services import accounts as loomy_accounts
+
+    rows = loomy_accounts.accounts_for(db, _realm_or_400(realm))
+    lines: list[str] = []
+    for account in rows:
+        record = loomy_accounts.export_record(account, reveal=bool(reveal))
+        if record:
+            lines.append(json.dumps(record, ensure_ascii=False))
+    return {"realm": realm, "count": len(lines),
+            "reveal": bool(reveal),
+            "format": "jsonl",
+            "text": "\n".join(lines),
+            "note": ("完整凭证导出一律含登录态，请私密保存"
+                     if reveal else "已脱敏：不含 session token，不能直接导入同一账号")}
 
 
 @router.post("/import-local")

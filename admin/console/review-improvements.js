@@ -118,9 +118,13 @@ window.WBReview = (() => {
         (data.error ? '<p class="maintenance-error">' + esc(data.error) + '</p>' : '') + '</section>' +
         '<section class="card maintenance-step"><div class="maintenance-step-head"><span class="maintenance-step-number">01</span><div><h2>备份数据</h2><p>升级前先保存一份数据库备份，便于恢复账号与配置。</p></div><span class="maintenance-db">' +
         esc(String(data.database || (data.backup_supported ? 'sqlite' : '数据库')).toUpperCase()) + '</span></div>' +
-        (data.backup_supported ? '<div class="maintenance-backup-actions"><button class="console-btn primary" onclick="WBReview.backup()"><i class="fa-solid fa-download" aria-hidden="true"></i>下载 SQLite 备份</button>' +
-          '<button class="console-btn" onclick="WBReview.pickRestore()"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>恢复备份</button>' +
-          '<input type="file" id="restoreFileInput" accept=".db,application/octet-stream" hidden onchange="WBReview.confirmRestore(this)" /></div>' :
+        (data.backup_supported ? (data.fs_ops === false
+          ? '<div class="maintenance-backup-actions"><button class="console-btn" disabled title="已关闭"><i class="fa-solid fa-download" aria-hidden="true"></i>下载 SQLite 备份</button>' +
+            '<button class="console-btn" disabled title="已关闭"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>恢复备份</button></div>' +
+            '<p class="maintenance-backup-help">备份下载与恢复已关闭（服务端未放行本机文件操作）。需要时在启动环境设置 <code>ADMIN_ALLOW_FS_OPS=1</code> 后重启服务，用完改回 <code>0</code>。数据库文件：<code>' + esc(data.db_path || '未知') + '</code></p>'
+          : '<div class="maintenance-backup-actions"><button class="console-btn primary" onclick="WBReview.backup()"><i class="fa-solid fa-download" aria-hidden="true"></i>下载 SQLite 备份</button>' +
+            '<button class="console-btn" onclick="WBReview.pickRestore()"><i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>恢复备份</button>' +
+            '<input type="file" id="restoreFileInput" accept=".db,application/octet-stream" hidden onchange="WBReview.confirmRestore(this)" /></div>') :
           '<p class="maintenance-backup-help">当前数据库请使用管理工具完成备份' + (data.mysql_backup_command ? '，也可以在终端使用以下命令。' : '。') + '</p>') +
         backupPathBlock(data) +
         (data.mysql_backup_command ? commandBlock('maintenance-command-backup', data.mysql_backup_command) : '') +

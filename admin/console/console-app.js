@@ -10001,7 +10001,7 @@ async function openAddKey(){
       })}</div>
       <p class="text-[11px] text-slate-400 mt-1">选择后该 Key 只能调用组内模型，调用组外模型返回 403。</p>
     </div>
-    ${keyAggregateSwitch(false)}
+    ${keyAggregateSwitch(true)}
     ${keyPlatformSelect("kPlatform", formData.platforms, "")}
     <div id="kAccountsHost">
       ${keyAccountPicker("k", formData.accounts, [], "")}
@@ -10018,7 +10018,7 @@ async function submitAddKey(){
   const rpmRaw = $("#kRatePerMinute").value;
   const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0),
     // 新控件：聚合开关 / 独占平台 / 多选账号
-    aggregate: ($("#kAggregate")||{}).checked !== false,
+    aggregate: $("#kAggregate") ? $("#kAggregate").checked : true,
     platform: String(uiSelectValue("kPlatform") || "").toLowerCase(),
     account_ids: keySelectedAccountIds("k"),
     max_concurrent: mcRaw === "" ? null : Number(mcRaw), rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw) };

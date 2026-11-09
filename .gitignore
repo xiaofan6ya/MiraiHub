@@ -89,6 +89,9 @@ scripts/*.py
 # 例外：双端构建脚本属于产品代码，打包流程直接依赖它们。
 !scripts/build_desktop.py
 !scripts/build_android.py
+# 例外：Android 签名身份管理是 build_android.py 的**硬依赖** ——
+# 漏了它，全新克隆的仓库一打包就 ImportError（不再是「少个工具」）。
+!scripts/android_signing.py
 
 # ===== 强制保留（即便以点开头也要提交） =====
 !.gitignore
@@ -161,7 +164,13 @@ tmp/
 
 # ===== 旧项目产物（换名后不再上传，避免干扰）=====
 docs/
+# 测试目录整体不入库（历史约定：本地私有的探针/样本太多）。
+# 但**锁真实 bug 的回归用例必须入库**，否则改动静默把它吞掉时毫无知觉。
 tests/
+!tests/
+tests/*
+!tests/test_android_signing.py
+!tests/test_anthropic_tool_result_image.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 

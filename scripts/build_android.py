@@ -235,7 +235,20 @@ def main() -> None:
                              "dependencies are already staged. Needed on hosts where a bulk-delete "
                              "guard blocks pip's post-install cache cleanup (pip itself succeeds). "
                              "Fails loudly if the staged dependencies are incomplete.")
+    parser.add_argument("--verify-signing", action="store_true",
+                        help="Only verify the Android signing identity and exit "
+                             "(no build). CI / pre-release check.")
+    parser.add_argument("--rotate-signing", action="store_true",
+                        help="Explicitly rotate the Android signing identity. Old users MUST "
+                             "uninstall before installing this build (local account DB is lost).")
     args = parser.parse_args()
+    if args.verify_signing:
+        from scripts.android_signing import verify as verify_signing
+
+        info = verify_signing(jdk=args.jdk)
+        print("Android 签名身份校验通过：alias=%s sha256=%s"
+              % (info["alias"], info["sha256"]))
+        return
     prepare()
     if args.prepare_only:
         return
@@ -250,33 +263,24 @@ def main() -> None:
     gradle = args.gradle or shutil.which("gradle")
     if not gradle:
         raise SystemExit("Set --gradle to Gradle 8.11.1 and provide JDK 17 / Android SDK")
-    # Keep one private signing identity for all upgrades. Never upload these files.
+
+    # 签名身份统一由 scripts/android_signing.py 管理：**一次生成、长期复用**。
     #
-    # 位置为什么在仓库根、而不是 `build/`：`build_desktop.py` 每次打包都会
-    # `Remove-Item build`，签名身份放在里面等于每发一版就换一把新钥匙 ——
-    # APK 覆盖升级会直接 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，用户只能卸载。
-    # 老位置保留一次性迁移，升级过的人不会因为换了路径又丢一次身份。
-    signing = Path(os.environ.get("WB_ANDROID_SIGNING_DIR") or (ROOT / "android-signing"))
-    legacy_signing = ROOT / "build/android-signing"
-    if not signing.exists() and legacy_signing.is_dir():
-        shutil.copytree(legacy_signing, signing)
-        print(f"Migrated Android signing identity: {legacy_signing} -> {signing}")
-    signing.mkdir(parents=True, exist_ok=True)
-    credentials = signing / "signing.json"
-    keystore = signing / "release.jks"
-    if credentials.is_file():
-        config = json.loads(credentials.read_text(encoding="utf-8"))
-    else:
-        config = {"password": secrets.token_urlsafe(40)}
-        credentials.write_text(json.dumps(config), encoding="utf-8")
-    env.update(WB_ANDROID_KEYSTORE=str(keystore), WB_ANDROID_STORE_PASSWORD=config["password"],
-               WB_ANDROID_KEY_PASSWORD=config["password"])
-    if not keystore.is_file():
-        keytool = str(Path(env["JAVA_HOME"]) / "bin/keytool") if env.get("JAVA_HOME") else "keytool"
-        subprocess.run([keytool, "-genkeypair", "-keystore", str(keystore), "-storetype", "JKS",
-                        "-storepass:env", "WB_ANDROID_STORE_PASSWORD", "-keypass:env", "WB_ANDROID_KEY_PASSWORD",
-                        "-alias", "workbuddy2api", "-keyalg", "RSA", "-keysize", "3072",
-                        "-validity", "10000", "-dname", "CN=MiraiHub Android"], env=env, check=True)
+    # 历史教训（这次必须一次性解决）：
+    #   · 材料放在 `build/android-signing/` 时，`build_desktop.py` 每次重建
+    #     `build/` 就把私钥删了，下一版自动生成新钥匙 —— APK 覆盖升级直接
+    #     `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，用户只能卸载（本地账号库丢失）；
+    #   · 只留 `signing.json` 而私钥丢了时，旧逻辑会用同一个密码重新生成一把
+    #     **新私钥**，全程无报错，直到用户装更新失败。
+    # 现在：keystore 已存在就永不重建；指纹与 `android/expected-signing-cert.txt`
+    # 不一致就**中止构建**，换钥匙只能显式 `--rotate-signing`。
+    from scripts.android_signing import ensure_identity, verify_apk
+
+    signing = ensure_identity(jdk=args.jdk, rotate=args.rotate_signing)
+    env.update(signing["env"])
+    print("Android 签名身份：alias=%s sha256=%s"
+          % (signing["alias"], signing["sha256"]))
+
     tasks = ["assembleRelease", "lintRelease"]
     if args.with_debug:
         tasks.append("assembleDebug")
@@ -299,6 +303,16 @@ def main() -> None:
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     target.with_suffix(".apk.sha256").write_text(f"{digest}  {target.name}\n", encoding="ascii")
     print(f"Built {target.name} ({target.stat().st_size / 1048576:.1f} MB)")
+    # 产物签名校验：证明这个 APK 真的用了登记的那把钥匙，
+    # 而不是「gradle 悄悄用了别的 keystore」。没有 apksigner 时跳过。
+    try:
+        check = verify_apk(target, jdk=args.jdk)
+    except Exception as exc:  # noqa: BLE001 - 校验失败必须让构建失败
+        raise SystemExit("APK 签名校验失败：%s" % exc)
+    if check.get("skipped"):
+        print("APK 签名校验跳过：%s" % check.get("reason"))
+    else:
+        print("APK 签名证书 SHA-256：%s" % check.get("sha256"))
 
 
 if __name__ == "__main__":

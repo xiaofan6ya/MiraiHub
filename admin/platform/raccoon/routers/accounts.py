@@ -328,7 +328,12 @@ def auth_qr_svg(auth_id: str = "", _: bool = Depends(require_admin)):
         raise HTTPException(404, detail="授权会话不存在或已过期")
     from fastapi.responses import Response
 
-    svg = webauth.qr_svg(sess["qr_value"])
+    try:
+        svg = webauth.qr_svg(sess["qr_value"])
+    except RuntimeError as exc:
+        # 缺 qrcode 库：回 503 + 明确处置办法，而不是 500 裸奔
+        # （前端 <img> 的 onerror 会把这个 detail 展示给用户）。
+        raise HTTPException(503, detail=str(exc))
     return Response(svg, media_type="image/svg+xml",
                     headers={"Cache-Control": "no-store"})
 

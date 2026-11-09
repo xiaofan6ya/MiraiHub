@@ -27,7 +27,24 @@
 
 安装包前缀统一为 `miraihub`，产品界面和版本资源使用同一名称。
 
-Android 签名保存在 `build/android-signing/`。迁移构建机时备份并恢复 `release.jks` 与 `signing.json`，不得提交到仓库或随安装包公开。
+Android 签名保存在 `android-signing/`（`release.jks` + `signing.json`）。迁移构建机时备份并恢复这两个文件，不得提交到仓库或随安装包公开。证书指纹登记在 `android/expected-signing-cert.txt`（公钥指纹，可提交）。
+
+签名身份由 `scripts/android_signing.py` 统一管理，**一次生成、长期复用**：
+
+```bash
+python scripts/android_signing.py --show     # 看当前身份（首次运行会登记指纹）
+python scripts/android_signing.py --verify   # 只校验：指纹不一致退出码 1
+python scripts/android_signing.py --rotate   # 显式换钥匙（老用户必须卸载重装）
+```
+
+打包时 `scripts/build_android.py` 会：
+
+1. keystore 已存在 → **永不重建**；
+2. `signing.json` 在而 `release.jks` 丢了 → **直接中止**（不再用旧密码悄悄生成新私钥）；
+3. 指纹与 `android/expected-signing-cert.txt` 不一致 → **直接中止**；
+4. 出包后用 `apksigner verify --print-certs` 复核产物证书（无 SDK 时跳过并提示）。
+
+换签名会让老用户 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，只能卸载 —— 而卸载会带走本地账号库。因此第 2、3 条是硬失败，不允许「先出包再说」。
 
 ## 验证
 
