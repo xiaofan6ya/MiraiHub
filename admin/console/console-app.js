@@ -58,6 +58,49 @@ document.addEventListener("DOMContentLoaded", () => {
  */
 const _uiSelectMap = new Map();  // id -> {options, value, onChange}
 
+/**
+ * 要用户填一段文本的弹窗（Promise 版）。
+ *
+ * `uiConfirm` 只有是/否，没有输入框；邀请码、兑换码这类「填一个值再提交」
+ * 的操作原来只能靠浏览器原生 `prompt()` —— 它会阻塞渲染线程、样式也跟
+ * 主题不一致。这里用同一套 modal 体系做一个，保持观感统一。
+ *
+ * 返回 Promise：确认 → 输入串（已 trim），取消 / 关掉 → null。
+ */
+function uiPrompt(opts) {
+  opts = opts || {};
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      delete window.__uiPromptOk;
+      delete window.__uiPromptCancel;
+      resolve(value === undefined ? null : value);
+      closeModal();
+    };
+    window.__uiPromptOk = () => finish(String($("#uiPromptInput")?.value || "").trim());
+    window.__uiPromptCancel = () => finish(null);
+    openModal(`<h3 class="font-semibold text-lg mb-1">${esc(opts.title || "请输入")}</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.75;white-space:pre-line">${esc(opts.message || "")}</p>
+      <input id="uiPromptInput" class="w-full border rounded-lg px-3 py-2 text-sm"
+             placeholder="${esc(opts.placeholder || "")}" autocomplete="off">
+      <div class="flex justify-end gap-2 mt-4">
+        <button class="console-btn quiet" onclick="window.__uiPromptCancel()">取消</button>
+        <button class="console-btn primary" onclick="window.__uiPromptOk()">${esc(opts.okText || "确定")}</button>
+      </div>`, "max-w-md");
+    setTimeout(() => {
+      const el = $("#uiPromptInput");
+      if (!el) return;
+      el.focus();
+      el.addEventListener("keydown", ev => {
+        if (ev.key === "Enter") { ev.preventDefault(); window.__uiPromptOk(); }
+        if (ev.key === "Escape") { ev.preventDefault(); window.__uiPromptCancel(); }
+      });
+    }, 40);
+  });
+}
+
 function uiSelectHTML(id, opts) {
   opts = opts || {};
   const options = opts.options || [];
@@ -1433,7 +1476,19 @@ function activateTab(name, opts) {
     loadPlatformBench();
   });
   if (name === "gateway") { loadGateway(); loadGatewaySpeed(); }
-  if (name === "accounts") ensurePlatforms().then(() => loadAccounts());
+  if (name === "accounts") {
+    // 平台动作区（授权登录 / 扫描本机 / 签到 …）也要在这时候渲染。
+    //
+    // 它原来**只**在 `wb-platform-change` 事件里重画：如果页面打开时记住的
+    // 是 Loomy/Qoder 这类非 WorkBuddy 平台，那个事件从来没触发过，于是
+    // 「添加与迁移账号」区只剩 WorkBuddy 的按钮被隐藏 —— 用户看到的就是
+    // 「平台的按钮没传进来」。这里在进入账号池时补一次。
+    ensurePlatforms().then(() => {
+      try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake]", e); }
+      try { renderAccPlatformSwitch(); } catch (e) { console.warn("[acc-switch]", e); }
+      return loadAccounts();
+    });
+  }
   if (name === "journal") window.WBReview?.loadJournal(1);
   if (name === "maintenance") window.WBReview?.loadUpdate();
   if (name === "groups") loadGroups();
@@ -2951,7 +3006,11 @@ document.addEventListener("wb-platform-change", () => {
   // 用户会以为有缓存（数据其实一直是各自平台的新数据，只是没重取）。
   if (active === "overview") loadOverview(true);
   if (active === "platforms") { loadPlatformOverview(); loadPlatformBench(); loadJoinGate(); }
-  if (active === "accounts") loadAccounts();
+  if (active === "accounts") {
+    // 切平台后同时重画「添加与迁移账号」的动作区（与首次进入同一套逻辑）
+    try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake]", e); }
+    loadAccounts();
+  }
   if (active === "usage") loadUsageStats();
   if (active === "logs") openLogsPanel();
   if (active === "credits") loadCreditStats();
@@ -3446,6 +3505,235 @@ function consoleIcon(name) {
   return path ? `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>` : '';
 }
 
+/**
+ * Loomy 邀请码：单号绑定 / 单号兑换 / 平台面板（同步 + 默认码 + 批量）。
+ *
+ * ## 上游两条硬规则（实测 2026-11-09，用户确认）
+ *
+ * 1. **一个号只能兑换一次邀请码** —— 再绑会回 `200003 邀请码不存在`
+ *    （码本身没问题，是"这个号不能再绑"）。所以已激活的号显示"已激活"，
+ *    不要再去点绑定。
+ * 2. **邀请人上限 20 个** —— 超限后绑定请求照样回成功，但 `activated`
+ *    不会变 true。所以后端会**回读状态**，只有真生效才算成功；前端提示
+ *    也要把这两句话带上，否则用户会以为网关坏了。
+ */
+async function accInviteBind(id) {
+  const code = await uiPrompt({
+    title: "绑定邀请码",
+    message: "填入要绑定到这个账号的邀请码。\n\n注意：一个账号只能兑换一次邀请码；"
+      + "邀请人上限 20 个，超限时上游会「假成功」但不会生效。",
+    placeholder: "邀请码，例如 WK9JPU",
+    okText: "绑定",
+  });
+  if (!code) return;
+  try {
+    const r = await api(`/api/loomy/accounts/${id}/invite`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: String(code).trim() }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (data.ok) {
+      toast(`#${id} 已绑定邀请码 ${data.applied_code || data.code}`, "ok");
+    } else {
+      toast(`#${id} 未生效：${data.reason || "上游拒绝"}`, "err");
+    }
+    accReloadActive();
+  } catch (error) {
+    toast("绑定失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function accRedeemCode(id) {
+  const code = await uiPrompt({
+    title: "兑换码换积分",
+    message: "填入兑换码，给这个账号加积分。",
+    placeholder: "兑换码",
+    okText: "兑换",
+  });
+  if (!code) return;
+  try {
+    const r = await api(`/api/loomy/accounts/${id}/redeem`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: String(code).trim() }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    toast(data.ok
+      ? `#${id} 兑换成功，当前余额 ${fmtCredit(data.balance)}`
+      : `#${id} 兑换失败：${data.reason || "上游拒绝"}`, data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    toast("兑换失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/** 平台级邀请码面板：状态同步 / 默认码 / 批量绑定 / 批量兑换。 */
+async function loomyInvitePanel() {
+  let info = {};
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite"));
+    if (ok) info = data || {};
+  } catch (e) { /* 下面按空数据渲染 */ }
+  const codes = info.codes || {};
+  const codeRows = Object.keys(codes).length
+    ? Object.entries(codes).map(([code, n]) =>
+        `<span class="stat-chip">${esc(code)} × ${n}</span>`).join("")
+    : '<span class="text-xs" style="color:var(--fg-subtle)">还没有同步过</span>';
+  openModal(`<h3 class="font-semibold text-lg mb-1">邀请码 · Loomy</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle);line-height:1.75">
+      官方规则：<b>一个账号只能兑换一次邀请码</b>；<b>邀请人上限 20 个</b>。
+      超限时上游会返回成功但不会真正生效，所以这里以回读的
+      <code>activated</code> 为准。
+    </p>
+    <div class="flex flex-wrap gap-2 mb-3">${codeRows}</div>
+    <p class="text-xs mb-3" style="color:var(--fg-muted)">${esc(info.summary || "")}</p>
+    <div class="mb-3">
+      <label class="text-xs" style="color:var(--fg-muted)">默认邀请码（新入库的号自动绑它）</label>
+      <div class="flex gap-2 mt-1">
+        <input id="loomyDefaultCode" class="w-full border rounded-lg px-3 py-2 text-sm"
+               value="${esc(info.default_code || "")}" placeholder="例如 WK9JPU">
+        <button class="console-btn quiet shrink-0" onclick="loomySaveDefaultCode()">保存</button>
+      </div>
+    </div>
+    <p id="loomyInviteStatus" class="text-xs mb-2" style="color:var(--brand)"></p>
+    <div class="flex flex-wrap justify-end gap-2">
+      <button class="console-btn quiet" onclick="loomyInviteSync()">同步邀请状态</button>
+      <button class="console-btn quiet" onclick="loomyInviteBatch('bind')">批量绑定默认码</button>
+      <button class="console-btn quiet" onclick="loomyInviteBatch('redeem')">批量兑换码</button>
+      <button class="console-btn primary" onclick="loomyMutualInvite()">账号池互邀</button>
+      <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+    </div>
+    <p class="text-[11px] mt-2" style="color:var(--fg-subtle);line-height:1.7">
+      互邀 = 轮换使用号池里各号自己的邀请码，去给「还没激活」的号兑换。
+      官方 20 人上限按<b>邀请人</b>算，所以换邀请人就能继续刷；执行有六条终止
+      条件（无号可兑 / 无码可用 / 次数上限 / 时间预算 / 邀请人上限 / 组合去重），
+      不会死循环。
+    </p>`, "max-w-lg");
+}
+
+async function loomySaveDefaultCode() {
+  const code = ($("#loomyDefaultCode")?.value || "").trim();
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "保存失败");
+    toast(code ? `默认邀请码已保存：${code}` : "默认邀请码已清除");
+  } catch (error) {
+    toast("保存失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function loomyInviteSync() {
+  const status = $("#loomyInviteStatus");
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在逐号同步（约 1 秒/个）…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite/sync", { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "同步失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "同步完成"; }
+    toast(data.summary || "同步完成");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("同步失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function loomyInviteBatch(kind) {
+  const status = $("#loomyInviteStatus");
+  const code = kind === "bind"
+    ? ($("#loomyDefaultCode")?.value || "").trim()
+    : await uiPrompt({ title: "批量兑换", message: "填兑换码，给所有启用账号各兑一次。",
+                      placeholder: "兑换码", okText: "开始兑换" });
+  if (kind === "bind" && !code) { toast("先填默认邀请码", "err"); return; }
+  if (!code) return;
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "批量执行中，请稍候…"; }
+  try {
+    const url = kind === "bind"
+      ? `/api/loomy/invite/bind?code=${encodeURIComponent(code)}`
+      : `/api/loomy/redeem?code=${encodeURIComponent(code)}`;
+    const { ok, data } = await safeJson(await api(url, { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "批量执行失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "完成"; }
+    toast(data.summary || "完成");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("批量执行失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/**
+ * 账号池互邀：轮换邀请人，把「还没激活」的号兑换掉。
+ *
+ * 先弹确认（这是批量写操作），确认后调 `/api/loomy/invite/mutual`；
+ * 后端自带六条终止条件，前端只负责把结果说清楚。
+ */
+async function loomyMutualInvite() {
+  const ok = await uiConfirm({
+    kind: "warn", danger: false,
+    title: "账号池互邀",
+    message: "将对号池里所有「未激活」的账号执行邀请码兑换：\n"
+      + "· 轮换使用各号自己的邀请码（官方每个邀请人上限 20 人）\n"
+      + "· 每个号只能兑换一次邀请码，已兑换的会自动跳过\n"
+      + "· 本次上限：60 次兑换 / 300 秒 / 20 个邀请人，超限即停\n\n"
+      + "确定开始吗？",
+    okText: "开始互邀",
+  });
+  if (!ok) return;
+  const status = $("#loomyInviteStatus");
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "互邀执行中，请稍候（最长 5 分钟）…"; }
+  try {
+    const { ok: httpOk, data } = await safeJson(await api(
+      "/api/loomy/invite/mutual?max_redeems=60&max_seconds=300&max_inviters=20",
+      { method: "POST" }));
+    if (!httpOk) throw new Error((data && data.detail) || "互邀失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "完成"; }
+    toast(data.summary || "互邀完成", data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("互邀失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/**
+ * 单账号任务（签到 / 新手任务 / 活跃对话）—— 账号行内菜单用。
+ *
+ * 这些任务原本只有「全池」入口（平台卡按钮 + 定时任务），想给某一个号补一次
+ * 签到就得跑整池：慢，而且几十个号同时签到是很明显的机器特征。
+ * 后端 `POST /api/accounts/{id}/task` 按账号归属平台分派，平台没实现时回
+ * `supported:false`，这里据此提示、不报错。
+ */
+async function accRunTask(id, task, label) {
+  const names = { checkin: "签到", onboarding: "新手任务", activity: "活跃对话" };
+  const name = label || names[task] || task;
+  try {
+    const r = await api(`/api/accounts/${id}/task`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (data && data.supported === false) {
+      toast(data.reason || "该平台没有这个单账号任务", "err");
+      return;
+    }
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    const summary = data.summary || (data.ok ? name + "完成" : name + "未完成");
+    toast(`${name}：#${id} ${summary}`, data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    toast(`${name}失败：` + (error && error.message ? error.message : error), "err");
+  }
+}
+
 function accountActionDescription(title) {
   const descriptions = {
     '成长任务':'查看任务进度，完成任务并领取奖励',
@@ -3457,7 +3745,10 @@ function accountActionDescription(title) {
     '刷新余额与到期快照':'同步最新余额及积分包到期信息',
     '导出登录态':'下载该账号凭据，供备份或重新导入',
     '启用/禁用':'控制该账号是否参与网关调度',
-    '删除':'从账号池移除该账号'
+    '删除':'从账号池移除该账号',
+    '签到（单号）':'只给这一个账号领今天的签到额度，不跑整池',
+    '新手任务（单号）':'只给这一个账号领一次性新手任务积分',
+    '活跃对话（单号）':'只给这一个账号发一条真实对话，维持账号画像'
   };
   return descriptions[title] || '';
 }
@@ -3953,6 +4244,34 @@ function tokenBadge(a) {
   return bits.map(b => `<span class="c-uid" style="color:${b.color};font-weight:600" data-tooltip="${esc(b.title)}" data-tooltip-description="${esc(detail)}">${esc(b.text)}</span>`).join(" ");
 }
 
+/**
+ * 单账号任务的操作项（签到 / 新手任务 / 活跃对话）—— 六个平台的账号行共用。
+ *
+ * 按账号**归属平台**决定摆哪几个按钮：后端没实现的平台点了会回
+ * `supported:false`，与其让人点了才知道，不如根本不摆出来。
+ *   checkin     非 WorkBuddy 平台都有（WorkBuddy 的签到只有全池任务）
+ *   onboarding  只有 Loomy（一次性 10000 分）
+ *   activity    只有 WPS 灵犀（「只签到不对话」会被判养号）
+ */
+function platformTaskOps(a) {
+  const storage = String(a.platform
+    || ((window.WBPlatform && window.WBPlatform.spec)
+        ? (window.WBPlatform.spec() || {}).storage_platform : "")
+    || "").toLowerCase();
+  if (!storage || storage === "workbuddy" || storage === "codebuddy") return [];
+  const ops = [[`accRunTask(${a.id},'checkin','签到')`, "fa-calendar-check",
+                "签到（单号）", "grow"]];
+  if (storage === "loomy") {
+    ops.push([`accRunTask(${a.id},'onboarding','新手任务')`, "fa-gift",
+              "新手任务（单号）", "grow"]);
+  }
+  if (storage === "wps-lingxi" || storage === "wps_lingxi") {
+    ops.push([`accRunTask(${a.id},'activity','活跃对话')`, "fa-comments",
+              "活跃对话（单号）", "grow"]);
+  }
+  return ops;
+}
+
 function accRow(a) {
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
   // 条目形状：[onclick, icon, tooltip, group]
@@ -3981,6 +4300,7 @@ function accRow(a) {
     [`injectAcc(${a.id})`, "fa-right-to-bracket", "注入本机客户端", "maintain"],
     [`WBReview.accountLimit(${a.id})`, "fa-sliders", "账号并发上限", "maintain"],
     ...commonAccountOps(a),
+    ...platformTaskOps(a),
   );
   // data-label 是给**窄屏卡片形态**用的字段名（见 CSS 里的移动端段落）：
   // 窄屏下表格变成卡片，靠 `td::before { content: attr(data-label) }`
@@ -4056,16 +4376,117 @@ function accListReload() {
   accReloadActive();
 }
 
+/**
+ * 入库 / 授权 / 签到之后，把**平台管理页所有面板**刷新一遍。
+ *
+ * 用户反馈：「平台管理这里入库之后底部卡片数据也要刷新一下」。
+ * 底部两张卡（`#platformOverview` 概览、`#platformBench` 速度榜）之前只在
+ * 切到这个 tab 时加载，入库后要切走再切回才更新 —— 看着像没成功。
+ *
+ * 一次性刷新四处：平台卡片的账号数、平台概览、速度榜、连接门禁。
+ * 单个失败不影响其它（用 try/catch 逐个包住）。
+ */
+function refreshPlatformSurfaces() {
+  try { window.WBPlatform && window.WBPlatform.refreshCounts && window.WBPlatform.refreshCounts(); } catch (e) { /* 计数失败不影响其它 */ }
+  try { if (typeof loadPlatformOverview === "function") loadPlatformOverview(); } catch (e) { /* ignore */ }
+  try { if (typeof loadPlatformBench === "function") loadPlatformBench(); } catch (e) { /* ignore */ }
+  try { if (typeof loadJoinGate === "function") loadJoinGate(); } catch (e) { /* ignore */ }
+}
+
 function accReloadActive() {
   const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
   const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
-  if (storage === "loomy") return loadLoomyAccounts(spec);
-  if (storage === "codearts") return loadCodeArtsAccounts(spec);
-  if (storage === "minimax") return loadMinimaxAccounts(spec);
-  if (storage === "trae") return loadTraeAccounts(spec);
-  if (storage === "qoder") return loadQoderAccounts(spec);
-  return loadAccounts();
+  // 每次重载后刷新表头排序指示（切换平台/翻页后指示也不能丢）
+  const done = () => accMarkSort();
+  if (storage === "loomy") return Promise.resolve(loadLoomyAccounts(spec)).then(done);
+  if (storage === "codearts") return Promise.resolve(loadCodeArtsAccounts(spec)).then(done);
+  if (storage === "minimax") return Promise.resolve(loadMinimaxAccounts(spec)).then(done);
+  if (storage === "trae") return Promise.resolve(loadTraeAccounts(spec)).then(done);
+  if (storage === "qoder") return Promise.resolve(loadQoderAccounts(spec)).then(done);
+  return Promise.resolve(loadAccounts()).then(done);
 }
+
+/* ==========================================================================
+   账号池表头排序（全局，所有平台共用）
+   --------------------------------------------------------------------------
+   用户要求：「账号池表格全局支持表字段排序」。
+
+   为什么用**委托点击 + 按列 class 映射**，而不是给 5 个平台的表头模板
+   各加一遍 onclick：
+     · 五个平台（WorkBuddy / Trae / Qoder / Loomy / CodeArts / MiniMax）
+       各有一套 `<thead>` 模板，逐个改等于同一份逻辑抄五遍；
+     · 它们已经统一用 `.col-name` / `.col-status` / `.col-balance` /
+       `.col-created` 这套列 class，直接按 class 反查列名最省。
+   只开放**语义在各平台一致**的四列；`.col-extra` / `.col-expiry` 在不同
+   平台含义不同（有的是「资源包」、有的是「套餐」），不参与排序。
+   ========================================================================== */
+
+/** 列 class -> 排序字段（`<字段>_asc` / `<字段>_desc`）。 */
+const ACC_SORTABLE = {
+  "col-name": "name",
+  "col-status": "status",
+  "col-balance": "credits",
+  "col-created": "created",
+  "col-id": "id",
+};
+
+/** 当前排序列，如 `{field:"credits", dir:"desc"}`；未排序时返回 null。 */
+function accSortOf() {
+  const raw = String((window._accListState || {}).sort || "id_desc");
+  const hit = /^([a-z]+)_(asc|desc)$/.exec(raw);
+  if (!hit) return null;
+  const field = hit[1] === "balance" ? "credits" : hit[1];
+  return { field, dir: hit[2] };
+}
+
+/** 点表头：同列再点切方向，换列按「数值默认降序、文本默认升序」。 */
+function accSortBy(columnClass) {
+  const field = ACC_SORTABLE[columnClass];
+  if (!field) return;
+  const st = window._accListState || (window._accListState = {});
+  const cur = accSortOf();
+  const numeric = field === "credits" || field === "created" || field === "id";
+  let dir;
+  if (cur && cur.field === field) dir = cur.dir === "asc" ? "desc" : "asc";
+  else dir = numeric ? "desc" : "asc";
+  st.sort = field + "_" + dir;
+  st.page = 1;
+  // 下拉里没有的键要清掉，否则别人看下拉会以为「没排序」
+  const sel = $("#accSort");
+  if (sel && Array.from(sel.options || []).some(o => o.value === st.sort)) sel.value = st.sort;
+  accReloadActive();
+}
+
+/** 把排序指示器画到表头上（每次渲染后调用）。 */
+function accMarkSort() {
+  const table = document.querySelector("#accountTableWrap .acc-table");
+  if (!table) return;
+  const cur = accSortOf();
+  table.querySelectorAll("thead th").forEach(th => {
+    th.classList.remove("is-sort-asc", "is-sort-desc");
+    th.removeAttribute("aria-sort");
+    const col = Object.keys(ACC_SORTABLE).find(name => th.classList.contains(name));
+    if (!col) return;
+    th.classList.add("is-sortable");
+    if (!th.dataset.accSortBound) th.dataset.accSortBound = "1";
+    if (cur && ACC_SORTABLE[col] === cur.field) {
+      th.classList.add(cur.dir === "asc" ? "is-sort-asc" : "is-sort-desc");
+      th.setAttribute("aria-sort", cur.dir === "asc" ? "ascending" : "descending");
+    }
+  });
+}
+
+// 表头点击（委托）：整张账号表的 thead 都走这里，新平台自动生效
+document.addEventListener("click", event => {
+  const th = event.target.closest("#accountTableWrap thead th");
+  if (!th) return;
+  // 表头里的勾选框（全选）不触发排序
+  if (event.target.closest("input")) return;
+  const col = Object.keys(ACC_SORTABLE).find(name => th.classList.contains(name));
+  if (!col) return;
+  event.preventDefault();
+  accSortBy(col);
+});
 
 function accPageTo(p) {
   window._accListState.page = Math.max(1, parseInt(p, 10) || 1);
@@ -4412,6 +4833,7 @@ function traeRow(a) {
       [`traeTest(${a.id})`, "fa-heart-pulse", "连通性检查：token / 模型 / 真实对话 / 额度", "maintain"],
       [`traeClearCooling(${a.id})`, "fa-snowflake", "清除冷却与熔断", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4591,6 +5013,7 @@ function qoderRow(a) {
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`qoderTest(${a.id})`, "fa-heart-pulse", "连通性检查：凭证 / 资料 / 模型 / 额度", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4694,6 +5117,24 @@ function loomyRow(a) {
       : '<span class="badge badge-ok">已启用</span>';
   const phone = a.phone
     ? `<small style="color:var(--fg-muted)">${esc(a.phone)}</small>` : "";
+  // ---- 邀请码状态 ----
+  // 用户要求「账号池里把账号的邀请状态显示出来」。
+  // 三态必须分开，别把「还没同步」显示成「未激活」—— 那会让人以为号有问题：
+  //   known=false          → 未同步（点平台卡「同步邀请状态」后才有）
+  //   activated=true       → 已激活，并显示用的是哪个码
+  //   activated=false      → 已同步，但没绑过邀请码
+  const inv = a.invite || {};
+  let inviteCell;
+  if (!inv.known) {
+    inviteCell = `<small style="color:var(--fg-subtle)" data-tooltip="邀请状态未同步"
+      data-tooltip-description="这是本地快照。点平台卡或「同步邀请状态」后会逐个号查一次上游。">未同步</small>`;
+  } else if (inv.activated) {
+    inviteCell = `<span class="badge badge-ok" data-tooltip="已绑定邀请码"
+      data-tooltip-description="${esc(inv.code ? ("已激活：" + inv.code) : "已激活")}">${esc(inv.code || "已激活")}</span>`;
+  } else {
+    inviteCell = `<span class="badge badge-warn" data-tooltip="未绑定邀请码"
+      data-tooltip-description="这个号还没兑换过邀请码。注意：一个号只能兑换一次，且邀请人有 20 人上限。">未激活</span>`;
+  }
   const err = (a.last_err_msg && ok)
     ? `<small style="color:var(--danger)" data-tooltip="最近上游错误" data-tooltip-description="${esc(a.last_err_msg)}">${esc(String(a.last_err_msg).slice(0, 36))}</small>`
     : "";
@@ -4733,10 +5174,14 @@ function loomyRow(a) {
     <td class="tnum text-right" data-label="当日额度"
         style="color:var(--fg-muted)">${fmtCredit(a.daily_balance)}</td>
     <td class="text-xs text-right" data-label="登录态有效期">${sessionCell}</td>
+    <td class="text-xs" data-label="邀请码">${inviteCell}</td>
     ${accCreatedCell(a)}
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`loomyTest(${a.id})`, "fa-heart-pulse", "连通性检查", "maintain"],
+      [`accInviteBind(${a.id})`, "fa-ticket", "绑定邀请码", "grow"],
+      [`accRedeemCode(${a.id})`, "fa-gift", "兑换码换积分", "grow"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4896,6 +5341,7 @@ function codeartsRow(a) {
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`codeartsTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -5032,6 +5478,7 @@ function minimaxRow(a) {
       [`minimaxCheckin(${a.id})`, "fa-calendar-check", "立即签到", "grow"],
       [`minimaxTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -5229,6 +5676,9 @@ document.addEventListener("wb-platform-action", event => {
     // 新手任务（一次性大额积分）：Loomy 的 10000 分就靠这个领。
     if (action === "onboarding") {
       return platformOnboarding(spec, storage);
+    }
+    if (action === "invite") {
+      return loomyInvitePanel();
     }
     if (action === "ban-recheck") {
       return platformBanRecheck(spec, storage);
@@ -5525,9 +5975,157 @@ async function platformSupportsAuth(storage) {
   return meta.auth_mode !== "local-session-only";
 }
 
+/**
+ * Loomy 授权：发送验证码。
+ *
+ * 后端 `POST /api/loomy/auth/sms` 调账号服务 `sendMsgCode`，返回 `msgid`。
+ * `msgid` 必须回传给下一步——上游用 `(phone, msgid, mcode)` 三件套校验，
+ * 少一个就报验证码错误（这是「码明明对却登不上」的唯一原因）。
+ */
+async function loomyAuthSend() {
+  const phone = ($("#loomyPhone")?.value || "").trim();
+  const status = $("#loomyAuthStatus");
+  if (!/^\d{6,}$/.test(phone)) {
+    toast("请填写手机号（纯数字）", "err");
+    return;
+  }
+  const btn = $("#loomySendBtn");
+  const restore = btn ? btnBusy(btn, "发送中") : () => {};
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在发送验证码…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/auth/sms", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "发送失败");
+    window._loomyMsgid = data.msgid || "";
+    if (status) {
+      status.style.color = "var(--brand)";
+      status.textContent = `验证码已发送，${data.expire || 300} 秒内有效`;
+    }
+    toast("验证码已发送");
+    const code = $("#loomyCode");
+    if (code) code.focus();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("发送验证码失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * Loomy 授权：验证码登录 → 入库。
+ *
+ * 后端逻辑：先 `checkCode`（老号）；报「未注册」且给了密码才走
+ * `register/phone/submit`。缺密码时返回 `need_password`，这里提示一次即可。
+ */
+async function loomyAuthVerify() {
+  const phone = ($("#loomyPhone")?.value || "").trim();
+  const code = ($("#loomyCode")?.value || "").trim();
+  const password = $("#loomyPwd")?.value || "";
+  const status = $("#loomyAuthStatus");
+  const hint = $("#loomyPwdHint");
+  if (!window._loomyMsgid) { toast("请先点「发送验证码」", "err"); return; }
+  if (!/^\d{4,8}$/.test(code)) { toast("请填写短信验证码", "err"); return; }
+
+  const btn = $("#loomyLoginBtn");
+  const restore = btn ? btnBusy(btn, "登录中") : () => {};
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在校验…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/auth/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, code, msgid: window._loomyMsgid, password }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "登录失败");
+    if (data.need_password) {
+      // 新号缺密码：留住 msgid，让用户补密码后直接再点一次（不重发短信）
+      if (status) { status.style.color = "var(--warn)"; status.textContent = data.reason || "新号需要先设一个密码"; }
+      if (hint) { hint.style.color = "var(--warn)"; hint.textContent = "（新号必填）"; }
+      const pwd = $("#loomyPwd");
+      if (pwd) pwd.focus();
+      toast("新号需要先设密码（同一个验证码还能用）", "err");
+      return;
+    }
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = "登录成功，凭证已入库"; }
+    const extra = data.renewable ? "已存密码，可自动续期" : "未设密码，14 天后需重新收码";
+    // 同一手机号会**就地更新**已有账号（按 uid 幂等），必须说清楚是哪一条，
+    // 否则用户会以为「入库了但号池里没这条」。
+    const where = data.created ? "新账号已入库" : "已更新同一手机号的已有账号";
+    toast(`${where}：${data.phone || phone} #${data.account_id ?? "?"}（${extra}）`);
+    window._loomyMsgid = "";
+    closeModal();
+    loadAccounts();
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("登录失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
 async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
+
+  // Loomy：**手机号 + 短信验证码**（与 WorkBuddy 的登录手感一致）。
+  //
+  // Loomy 没有设备授权/扫码换票，凭证只能来自它自己的账号服务：
+  //   /login/phone/sendMsgCode  → msgid
+  //   /login/phone/checkCode    → 老号直接拿 session
+  //   /register/phone/submit    → 新号建号（**这一刻才能设密码**）
+  //
+  // 关键：**没有密码的号 14 天后必然报废**（服务端没有 refresh、也没有
+  // 补设密码的接口）。所以新号必须让用户顺手设个密码，之后由保活任务
+  // 在剩余 <3 天时用密码自动重登。
+  if (id === "loomy") {
+    let msgid = "";
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · Loomy</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        用手机号收验证码登录。登录成功后凭证<b>直接入库</b>，不需要复制粘贴任何东西。
+      </p>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">手机号</label>
+        <div class="flex gap-2 mt-1">
+          <input id="loomyPhone" class="w-full border rounded-lg px-3 py-2 text-sm"
+                 inputmode="tel" autocomplete="tel" placeholder="11 位手机号">
+          <button type="button" id="loomySendBtn" class="console-btn quiet shrink-0"
+                  onclick="loomyAuthSend()">发送验证码</button>
+        </div>
+      </div>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">验证码</label>
+        <input id="loomyCode" class="w-full border rounded-lg px-3 py-2 text-sm mt-1"
+               inputmode="numeric" autocomplete="one-time-code" maxlength="8"
+               placeholder="短信里的 6 位数字">
+      </div>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">
+          登录密码<span id="loomyPwdHint" class="ml-1" style="color:var(--fg-subtle)">
+            （新号必填；老号可留空）</span>
+        </label>
+        <input id="loomyPwd" type="password" class="w-full border rounded-lg px-3 py-2 text-sm mt-1"
+               autocomplete="current-password" placeholder="设一个密码，用于 14 天到期后自动续期">
+        <p class="text-[11px] mt-1" style="color:var(--fg-subtle);line-height:1.6">
+          Loomy 没有 refresh 接口，也<b>不能给已有号补设密码</b>：新号必须在这里设，
+          否则这张 14 天的票到期就只能再收一次短信。
+        </p>
+      </div>
+      <p id="loomyAuthStatus" class="text-xs mb-2" style="color:var(--brand)"></p>
+      <p class="text-[11px] mb-2" style="color:var(--fg-subtle)">
+        网页登录地址：<a href="https://loomy.xunfei.cn/web/login" target="_blank"
+          rel="noopener" style="color:var(--brand);text-decoration:underline">loomy.xunfei.cn/web/login</a>
+        （同一个账号，网页端登录也可用来核对）
+      </p>
+      <div class="flex justify-end gap-2">
+        <button class="console-btn quiet" onclick="closeModal()">取消</button>
+        <button class="console-btn primary" id="loomyLoginBtn"
+                onclick="loomyAuthVerify()">登录并入库</button>
+      </div>`, "max-w-md");
+    return;
+  }
 
   // WPS 灵犀：没有设备码 / 扫码换票的公开协议 —— 客户端登录取的是
   // WPS SSO 的 `wps_sid` Cookie。做法与官方 Magpie 插件一致：
@@ -7496,8 +8094,56 @@ async function healthCheckAll() {
   await accountBatchAction(() => runJob(healthCheckOptions(
     '/api/accounts/health-check-batch', '账号池三项上游健康检查', _accData.length)));
 }
-async function toggleAcc(id,st){ await api("/api/accounts/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:st})}); loadAccounts(); }
-async function delAcc(id){ if(!await uiConfirm({message:"确认删除该账号？", title:"删除账号"}))return; const r=await api("/api/accounts/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"删除失败",r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
+/**
+ * 账号行操作的接口基址 —— **只有「刷新额度」需要按平台分流**。
+ *
+ * 分工（2026-11-09 实测确认）：
+ *   · `PATCH/DELETE /api/accounts/{id}` 是**纯数据库操作**（改名/状态/删除），
+ *     平台无关，所有平台共用；各平台自己的 PATCH/DELETE 反而只有 Trae /
+ *     MiniMax 实现过，统一走通用接口才不会 404。
+ *   · `POST /api/accounts/{id}/refresh` 会按 **WorkBuddy 的凭证结构**解析，
+ *     拿别的平台的号打过去就抛 `CredentialError: 账号凭证缺少 auth`。
+ *     所以刷新必须落到 `/api/<storage>/accounts/{id}/refresh`。
+ *
+ * 后端账号视图现在统一带 `platform`（storage 名），这里据此分流；
+ * 取不到就回落到当前平台。
+ */
+function accApiBase(id) {
+  const row = (_accData || []).find(item => item.id === id) || {};
+  let storage = String(row.platform || "").toLowerCase();
+  if (!storage) {
+    const spec = (window.WBPlatform && window.WBPlatform.spec && window.WBPlatform.spec()) || {};
+    storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  }
+  if (!storage || storage === "workbuddy" || storage === "codebuddy") return "/api/accounts";
+  return `/api/${storage}/accounts`;
+}
+
+async function toggleAcc(id, st) {
+  const r = await api(`/api/accounts/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: st }),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    toast("操作失败：" + (d.detail || r.status), "err");
+    return;
+  }
+  toast(st === "active" ? "已启用" : "已禁用");
+  accReloadActive();
+  refreshPlatformSurfaces();
+}
+
+async function delAcc(id) {
+  if (!await uiConfirm({ message: "确认删除该账号？", title: "删除账号" })) return;
+  const r = await api(`/api/accounts/${id}`, { method: "DELETE" });
+  const d = r.ok ? {} : await r.json().catch(() => ({}));
+  toast(r.ok ? "已删除" : ("删除失败：" + (d.detail || r.status)), r.ok ? "ok" : "err");
+  if (r.ok) {
+    accReloadActive();
+    refreshPlatformSurfaces();
+  }
+}
 async function injectAcc(id){
   if(!await uiConfirm({kind:"warn", danger:false, title:"注入本机客户端",
       message:"确认把该账号注入到本机 WorkBuddy 客户端？\n会先自动备份当前活动登录态（*.bak-时间戳）。", okText:"确认注入"})) return;

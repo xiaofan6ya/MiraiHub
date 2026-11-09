@@ -734,6 +734,9 @@ def public_view(account: Account) -> dict:
     data = data if isinstance(data, dict) else {}
     inner = data.get("account") if isinstance(data.get("account"), dict) else {}
     return {
+        # 前端按账号归属平台选接口（刷新/删除/禁用），少了这个字段就会
+        # 一律退回 WorkBuddy 的 `/api/accounts/*`，报「账号凭证缺少 auth」。
+        "platform": PLATFORM,
         "realm": client.normalize_realm(data.get("realm")),
         "uid": account.uid or "",
         "email": _mask(inner.get("email") or "", 2),

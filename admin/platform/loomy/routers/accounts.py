@@ -225,6 +225,73 @@ class SmsCodeIn(BaseModel):
     phone: str = ""
 
 
+class AuthSmsIn(BaseModel):
+    phone: str = ""
+
+
+class AuthVerifyIn(BaseModel):
+    phone: str = ""
+    code: str = ""
+    msgid: str = ""
+    password: str = ""
+    name: str = ""
+
+
+class AuthPasswordIn(BaseModel):
+    phone: str = ""
+    password: str = ""
+    name: str = ""
+
+
+@router.post("/auth/sms")
+def auth_send_sms(body: AuthSmsIn, _: bool = Depends(require_admin)):
+    """① 发登录验证码（手机号，和 WorkBuddy 的登录流程同一个手感）。"""
+    from admin.platform.loomy.services import auth as loomy_auth
+
+    try:
+        return loomy_auth.send_code(body.phone)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - 上游 SDK 异常也转成 400
+        raise HTTPException(400, detail="发送验证码失败：%s" % str(exc)[:160]) from exc
+
+
+@router.post("/auth/verify")
+def auth_verify(body: AuthVerifyIn, _: bool = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    """② 验证码 → 登录（老号）或注册（新号）→ 凭证直接入库。
+
+    新号必须带 `password`（账号服务没有补设密码的接口）；缺密码时返回
+    `need_password: true`，前端补一次输入再调一次即可。
+    """
+    from admin.platform.loomy.services import auth as loomy_auth
+
+    try:
+        return loomy_auth.verify(db, phone=body.phone, code=body.code,
+                                 msgid=body.msgid, password=body.password,
+                                 name=body.name)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, detail="授权失败：%s" % str(exc)[:160]) from exc
+
+
+@router.post("/auth/password")
+def auth_password(body: AuthPasswordIn, _: bool = Depends(require_admin),
+                  db: Session = Depends(get_db)):
+    """手机号 + 密码登录（不需要短信）——换机 / 续期都走这条。"""
+    from admin.platform.loomy.services import auth as loomy_auth
+
+    try:
+        return loomy_auth.password_login(db, phone=body.phone,
+                                          password=body.password,
+                                          name=body.name)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, detail="登录失败：%s" % str(exc)[:160]) from exc
+
+
 class SmsLoginIn(BaseModel):
     phone: str = ""
     code: str = ""
@@ -510,6 +577,165 @@ def renew_batch(_: bool = Depends(require_admin),
     return {"ok": not failed, "total": len(rows), **counters,
             "failed": failed, "no_password": no_password,
             "summary": summary}
+
+
+class InviteCodeIn(BaseModel):
+    code: str = ""
+
+
+@router.post("/invite/mutual")
+def invite_mutual(realm: str = "", max_redeems: int = 60, max_seconds: int = 300,
+                  max_inviters: int = 20, dry_run: int = 0,
+                  _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """**账号池互邀**：轮换使用各号自己的邀请码，去给还没绑过的号兑换。
+
+    官方的 20 人上限是**按邀请人**算的（`maxUses=20`，满了就是 exhausted），
+    所以想让整池都吃到邀请奖励，只能换邀请人 —— 这就是这个接口做的事。
+
+    六条终止条件（参见 `services/invite.mutual_invite` 文档）保证不会死循环；
+    `dry_run=1` 可先看计划。
+    """
+    from admin.platform.loomy.services import invite as invite_svc
+
+    return invite_svc.mutual_invite(
+        db, _realm_or_400(realm), max_redeems=max_redeems,
+        max_seconds=max_seconds, max_inviters=max_inviters,
+        dry_run=bool(dry_run))
+
+
+@router.get("/invite/codes")
+def invite_codes(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """列出号池里每个号**自己**的邀请码与剩余次数（互邀前先看可用量）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    rows = [a for a in loomy_accounts.accounts_for(db, "")
+            if (getattr(a, "status", "") or "") == "active"]
+    items = []
+    total_left = 0
+    for account in rows:
+        got = invite_svc.invitation_codes_of(account)
+        for entry in got.get("codes") or []:
+            total_left += int(entry.get("left") or 0)
+        items.append({"account_id": account.id,
+                      "account": account.name or str(account.id),
+                      "ok": bool(got.get("ok")),
+                      "reason": got.get("reason") or "",
+                      "codes": got.get("codes") or []})
+    return {"accounts": len(rows), "remaining_slots": total_left,
+            "items": items[:120],
+            "summary": "可用邀请名额合计 %d 个（每号最多 20 人）" % total_left}
+
+
+@router.get("/invite")
+def invite_status(realm: str = "", _: bool = Depends(require_admin),
+                  db: Session = Depends(get_db)):
+    """邀请码总览：默认邀请码 + 每个号当前的激活状态（读本地快照）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    rows = [a for a in loomy_accounts.accounts_for(db, _realm_or_400(realm))
+            if (getattr(a, "status", "") or "") == "active"]
+    states = []
+    activated = pending = unknown = 0
+    codes: dict[str, int] = {}
+    for account in rows:
+        state = loomy_accounts._invite_state(account)  # noqa: SLF001 - 同包
+        if not state.get("known"):
+            unknown += 1
+        elif state.get("activated"):
+            activated += 1
+            code = state.get("code") or ""
+            if code:
+                codes[code] = codes.get(code, 0) + 1
+        else:
+            pending += 1
+        states.append({"account_id": account.id,
+                       "account": account.name or str(account.id), **state})
+    return {
+        "supported": True,
+        "default_code": invite_svc.read_default_code(db),
+        "inviter_limit": invite_svc.INVITER_LIMIT,
+        "accounts": len(rows),
+        "activated": activated,
+        "pending": pending,
+        "unknown": unknown,
+        "codes": codes,
+        "items": states[:200],
+        "summary": ("已激活 %d 个 · 未激活 %d 个 · 未同步 %d 个（邀请人上限 %d）"
+                    % (activated, pending, unknown, invite_svc.INVITER_LIMIT)),
+    }
+
+
+@router.put("/invite")
+def invite_set_default(body: InviteCodeIn, _: bool = Depends(require_admin),
+                       db: Session = Depends(get_db)):
+    """保存**默认邀请码**：之后入库的新号会自动绑它。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    saved = invite_svc.write_default_code(db, body.code)
+    return {"ok": True, "default_code": saved,
+            "note": "已保存：之后新入库的 Loomy 账号会自动绑定这个邀请码"}
+
+
+@router.post("/invite/sync")
+def invite_sync(realm: str = "", limit: int | None = None,
+                _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """同步整个号池的邀请状态（逐号查上游，写进快照供列表展示）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    return invite_svc.sync_all(db, _realm_or_400(realm), limit=limit)
+
+
+@router.post("/invite/bind")
+def invite_bind(realm: str = "", code: str = "", limit: int | None = None,
+                _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """把邀请码批量绑到所有启用账号（`code` 为空则用默认邀请码）。
+
+    ⚠️ 上游两条硬规则（实测）：一个号只能兑换一次邀请码；**邀请人上限 20**。
+    超限时绑定请求照样回成功，但 `activated` 不变 —— 本接口会回读状态，
+    只有真生效才算成功。
+    """
+    from admin.platform.loomy.services import invite as invite_svc
+
+    return invite_svc.bind_all(db, code, _realm_or_400(realm), limit=limit)
+
+
+@router.post("/accounts/{acc_id}/invite")
+def invite_bind_one(acc_id: int, body: InviteCodeIn,
+                    _: bool = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    """单账号绑定邀请码（账号行内操作）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    account = db.query(loomy_accounts.Account).filter_by(id=acc_id).first()
+    if account is None or str(account.platform or "") != loomy_accounts.PLATFORM:
+        raise HTTPException(404, detail="Loomy 账号不存在")
+    code = str(body.code or "").strip() or invite_svc.read_default_code(db)
+    if not code:
+        raise HTTPException(400, detail="请填写邀请码，或先在平台上设置默认邀请码")
+    return invite_svc.bind_one(db, account, code)
+
+
+@router.post("/redeem")
+def redeem_batch(code: str = "", realm: str = "", limit: int | None = None,
+                 _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """批量兑换码换积分（每个启用账号各兑一次同一个码）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    return invite_svc.redeem_all(db, code, _realm_or_400(realm), limit=limit)
+
+
+@router.post("/accounts/{acc_id}/redeem")
+def redeem_one(acc_id: int, body: InviteCodeIn,
+               _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """单账号兑换码换积分（账号行内操作）。"""
+    from admin.platform.loomy.services import invite as invite_svc
+
+    account = db.query(loomy_accounts.Account).filter_by(id=acc_id).first()
+    if account is None or str(account.platform or "") != loomy_accounts.PLATFORM:
+        raise HTTPException(404, detail="Loomy 账号不存在")
+    if not str(body.code or "").strip():
+        raise HTTPException(400, detail="请填写兑换码")
+    return invite_svc.redeem_one(db, account, body.code)
 
 
 @router.get("/usage")

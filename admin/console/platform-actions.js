@@ -44,6 +44,9 @@
       '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M14 9l3 3"/></svg>',
     upload:
       '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V8m-4 4 4-4 4 4M4 6h16"/></svg>',
+    // 邀请码 / 兑换码：一张票据，和「赠品」区分开
+    ticket:
+      '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4z"/><path d="M12 6v2m0 8v2"/></svg>',
   };
 
   /* 动作 -> 展示配置。**只有展示信息，能力由后端决定** */
@@ -67,6 +70,8 @@
     activity: { label: "活跃对话", icon: "refresh" },
     // 新手任务（一次性大额积分，如 Loomy 的 10000 分）：网关直接调服务端领取。
     onboarding: { label: "新手任务", icon: "gift" },
+    // 邀请码：总览 + 同步 + 默认码 + 批量绑定/兑换
+    invite: { label: "邀请码", icon: "ticket" },
     // 失效复检：disabled 的号再探一次，能通就自动恢复。
     "ban-recheck": { label: "失效复检", icon: "refresh" },
     "begin-auth": { label: "授权登录", icon: "key", primary: true },

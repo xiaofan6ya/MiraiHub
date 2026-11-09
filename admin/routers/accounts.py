@@ -1444,6 +1444,88 @@ class AccountBulkIn(BaseModel):
     ids: list[int] = []
 
 
+@router.post("/{acc_id}/task")
+def run_account_task(acc_id: int, body: dict,
+                     _: bool = Depends(require_admin),
+                     db: Session = Depends(get_db)):
+    """给**单个账号**跑一个平台任务：签到 / 新手任务 / 活跃对话。
+
+    用户的原话：「没有单个账号的操作，签到、任务之类的，其它平台也是一样的」。
+    这些任务原来只有「全池」入口（平台卡的按钮或定时任务），想给某一个号
+    补一次签到就得跑整池，既慢又制造机器特征。
+
+    这里按 `账号归属平台` 分派到各平台的服务层；平台没实现该任务时回
+    `supported: false` + 原因，而不是 500 —— 前端据此不显示那个按钮。
+    """
+    action = str((body or {}).get("task") or (body or {}).get("action") or "").strip().lower()
+    if not action:
+        raise HTTPException(400, "缺少 task")
+    account = db.query(Account).filter(Account.id == acc_id).first()
+    if account is None:
+        raise HTTPException(404, "账号不存在")
+    storage = str(account.platform or "").lower()
+
+    try:
+        if action == "checkin":
+            if storage == "loomy":
+                from admin.platform.loomy.services import checkin as svc
+
+                item = svc.checkin_one(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or ""}
+            if storage == "wps-lingxi":
+                from admin.platform.wps_lingxi.services import checkin as svc
+
+                item = svc.checkin_account(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or ""}
+            if storage == "qoder":
+                from admin.platform.qoder.services import checkin as svc
+
+                # Qoder 的签到是「活动领取」，按账号跑一遍即可
+                result = svc.run_daily_checkin(db, None, account.domain or "cn")
+                row = next((r for r in (result.get("items") or [])
+                            if int(r.get("account_id") or 0) == acc_id), {})
+                return {"ok": bool(row.get("ok", result.get("ok"))), "task": action,
+                        "account_id": acc_id, "item": row,
+                        "summary": row.get("reason") or result.get("summary") or ""}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "%s 平台没有单账号签到入口" % (storage or "该")}
+
+        if action == "onboarding":
+            if storage == "loomy":
+                from admin.platform.loomy.services import onboarding as svc
+
+                result = svc.run_all(db, account.domain or "cn", limit=0)
+                row = next((r for r in (result.get("items") or [])
+                            if int(r.get("account_id") or 0) == acc_id), {})
+                return {"ok": bool(row.get("ok", True)), "task": action,
+                        "account_id": acc_id, "item": row,
+                        "gained": int(row.get("gained") or 0),
+                        "summary": ("+%d 积分" % int(row.get("gained") or 0))
+                                   if row.get("gained") else (row.get("reason") or "已全部完成")}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "只有 Loomy 有新手任务（一次性积分）"}
+
+        if action == "activity":
+            if storage == "wps-lingxi":
+                from admin.platform.wps_lingxi.services import activity as svc
+
+                item = svc.activate_account(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or item.get("answer") or ""}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "%s 平台没有「活跃对话」任务" % (storage or "该")}
+    except Exception as exc:  # noqa: BLE001 - 单号任务失败如实回，不 500
+        logger.exception("单账号任务失败 acc=%s task=%s", acc_id, action)
+        raise HTTPException(400, "%s 失败：%s" % (action, str(exc)[:160])) from exc
+
+    raise HTTPException(400, "不支持的任务：%s" % action)
+
+
 @router.post("/bulk")
 def bulk_mutate(body: AccountBulkIn, _: bool = Depends(require_admin),
                 db: Session = Depends(get_db)):

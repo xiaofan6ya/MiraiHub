@@ -709,6 +709,70 @@ def complete_onboarding(token: str, realm: str, key: str, *,
             "raw": payload}
 
 
+def fetch_activation(token: str, realm: str = "cn",
+                     account_id: int = 0) -> dict:
+    """查邀请码绑定状态（客户端 `checkActivation`）。
+
+        GET {base}/points/activation   headers: {"token": ...}
+    """
+    url = endpoints.base_of(realm) + endpoints.POINTS_ACTIVATION_PATH
+    data = _request(url, token="", timeout=25.0, account_id=account_id,
+                    realm=realm, headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return {"raw": payload, **{k: payload.get(k) for k in payload}}
+
+
+def bind_invite_code(token: str, realm: str, code: str, *,
+                     device_id: str = "", account_id: int = 0) -> dict:
+    """绑定邀请码（客户端 `bindInviteCode`）。
+
+        POST {base}/points/activation   body {"inviteCode": "...", "deviceId": "..."}
+    """
+    code = str(code or "").strip()
+    if not code:
+        raise UpstreamError("bad_invite_code", "邀请码不能为空", 400,
+                            kind="invalid_request")
+    body: dict = {"inviteCode": code}
+    if device_id:
+        body["deviceId"] = device_id
+    url = endpoints.base_of(realm) + endpoints.POINTS_ACTIVATION_PATH
+    data = _request(url, method="POST", body=body, token="", timeout=25.0,
+                    account_id=account_id, realm=realm,
+                    headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return {"code": code, "raw": payload}
+
+
+def redeem_code(token: str, realm: str, code: str, *,
+                account_id: int = 0) -> dict:
+    """兑换码换积分（客户端 `redeemRedemptionCode`）。
+
+        POST {base}/points/redemption-codes/redeem   body {"code": "..."}
+
+    返回里通常带 `currentBalance` / 本次到账积分数（字段名不固定，原样透出）。
+    """
+    code = str(code or "").strip()
+    if not code:
+        raise UpstreamError("bad_redeem_code", "兑换码不能为空", 400,
+                            kind="invalid_request")
+    url = endpoints.base_of(realm) + endpoints.POINTS_REDEEM_PATH
+    data = _request(url, method="POST", body={"code": code}, token="",
+                    timeout=25.0, account_id=account_id, realm=realm,
+                    headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return {"code": code, "raw": payload}
+
+
+def fetch_invitation_codes(token: str, realm: str = "cn",
+                           account_id: int = 0) -> dict:
+    """查这个账号**自己**的邀请码（客户端 `queryInvitationCodes`）。"""
+    url = endpoints.base_of(realm) + endpoints.POINTS_INVITATION_CODES_PATH
+    data = _request(url, token="", timeout=25.0, account_id=account_id,
+                    realm=realm, headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return {"raw": payload}
+
+
 def fetch_points_records(token: str, realm: str = "cn", *, page: int = 1,
                          page_size: int = 20, account_id: int = 0) -> dict:
     """积分流水（按页）。"""

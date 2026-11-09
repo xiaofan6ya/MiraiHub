@@ -62,6 +62,25 @@ POINTS_FIRST_LOGIN_PATH = "/points/first-login"
 ONBOARDING_TASKS_PATH = "/onboarding/tasks"
 ONBOARDING_COMPLETE_PATH = "/onboarding/tasks/complete"
 
+# ---- 邀请码 / 兑换码（2026-11-09，从客户端 points-service.js 挖出）----
+#:
+#: 邀请码绑定（"激活"）：
+#:     GET  /points/activation          查当前绑定状态
+#:     POST /points/activation          {inviteCode, deviceId?} 绑定邀请码
+#:     POST /points/first-login         {inviteCode?, deviceId?, channel?, visitedId?}
+#:                                      首次登录初始化，**也能顺带绑定邀请码**
+#: 兑换码换积分：
+#:     POST /points/redemption-codes/redeem  {code}   → 兑换积分
+#:     GET  /points/invitation-codes          查自己的邀请码
+#:
+#: 鉴权一律只要 `token` 头（与 points 族其它接口一致）。
+POINTS_ACTIVATION_PATH = "/points/activation"
+POINTS_REDEEM_PATH = "/points/redemption-codes/redeem"
+#: 路径按客户端**原文**抄：`queryInvitationCodes()` 打的是
+#: `/api/v1/invitation-codes`（**不在** `points/` 下面）。写成
+#: `/points/invitation-codes` 会 404 —— 实测过。
+POINTS_INVITATION_CODES_PATH = "/invitation-codes"
+
 #: key -> 积分。与客户端 `TASK_POINTS` 完全一致（8 个 key，合计 10000）。
 #: 顺序按客户端分组：初识 Loomy(3000) / 打造你的专属 Loomy(3500) /
 #: 遇见你的 AI 搭子(3500)。

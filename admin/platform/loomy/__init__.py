@@ -106,10 +106,13 @@ def install() -> None:
             # **export**：导出号池（备份 / 脱敏两档）。缺它时控制台只有
             # 「导入账号」没有「导出」，用户没法把号池搬去另一台机器
             # （issue #25 报的「loomy 只有导入」）。
-            "actions": ["scan", "import", "export", "refresh-quota", "checkin",
+            "actions": ["begin-auth", "scan", "import", "export", "refresh-quota",
+                        "checkin",
                         # 新手任务（一次性 10000 积分）：网关直接调服务端，
                         # 不依赖客户端那个默认 mock 的本地记账。
-                        "onboarding"],
+                        "onboarding",
+                        # 邀请码：总览/同步/默认码/批量绑定/批量兑换
+                        "invite"],
         },
         ))
         logger.debug("Loomy 平台已登记：%s", platform_id)

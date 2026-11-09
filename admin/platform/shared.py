@@ -1260,14 +1260,42 @@ def apply_account_filters(q, model, *, search: str = "", status: str = "",
 
 
 def account_order(q, model, sort: str = "id_desc"):
-    """排序白名单（防注入：直接映射列，不拼字符串）。"""
+    """排序白名单（防注入：直接映射列，不拼字符串）。
+
+    ## 为什么要这么多组合（2026-11-09）
+
+    控制台账号池改成「点表头排序」后，前端只能传 `列_方向` 这一种形状。
+    以前只有 5 个键（`id_asc` / `credits_desc` / `name_asc` / `synced_desc` …），
+    点「名称」升序能排、再点一次想降序就落到白名单外，被**静默忽略**变回
+    `id_desc` —— 用户看到的是「点了没反应/顺序乱跳」。
+
+    所以这里按 `列_asc` / `列_desc` 成对补齐。名称用库里的 `name`，
+    「状态」用 `status`（active < disabled 的字典序，配合方向够用）。
+    """
     order = {
+        # 默认 / 入库顺序
         "id_asc": model.id.asc(),
+        "id_desc": model.id.desc(),
+        # 名称
+        "name_asc": model.name.asc(),
+        "name_desc": model.name.desc(),
+        # 状态（启用/停用）
+        "status_asc": model.status.asc(),
+        "status_desc": model.status.desc(),
+        # 积分（剩余）：`credits` 与 `balance` 都是历史叫法，两个都认
         "credits_desc": model.balance_remain.desc(),
         "credits_asc": model.balance_remain.asc(),
-        "name_asc": model.name.asc(),
+        "balance_desc": model.balance_remain.desc(),
+        "balance_asc": model.balance_remain.asc(),
+        # 入库时间
+        "created_desc": model.created_at.desc(),
+        "created_asc": model.created_at.asc(),
+        # 最近同步 / 最近使用
         "synced_desc": model.last_sync_at.desc(),
-    }.get(sort)
+        "synced_asc": model.last_sync_at.asc(),
+        "used_desc": model.last_used_at.desc(),
+        "used_asc": model.last_used_at.asc(),
+    }.get(str(sort or "").strip().lower())
     return q.order_by(order) if order is not None else q.order_by(model.id.desc())
 
 

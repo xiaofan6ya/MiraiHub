@@ -828,6 +828,41 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   border-bottom:none;
 }
 
+/* 账号池表头可排序（全局：WorkBuddy / Trae / Qoder / Loomy / CodeArts / MiniMax）
+ *
+ * 只有**语义在各平台一致**的四列可点（名称/状态/积分/入库时间）。
+ * 指示器用 CSS 伪元素画，不额外加 DOM —— 表头模板由各平台自己拼，
+ * 加 DOM 就得改五遍。
+ *   is-sort-desc → ▼   is-sort-asc → ▲
+ */
+.acc-table thead th.is-sortable {
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  transition: color .12s ease;
+}
+.acc-table thead th.is-sortable:hover { color: var(--fg); }
+.acc-table thead th.is-sortable::after {
+  content: "";
+  display: inline-block;
+  width: 0; height: 0;
+  margin-left: 4px;
+  vertical-align: middle;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4.5px solid currentColor;
+  opacity: 0;                  /* 未排序时不占视觉注意力 */
+  transition: opacity .12s ease, transform .12s ease;
+}
+.acc-table thead th.is-sortable:hover::after { opacity: .35; }
+.acc-table thead th.is-sort-asc::after,
+.acc-table thead th.is-sort-desc::after { opacity: 1; }
+.acc-table thead th.is-sort-asc::after {
+  transform: rotate(180deg);
+  color: var(--brand);
+}
+.acc-table thead th.is-sort-desc::after { color: var(--brand); }
+
 /* ============================================================================
    账号池批量操作条
    ----------------------------------------------------------------------------
