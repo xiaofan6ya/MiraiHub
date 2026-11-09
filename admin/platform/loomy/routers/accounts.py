@@ -526,3 +526,44 @@ def checkin(realm: str = "", _: bool = Depends(require_admin),
     """Loomy 没有签到 —— 返回 `supported: False`（不是错误）。"""
     return {"supported": False,
             "summary": "Loomy 没有签到接口；额度按对话计量"}
+
+
+@router.get("/onboarding")
+def onboarding_status(realm: str = "", _: bool = Depends(require_admin),
+                      db: Session = Depends(get_db)):
+    """新手任务进度（8 个一次性任务，共 10000 积分）。
+
+    读的是**服务端**状态，不是客户端本地 json —— 客户端默认 mock 后端，
+    界面上"已获得 N 积分"完全可能服务端一分都没有。
+    """
+    from admin.platform.loomy.services import onboarding as onboarding_svc
+
+    rows = onboarding_svc.status_of_each(db, _realm_or_400(realm))
+    return {
+        "supported": True,
+        "total_points": onboarding_svc.total_points(),
+        # 中文任务清单（按客户端三段分组）：key 只用于提交，展示用 label
+        "catalog": onboarding_svc.task_catalog(),
+        "tasks": [{"key": k, "label": onboarding_svc.label_of(k), "points": v}
+                  for k, v in onboarding_svc.point_table().items()],
+        "accounts": rows,
+        "summary": "共 %d 个账号，仍有 %d 积分未领取"
+                   % (len(rows), sum(max(0, r.get("missing_points") or 0)
+                                     for r in rows)),
+    }
+
+
+@router.post("/onboarding")
+def onboarding_run(realm: str = "", dry_run: int = 0,
+                   limit: int | None = None,
+                   _: bool = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    """把所有启用账号的新手任务补齐（幂等，可反复点）。
+
+    `dry_run=1` 只统计不领取 —— 用来先看「还有多少分没赚」。
+    一次跑 8 个 key × N 个号，串行 + 抖动，几十个号需要一两分钟。
+    """
+    from admin.platform.loomy.services import onboarding as onboarding_svc
+
+    return onboarding_svc.run_all(db, _realm_or_400(realm),
+                                  limit=limit, dry_run=bool(dry_run))

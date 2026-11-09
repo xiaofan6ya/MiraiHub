@@ -65,6 +65,8 @@
     // 每日活跃对话：不是签到也不是刷额度，是真发一条对话维持账号画像。
     // 只在确实实现了 /api/<storage>/activity 的平台上由后端声明。
     activity: { label: "活跃对话", icon: "refresh" },
+    // 新手任务（一次性大额积分，如 Loomy 的 10000 分）：网关直接调服务端领取。
+    onboarding: { label: "新手任务", icon: "gift" },
     // 失效复检：disabled 的号再探一次，能通就自动恢复。
     "ban-recheck": { label: "失效复检", icon: "refresh" },
     "begin-auth": { label: "授权登录", icon: "key", primary: true },

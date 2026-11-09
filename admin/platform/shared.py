@@ -806,7 +806,8 @@ def note_success(account: Account | None) -> None:
 def note_failure(db: Session, account: Account | None, *, kind: str,
                  detail: str = "", status: int = 0, model: str = "",
                  public_platform: str = "", cool_seconds: int = 0,
-                 zero_balance: bool = False) -> None:
+                 zero_balance: bool = False, code: str = "",
+                 signal: str = "", severity: str = "") -> None:
     """把失败写回账号，并按需要进哨兵。**不抛异常**。
 
     ## `zero_balance`：额度类失败要**落一个 0 到余额列**
@@ -875,9 +876,15 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
         from admin import sentinel
 
         if public_platform:
+            # **不要把 HTTP 状态码当业务码传**（以前传的就是 `status`）：
+            # 403 在 WorkBuddy 是「出口被拦」，在别的平台可能只是额度不足，
+            # 混用会让哨兵给出错误的信号名与严重程度。
+            # 平台自己知道真实码就传 `code`；不知道就留空，
+            # 让哨兵按 `kind` 归类（限速/排队/额度/登录失效都有对应 severity）。
             sentinel.note_failure(public_platform, int(account.id or 0), kind,
-                                  code=str(status or ""), status=int(status or 0),
-                                  detail=(detail or "")[:200], model=model or "")
+                                  code=str(code or ""), status=int(status or 0),
+                                  detail=(detail or "")[:200], model=model or "",
+                                  signal=signal or "", severity=severity or "")
     except Exception:  # noqa: BLE001
         logger.debug("哨兵上报失败 kind=%s", kind, exc_info=True)
 

@@ -1438,6 +1438,171 @@ def reauthenticate_account(acc_id: int, body: AccountIn,
     return {"ok": True, "id": acc.id, "message": "凭证已更新，原账号 ID、排序、Key 绑定及历史记录已保留"}
 
 
+class AccountBulkIn(BaseModel):
+    """批量动作入参。"""
+    action: str = ""
+    ids: list[int] = []
+
+
+@router.post("/bulk")
+def bulk_mutate(body: AccountBulkIn, _: bool = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    """对**勾选的一批账号**执行同一个动作（全平台生效）。
+
+    ## 为什么需要它
+
+    账号池支持「勾选」，但勾上之后**没有任何批量入口**：想停用 20 个号只能
+    一个个点。用户反馈「勾选了表格之后对应批量操作的按钮出现，比如批量删除、
+    禁用、导入等，全平台生效」。
+
+    ## 语义
+
+    `action` 取值：
+      `enable`   启用（status=active），清掉冷却/熔断残留
+      `disable`  停用（status=disabled），保留账号与绑定
+      `delete`   物理删除（不可恢复）
+      `refresh`  逐个刷新额度 + token（串行，上游限速友好）
+      `check`    逐个探活（只标记状态，不改凭证）
+
+    **不按当前平台过滤**：勾选本身就是明确意图；跨平台勾选是允许的
+    （例如「把所有 0 积分的号停掉」）。每个 id 单独处理，坏一个不影响其余，
+    结果里给出 `affected / skipped / errors`，前端据此提示。
+    """
+    action = str(body.action or "").strip().lower()
+    ids = [int(i) for i in (body.ids or []) if str(i).strip().lstrip("-").isdigit()]
+    ids = sorted(set(i for i in ids if i > 0))
+    if not ids:
+        raise HTTPException(400, "没有选中任何账号")
+    if len(ids) > 2000:
+        raise HTTPException(400, "单次最多操作 2000 个账号")
+    if action not in ("enable", "disable", "delete", "refresh", "check"):
+        raise HTTPException(400, "不支持的批量动作：%s" % action)
+
+    rows = db.query(Account).filter(Account.id.in_(ids)).all()
+    found = {row.id: row for row in rows}
+    missing = [i for i in ids if i not in found]
+    affected, skipped, errors = 0, [], []
+
+    if action in ("enable", "disable"):
+        target = "active" if action == "enable" else "disabled"
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            account.status = target
+            if target == "active":
+                # 启用时清掉冷却类残留：否则"启用了但还是不接请求"，
+                # 用户会以为批量启用没生效。
+                account.cool_until = None
+                account.cool_kind = ""
+                account.breaker_until = None
+                account.degrade_until = None
+            affected += 1
+        db.commit()
+
+    elif action == "delete":
+        # 绑定了 Key 的号删掉会让 Key 失去专属账号 —— 如实报告，不静默改绑定。
+        bound = {}
+        try:
+            from admin.models import ApiKey
+
+            for key in db.query(ApiKey).filter(ApiKey.account_id.in_(ids)).all():
+                bound.setdefault(int(key.account_id or 0), []).append(key.name or ("#%s" % key.id))
+        except Exception:  # noqa: BLE001 - 读不到绑定不影响删除
+            bound = {}
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            try:
+                db.delete(account)
+                affected += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append("#%s 删除失败：%s" % (acc_id, str(exc)[:80]))
+        db.commit()
+        for acc_id, names in bound.items():
+            skipped.append("#%s 删除前被 Key 独占绑定：%s" % (acc_id, "、".join(names[:3])))
+
+    else:  # refresh / check
+        from admin.platform import registry
+
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            platform = str(account.platform or "").lower()
+            spec = registry.get(platform) or None
+            storage = str(getattr(spec, "storage", lambda: platform)() if spec else platform)
+            try:
+                if action == "refresh":
+                    _refresh_one(storage, account, db)
+                else:
+                    _check_one(storage, account, db)
+                affected += 1
+            except Exception as exc:  # noqa: BLE001 - 单个号失败不影响批量
+                errors.append("#%s：%s" % (acc_id, str(exc)[:90]))
+        db.commit()
+
+    if missing:
+        skipped.append("有 %d 个账号已不存在（可能已被删除）" % len(missing))
+    return {"ok": True, "action": action, "requested": len(ids),
+            "affected": affected, "skipped": skipped[:20], "errors": errors[:20],
+            "note": "" if affected else "没有任何账号被修改"}
+
+
+def _refresh_one(storage: str, account: Account, db: Session) -> None:
+    """批量「刷新额度」：优先调平台自己的服务层（口径与单号刷新一致）。"""
+    if storage == "trae":
+        from admin.platform.trae.services import accounts as svc
+
+        svc.refresh(db, account)
+        return
+    if storage == "loomy":
+        from admin.platform.loomy.services import accounts as svc
+
+        svc.sync_quota(db, account, with_models=False)
+        return
+    if storage == "qoder":
+        from admin.platform.qoder.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "wps-lingxi":
+        from admin.platform.wps_lingxi.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "codearts":
+        from admin.platform.codearts.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "raccoon":
+        from admin.platform.raccoon.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "minimax":
+        from admin.platform.minimax.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    # 默认平台（WorkBuddy）：走通用余额刷新
+    _refresh_balance(account)
+
+
+def _check_one(storage: str, account: Account, db: Session) -> None:
+    """批量「检测」：只探活并标记状态，不改凭证。"""
+    try:
+        from admin import account_health
+
+        account_health.probe_account(db, account)
+        return
+    except Exception:  # noqa: BLE001 - 没有通用探针就回落
+        pass
+    _refresh_one(storage, account, db)
+
+
 @router.post("/batch")
 def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     """批量上传：逐条做**结构校验 + 真实上游验证**，不合格的记进 errors 并跳过。

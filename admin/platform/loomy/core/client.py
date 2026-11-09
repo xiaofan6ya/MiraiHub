@@ -651,6 +651,64 @@ def first_login(token: str, realm: str = "cn",
                     headers=endpoints.points_headers(token))
 
 
+def fetch_onboarding(token: str, realm: str = "cn",
+                     account_id: int = 0) -> dict:
+    """新手任务进度（8 个一次性任务，合计 10000 积分）。
+
+        GET {base}/onboarding/tasks
+        headers: {"token": <session>}
+    返回（实测 2026-11-09）：
+        {"tasks": {"first_message": true, "pick_skill": false, ...},
+         "earned": 500, "total": 10000}
+
+    ⚠️ 客户端默认走 **mock 后端**（只写本地 json，不发请求），
+    所以"客户端显示已获得 500"与"服务端记了账"是两件事 —— 必须调这个接口才知道真相。
+    """
+    url = endpoints.base_of(realm) + endpoints.ONBOARDING_TASKS_PATH
+    data = _request(url, token="", timeout=25.0,
+                    account_id=account_id, realm=realm,
+                    headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    tasks = payload.get("tasks") if isinstance(payload.get("tasks"), dict) else {}
+    # 以本地注册表为准补齐缺失 key（服务端新增/删减 key 时前端不会崩）
+    normalized = {key: tasks.get(key) is True for key in endpoints.ONBOARDING_TASKS}
+    earned = int(payload.get("earned") or 0)
+    return {
+        "tasks": normalized,
+        "earned": earned,
+        "total": int(payload.get("total") or sum(endpoints.ONBOARDING_TASKS.values())),
+        "pending": [key for key, done in normalized.items() if not done],
+        "raw": payload,
+    }
+
+
+def complete_onboarding(token: str, realm: str, key: str, *,
+                        account_id: int = 0) -> dict:
+    """完成一个新手任务并领积分。
+
+        POST {base}/onboarding/tasks/complete   body {"key": "<task>"}
+    返回（实测）：
+        {"alreadyCompleted": false, "balance": 1500}
+
+    `alreadyCompleted: true` 是**幂等**结果（重复调用不重复加分），不是错误。
+    key 必须是 `endpoints.ONBOARDING_TASKS` 里的 8 个之一：服务端对空/未知 key
+    回 `100001`（不是 0 分，而是直接拒绝）。
+    """
+    if key not in endpoints.ONBOARDING_TASKS:
+        raise UpstreamError("bad_task_key", "未知的新手任务 key：%s" % key, 400,
+                            kind="invalid_request")
+    url = endpoints.base_of(realm) + endpoints.ONBOARDING_COMPLETE_PATH
+    data = _request(url, method="POST", body={"key": key}, token="",
+                    timeout=25.0, account_id=account_id, realm=realm,
+                    headers=endpoints.points_headers(token))
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return {"key": key,
+            "already": payload.get("alreadyCompleted") is True,
+            "balance": int(payload.get("balance") or 0),
+            "points": int(endpoints.ONBOARDING_TASKS.get(key) or 0),
+            "raw": payload}
+
+
 def fetch_points_records(token: str, realm: str = "cn", *, page: int = 1,
                          page_size: int = 20, account_id: int = 0) -> dict:
     """积分流水（按页）。"""

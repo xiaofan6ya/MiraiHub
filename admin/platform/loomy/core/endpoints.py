@@ -49,6 +49,59 @@ POINTS_RECORDS_PATH = "/points/records"
 #: 每日签到（领取当日赠送额度）
 POINTS_FIRST_LOGIN_PATH = "/points/first-login"
 
+# ---- 新手任务（一次性，共 10000 积分）----
+#:
+#: 契约来源：客户端 `app.asar.unpacked/electron/onboarding-service.js`
+#: （`backend === 'real'` 分支），envelope 是 `{code, desc, trace_id, data}`，
+#: 成功 `code == "000000"`，鉴权失效 `100002`。
+#:
+#: ⚠️ 客户端**默认 backend='mock'**：只写 `userData/onboarding-tasks.json`，
+#: 根本不发请求 —— 所以"客户端显示已获得 500"并不代表服务端记了账。
+#: 实测（2026-11-09）服务端这两个接口是**真的**：完成后余额立即增加。
+#: 因此网关直接调它，比让用户一个个点客户端更省事。
+ONBOARDING_TASKS_PATH = "/onboarding/tasks"
+ONBOARDING_COMPLETE_PATH = "/onboarding/tasks/complete"
+
+#: key -> 积分。与客户端 `TASK_POINTS` 完全一致（8 个 key，合计 10000）。
+#: 顺序按客户端分组：初识 Loomy(3000) / 打造你的专属 Loomy(3500) /
+#: 遇见你的 AI 搭子(3500)。
+ONBOARDING_TASKS = {
+    "first_message": 500,      # 发送你的第一条消息
+    "pick_skill": 1000,        # 尝试选择一个技能
+    "generate_ppt": 1500,      # 生成一份 PPT
+    "set_schedule": 1000,      # 设置定时任务
+    "install_skill": 1500,     # 在技能广场安装一个技能
+    "configure_remote": 1000,  # 配置远程控制
+    "create_soul": 1500,       # 创建你的第一个搭子
+    "share_soul": 2000,        # 把搭子分享给朋友
+}
+
+#: key -> 中文任务名（**控制台展示用**）。
+#:
+#: 界面上一律显示中文：`first_message` 这种内部 key 对用户毫无意义，
+#: 而且和客户端界面的「发送你的第一条消息」对不上，用户没法判断
+#: 「我到底做完哪几个」。key 本身仍然只用于调接口，不做翻译。
+ONBOARDING_TASK_LABELS = {
+    "first_message": "发送你的第一条消息",
+    "pick_skill": "尝试选择一个技能",
+    "generate_ppt": "生成一份 PPT",
+    "set_schedule": "设置定时任务",
+    "install_skill": "在技能广场安装一个技能",
+    "configure_remote": "配置远程控制",
+    "create_soul": "创建你的第一个搭子",
+    "share_soul": "把搭子分享给朋友",
+}
+
+#: 分组（与客户端三段对应，控制台按组展示进度）。
+ONBOARDING_GROUPS = (
+    ("getting-started", "初识 Loomy", 3000,
+     ("first_message", "pick_skill", "generate_ppt")),
+    ("make-it-yours", "打造你的专属 Loomy", 3500,
+     ("set_schedule", "install_skill", "configure_remote")),
+    ("create-share", "遇见你的 AI 搭子", 3500,
+     ("create_soul", "share_soul")),
+)
+
 # ---- 配置目录（userDataPath 是算出来的，不是 %APPDATA%/<产品名>）----
 #: `config-path.js`：%PUBLIC%/Loomy/<sha256(username)[:12]>/userData
 #: 只记录「名字」，位置由 services/scan.py 从环境变量动态解析

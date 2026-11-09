@@ -682,7 +682,9 @@
     .tbl thead th{
       background:var(--surface-2); color:var(--fg-muted); font-weight:500;
       text-align:left; padding:9px 14px; white-space:nowrap;
-      position:sticky; top:0; z-index:1;
+      /* 表头不吸顶：卡片本身是 overflow:auto，吸顶会让表头压住第一行、
+         并与列宽错位（库里的 console.css 与 ui-enhancements.css 也都改成了 static）。 */
+      position:static;
     }
     .tbl tbody td{ padding:9px 14px; border-top:1px solid var(--border-soft); vertical-align:middle; }
     :root[data-theme="dark"] .side-item:hover{ background:rgba(255,255,255,.06); }
@@ -1723,6 +1725,20 @@
       <!-- 账号表：紧凑行（单行约 44px），一屏能看 12+ 行。
            原来是 142px/行（到期列里塞了 2 个积分包明细），一屏只看 4 行。
            积分明细移交给悬停 title 与「积分明细」弹窗。 -->
+      <!-- 批量操作条：勾选账号后出现（全平台生效，不受当前平台筛选限制）。
+           固定高度占位不跳动：未选中时隐藏，选中后原地展开。 -->
+      <div id="accBulkBar" class="acc-bulk-bar" hidden role="region" aria-label="批量操作">
+        <span class="acc-bulk-count"><b id="accBulkCount">0</b> 个账号已选</span>
+        <div class="acc-bulk-actions">
+          <button type="button" class="console-btn quiet" onclick="accBulkRun('enable')">批量启用</button>
+          <button type="button" class="console-btn quiet" onclick="accBulkRun('disable')">批量禁用</button>
+          <button type="button" class="console-btn quiet" onclick="accBulkRun('refresh')">批量刷新额度</button>
+          <button type="button" class="console-btn quiet" onclick="accBulkRun('check')">批量检测</button>
+          <button type="button" class="console-btn quiet" onclick="accBulkExport()">导出选中</button>
+          <button type="button" class="console-btn danger-quiet" onclick="accBulkRun('delete')">批量删除</button>
+        </div>
+        <button type="button" class="acc-bulk-clear" onclick="accBulkClear()">取消选择</button>
+      </div>
       <div id="accountTableWrap" class="card overflow-x-auto max-h-[70vh]">
         <table class="acc-table">
           <thead>
@@ -1859,9 +1875,13 @@
         <label class="text-xs">IP 地址<input id="ipActivityIP" placeholder="全部 IP" maxlength="64" class="block border rounded-lg px-3 py-2 mt-1" style="width:160px"></label>
         <button type="submit" class="console-btn quiet">筛选</button>
       </form>
-      <p class="text-xs text-slate-400 mb-3">入口次数包含鉴权失败、限流和封禁请求；历史数据从用量日志补充。按小时汇总，时间范围包含起始小时；失败数按 HTTP 状态统计，积分与 Token 来自用量日志。点击表头切换排序。</p>
-      <p class="text-xs text-slate-400 mb-3">低消耗筛选按成功用量记录计算均值，未返回 Token 的请求不作为低消耗。点击 IP 查看用量明细。</p>
-      <div id="ipActivitySummary" class="stat-grid mb-3" role="status"></div>
+      <ul class="ip-notes">
+        <li>入口次数包含鉴权失败、限流和封禁请求；历史数据从用量日志补充。</li>
+        <li>按小时汇总，时间范围包含起始小时；失败数按 HTTP 状态统计，积分与 Token 来自用量日志。</li>
+        <li>点击表头切换排序；点击 IP 查看该地址的用量明细。</li>
+        <li>低消耗筛选按成功用量记录计算均值，未返回 Token 的请求不作为低消耗。</li>
+      </ul>
+      <div id="ipActivitySummary" class="stat-grid" role="status"></div>
       <div class="card overflow-x-auto"><table class="tbl min-w"><thead><tr>
         <th data-ip-sort="ip"><button type="button" onclick="WBIP.sort('ip')">IP 地址</button></th>
         <th data-ip-sort="requests" class="text-right"><button type="button" onclick="WBIP.sort('requests')">请求次数 ↓</button></th>
@@ -1871,10 +1891,10 @@
         <th data-ip-sort="tokens" class="text-right"><button type="button" onclick="WBIP.sort('tokens')">Token</button></th>
         <th data-ip-sort="last_seen" class="text-right"><button type="button" onclick="WBIP.sort('last_seen')">最近请求</button></th><th>状态</th><th class="text-right">操作</th>
       </tr></thead><tbody id="ipActivityBody"></tbody></table></div>
-      <div id="ipActivityPager" class="flex justify-between items-center gap-2 my-3 text-sm"></div>
-      <h3 class="text-sm font-semibold mt-5 mb-3">封禁名单</h3>
-      <div class="card overflow-x-auto"><table class="tbl min-w"><thead><tr><th>IP 地址</th><th>备注</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="ipBlockedBody"></tbody></table></div>
-      <div class="section-head mt-5"><h3>设备关联与封禁</h3><span class="hint">按标识独立封禁</span></div>
+      <div id="ipActivityPager" class="flex justify-between items-center gap-2 text-sm"></div>
+      <div class="ip-section"><h3>封禁名单</h3><span>封禁后该 IP 的全部 /v1 与 /gw 请求直接 403</span></div>
+      <div class="card overflow-x-auto"><table class="tbl min-w"><thead><tr><th>IP 地址</th><th>备注</th><th>状态</th><th>更新时间</th><th class="text-right">操作</th></tr></thead><tbody id="ipBlockedBody"></tbody></table></div>
+      <div class="ip-section"><h3>设备关联与封禁</h3><span>按标识独立封禁</span></div>
       <p class="panel-note">设备 ID、指纹和 MAC 均由客户端上报，未经硬件验证。相同标识换 IP 后仍会拦截；未上报或重置标识的设备无法可靠关联。普通 UA 不作为封禁依据。最多展示最近 2000 条关联。</p>
       <div id="ipDevices"></div>
     </section>

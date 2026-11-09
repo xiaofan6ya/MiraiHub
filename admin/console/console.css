@@ -392,63 +392,97 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
 }
 .platform-card.active .platform-card-sub { color:var(--brand-ink); opacity:.8; }
 /* ---- 平台「平均级」徽标（卡片右侧）--------------------------------------
- * 四档：夯 > 人上人 > npc > 拉完了。用**同色相的明度/饱和阶梯**表达强弱，
- * 而不是四个撞色块 —— 一排卡片上出现四种高饱和色会盖过平台 logo。
+ * 四档：夯 > 人上人 > npc > 拉完了。
  *
- * 夯     实心暖金（最高档，最醒目）
- * 人上人 实心主题蓝
- * npc    中性灰（"能用但不突出"）
- * 拉完了 低饱和红（警示但不刺眼）
- * 悬停说明走原生 title（见 platform-switch.js 的 tierBadge）。 */
+ * ## 为什么是「淡底胶囊」而不是四块实心色
+ *
+ * 第一版给每一档上了实心底色（金/蓝/深灰/深红）。实际截图里同屏 10 张卡片
+ * 就是 10 个高饱和色块，**盖过平台 logo、看着乱**；深色主题下 npc 的
+ * `--surface-3` 与拉完了的淡红底几乎糊成一片黑块，文字对比度也不够。
+ *
+ * 现在统一形制、只换色相：
+ *     浅淡同色底（12% 左右）+ 同色细描边 + 同色加粗文字
+ * 这样四档强弱靠**颜色与描边**区分，视觉重量接近，一排卡片是"一列标签"
+ * 而不是"一列色块"。
+ *
+ * 悬停说明走系统 tooltip 组件（`data-tooltip` / `data-tooltip-description`，
+ * 见 platform-switch.js 的 tierBadge），不再用原生 title。
+ * ---------------------------------------------------------------------- */
 .platform-tier {
   flex:0 0 auto;
   margin-left:auto;
-  padding:2px 7px;
+  display:inline-flex;
+  align-items:center;
+  padding:1px 8px;
   border-radius:999px;
   border:1px solid transparent;
   font-size:11px;
   font-weight:600;
-  line-height:1.5;
+  line-height:18px;
   white-space:nowrap;
-  letter-spacing:.02em;
+  letter-spacing:.01em;
   cursor:help;
+  transition:background .15s ease, border-color .15s ease, color .15s ease;
 }
+/* 浅色：夯（暖金）—— 底色压到 8%，只靠描边与字色表达"最高档"。
+ * 之前 13% + 近白选中态确实刺眼：一排卡片里只有它跳出来，
+ * 反而盖过平台名。 */
 .platform-tier-hang {
-  background:linear-gradient(135deg,#f6b73c 0%,#e8912a 100%);
-  border-color:rgba(232,145,42,.55);
-  color:#3a2506;
-  box-shadow:0 1px 4px rgba(232,145,42,.28);
+  background:rgba(232,145,42,.08);
+  border-color:rgba(232,145,42,.34);
+  color:#7d4a06;
 }
+/* 浅色：人上人（主题蓝） */
 .platform-tier-elite {
-  background:var(--blue-main);
-  border-color:transparent;
-  color:#fff;
+  background:rgba(65,118,230,.11);
+  border-color:rgba(65,118,230,.36);
+  color:var(--brand-ink);
 }
+/* 浅色：npc（中性）—— **不铺底色**，只留描边。
+ * 铺 `--surface-2` 会在"选中卡片"的浅蓝底上糊成一块补丁，
+ * 透明底 + 描边在任何卡片背景下都成立。 */
 .platform-tier-npc {
-  background:var(--surface-3);
+  background:transparent;
   border-color:var(--border);
   color:var(--fg-muted);
 }
+/* 浅色：拉完了（低饱和红） */
 .platform-tier-bad {
-  background:var(--danger-soft);
-  border-color:rgba(242,123,123,.45);
-  color:#b03434;
+  background:rgba(214,69,69,.09);
+  border-color:rgba(214,69,69,.30);
+  color:#a93333;
 }
-:root[data-theme="dark"] .platform-tier-bad { color:#ffb3b3; }
-:root[data-theme="dark"] .platform-tier-npc { color:var(--fg-subtle); }
-/* 卡片被选中（蓝底）时，npc / 拉完了 的自定义底色会糊进去：
- * 统一换成半透明白，保证四档在选中态下都读得出来。 */
-.platform-card.active .platform-tier {
-  background:rgba(255,255,255,.22);
-  border-color:rgba(255,255,255,.34);
-  color:#fff;
-  box-shadow:none;
+/* 深色：同色相提亮，底色降不透明度，避免"荧光块" */
+:root[data-theme="dark"] .platform-tier-hang {
+  background:rgba(246,183,60,.10);
+  border-color:rgba(246,183,60,.32);
+  color:#e6b26a;
 }
-.platform-card.active .platform-tier-hang {
-  background:rgba(255,255,255,.9);
-  border-color:rgba(255,255,255,.9);
-  color:#8a5207;
+:root[data-theme="dark"] .platform-tier-elite {
+  background:rgba(79,131,241,.16);
+  border-color:rgba(79,131,241,.42);
+  color:#a9c5ff;
 }
+:root[data-theme="dark"] .platform-tier-npc {
+  background:transparent;
+  border-color:rgba(255,255,255,.16);
+  color:#98a1b2;
+}
+:root[data-theme="dark"] .platform-tier-bad {
+  background:rgba(242,123,123,.13);
+  border-color:rgba(242,123,123,.38);
+  color:#ffb3b3;
+}
+/* 选中卡片**不需要**单独改徽标配色。
+ *
+ * 踩过的坑：以为选中态是"饱和蓝底"，于是把四档统一换成半透明白 ——
+ * 结果为浅色主题下看不见：`.platform-card.active` 的底色是
+ * `--brand-soft`(#c4d3f0 淡蓝)，深色主题是 `color-mix(brand 11%, surface)`
+ * （近乎 surface 的深灰）—— 两种都不是饱和蓝，白字白底直接消失。
+ *
+ * 现在的规则：各档配色在两种主题的卡片底色上都已经够对比度，
+ * 选中态交给 `.platform-card.active` 的边框/左侧色条去表达即可。
+ * npc 档用透明底 + 描边，所以它在任何卡片背景上都不会糊掉。 */
 .platform-card-check {
   display:none;
   width:16px;
@@ -728,10 +762,35 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   color:var(--fg-muted);
   text-transform:uppercase;
   border-bottom:1px solid var(--border);
-  position:sticky;
-  top:0;
-  z-index:10;
+  /* **不要 sticky**（2026-11-09 用户反馈）。
+   * 原来这里是 `position:sticky; top:0`，而卡片又是 `overflow-x:auto`：
+   * 于是横向滚动时表头会浮在内容上、还会跟卡片圆角打架；竖向滚动时
+   * 表头盖住第一行数据的上边距，行看着"挤在一起"。表格本身不带 max-height，
+   * 页头也已经有滚动公告条，sticky 没有收益。
+   * 账号池那张大表有**自己的**粘顶规则（`#accountTableWrap .acc-table`），
+   * 不受这里影响。 */
+  position:static;
 }
+
+/* 表头里放 <button>（可排序列表头）时，按钮的默认内边距会把它自己
+ * 顶歪 —— 表现为表头文字比下面的数据列往右偏几像素，整列看着不对齐。
+ * 这里把按钮压成"纯文本"：继承对齐方式与字号，去掉所有盒模型偏移。 */
+.tbl thead th > button {
+  all:unset;
+  display:inline;
+  cursor:pointer;
+  font:inherit;
+  letter-spacing:inherit;
+  color:inherit;
+  text-transform:inherit;
+  text-align:inherit;
+}
+.tbl thead th > button:focus-visible {
+  outline:2px solid var(--brand);
+  outline-offset:2px;
+  border-radius:3px;
+}
+.tbl thead th.text-right > button { text-align:right; }
 
 .tbl thead th.text-right {
   text-align:right!important;
@@ -741,6 +800,20 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   padding:12px;
   border-bottom:1px solid var(--border);
   vertical-align:middle;
+  /* 单元格内多行时的呼吸感：副标题 / 小字说明不再贴着主数值 */
+  line-height:1.5;
+}
+
+/* 单元格里的副行（`<small class="block">` / `.sub`）：
+ * 数字下面那行「均 22.3224」「当前访问 IP」原来紧贴在数值底部，
+ * 与上下行的间距也不一致 —— 统一给一点上边距 + 更小的行高。 */
+.tbl tbody td small,
+.tbl tbody td .sub {
+  display:block;
+  margin-top:3px;
+  font-size:11px;
+  line-height:1.35;
+  color:var(--fg-subtle);
 }
 
 .tbl tbody td.text-right {
@@ -753,6 +826,50 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
 
 .tbl tbody tr:last-child td {
   border-bottom:none;
+}
+
+/* ============================================================================
+   账号池批量操作条
+   ----------------------------------------------------------------------------
+   勾选账号后出现在表格上方；未选中时 `hidden`，不占位。
+   操作条本身是浅底胶囊，避免与表格卡片抢视觉。
+   ========================================================================= */
+.acc-bulk-bar {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:10px;
+  margin-bottom:10px;
+  padding:9px 12px;
+  border:1px solid var(--brand-soft);
+  border-radius:10px;
+  background:var(--surface-2);
+}
+.acc-bulk-bar[hidden] { display:none; }
+.acc-bulk-count {
+  font-size:12px; color:var(--fg-muted);
+  display:inline-flex; align-items:baseline; gap:4px;
+}
+.acc-bulk-count b {
+  font-size:14px; font-weight:700; color:var(--brand-ink);
+  font-variant-numeric:tabular-nums;
+}
+.acc-bulk-actions {
+  display:flex; flex-wrap:wrap; gap:6px;
+  margin-left:auto;
+}
+.acc-bulk-clear {
+  border:0; background:transparent; cursor:pointer;
+  font-size:12px; color:var(--fg-subtle);
+  padding:2px 4px; border-radius:6px;
+}
+.acc-bulk-clear:hover { color:var(--fg); background:var(--surface-3); }
+/* 勾选列：固定窄列，表头/表体同宽 */
+.acc-table .col-pick { width:34px; padding-left:10px; }
+@media (max-width:640px) {
+  /* 手机端按钮铺满一行，别挤成两三个字一行 */
+  .acc-bulk-actions { margin-left:0; width:100%; }
+  .acc-bulk-actions .console-btn { flex:1 1 auto; }
 }
 
 /* 数字列的等宽字体 */
@@ -2517,6 +2634,208 @@ tbody tr:hover > th { background:transparent!important; }
   font-variant-numeric:tabular-nums; line-height:1.2;
 }
 .sentinel-stat em { font-size:11px; font-style:normal; color:var(--fg-subtle); }
+
+/* ---- 哨兵：平台 / 信号类型 小标签 ---------------------------------------
+ * 形制与 `usage-platform-chip` 一致（胶囊、1px 描边、小字），
+ * 这样"平台"在整套控制台里是同一个视觉语言：
+ *   哨兵表格里的平台、使用记录的平台筛选、统计条的平台分布，看起来是同一类东西。
+ *
+ * 信号类型用四档（risk / throttle / auth / info），语义见 admin/sentinel.py：
+ * **只有 risk 参与熔断**，其余只记录。颜色只是提示，不承担判断。 */
+.sentinel-plat {
+  display:inline-flex; align-items:center;
+  padding:1px 8px; border-radius:999px;
+  border:1px solid var(--border); background:var(--surface-2);
+  color:var(--fg-muted); font-size:11px; font-weight:600;
+  line-height:18px; white-space:nowrap;
+}
+.sentinel-plat.is-empty {
+  background:transparent; border-style:dashed; color:var(--fg-subtle);
+}
+.sentinel-sev {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:1px 8px; border-radius:999px;
+  border:1px solid transparent; font-size:11px; font-weight:600;
+  line-height:18px; white-space:nowrap; cursor:help;
+}
+.sentinel-sev em {
+  font-style:normal; font-weight:500; opacity:.82;
+  font-size:10.5px;
+}
+.sentinel-sev.is-risk {
+  background:rgba(214,69,69,.10); border-color:rgba(214,69,69,.32); color:#a93333;
+}
+.sentinel-sev.is-throttle {
+  background:rgba(217,119,6,.10); border-color:rgba(217,119,6,.30); color:#9a5b00;
+}
+.sentinel-sev.is-auth {
+  background:rgba(65,118,230,.09); border-color:rgba(65,118,230,.30); color:var(--brand-ink);
+}
+.sentinel-sev.is-info {
+  background:transparent; border-color:var(--border); color:var(--fg-subtle);
+}
+:root[data-theme="dark"] .sentinel-sev.is-risk {
+  background:rgba(242,123,123,.13); border-color:rgba(242,123,123,.36); color:#ffb3b3;
+}
+:root[data-theme="dark"] .sentinel-sev.is-throttle {
+  background:rgba(245,163,92,.12); border-color:rgba(245,163,92,.34); color:#f5c065;
+}
+:root[data-theme="dark"] .sentinel-sev.is-auth {
+  background:rgba(79,131,241,.15); border-color:rgba(79,131,241,.38); color:#a9c5ff;
+}
+:root[data-theme="dark"] .sentinel-plat {
+  background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.13);
+  color:#98a1b2;
+}
+/* 码没进平台码表：虚线框，提示"该补映射了" */
+.sentinel-code.is-unmapped {
+  border-style:dashed; color:var(--warn); cursor:help;
+}
+
+/* ---- 数值胶囊（statCard 的 chips / 使用记录统计条）-----------------------
+ * 形制对齐 `usage-platform-chip`：胶囊 + 1px 描边 + 小字 + 数字加粗。
+ * 用途是替代「共 162 个 · 日耗尽 0 · 限流 0 · 冷却 1 · 停用 34」这类长句：
+ * 每个数字单独成块，异常项用 is-bad / is-warn 上色，一眼能挑出来。 */
+.stat-chips {
+  display:flex; flex-wrap:wrap; gap:4px;
+  margin-top:7px;
+}
+.stat-chip {
+  display:inline-flex; align-items:baseline; gap:4px;
+  padding:1px 7px; border-radius:999px;
+  border:1px solid var(--border); background:transparent;
+  font-size:11px; line-height:17px; color:var(--fg-muted);
+  white-space:nowrap;
+}
+.stat-chip b {
+  font-weight:600; color:var(--fg);
+  font-variant-numeric:tabular-nums;
+}
+/* 0 值不抢注意力：只把数字压淡，标签仍在（保持列对齐、可扫读） */
+.stat-chip.is-zero b { color:var(--fg-subtle); font-weight:500; }
+.stat-chip.is-warn {
+  border-color:rgba(217,119,6,.32); background:rgba(217,119,6,.07); color:#9a5b00;
+}
+.stat-chip.is-warn b { color:#9a5b00; }
+.stat-chip.is-bad {
+  border-color:rgba(214,69,69,.30); background:rgba(214,69,69,.07); color:#a93333;
+}
+.stat-chip.is-bad b { color:#a93333; }
+.stat-chip.is-flat { border-style:dashed; }
+:root[data-theme="dark"] .stat-chip.is-warn {
+  border-color:rgba(245,163,92,.30); background:rgba(245,163,92,.10); color:#f0b57a;
+}
+:root[data-theme="dark"] .stat-chip.is-warn b { color:#f0b57a; }
+:root[data-theme="dark"] .stat-chip.is-bad {
+  border-color:rgba(242,123,123,.30); background:rgba(242,123,123,.10); color:#ffb3b3;
+}
+:root[data-theme="dark"] .stat-chip.is-bad b { color:#ffb3b3; }
+
+/* 新手任务清单（分组） */
+.onb-group { margin-bottom:10px; }
+.onb-group:last-child { margin-bottom:0; }
+.onb-group-head {
+  display:flex; align-items:baseline; justify-content:space-between;
+  gap:10px; margin-bottom:5px;
+  font-size:12px; font-weight:600; color:var(--fg);
+}
+.onb-group-head b {
+  font-size:11px; font-weight:600; color:var(--brand-ink);
+  font-variant-numeric:tabular-nums;
+}
+
+/* 使用记录顶部统计条：原来是一整行纯文字，现在拆成胶囊 */
+.logstat-row { display:inline-flex; flex-wrap:wrap; gap:5px; align-items:center; }
+.logstat {
+  display:inline-flex; align-items:baseline; gap:5px;
+  padding:1px 8px; border-radius:999px;
+  border:1px solid var(--border); background:transparent;
+  font-size:11.5px; line-height:18px; color:var(--fg-subtle);
+}
+.logstat b { color:var(--fg); font-weight:600; font-variant-numeric:tabular-nums; }
+.logstat.is-ok { border-color:rgba(16,145,90,.30); }
+.logstat.is-ok b { color:#0f8a56; }
+.logstat.is-bad { border-color:rgba(214,69,69,.32); background:rgba(214,69,69,.06); }
+.logstat.is-bad b { color:#a93333; }
+:root[data-theme="dark"] .logstat.is-ok b { color:#5fd08d; }
+:root[data-theme="dark"] .logstat.is-bad b { color:#ffb3b3; }
+.logstat-plain { color:var(--fg-subtle); font-size:11.5px; }
+
+/* ============================================================================
+   IP 管理页：纵向节奏
+   ----------------------------------------------------------------------------
+   用户反馈「样式太乱、文字没上下间距、各区块也没有间距」。
+
+   根因不是颜色，而是**节奏不统一**：
+     · 两段说明文字各自 `text-xs text-slate-400 mb-3`，行高挤成 1.4，
+       两段之间只差 12px，读起来像一整块；
+     · 「封禁名单」「设备关联」用 `mt-5` 手写外边距，另一个用 `section-head`，
+       于是每个区块的间距都不一样；
+     · 统计卡（`.stat-grid`）与表格之间没有统一间距。
+
+   这里用一条**统一的垂直节奏**收口：区块 20px、说明 8px、说明内部 1.7 行高。
+   ========================================================================= */
+#panel-ip > * + * { margin-top:16px; }
+/* 统一节奏只认 `margin-top`：把各子元素自带的 `mb-*` 清掉，
+ * 否则「mb-4 + 16px」会变成 32px，和相邻区块的 16px 又不一致 —— 正是
+ * 用户说的"每个区块的间距都不一样"的来源。 */
+#panel-ip > * { margin-bottom:0; }
+
+/* 说明段落：拆成条目，行高放宽，条目之间留 6px */
+#panel-ip .panel-subtitle,
+#panel-ip .panel-note {
+  line-height:1.7;
+  margin:0;
+}
+#panel-ip .ip-notes {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin:0 0 4px;
+  padding:0;
+  list-style:none;
+}
+#panel-ip .ip-notes li {
+  display:flex;
+  gap:7px;
+  font-size:11.5px;
+  line-height:1.7;
+  color:var(--fg-subtle);
+}
+#panel-ip .ip-notes li::before {
+  content:"";
+  flex:0 0 auto;
+  width:4px; height:4px;
+  margin-top:9px;
+  border-radius:50%;
+  background:var(--border-strong, var(--border));
+}
+
+/* 区块标题：三处统一（活跃 IP 表格 / 封禁名单 / 设备关联） */
+#panel-ip .ip-section {
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:10px;
+  margin:22px 0 10px;
+}
+#panel-ip .ip-section h3 {
+  margin:0;
+  font-size:13px;
+  font-weight:600;
+  color:var(--fg);
+}
+#panel-ip .ip-section span {
+  font-size:11px;
+  color:var(--fg-subtle);
+}
+
+/* 表格卡片：与统计卡、分页器统一留白 */
+#panel-ip .card { border-radius:10px; }
+#panel-ip .tbl tbody td { padding:13px 12px; }
+
+/* 筛选栏：标签与控件之间留一档 */
+#panel-ip .filter-combobox { margin-bottom:2px; }
 .sentinel-table-card, .sentinel-events-card { padding:0; margin-bottom:16px; overflow:hidden; }
 .sentinel-card-head {
   display:flex; align-items:baseline; justify-content:space-between; gap:10px;
@@ -2633,6 +2952,30 @@ tbody tr:hover > th { background:transparent!important; }
   background:var(--danger); color:#fff; border-color:transparent;
 }
 .console-btn.danger:hover { filter:brightness(1.08); }
+/* 危险但**不是主操作**的按钮（批量操作条里的「批量删除」）。
+ *
+ * 实心红（`.danger`）适合「屏幕上只有一个动作」的场景（如止损确认），
+ * 但摆在一排 quiet 按钮中间就变成一块刺眼的大红 —— 用户反馈「太亮」。
+ * 这里改成描边 + 红字：语义仍明确，视觉权重与邻居一致。 */
+.console-btn.danger-quiet {
+  background:transparent;
+  border-color:rgba(214,69,69,.30);
+  color:#a93333;
+}
+.console-btn.danger-quiet:hover {
+  background:rgba(214,69,69,.07);
+  border-color:rgba(214,69,69,.48);
+  color:#8f2b2b;
+}
+:root[data-theme="dark"] .console-btn.danger-quiet {
+  border-color:rgba(242,123,123,.30);
+  color:#ffb3b3;
+}
+:root[data-theme="dark"] .console-btn.danger-quiet:hover {
+  background:rgba(242,123,123,.10);
+  border-color:rgba(242,123,123,.46);
+  color:#ffc9c9;
+}
 @media (max-width:900px) {
   .sentinel-banner { flex-wrap:wrap; }
   .sentinel-banner-actions { width:100%; }
@@ -3550,25 +3893,52 @@ tbody tr:hover > th { background:transparent!important; }
 .gw-order-list { display: flex; flex-direction: column; gap: 6px; }
 .gw-order-row {
   display: grid;
-  grid-template-columns: 26px minmax(90px, 1fr) minmax(80px, 1.2fr) auto;
+  /* **列宽必须确定 + 可收缩**。
+   *
+   * 踩过两次：
+   *   1. `minmax(90px,1fr) … auto` —— 每行是独立 grid，`auto` 按本行内容算，
+   *      于是"优先级 10"与"无可用账号"两行的第三列宽度不同，整表歪；
+   *   2. 改成固定 px（22/176/138/150）后**总宽 540px 起**，卡片窄一点就
+   *      直接把「额度 2617」挤出右边界（截图里的溢出）。
+   *
+   * 现在的写法：全部按比例分配、最小宽度 0 允许收缩；因为每一行的容器宽度
+   * 相同、模板里没有任何 `auto`，各行的列边界仍然落在同一条竖线上。
+   * 名称/原因/数值三列各自 `min-width:0` + 省略号，窄屏也不撑破。 */
+  grid-template-columns:
+    22px
+    minmax(0, 1.15fr)
+    minmax(0, 0.95fr)
+    minmax(0, 1.2fr);
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border-radius: 7px;
   background: var(--surface-2);
   font-size: 12px;
+  min-width: 0;
 }
+.gw-order-row > * { min-width: 0; }
 .gw-order-rank {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: 50%;
   background: var(--brand-soft); color: var(--brand-ink);
   font-size: 11px; font-weight: 700;
 }
-.gw-order-name { font-weight: 600; color: var(--fg); }
-.gw-order-reason { color: var(--fg-subtle); font-size: 11px; }
+.gw-order-name { font-weight: 600; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gw-order-reason { color: var(--fg-subtle); font-size: 11px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .gw-order-meta {
   color: var(--fg-muted); font-size: 11px;
   font-variant-numeric: tabular-nums;
+  /* 右对齐：可用数 / 额度是数值，右缘对齐后才能一眼比大小。
+     `min-width:0` + 省略号保证窄卡片下也不会把数字推出边界。 */
+  justify-self: end;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 @media (max-width: 900px) {
   .gw-platform-row { grid-template-columns: 26px 1fr auto; }

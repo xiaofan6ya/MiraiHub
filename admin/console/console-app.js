@@ -2317,6 +2317,9 @@ document.addEventListener("click", event => {
    ========================================================================== */
 
 let _sentinelData = null;
+//: 信号名 -> 中文（后端 `status().signal_labels` 下发，这里缓存一份给
+//: 表格渲染用；后端没给时退化为展示原始 signal 名）。
+let SIGNAL_LABELS_CACHE = {};
 
 async function loadSentinel(force) {
   const summary = $("#sentinelSummary");
@@ -2326,6 +2329,7 @@ async function loadSentinel(force) {
     if (!r.ok) return;
     const data = await r.json();
     _sentinelData = data;
+    SIGNAL_LABELS_CACHE = data.signal_labels || SIGNAL_LABELS_CACHE;
     renderSentinel(data);
     // 侧栏角标：没打开面板也能看到「有账号正在被风控」
     const n = data.accounts_affected || 0;
@@ -2382,21 +2386,27 @@ function renderSentinel(data) {
     </div>`;
 
   // 账号表：谁处于什么阶段
+  //
+  // **必须带平台列**：以前只写 `#152`，同屏出现 5 个号时根本看不出
+  // 是哪个平台的（一个号池里 workbuddy / trae / loomy 的 id 会混排）。
   const accounts = data.accounts || [];
+  const sevChip = sentinelSeverityChip;
   $("#sentinelAccounts").innerHTML = `
     <div class="sentinel-card-head"><h3>受影响账号</h3>
-      <span>按最近一次信号排序</span></div>
+      <span>按最近一次信号排序 · ${accounts.length} 个账号有信号</span></div>
     ${accounts.length ? `<div class="sentinel-table-wrap"><table class="tbl">
-      <thead><tr><th>账号</th><th>最近信号</th><th>次数</th><th>首次</th><th>最近</th></tr></thead>
+      <thead><tr><th>平台</th><th>账号</th><th>最近信号</th><th>类型</th><th>次数</th><th>首次</th><th>最近</th></tr></thead>
       <tbody>${accounts.map(item => `<tr>
+        <td>${sentinelPlatformChip(item.platform)}</td>
         <td class="sentinel-acc">#${item.account_id}</td>
         <td><span class="sentinel-code">${esc(item.code || item.kind || "-")}</span>
           ${esc(item.label || "")}</td>
+        <td>${sevChip(item.severity, item.signal)}</td>
         <td class="tnum">${item.count}</td>
         <td class="sentinel-ts">${fmtTime(new Date((item.first_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
         <td class="sentinel-ts">${fmtTime(new Date((item.last_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
       </tr>`).join("")}</tbody></table></div>`
-    : `<p class="sentinel-empty">最近没有账号被上游风控。</p>`}`;
+    : `<p class="sentinel-empty">最近没有账号被上游拦。</p>`}`;
 
   // 原始事件流：排障时能定位到具体某次请求
   const events = data.recent || [];
@@ -2404,16 +2414,59 @@ function renderSentinel(data) {
     <div class="sentinel-card-head"><h3>信号明细</h3>
       <span>最近 ${events.length} 条（Redis 保留 15 分钟，自动过期）</span></div>
     ${events.length ? `<div class="sentinel-table-wrap"><table class="tbl">
-      <thead><tr><th>时间</th><th>账号</th><th>类型</th><th>码</th><th>模型</th><th>细节</th></tr></thead>
+      <thead><tr><th>时间</th><th>平台</th><th>账号</th><th>类型</th><th>码</th><th>模型</th><th>细节</th></tr></thead>
       <tbody>${events.map(ev => `<tr>
         <td class="sentinel-ts">${fmtTime(new Date((ev.ts || 0) * 1000).toISOString().slice(0, 19))}</td>
+        <td>${sentinelPlatformChip(ev.platform)}</td>
         <td class="sentinel-acc">#${ev.account_id}</td>
-        <td>${esc(ev.kind || "")}</td>
-        <td><span class="sentinel-code">${esc(ev.code || "-")}</span></td>
+        <td>${sevChip(ev.severity, ev.signal)}</td>
+        <td><span class="sentinel-code ${ev.unmapped ? "is-unmapped" : ""}"
+              ${ev.unmapped ? `data-tooltip="未收录的码" data-tooltip-description="该平台的这个码还没进 sentinel.PLATFORM_SIGNALS，显示为未归类；补一行映射即可。"` : ""}>${esc(ev.code || "-")}</span></td>
         <td class="sentinel-model">${esc(ev.model || "-")}</td>
         <td class="sentinel-detail" data-tooltip="${esc(ev.detail ||"")}">${esc((ev.detail || "").slice(0, 90))}</td>
       </tr>`).join("")}</tbody></table></div>`
     : `<p class="sentinel-empty">暂无明细。</p>`}`;
+}
+
+/**
+ * 平台小标签（复用 `usage-platform-chip` 的形制）。
+ *
+ * 平台名来自事件的 `platform`（落库名），用 `_logPlatformLabels` 换成展示名；
+ * 拿不到就原样显示 —— 宁可显示 `minimax` 也不能显示空白。
+ */
+function sentinelPlatformChip(platform) {
+  const key = String(platform || "").toLowerCase();
+  if (!key) return `<span class="sentinel-plat is-empty">未知平台</span>`;
+  const label = (_logPlatformLabels && _logPlatformLabels[key]) || key;
+  return `<span class="sentinel-plat" data-tooltip="${esc(label)}"
+    data-tooltip-description="该信号来自 ${esc(key)} 平台的上游返回。">${esc(label)}</span>`;
+}
+
+/**
+ * 信号类型小标签。
+ *
+ * 四档语义（见 `admin/sentinel.py`）：
+ *   risk      真封控 —— 计入熔断
+ *   throttle  限速 / 限流 / 排队 / 额度耗尽 —— 只记录
+ *   auth      登录失效 / 退出登录 —— 只记录，需要重新登录
+ *   info      其它留痕
+ */
+const SENTINEL_SEVERITY_META = {
+  risk:     { label: "风控", cls: "is-risk",     hint: "上游在拦（WAF / 渠道 / 账号级风控 / 签名）。会计入批次熔断判定。" },
+  throttle: { label: "限流", cls: "is-throttle", hint: "限速 / 限流 / 排队 / 额度耗尽。属于运营态，只记录、不熔断。" },
+  auth:     { label: "登录", cls: "is-auth",     hint: "登录态失效 / 退出登录。不算风控，需要重新登录；只记录。" },
+  info:     { label: "记录", cls: "is-info",     hint: "留痕用，没有止损动作。" },
+};
+function sentinelSeverityChip(severity, signal) {
+  const key = String(severity || "info");
+  const meta = SENTINEL_SEVERITY_META[key] || SENTINEL_SEVERITY_META.info;
+  const name = (SIGNAL_LABELS_CACHE[String(signal || "")])
+    || (_sentinelData && _sentinelData.signal_labels
+        && _sentinelData.signal_labels[String(signal || "")])
+    || String(signal || "");
+  return `<span class="sentinel-sev ${meta.cls}" data-tooltip="${esc(meta.label)}${
+    name ? " · " + esc(name) : ""}" data-tooltip-description="${esc(meta.hint)}">${
+    esc(meta.label)}${name ? `<em>${esc(name)}</em>` : ""}</span>`;
 }
 
 async function sentinelPause(platform) {
@@ -3111,13 +3164,45 @@ function statCard(label, value, opts) {
   opts = opts || {};
   const cls = opts.tone ? ` is-${opts.tone}` : "";
   const icon = opts.icon ? ic(opts.icon, opts.iconColor || "") : "";
+  // `chips`：把"一堆用 · 串起来的数字"改成小胶囊 ——
+  // 模型使用统计的四张卡原来靠 `共 162 个 · 日耗尽 0 · 限流 0 · 冷却 1 · 停用 34`
+  // 这种长句说明，11px 挤成一团，扫读成本很高。胶囊化之后每个数字都能被
+  // 单独看见，也为将来"点胶囊下钻"留好了结构。
+  const chips = Array.isArray(opts.chips) && opts.chips.length
+    ? `<div class="stat-chips">${opts.chips.map(chip => {
+        const tone = chip.tone ? ` is-${chip.tone}` : "";
+        const zero = Number(chip.value) === 0 ? " is-zero" : "";
+        const shown = Number.isFinite(Number(chip.value))
+          ? Number(chip.value).toLocaleString("zh-CN")
+          : (chip.value ?? "—");
+        return `<span class="stat-chip${tone}${zero}"${chip.title
+            ? ` data-tooltip="${esc(chip.title)}"` : ""}>${esc(chip.label || "")}<b>${shown}</b></span>`;
+      }).join("")}</div>`
+    : "";
   const sub = opts.sub ? `<div class="stat-sub">${opts.sub}</div>` : "";
   // 数值统一过一遍千分位：同一个「11351」在概览是 11,351、在账号池是 11351，
   // 是 issue #4 里最扎眼的一处不一致。字符串（如「会话鉴权」）原样输出。
   const shown = opts.raw ? value : fmtAuto(value);
   return `<div class="stat${cls}">
     <div class="stat-label">${icon}${esc(label)}</div>
-    <div class="stat-value">${shown}</div>${sub}</div>`;
+    <div class="stat-value">${shown}</div>${chips}${sub}</div>`;
+}
+
+/**
+ * 「共 / 成功 / 错误」这类**纯数值**渲染成小胶囊。
+ *
+ * 原来是一行 `当前筛选 · 共 1234 次 · 成功 1200 次 · 错误 34 次` 的纯文本：
+ * 数字和文字同字号同颜色，扫一眼分不出哪个是重点，错误数混在中间根本看不见。
+ * 现在数字加粗、按语义描边（错误为红），与 `usage-platform-chip` 同一形制。
+ */
+function logStatChips(items) {
+  const parts = (items || []).map(item => {
+    const value = Number(item.value);
+    const shown = Number.isFinite(value) ? value.toLocaleString("zh-CN") : (item.value ?? "—");
+    return `<span class="logstat ${item.tone || ""}">
+      <em>${esc(item.label)}</em><b>${shown}</b></span>`;
+  });
+  return `<span class="logstat-row">${parts.join("")}</span>`;
 }
 
 /** 统计卡的默认数值格式：整数千分位，小数最多两位，非数字原样返回。 */
@@ -3995,6 +4080,112 @@ function accSelectedIds() {
 
 function accPickAllToggle(master) {
   document.querySelectorAll("#accBody .acc-pick").forEach(b => { b.checked = !!master.checked; });
+  accBulkSync();
+}
+
+/* ==========================================================================
+   账号池批量操作（勾选后出现操作条，全平台生效）
+   --------------------------------------------------------------------------
+   用户反馈：「账号池支持勾选，但勾上之后没有任何批量入口，想停用 20 个号
+   只能一个个点」。
+
+   这里只做**入口与交互**，真正的动作在 `POST /api/accounts/bulk`。
+   关键约定：
+     · 选择状态由 `#accBody .acc-pick` 决定，**跨平台允许**（不按当前平台过滤）；
+     · 操作条固定显示在表格上方，选中数实时更新；
+     · 危险动作（删除）必须二次确认，并说明「不可恢复」；
+     · 完成后刷新列表并清空选择，避免"删完还显示选中 N 个"。
+   ========================================================================== */
+
+const ACC_BULK_LABELS = {
+  enable: "批量启用", disable: "批量禁用", delete: "批量删除",
+  refresh: "批量刷新额度", check: "批量检测",
+};
+
+/** 同步操作条的显示与计数（勾选变化时调用）。 */
+function accBulkSync() {
+  const bar = document.getElementById("accBulkBar");
+  const count = document.getElementById("accBulkCount");
+  if (!bar) return;
+  const ids = accSelectedIds();
+  if (count) count.textContent = String(ids.length);
+  bar.hidden = ids.length === 0;
+  // 表头全选框跟随当前页状态（半选用 indeterminate）
+  const master = document.getElementById("accPickAll");
+  if (master) {
+    const boxes = [...document.querySelectorAll("#accBody .acc-pick")];
+    const checked = boxes.filter(b => b.checked).length;
+    master.checked = boxes.length > 0 && checked === boxes.length;
+    master.indeterminate = checked > 0 && checked < boxes.length;
+  }
+}
+
+function accBulkClear() {
+  document.querySelectorAll("#accBody .acc-pick").forEach(b => { b.checked = false; });
+  const master = document.getElementById("accPickAll");
+  if (master) { master.checked = false; master.indeterminate = false; }
+  accBulkSync();
+}
+
+/** 执行一次批量动作。 */
+async function accBulkRun(action) {
+  const ids = accSelectedIds();
+  if (!ids.length) { toast("先勾选账号", "err"); return; }
+  const label = ACC_BULK_LABELS[action] || action;
+  const danger = action === "delete";
+  const yes = await uiConfirm({
+    kind: danger ? "warn" : "info",
+    danger,
+    title: label,
+    message: danger
+      ? `确认删除 ${ids.length} 个账号？\n删除**不可恢复**（凭证、绑定、余额快照一并消失）。\n被 API Key 独占绑定的账号删除后，该 Key 会失去专属账号。`
+      : `对选中的 ${ids.length} 个账号执行「${label}」？\n动作对全部平台生效，不受当前平台筛选限制。`,
+    okText: label,
+  });
+  if (!yes) return;
+
+  const btn = event && event.target ? event.target.closest("button") : null;
+  const restore = btn ? btnBusy(btn, "执行中") : () => {};
+  try {
+    const r = await api("/api/accounts/bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ids }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    const parts = [`${label}：影响 ${data.affected} 个`];
+    if (data.skipped && data.skipped.length) parts.push(`跳过 ${data.skipped.length} 条`);
+    if (data.errors && data.errors.length) parts.push(`失败 ${data.errors.length} 条`);
+    toast(parts.join(" · ") + (data.note ? " · " + data.note : ""),
+          (data.errors && data.errors.length) ? "err" : "ok");
+    if (data.errors && data.errors.length) console.warn("[acc-bulk] 失败明细", data.errors);
+    accBulkClear();
+    accReloadActive();
+  } catch (error) {
+    toast(label + "失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
+/** 导出勾选的账号（走已有的导出流程，只带选中的 id）。 */
+async function accBulkExport() {
+  const ids = accSelectedIds();
+  if (!ids.length) { toast("先勾选账号", "err"); return; }
+  try {
+    const r = await api("/api/accounts/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, format: "client" }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    // 大号池走异步任务：接口返回 job_id，进度在「后台任务」里看
+    if (data.job_id) { toast("已提交导出任务，进度见「后台任务」", "ok"); return; }
+    const text = data.text || JSON.stringify(data.accounts || data, null, 2);
+    await downloadText(`miraihub-accounts-${exportStamp()}.json`, text, "application/json");
+  } catch (error) {
+    toast("导出选中失败：" + (error && error.message ? error.message : error), "err");
+  }
 }
 
 /** 给行 HTML 的 <tr> 后插入勾选列（不动各平台的行构造器）。 */
@@ -4038,8 +4229,11 @@ function accCreatedCell(a) {
 }
 
 function withPick(rowHtml, id) {
+  // `onchange` 而不是 `onclick`：键盘空格切换、程序化 `checked=` 都要算数，
+  // 否则批量操作条的计数只跟鼠标走。
   return String(rowHtml).replace(/<tr(\s[^>]*)?>/i,
-    m => `${m}<td><input type="checkbox" class="acc-pick" data-id="${id}"></td>`);
+    m => `${m}<td class="col-pick"><input type="checkbox" class="acc-pick"
+      data-id="${id}" onchange="accBulkSync()" aria-label="选择账号 #${id}"></td>`);
 }
 
 function pickAllTh() {
@@ -5032,6 +5226,10 @@ document.addEventListener("wb-platform-action", event => {
     if (action === "activity") {
       return platformActivity(spec, storage);
     }
+    // 新手任务（一次性大额积分）：Loomy 的 10000 分就靠这个领。
+    if (action === "onboarding") {
+      return platformOnboarding(spec, storage);
+    }
     if (action === "ban-recheck") {
       return platformBanRecheck(spec, storage);
     }
@@ -5984,6 +6182,97 @@ async function platformBanRecheck(spec, storage) {
     <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`,
     "max-w-xl");
   loadAccounts();
+}
+
+/**
+ * 新手任务（一次性大额积分）。
+ *
+ * Loomy 的 10000 分新手任务在客户端里是**默认 mock 后端**：界面显示
+ * 「已获得 10000 积分」也可能服务端一分没有。所以这里直接调网关接口，
+ * 由网关逐 key 调 `/onboarding/tasks/complete` 真正入账。
+ *
+ * 交互：先用 `dry_run=1` 看还有多少分没赚 → 用户确认 → 真正领取。
+ */
+async function platformOnboarding(spec, storage) {
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const base = platformApiPrefix(spec, storage);
+  const label = esc((spec && spec.label) || storage);
+  const started = Date.now();
+  toast("正在读取新手任务进度…");
+  let preview;
+  try {
+    const r = await api(base + "/onboarding" + qs, { method: "GET" });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    preview = data;
+  } catch (error) {
+    toast("读取任务失败：" + (error && error.message ? error.message : error), "err");
+    return;
+  }
+  const rows = preview.accounts || [];
+  const missing = rows.reduce((sum, it) => sum + (it.missing_points || 0), 0);
+  // 任务清单按客户端三段分组显示中文名：内部 key（first_message 等）
+  // 对用户没有意义，也和客户端界面上的文案对不上。
+  const catalog = preview.catalog || [];
+  const taskList = (catalog.length
+    ? catalog.map(g => `<div class="onb-group">
+        <div class="onb-group-head"><span>${esc(g.group_label)}</span>
+          <b>+${g.group_points}</b></div>
+        <div class="stat-chips">${(g.tasks || []).map(t =>
+          `<span class="stat-chip"><span>${esc(t.label || t.key)}</span><b>+${t.points}</b></span>`
+        ).join("")}</div></div>`).join("")
+    : (preview.tasks || []).map(t =>
+        `<span class="stat-chip"><span>${esc(t.label || t.key)}</span><b>+${t.points}</b></span>`
+      ).join(""));
+  const table = rows.length ? `<div class="sentinel-table-wrap" style="max-height:260px">
+    <table class="tbl"><thead><tr><th>账号</th><th class="text-right">已获得</th>
+      <th class="text-right">未领取</th><th>还差的任务</th></tr></thead><tbody>
+      ${rows.map(it => `<tr>
+        <td>${esc(it.account || ("#" + it.account_id))}</td>
+        <td class="text-right tnum">${it.earned ?? 0}</td>
+        <td class="text-right tnum" style="color:${(it.missing_points || 0) ? "var(--ok,#10b981)" : "var(--fg-subtle)"}">${it.missing_points ?? 0}</td>
+        <td class="text-xs" style="color:var(--fg-subtle)">${esc((it.pending_labels || it.pending || []).join("、") || "已全部完成")}</td>
+      </tr>`).join("")}</tbody></table></div>`
+    : `<p class="sentinel-empty">没有启用账号</p>`;
+
+  const go = await uiConfirm({
+    kind: "info",
+    title: `新手任务 · ${label}`,
+    message: `共 ${rows.length} 个账号，还有 ${missing} 积分可领（任务合计 ${preview.total_points} 分/号）。\n`
+      + "这些任务在客户端里默认只记本地账、不进服务端，网关会直接调服务端逐个领取。\n"
+      + `一次跑完约需 ${Math.max(1, Math.round(rows.length * 0.6))} 秒。现在领取？`,
+    okText: "开始领取",
+  });
+  if (!go) { closeModal(); return; }
+
+  try {
+    const r = await api(base + "/onboarding" + qs, { method: "POST" });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    const gained = data.gained || 0;
+    openModal(`<h3 class="font-semibold text-lg mb-1">新手任务 · ${label}</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+        ${esc(data.summary || "")}</p>
+      <div class="stat-chips" style="margin:0 0 12px">
+        <span class="stat-chip"><span>本次新增</span><b>+${gained}</b></span>
+        <span class="stat-chip"><span>新完成号</span><b>${data.completed || 0}</b></span>
+        <span class="stat-chip"><span>本就完成</span><b>${data.already || 0}</b></span>
+        <span class="stat-chip${data.failed ? " is-warn" : ""}"><span>失败</span><b>${data.failed || 0}</b></span>
+      </div>
+      <p class="text-xs mb-2" style="color:var(--fg-subtle)">任务清单（每个 key 只能领一次）：</p>
+      <div class="stat-chips" style="margin-bottom:12px">${taskList}</div>
+      ${table}
+      <div class="flex justify-end mt-3 gap-2">
+        <button class="console-btn" onclick="closeModal()">关闭</button>
+        <button class="console-btn quiet" onclick="platformOnboarding(${jsv(storage)}, ${jsv(storage)})">再跑一次</button>
+      </div>`, "max-w-2xl");
+    loadAccounts();
+  } catch (error) {
+    toast("领取失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    console.debug("[onboarding] 用时", Date.now() - started, "ms");
+  }
 }
 
 async function platformCheckin(spec, storage) {
@@ -12988,6 +13277,28 @@ const TASK_LABELS = {
   run_growth_tasks: "自动做成长任务",
   run_growth_plan: "WorkBuddy 成长计划巡检",
   keepalive_tokens: "token 保活刷新",
+  ban_recheck: "风控封号复核与自动解封",
+  daily_activity: "每日活跃对话",
+  // ---- 各平台任务（原来这些一律回退成英文 task 名）----
+  loomy_onboarding: "新手任务领积分",
+  loomy_checkin: "每日签到",
+  loomy_keepalive: "会话保活",
+  trae_checkin: "每日签到",
+  trae_keepalive: "会话保活",
+  refresh_quota: "刷新额度",
+  qoder_checkin: "每日签到",
+  qoder_keepalive: "会话保活",
+  codearts_checkin: "每日签到",
+  codearts_keepalive: "会话保活",
+  raccoon_keepalive: "会话保活",
+  raccoon_expiry_sweep: "过期账号清理",
+  minimax_checkin: "每日签到",
+  minimax_keepalive: "会话保活",
+  minimax_refresh_quota: "刷新额度",
+  wps_lingxi_checkin: "每日签到",
+  wps_lingxi_keepalive: "会话保活",
+  wps_lingxi_activity: "每日活跃对话",
+  wps_lingxi_ban_recheck: "失效账号复检",
 };
 
 function scheduleResultSummary(s){
@@ -14361,7 +14672,13 @@ async function loadLogs(page, silent = false) {
   const stats = d.stats;
   if (revision === _logUsageRevision) _logUsageDirty = false;
   _logUsageAt = Date.now();
-  $('#logStats').textContent = stats ? `当前筛选 · 共 ${stats.total} 次 · 成功 ${stats.success} 次 · 错误 ${stats.error} 次` : silent ? '用量记录已实时更新 · 总数统计请点击查询' : '快速翻页未统计总数';
+  $('#logStats').innerHTML = stats
+    ? logStatChips([
+        { label: "共", value: stats.total, tone: "" },
+        { label: "成功", value: stats.success, tone: "is-ok" },
+        { label: "错误", value: stats.error, tone: stats.error ? "is-bad" : "" },
+      ])
+    : `<span class="logstat-plain">${silent ? "用量记录已实时更新 · 总数统计请点击查询" : "快速翻页未统计总数"}</span>`;
   if (_logPage === 1 && !silent) { loadLogSummary(); }
 
   const total = d.total;              // null = 本次未统计

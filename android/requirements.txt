@@ -1,4 +1,9 @@
 # Android-compatible wheels: Pydantic 1 avoids an unavailable Android Rust core.
+#
+# NOTE: this file must stay **pure ASCII**. pip reads requirement files with the
+# system locale codec (GBK on zh-CN Windows) unless a BOM/declaration says
+# otherwise, so a UTF-8 Chinese comment here breaks the Android build with
+# `UnicodeDecodeError: 'gbk' codec can't decode byte ...`. Keep comments English.
 fastapi==0.115.12
 pydantic==1.10.22
 uvicorn==0.34.2
@@ -13,7 +18,7 @@ cryptography==42.0.8
 python-dotenv==1.1.0
 packaging==25.0
 tzdata==2026.5
-# 小浣熊扫码授权的二维码（raccoon webauth /auth/qr.svg 服务端渲染）。
-# 纯 Python、无原生依赖，Chaquopy 能直接装；**漏了它 APK 里二维码就渲染不出来**
-# （前端表现为「商汤二维码不显示」）。
+# QR code for the Raccoon scan-to-authorize flow (webauth /auth/qr.svg renders
+# server-side). Pure Python, no native deps, Chaquopy installs it directly.
+# Missing it means the APK shows a blank QR code.
 qrcode==8.2

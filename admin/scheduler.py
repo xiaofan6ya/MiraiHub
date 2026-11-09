@@ -2068,11 +2068,22 @@ _TASK_SCHEDULE_META = {
     # 失效复检每 2 小时一轮就够，Cookie 过期本来就要人工重粘。
     "wps_lingxi_activity": ("每日活跃对话", 1440),
     "wps_lingxi_ban_recheck": ("失效账号复检", 120),
+    # Loomy 新手任务（一次性 10000 积分）：每天跑一次兜住半途失败，幂等。
+    "loomy_onboarding": ("新手任务领积分", 1440),
 }
 
 
 def _schedule_meta(task: str, label: str) -> tuple[str, int]:
-    """任务名 → (展示名, 周期分钟)。"""
+    """任务名 → (展示名, 周期分钟)。
+
+    表里没有的任务名会把**原始 task 名**直接拼进展示名
+    （`loomy_onboarding · Loomy`）—— 那就是「列表里出现英文」的成因。
+    所以新增平台任务时，务必在 `_TASK_SCHEDULE_META` 里补一条中文名；
+    漏了也只是名字难看，不影响执行。
+
+    这里同时**复用前端那套中文名**（`TASK_LABELS`），并按后缀兜底，
+    避免「同一个任务在定时任务页叫中文、在别处叫英文」。
+    """
     name = str(task)
     if name in _TASK_SCHEDULE_META:
         title, minutes = _TASK_SCHEDULE_META[name]
@@ -2083,7 +2094,64 @@ def _schedule_meta(task: str, label: str) -> tuple[str, int]:
         return f"会话保活 · {label}", 360
     if name.endswith("_refresh_quota"):
         return f"刷新额度 · {label}", 360
+    if name.endswith("_onboarding"):
+        return f"新手任务领积分 · {label}", 1440
+    if name.endswith("_activity"):
+        return f"每日活跃对话 · {label}", 1440
+    if name.endswith("_ban_recheck"):
+        return f"失效账号复检 · {label}", 120
     return f"{name} · {label}", 360
+
+
+def ensure_schedule_titles(db) -> int:
+    """把**已经入库**的英文任务名改写成中文（幂等）。
+
+    只在「平台任务名是原始英文」时改写 —— 用户手动改过名字的（`name`
+    里已含中文）一律不动。这修的是历史遗留：`loomy_onboarding (Loomy)`
+    这种直接用 task 名当标题的行。
+    """
+    fixed = 0
+    try:
+        # 必须先装载平台：否则 `registry.get()` 拿不到 spec，label 会退化成
+        # 落库名（`· loomy` 而不是 `· Loomy`）—— 中文名对了但大小写难看。
+        from admin.platform.loader import load_platforms
+
+        load_platforms()
+    except Exception:  # noqa: BLE001 - 平台装载失败也要继续，只是名字丑一点
+        _logger.debug("定时任务名本地化：平台装载失败", exc_info=True)
+    try:
+        rows = db.query(Schedule).all()
+    except Exception:  # noqa: BLE001 - 读不到就算了
+        return 0
+    for row in rows:
+        task = str(row.task or "")
+        current = str(row.name or "")
+        if not task or not current:
+            continue
+        # 判断「这个名字是不是还没翻译」：取 ` · ` 之前的主体，
+        # 只要**不含中文**就说明它是原始 task 名拼出来的（`loomy_onboarding · Loomy`）。
+        # 之前用「名字里有 · 就跳过」把这类种子行全跳过了 —— 正是要改的那批。
+        head = current.split("·")[0].strip()
+        if any("\u4e00" <= ch <= "\u9fff" for ch in head):
+            continue  # 已经是中文标题（或用户自己改过），不动
+        platform = str(row.platform or "")
+        if not platform:
+            continue
+        try:
+            from admin.platform import registry
+
+            spec = registry.get(platform)
+            label = getattr(spec, "label", "") or platform
+        except Exception:  # noqa: BLE001
+            label = platform
+        title, _minutes = _schedule_meta(task, label)
+        if title and title != current:
+            row.name = title
+            fixed += 1
+    if fixed:
+        db.commit()
+        _logger.info("已把 %d 条定时任务名本地化", fixed)
+    return fixed
 
 
 def ensure_platform_schedules(db):
@@ -2208,6 +2276,11 @@ def start_scheduler():
             ensure_platform_schedules(db)
         except Exception:  # noqa: BLE001 - 补种失败不能挡住调度线程
             _logger.exception("平台定时任务补种失败")
+        # 把历史上用原始 task 名当标题的行改写成中文（幂等，只动英文行）
+        try:
+            ensure_schedule_titles(db)
+        except Exception:  # noqa: BLE001
+            _logger.exception("定时任务名本地化失败")
         # DeepSeek's time-limited compensation endpoint expired; retire old
         # schedules so a legacy database never keeps polling it.
         db.query(Schedule).filter(Schedule.task.in_(("claim_benefits", "claim_compensation"))).delete(
