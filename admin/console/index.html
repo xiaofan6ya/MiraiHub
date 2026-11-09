@@ -200,7 +200,17 @@
        * 换成 #3F63E8（略压一点饱和，避免大面积刺眼）后通透很多。 */
       --brand:#4176e6;
       --blue-main:#4176e6;   /* 下拉选中项高亮：深浅色都用它（用户指定系统主题色） */
-      --brand-hover:#5686fe;
+      /* 主按钮 hover：**必须是显式色值**。
+       *
+       * 这里原来只定义了 `--brand-hover`，而浅色主题的主按钮 hover 用的是
+       * `--blue-hover` —— 这个变量只在深色块里赋值，浅色下是**未定义**的，
+       * 于是 `background: var(--blue-hover)` 解析失败变成透明，
+       * 按钮 hover 就成了"白底 + 白字"，完全看不清。
+       *
+       * 取值：比 brand(#4176e6) 亮一档、比深色档(#6a97ff) 暗一档的过渡蓝，
+       * 与白字对比度 ≈5:1，hover 时既有反馈又不刺眼。 */
+      --blue-hover:#4f7bea;
+      --brand-hover:#4f7bea;
       /* rgba() 光晕/阴影用的 RGB 分量 —— 深色模式会换成更亮的一档，
          这样「选中态的光晕」在深底上才不会灰掉。 */
       --brand-rgb:65,118,230;
@@ -318,6 +328,8 @@
         --brand:#4f83f1; --brand-strong:#6a97ff; --brand-ink:#8fb4ff;
         --brand-rgb:79,131,241; --brand-soft:rgba(79,131,241,.18);
         --blue-main:#4f83f1; --blue-hover:#6a97ff; --blue-tint:rgba(79,131,241,.16);
+        /* 深色主按钮 hover 沿用原来那一档（浅色档改暗后不能串到深色） */
+        --brand-hover:#5686fe;
         --on-brand:#ffffff;
 
         /* 语义色：暗底上降饱和、提明度，避免"荧光块" */
@@ -1080,7 +1092,7 @@
 .upload-result{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-muted)}
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
-  <link rel="stylesheet" href="/admin/assets/console.css?v=20261107-exp1" />
+  <link rel="stylesheet" href="/admin/assets/console.css?v=20261109-tiers1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261105-ui6" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
@@ -1110,7 +1122,10 @@
      必须在 platform-switch.js **之前**加载 —— 后者要用 actionsFor()。 -->
 <script defer src="/admin/assets/traffic.js?v=20261029-r2"></script>
 <script defer src="/admin/assets/platform-actions.js?v=20261105-ui4"></script>
-<script defer src="/admin/assets/platform-switch.js?v=20261105-hardening1"></script>
+<!-- 平台「平均级」排行数据（纯展示）。必须在 platform-switch.js 之前：
+     卡片渲染时要读 window.WBPlatformTiers。 -->
+<script defer src="/admin/assets/platform-tiers.js?v=20261109-tiers1"></script>
+<script defer src="/admin/assets/platform-switch.js?v=20261109-tiers1"></script>
 <script defer src="/admin/assets/agent.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/model-pool.js?v=20261103-noinline1"></script>
 </head>

@@ -109,6 +109,25 @@ class PlatformSpec:
     #: `auth_mode !== "local-session-only"`），若把本字段的值塞过去
     #: 会得到「支持授权」的错误结论。
     auth_mode: str = ""
+    #: **平台自评等级**（控制台「平均级」徽标）。
+    #:
+    #: 形态：`{"tier": "hang|elite|npc|bad", "reason": "一句话依据"}`
+    #:   hang    夯      稳定、免排队、额度足
+    #:   elite   人上人  能用、量够，但稳定性一般
+    #:   npc     npc     要排队 / 额度少 / 慢
+    #:   bad     拉完了  排队 + 额度少 + 极慢
+    #:
+    #: ## 为什么放在平台侧而不是前端常量表
+    #:
+    #: 这是**网关对自己上游的真实体感**，只有平台实现最清楚。放在
+    #: `PlatformSpec` 里，新增平台自己声明、改价/改排队策略时跟着代码走；
+    #: 前端只负责渲染，并保留一份兜底表（`platform-tiers.js`）给没声明的平台。
+    #:
+    #: 现阶段是**人工填写**。后续可以按真实指标自动打分（成功率 / 首字节
+    #: 延迟 / 排队次数 / 每千 token 消耗），届时只需在平台侧算出这个 dict，
+    #: 前端与 `/api/platforms` 契约完全不用改。
+    #: 留空 = 用前端兜底表；两边都没有就不显示徽标。
+    rating: dict = field(default_factory=dict)
     #: 额外元数据，供前端自由使用（不参与后端逻辑）。
     extra: dict = field(default_factory=dict)
 

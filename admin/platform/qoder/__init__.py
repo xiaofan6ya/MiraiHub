@@ -85,6 +85,10 @@ def install() -> None:
             notes="Qoder %s（%s）。COSY 自签名鉴权；模型格式为 OpenAI，"
                   "支持 Chat Completions / Responses / Anthropic Messages 互转。"
                   % (conf_label, "qoder.com.cn" if realm == "cn" else "qoder.sh"),
+            rating={
+                "tier": "bad",
+                "reason": "需要排队，额度不多，而且巨慢。",
+            },
             extra={
             "task_runners": list(_task_runners().keys()),
             # Qoder 的凭证加密在原生层：扫描能定位账号但读不出 token，

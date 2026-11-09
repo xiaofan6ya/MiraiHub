@@ -91,6 +91,10 @@ def install() -> None:
             icon="codearts",
             notes="华为云 CodeArts（AK/SK 签名）",
             auth_mode="local-scan",
+            rating={
+                "tier": "npc",
+                "reason": "保活续签比较麻烦，额度不算多但够用，速度不快。",
+            },
             extra={
                 "task_runners": list(_task_runners().keys()),
                 # 控制台按钮：扫描 / 导入 / 导出 / 签到 / 刷新额度。

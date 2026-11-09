@@ -171,6 +171,7 @@ tests/
 tests/*
 !tests/test_android_signing.py
 !tests/test_anthropic_tool_result_image.py
+!tests/test_platform_rating.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 

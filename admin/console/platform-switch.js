@@ -103,6 +103,26 @@ function actionsFor(spec) {
     return (value === undefined || value === null) ? null : value;
   }
 
+  /* 「平均级」徽标（卡片右侧，勾选标记之前）。
+   *
+   * 数据优先取平台**自报**的 `spec.rating`（由 /api/platforms 下发），
+   * 没声明时才回落到 platform-tiers.js 的兜底表。
+   * 徽标本身用原生 `title`，不占用卡片按钮上的 `data-tooltip`
+   * （那个位置已经用来显示该平台的接入说明了，叠加会互相覆盖）。
+   * 单区平台（trae-cn / trae-intl）按 storage_platform 取同一份评价。 */
+  function tierBadge(item) {
+    var api = window.WBPlatformTiers;
+    if (!api || !api.tierOf) return "";
+    var storage = String(item.storage_platform || item.id || "").toLowerCase();
+    var tier = api.tierOf(storage, item);
+    if (!tier) return "";
+    var tip = "平均级：" + tier.label + (tier.reason ? " — " + tier.reason : "");
+    return '<span class="platform-tier platform-tier-' + esc(tier.key) + '"' +
+      ' title="' + esc(tip) + '"' +
+      ' aria-label="平均级 ' + esc(tier.label) + '">' +
+      esc(tier.label) + "</span>";
+  }
+
   function render() {
     var host = $("#platformCards");
     if (!host) return;
@@ -127,6 +147,7 @@ function actionsFor(spec) {
         '<span class="platform-card-sub">' + esc(sub) +
         (realmLabels ? " · " + esc(realmLabels) : "") +
         "</span></span>" +
+        tierBadge(item) +
         '<span class="platform-card-check" aria-hidden="true">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' +
         '<path d="M20 6 9 17l-5-5"/></svg></span>' +

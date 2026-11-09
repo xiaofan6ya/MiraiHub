@@ -71,6 +71,11 @@ def install() -> None:
             realm=realm,
             icon="loomy",
             notes="Loomy",
+            rating={
+                "tier": "hang",
+                "reason": "稳定模型速度最快，新用户给的积分很足，每天签到还能领 5000 积分；"
+                          "美中不足是积分用得偏快。",
+            },
             extra={
             "task_runners": list(_task_runners().keys()),
             # Loomy 凭证是明文 JSON —— 扫描即导入，用户零操作。

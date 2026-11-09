@@ -221,7 +221,8 @@ body {
   box-shadow:0 1px 2px rgba(0,0,0,.12);
 }
 .console-btn.primary:hover {
-  background:var(--brand-hover);
+  /* 同样是 `--brand-hover`，浅色下已定义为 #4f7bea；兜底防变量缺失白屏 */
+  background:var(--brand-hover, #4f7bea);
 }
 .console-btn.primary:active { transform:translateY(0); box-shadow:0 1px 2px rgba(0,0,0,.1); }
 /* 「文字按钮」也要有边界。
@@ -390,6 +391,64 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   text-overflow:ellipsis;
 }
 .platform-card.active .platform-card-sub { color:var(--brand-ink); opacity:.8; }
+/* ---- 平台「平均级」徽标（卡片右侧）--------------------------------------
+ * 四档：夯 > 人上人 > npc > 拉完了。用**同色相的明度/饱和阶梯**表达强弱，
+ * 而不是四个撞色块 —— 一排卡片上出现四种高饱和色会盖过平台 logo。
+ *
+ * 夯     实心暖金（最高档，最醒目）
+ * 人上人 实心主题蓝
+ * npc    中性灰（"能用但不突出"）
+ * 拉完了 低饱和红（警示但不刺眼）
+ * 悬停说明走原生 title（见 platform-switch.js 的 tierBadge）。 */
+.platform-tier {
+  flex:0 0 auto;
+  margin-left:auto;
+  padding:2px 7px;
+  border-radius:999px;
+  border:1px solid transparent;
+  font-size:11px;
+  font-weight:600;
+  line-height:1.5;
+  white-space:nowrap;
+  letter-spacing:.02em;
+  cursor:help;
+}
+.platform-tier-hang {
+  background:linear-gradient(135deg,#f6b73c 0%,#e8912a 100%);
+  border-color:rgba(232,145,42,.55);
+  color:#3a2506;
+  box-shadow:0 1px 4px rgba(232,145,42,.28);
+}
+.platform-tier-elite {
+  background:var(--blue-main);
+  border-color:transparent;
+  color:#fff;
+}
+.platform-tier-npc {
+  background:var(--surface-3);
+  border-color:var(--border);
+  color:var(--fg-muted);
+}
+.platform-tier-bad {
+  background:var(--danger-soft);
+  border-color:rgba(242,123,123,.45);
+  color:#b03434;
+}
+:root[data-theme="dark"] .platform-tier-bad { color:#ffb3b3; }
+:root[data-theme="dark"] .platform-tier-npc { color:var(--fg-subtle); }
+/* 卡片被选中（蓝底）时，npc / 拉完了 的自定义底色会糊进去：
+ * 统一换成半透明白，保证四档在选中态下都读得出来。 */
+.platform-card.active .platform-tier {
+  background:rgba(255,255,255,.22);
+  border-color:rgba(255,255,255,.34);
+  color:#fff;
+  box-shadow:none;
+}
+.platform-card.active .platform-tier-hang {
+  background:rgba(255,255,255,.9);
+  border-color:rgba(255,255,255,.9);
+  color:#8a5207;
+}
 .platform-card-check {
   display:none;
   width:16px;
@@ -4520,7 +4579,7 @@ tbody tr:hover > th { background:transparent!important; }
   color: #fff;
 }
 :root[data-theme="dark"] .btn-primary:hover,
-:root[data-theme="dark"] .console-btn.primary:hover { background: var(--brand-hover); }
+:root[data-theme="dark"] .console-btn.primary:hover { background: var(--brand-hover, #5686fe); }
 
 /* 进度条/迷你条：**跟随语义色**，不再一律灰白。
    原来这里把深色下的所有进度条压成 rgba(255,255,255,.55)，
@@ -4602,9 +4661,20 @@ tbody tr:hover > th { background:transparent!important; }
   border-color: transparent;
   color: #fff;
 }
+/* hover 色**必须带兜底**：`--blue-hover` 历史上只在深色块里定义过，
+ * 浅色下缺失 → `var()` 解析失败 → 背景变透明 → 白底白字看不见。
+ * 兜底值 #4f7bea 与 index.html 里的浅色变量一致，两边任何一处漏了都不会白屏。 */
 :root:not([data-theme="dark"]) .btn-primary:hover,
 :root:not([data-theme="dark"]) .console-btn.primary:hover {
-  background: var(--blue-hover);
+  background: var(--blue-hover, #4f7bea);
+  color: #fff;
+}
+/* 键盘可达性：hover / focus-visible 用同一套反馈，避免只有鼠标能看清状态 */
+:root:not([data-theme="dark"]) .btn-primary:focus-visible,
+:root:not([data-theme="dark"]) .console-btn.primary:focus-visible {
+  background: var(--blue-hover, #4f7bea);
+  outline: 2px solid var(--brand-ink);
+  outline-offset: 2px;
 }
 /* tag / 徽标轻底色 */
 :root:not([data-theme="dark"]) :is(.bg-sky-50, .bg-sky-100, .bg-blue-50, .bg-blue-100) {

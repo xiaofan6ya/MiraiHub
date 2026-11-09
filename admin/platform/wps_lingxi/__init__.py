@@ -76,6 +76,10 @@ def install() -> None:
             realm=realm,
             icon="wps",
             notes="WPS 灵犀（Lingxi / 灵犀 Claw）；Cookie 登录 + 桌面 agent-runtime 通路",
+            rating={
+                "tier": "npc",
+                "reason": "模型给得多，但每个量的额度不大。",
+            },
             extra={
                 "task_runners": list(_task_runners().keys()),
                 "actions": ["begin-auth", "scan", "import", "export", "checkin",
