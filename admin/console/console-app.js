@@ -5936,6 +5936,36 @@ async function platformBeginAuth(spec, storage) {
 }
 
 /**
+ * 从错误响应里取一句**人能看懂**的话。
+ *
+ * FastAPI 的 `HTTPException(detail={...})` 会把 detail 原样塞进 JSON，于是
+ * `"失败：" + detail` 直接得到 `[object Object]` —— 用户看到的是一句废话，
+ * 真实原因（`RC_NO_AUTH_ERR` / 授权码已被使用）全丢了。
+ * 这里按 `detail.message` → `detail.detail` → `detail` → `message` 逐层剥，
+ * 剥到底还是对象就退化成 JSON 文本（至少能看到内容）。
+ */
+function marvisErrorText(data, status) {
+  const unwrap = value => {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "object") {
+      return value.message || value.detail || value.msg || "";
+    }
+    return String(value);
+  };
+  let text = "";
+  if (data && typeof data === "object") {
+    text = unwrap(data.detail) || unwrap(data.message) || unwrap(data.error);
+    if (!text) {
+      try { text = JSON.stringify(data).slice(0, 200); } catch (e) { text = ""; }
+    }
+  } else if (typeof data === "string") {
+    text = data;
+  }
+  return text || ("HTTP " + status);
+}
+
+/**
  * 腾讯 Marvis 授权登录：二维码 + 回调粘贴。
  *
  * 流程（QQ / 微信 OAuth 的固有形态，绕不过去）：
@@ -6062,7 +6092,7 @@ async function marvisBeginAuth(spec) {
       });
       const { ok, data } = await safeJson(response);
       if (!ok) {
-        const detail = (data && (data.message || data.detail)) || response.status;
+        const detail = marvisErrorText(data, response.status);
         if (el) { el.style.color = "var(--danger)"; el.textContent = "失败：" + detail; }
         toast("授权失败：" + detail, "err");
         return;

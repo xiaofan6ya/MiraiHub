@@ -109,7 +109,7 @@ class ModelTests(unittest.TestCase):
     def test_legacy_index_maps_to_slot(self):
         """旧版把目录存成数组下标，老路由不能作废。"""
         self.assertEqual(endpoints.canonical_model_id("0"), "main-auto")
-        self.assertEqual(endpoints.canonical_model_id("7"),
+        self.assertEqual(endpoints.canonical_model_id("4"),
                          "hunyuan-turbos-vision")
 
     def test_slot_passes_through(self):
@@ -120,6 +120,24 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(endpoints.is_unavailable_model("kimi-k2.5"))
         self.assertTrue(endpoints.is_unavailable_model("  Kimi-K2.5 "))
         self.assertFalse(endpoints.is_unavailable_model("main-auto"))
+
+    def test_tier_limited_slots_are_rejected_locally(self):
+        """实测拿不到权限的槽位（4130001 无效模型id）要在本地就拦下。
+
+        不拦的后果：用户选中它 → 上游 400 → 界面显示「失败」但看不出原因，
+        每次都要打一趟上游才知道这个号没这个模型。
+        """
+        for slot in ("claude-sonnet-4-6", "claude-opus-4-6", "gpt-5.4"):
+            self.assertIn(slot, endpoints.UNAVAILABLE_SLOTS)
+            self.assertTrue(endpoints.is_unavailable_model(slot),
+                            "%s 应被本地拦下" % slot)
+            # 也不该出现在对外目录里
+            self.assertNotIn(slot, endpoints.DISPLAY_BY_SLOT)
+
+    def test_catalog_only_lists_reachable_slots(self):
+        """对外目录里不能混进拿不到权限的槽位。"""
+        catalog_slots = {item["api_id"] for item in endpoints.models_catalog()}
+        self.assertFalse(catalog_slots & set(endpoints.UNAVAILABLE_SLOTS))
 
     def test_catalog_matches_table(self):
         catalog = endpoints.models_catalog()

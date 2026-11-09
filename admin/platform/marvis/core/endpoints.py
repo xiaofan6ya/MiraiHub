@@ -116,6 +116,10 @@ def oauth_url(realm: str = "") -> str:
 #:
 #: 不列 `file-auto` / `computer-auto` / `browser-auto` / `app-auto`：实测这四个
 #: 全部路由到与 `main-auto` 相同的模型，列出来只会在列表里重复同名条目。
+#:
+#: ⚠ 这份表是**按实测收敛过**的（2026-11-09，真实账号逐个打通）：
+#: 只保留确实能出字的槽位。上游按账号等级下发模型权限，免费号拿不到的那几个
+#: 在 `UNAVAILABLE_SLOTS` 里留档，换高等级账号时可以搬回来。
 MODEL_TABLE = (
     # ── DeepSeek ──
     ("main-auto", "deepseek-v4-1-flash-261017", 1_000_000,
@@ -127,15 +131,22 @@ MODEL_TABLE = (
     # ── 其他厂商 ──
     ("hy3-preview-agent-real", "hy3", 1_000_000,
      {"reasoning": True, "tools": True}),
-    ("claude-sonnet-4-6", "claude-sonnet-4-6", 1_000_000,
-     {"reasoning": True, "tools": True, "vision": True}),
-    ("claude-opus-4-6", "claude-opus-4-6", 1_000_000,
-     {"reasoning": True, "tools": True, "vision": True}),
-    ("gpt-5.4", "gpt-5.4-2026-03-05", 1_000_000,
-     {"reasoning": True, "tools": True, "vision": True}),
     ("hunyuan-turbos-vision", "HY-Vision-2.0-instruct", 32_000,
      {"vision": True}),
 )
+
+#: 客户端目录里有、但**当前等级账号调不动**的槽位。
+#:
+#: 实测（2026-11-09）这三个一律回 `{"code":4130001,"msg":"...无效模型id"}`，
+#: 不是本网关的问题也不是参数问题 —— 是上游按账号等级下发的权限。
+#:
+#: 为什么不直接删掉：换到高等级账号时把它们从这张表搬回 `MODEL_TABLE` 即可，
+#: 不用再去翻上游注册表。
+UNAVAILABLE_SLOTS = {
+    "claude-sonnet-4-6": "claude-sonnet-4-6（实测 4130001 无效模型id，需更高等级账号）",
+    "claude-opus-4-6": "claude-opus-4-6（实测 4130001 无效模型id，需更高等级账号）",
+    "gpt-5.4": "gpt-5.4-2026-03-05（实测 4130001 无效模型id，需更高等级账号）",
+}
 
 DEFAULT_OUTPUT_TOKENS = 32_000
 
@@ -149,7 +160,7 @@ SLOT_BY_DISPLAY = {name: slot for slot, name, _ctx, _cap in MODEL_TABLE}
 #: 旧版把目录存成数组下标（"0"…"7"），保留映射让老路由继续可用
 ALIAS_BY_INDEX = {str(index): slot for index, (slot, *_rest) in enumerate(MODEL_TABLE)}
 
-#: 已确认持续失败、本地直接拦掉的模型（上游 500 RPC）
+#: 已确认持续失败、本地直接拦掉的模型（上游 500 RPC / 空响应）
 UNAVAILABLE_MODELS = frozenset({"kimi-k2.5"})
 
 
@@ -161,11 +172,15 @@ def canonical_model_id(model) -> str:
 
 def display_model_id(model) -> str:
     slot = canonical_model_id(model)
-    return DISPLAY_BY_SLOT.get(slot, slot)
+    return DISPLAY_BY_SLOT.get(slot, UNAVAILABLE_SLOTS.get(slot, slot))
 
 
 def is_unavailable_model(model) -> bool:
-    return canonical_model_id(model).strip().lower() in UNAVAILABLE_MODELS
+    """本地就要拦掉的模型：显式 denylist + 当前等级拿不到的槽位。"""
+    slot = canonical_model_id(model).strip()
+    if slot.lower() in UNAVAILABLE_MODELS:
+        return True
+    return slot in UNAVAILABLE_SLOTS
 
 
 def models_catalog(realm: str = "") -> list[dict]:

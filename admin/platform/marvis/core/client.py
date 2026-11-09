@@ -336,25 +336,56 @@ def exchange_code(code: str, login_type: str, realm: str = "cn", *,
             payload = {}
         info = payload.get("user_info") or payload.get("data") or payload or {}
 
-    access = str(info.get("access_token") or info.get("accessToken")
+    if not isinstance(info, dict):
+        info = {}
+
+    # ⚠ 字段名是**小写无下划线**：上游实测返回
+    #   `{"openid": "...", "accesstoken": "mv_...", "refreshtoken": "...",
+    #     "expires_in": "5184000", "appid": "1903794758"}`
+    #   只认 `access_token` 会把一次成功的登录判成失败（凭证其实已经发下来了）。
+    access = str(info.get("accesstoken") or info.get("access_token")
+                 or info.get("accessToken") or cookies.get("accesstoken")
                  or cookies.get("access_token") or "")
     openid = str(info.get("openid") or info.get("open_id")
-                 or cookies.get("openid") or "")
+                 or info.get("openId") or cookies.get("openid") or "")
+    refresh = str(info.get("refreshtoken") or info.get("refresh_token")
+                  or info.get("refreshToken") or cookies.get("refreshtoken")
+                  or cookies.get("refresh_token") or "")
     if not access or not openid:
         raise UpstreamError(
-            "登录接口没有下发 access_token / openid",
+            "登录接口没有下发 accesstoken / openid",
             kind="auth",
             detail=(body_text or str(cookies))[:200])
+
+    # `expires_in` 是**相对秒数**（QQ 给 5184000 = 60 天）。直接当绝对时间戳用
+    # 会得到一个 1970 年的过期时间，下次选号立刻判死。
+    expires_at = 0
+    raw_expires = info.get("expires_in") or info.get("expiresIn")
+    try:
+        if raw_expires is not None:
+            seconds = float(raw_expires)
+            # 大于 1e9 的视为已经是绝对时间戳（秒），否则按相对秒数换算
+            expires_at = int(seconds) if seconds > 1e9 else int(time.time() + seconds)
+    except (TypeError, ValueError):
+        expires_at = 0
+    if not expires_at:
+        raw_at = info.get("expires_at") or info.get("expiresAt")
+        try:
+            expires_at = int(float(raw_at)) if raw_at else 0
+        except (TypeError, ValueError):
+            expires_at = 0
+
     return {
         "openid": openid,
         "access_token": access,
-        "refresh_token": str(info.get("refresh_token")
-                             or cookies.get("refresh_token") or ""),
+        "refresh_token": refresh,
         "nickname": str(info.get("nick_name") or info.get("nickname") or ""),
         "avatar": str(info.get("head_img_url") or ""),
         "login_type": endpoints.LOGIN_TYPE.get(
             str(info.get("login_type") or "").upper(), login_type),
         "guid": str(guid),
+        "expires_at": expires_at,
+        "appid": str(info.get("appid") or ""),
     }
 
 
