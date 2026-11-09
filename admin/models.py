@@ -85,6 +85,17 @@ class Account(Base):
     credits_snapshot = Column(Text, default="")
     #: 快照采集时间，用于展示「N 分钟前更新」并判断数据是否可信。
     credits_synced_at = Column(DateTime, nullable=True)
+    # ---- 上游封禁标记 ------------------------------------------------
+    #: 封禁类型。空串 = 未封；"11140" 等 = 上游返回的封禁业务码。
+    #: 与 status 分开保存的理由：status="disabled" 是「我主动停用」，
+    #: 封禁是「上游拒绝服务」—— 两者混用会让排障失去线索，也无法区分
+    #: 「这个号不可用」到底该不该申诉。
+    ban_kind = Column(String(32), default="")
+    #: 判定为封禁的时间
+    ban_at = Column(DateTime, nullable=True)
+    #: 上游原文摘要（截断），申诉时需要把这段提供给上游
+    ban_reason = Column(String(500), default="")
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

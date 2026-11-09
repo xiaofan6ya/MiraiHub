@@ -11,6 +11,7 @@ Anthropic Messages API 参考：https://docs.anthropic.com/en/docs/messages
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -128,7 +129,76 @@ def anthropic_request_to_chat(body: dict) -> dict:
         chat.pop("reasoning_effort", None)
         chat["thinking"] = {"type": "disabled"}
 
+    _apply_prefix_cache_hint(chat, body)
     return chat
+
+
+def _apply_prefix_cache_hint(chat: dict, body: dict) -> None:
+    """把 Anthropic 的前缀缓存意图翻译成上游认的字段。
+
+    ## 为什么需要这一步（2026-11-09）
+
+    Anthropic 协议用 `cache_control: {type: "ephemeral"}` 在 system / messages /
+    tools 的块上**显式声明**缓存断点，上游据此把前缀写入缓存并回
+    `cache_creation_input_tokens`。但本文件的转换只取 `block["text"]` 重建消息，
+    `cache_control` 整个丢掉 —— 于是：
+
+      * 上游从来收不到断点 → `cache_creation_input_tokens` 恒为 0
+        （实测连续 3 天、1800+ 次 `/v1/messages` 请求无一例外全 0）；
+      * 前缀缓存只能靠上游自己的隐式策略，命中率被压在 10~60%。
+
+    对照：同一条 `/v1/chat/completions` 链路上 pi 自带 `prompt_cache_key`，
+    命中率 82~98%，说明**上游本身支持前缀缓存**，缺的只是这个声明。
+
+    上游（WorkBuddy `/v2/chat/completions`）实测接受 `prompt_cache_key`
+    （见 upstream_compat.py 的字段清单注释：它 HTTP 200 照收），并且
+    `admin/pool.py` 正把它当会话粘性键 —— 两者用同一个值，缓存边界与
+    账号粘性才会对齐。所以这里把最长的那段稳定前缀（system）摘要成键。
+
+    只在客户端**确实**声明了 `cache_control` 时才加：没声明就不该替它开启
+    缓存，否则等于改变了客户端的计费行为。
+    """
+    if not _has_cache_control(body):
+        return
+    # 复用一个稳定值：system 文本摘要。同一对话的 system 恒定 → 键恒定，
+    # 正好对应上游「会话级前缀」的粒度。
+    seed = _extract_system_text(body.get("system")) or ""
+    first_user = ""
+    for m in body.get("messages") or []:
+        if isinstance(m, dict) and m.get("role") == "user":
+            first_user = _text_of_content(m.get("content"))
+            break
+    seed = seed or first_user
+    if not seed:
+        return
+    digest = hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
+    chat["prompt_cache_key"] = "a-" + digest[:16]
+
+
+def _text_of_content(content) -> str:
+    """把 Anthropic 的 content（字符串或块数组）压成纯文本，仅用于取摘要。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                t = b.get("text")
+                if isinstance(t, str):
+                    out.append(t)
+        return "\n".join(out)
+    return ""
+
+
+def _has_cache_control(value) -> bool:
+    """深度判断请求里是否存在 `cache_control`（system / messages / tools 任意层）。"""
+    if isinstance(value, dict):
+        if "cache_control" in value:
+            return True
+        return any(_has_cache_control(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_cache_control(v) for v in value)
+    return False
 
 
 def _extract_system_text(system) -> str:

@@ -160,6 +160,10 @@ def init_db() -> bool:
 
         # 迁移：给 schedules 表加 stop_after 列（daily_checkin 任务的「停止领取时间」）
         _ensure_column("schedules", "stop_after", "DATETIME", "NULL")
+        # 上游封禁标记：与 status 分开，便于区分「主动停用」与「被上游限制」
+        _ensure_column("accounts", "ban_kind", "VARCHAR(32)", "DEFAULT ''")
+        _ensure_column("accounts", "ban_at", "DATETIME", "NULL")
+        _ensure_column("accounts", "ban_reason", "VARCHAR(500)", "DEFAULT ''")
         # Older MySQL versions reject defaults on TEXT. Existing rows may be
         # NULL; schedule timing treats NULL and an empty config identically.
         _ensure_column("schedules", "timing_config", "TEXT", "NULL")

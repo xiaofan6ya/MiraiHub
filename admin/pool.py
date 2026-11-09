@@ -37,6 +37,7 @@ import json
 import math
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -733,14 +734,23 @@ def fallback_session_key(body: dict) -> str:
     会话内历史不断追加，但首条 user 消息恒定 → 同会话恒同键；用户开新会话
     （首条消息不同）→ 自然换键。
 
-    抑制条件：请求体带 `metadata.user_id` 或顶层 `user_id` 时**恒返回空串**。
-    这类客户端已显式声明了用户维度，若再借首条 prompt 获得粘性，会把该用户的
-    所有并行对话钉到同一账号 —— 正是上面要避免的过粗粒度。
+    抑制条件（2026-11-09 修订）：请求体带 `metadata.user_id` 或顶层 `user_id`，
+    且该值**不够细**时返回空串。判据见 :func:`_user_id_is_conversation_scoped`：
+    Claude Code 等客户端的 `user_id` 形如 `user_<hash>_account_<uuid>_session_<uuid>`，
+    是**会话级**的，直接拿来当粘性键既够细又比首条 prompt 更可靠，因此放行；
+    只有那些把整个用户当粒度的粗 `user_id` 才继续抑制，避免把该用户的所有
+    并行对话钉到同一账号。
     """
     if not isinstance(body, dict):
         return ""
-    if _has_user_id(body):
-        return ""
+    uid = _user_id_of(body)
+    if uid:
+        if not _user_id_is_conversation_scoped(uid):
+            return ""
+        # 会话级 user_id：本身即最准确的粘性键（与首条 prompt 派生相比
+        # 不受「首条消息被压缩/改写」影响）
+        digest = hashlib.sha256(uid.encode("utf-8", "replace")).hexdigest()
+        return "u-" + digest[:16]
     msgs = body.get("messages")
     if not isinstance(msgs, list):
         return ""
@@ -827,6 +837,52 @@ def _has_user_id(body: dict) -> bool:
             return True
     v = body.get("user_id")
     return isinstance(v, str) and bool(v)
+
+
+def _user_id_of(body: dict) -> str:
+    """取 body 里的用户维度标识；没有返回空串。
+
+    优先 `metadata.user_id`，其次顶层 `user_id` —— 与 :func:`_has_user_id`
+    的判定顺序一致，避免两处判断打架。
+    """
+    if not isinstance(body, dict):
+        return ""
+    meta = body.get("metadata")
+    if isinstance(meta, dict):
+        v = meta.get("user_id")
+        if isinstance(v, str) and v:
+            return v
+    v = body.get("user_id")
+    return v if isinstance(v, str) else ""
+
+
+#: Claude Code 一类客户端的会话级 user_id 形态：
+#:   user_<16位hex>_account_<uuid>_session_<uuid>
+#: 会话部分是一段 UUID，即**每次对话一个新值**，粒度正好等于上游的前缀缓存边界。
+_CLAUDE_USER_ID_RE = re.compile(
+    r"^user_[0-9a-fA-F]+_account_[0-9a-fA-F-]+_session_[0-9a-fA-F-]+$"
+)
+
+
+def _user_id_is_conversation_scoped(uid: str) -> bool:
+    """判断一个 user_id 是否细到「会话级」，可以安全地当粘性键。
+
+    ## 为什么要区分
+
+    `metadata.user_id` 的粒度因客户端而异：
+
+    * 细 —— Claude Code 写成 `user_…_account_…_session_<uuid>`，**每次对话不同**。
+      这种拿来当粘性键最准：同一对话恒定、不同对话天然分开，正是想要的粒度。
+    * 粗 —— 有的客户端只放一个用户标识（邮箱、固定用户名、`u_123`）。
+      拿它当粘性键会把该用户的**所有并行对话**钉到同一个账号上：
+      既压垮单个号，又浪费粘性收益（并行对话本就该分散）。
+
+    只有细的那种才放行。判据是显式的结构化形态，不做「看起来像 UUID」这种
+    模糊猜测 —— 猜错会把粗粒度 ID 误判成细的，就是上面第二种的后果。
+    """
+    if not isinstance(uid, str) or not uid:
+        return False
+    return bool(_CLAUDE_USER_ID_RE.match(uid))
 
 
 # ---------------------------------------------------------------------------

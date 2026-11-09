@@ -2063,6 +2063,9 @@ def _transient_cool_fallback(db: Session, exclude_ids: set | None,
     # 漏掉这里的话，严格过滤没选到号时会从别的平台拉一个过来 ——
     # 表现就是「WorkBuddy 报 8 个账号不可选」那种跨平台串号。
     q = q.filter(Account.platform == registry.DEFAULT_PLATFORM)
+    # 兜底只放宽 `cool_until`，**不放宽封禁**：被封是上游侧的永久事实，
+    # 不是「等一会就好」的临时限流；兜底选中它只会多一次必败请求。
+    q = q.filter(or_(Account.ban_kind.is_(None), Account.ban_kind == ""))
     q = scope_accounts(q, account_id, key_id, key=key)
     if min_balance > 0:
         q = q.filter(Account.balance_remain > 0)
@@ -2230,6 +2233,15 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     #
     # 多平台各自有 gateway，不走这里，所以固定用默认平台即可。
     q = q.filter(Account.platform == registry.DEFAULT_PLATFORM)
+    # 已被上游封禁的号永不参与选号。
+    #
+    # 为什么不直接置 status='disabled'：那是「我主动停用」的语义，批量
+    # 启用/禁用时会被一并翻开。封禁是上游侧的事实（ban_kind 记着业务码），
+    # 解封后只需清空该字段即可恢复，不必重建账号。
+    #
+    # 代价必须挡住：被封的号每次被选中都会白打一次上游（一次 403 + 换号），
+    # 既增加延迟，也可能加重上游的风控判定。
+    q = q.filter(or_(Account.ban_kind.is_(None), Account.ban_kind == ""))
     q = scope_accounts(q, account_id, key_id, key=key)
     if min_balance > 0:
         q = q.filter(Account.balance_remain > 0)
@@ -2472,6 +2484,30 @@ def _model_access_error(key, model):
     return _model_out_of_group_error(model)
 
 
+#: 客户端附在模型名尾部的「上下文窗口」标记，例如 Anthropic 的
+#: `claude-sonnet-4[1m]` / `deepseek-v4.1-flash[1M]`。它是**请求参数**而非
+#: 模型身份：上游不认，本地白名单/分组也按裸名配置，不剥离就一律 403。
+_MODEL_CTX_SUFFIX_RE = re.compile(r"\s*\[\s*\d+\s*[kKmM]\s*\]\s*$")
+
+
+def strip_model_context_suffix(model: str) -> str:
+    """去掉模型名尾部的 `[1m]` / `[128k]` 之类上下文标记。
+
+    实测（2026-11-04）：Claude Code 发 `qwen-3.8-max[1M]`，分组里配的是
+    `qwen-3.8-max`，`requested in allowed` 恒为 False → 403 model_not_in_group。
+    剥离后正常命中。
+
+    只动**尾部**方括号，且要求里面是「数字 + k/m」：
+      `model[1m]`    -> `model`
+      `model[128k]`  -> `model`
+      `model[foo]`   -> 原样（不是上下文标记，可能是真实名字）
+    """
+    if not model or "[" not in model:
+        return model
+    stripped = _MODEL_CTX_SUFFIX_RE.sub("", model)
+    return stripped or model
+
+
 def _pick_best_model(db: Session, requested_model: str,
                      allowed: set[str] | None = None) -> str | None:
     """根据请求模型和可用配置，选出最优实际使用的模型 ID。
@@ -2481,9 +2517,15 @@ def _pick_best_model(db: Session, requested_model: str,
       - 用户传 "auto" 或空 → 优先选免费模型（credit_multiplier=0），没有免费的才选付费的
       - 未配置任何模型规则时放行全部（向后兼容），返回原始 model
       - allowed 非 None 时（Key 绑定了分组），只在 allowed 集合内选择
+      - 模型名尾部的上下文标记（`[1m]`/`[128k]`）在判定前剥离
     """
     from admin.routers.models import _is_model_allowed, _get_free_models, _get_enabled_models
     from admin.models import ModelConfig
+
+    # 先剥离 `[1m]` 这类上下文标记，再做任何白名单/分组判定。
+    # 三条入口（/v1/messages、/v1/chat/completions、/v1/responses）都经过
+    # 本函数，放这里即可全覆盖，不必在每个端点里重复。
+    requested_model = strip_model_context_suffix(requested_model)
 
     # 检查是否有任何配置记录（无配置=向后兼容，放行全部）
     has_any_config = db.query(ModelConfig).first() is not None
@@ -3611,11 +3653,16 @@ async def responses_proxy(
                             converter.finish()
                             obj = converter.get_nonstream_response()
                             cost_info = _parse_usage(r.text)
+                            # 同 /v1/messages 非流式分支：整条响应是在
+                            # `client.post()` 里拿全的，没有单独的流式首字节时刻，
+                            # 按整条耗时补 ttfb，否则用量页速度列是 “—”。
+                            latency_ms = int((time.perf_counter() - request_start) * 1000)
+                            ttfb_ms = latency_ms
                             acc_i.last_used_at = datetime.utcnow()
                             await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
                             updated = sess_i.updated_json()
                             total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
-                            seq = _log_chat_row(None, None, m, "resp", acc_i.uid or "-", 200, total_toks, error_kind="success")
+                            seq = _log_chat_row(ttfb_ms, latency_ms, m, "resp", acc_i.uid or "-", 200, total_toks, error_kind="success")
                             sess_i.close()
                             if sticky_key and held_uid:
                                 POOL.sticky.bind(sticky_key, held_uid)
@@ -3628,7 +3675,8 @@ async def responses_proxy(
                                           completion_tokens=cost_info["completion_tokens"],
                                           total_tokens=cost_info["total_tokens"],
                                           cached_tokens=cost_info["cached_tokens"],
-                                          seq=seq, error_kind="success")
+                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                          error_kind="success")
                             return JSONResponse(content=obj)
                     except GatewayRejected:
                         raise
@@ -4092,11 +4140,19 @@ async def anthropic_messages(
                                 conv.feed_line(line)
                             msg_obj = conv.build_message()
                             cost_info = _parse_usage("\n".join(raw_lines))
+                            # 非流式同样是「攒完整条 SSE 再一次性回给客户端」，
+                            # 中间并没有真的少了首字节 —— 只是首字节发生在
+                            # `client.post()` 返回之前，没被计时。缺了 ttfb 会让
+                            # 用量页的速度列整列显示 “—”（算不出生成速度）。
+                            # 这里按整条响应耗时补上：语义是「等到第一个可用数据
+                            # 的时间」，对非流式就是全部内容到齐的时刻。
+                            latency_ms = int((time.perf_counter() - request_start) * 1000)
+                            ttfb_ms = latency_ms
                             acc_i.last_used_at = datetime.utcnow()
                             await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
                             updated = sess_i.updated_json()
                             total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
-                            seq = _log_chat_row(None, None, m, "anthropic", acc_i.uid or "-", 200,
+                            seq = _log_chat_row(ttfb_ms, latency_ms, m, "anthropic", acc_i.uid or "-", 200,
                                                 total_toks, error_kind="success")
                             sess_i.close()
                             if sticky_key and held_uid:
@@ -4110,7 +4166,8 @@ async def anthropic_messages(
                                           completion_tokens=cost_info["completion_tokens"],
                                           total_tokens=cost_info["total_tokens"],
                                           cached_tokens=cost_info["cached_tokens"],
-                                          seq=seq, error_kind="success")
+                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                          error_kind="success")
                             return JSONResponse(content=msg_obj)
                     except GatewayRejected:
                         raise
@@ -4258,9 +4315,14 @@ async def anthropic_messages(
                                     if events:
                                         pending_events.append(events)
                                     if delivered or _sse_has_content(line) or _sse_has_finish_reason(line):
+                                        # 首字节时间按**上游首个有效数据行**记，不能只在
+                                        # `pending_events` 非空时才记：转换器可能对某几行
+                                        # 不产出事件（例如只有 usage / ping 片段），那种
+                                        # 情况下 `ttfb_at` 会一直留空，用量页的速度列就
+                                        # 整列显示 “—”。
+                                        ttfb_at = ttfb_at or time.perf_counter()
                                         if pending_events:
                                             delivered = True
-                                            ttfb_at = ttfb_at or time.perf_counter()
                                             yield "".join(pending_events)
                                             pending_events.clear()
                             # HTTP 200 但体内是错误信封（-32603 / ENOSPC）：
