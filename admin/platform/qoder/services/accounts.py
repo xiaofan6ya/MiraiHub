@@ -66,6 +66,28 @@ def realm_of(account: Account) -> str:
     return str(getattr(account, "domain", "") or "cn")
 
 
+def umid_of(data: dict) -> str:
+    """客户端 UMID 组件生成的设备令牌（签到风控头 `Cosy-MachineToken` 用）。
+
+    ## 为什么签到必须要它（2026-11-09 用户实测反馈）
+
+    Qoder 的签到是「活动领取」，风控身份**按 uid 用 UMID 生成**。
+    不带 `Cosy-Machine*` 三件套时，活动列表里永远只回来
+    `VIEW_DETAILS` 促销 —— 表现就是「签到一直失败 / 没有可领活动」，
+    而换成本机客户端（带 UMID 的 `.info` 那个 exe）就能领到。
+
+    取值顺序（都是**客户端自己的**设备身份，不要伪造）：
+      1. `umid`            —— 显式导入 / `--umid` 写入
+      2. `machine_token` / `machineToken` —— 客户端 info 里的同义字段
+      3. 空串              —— 没有就不带风控头，如实告诉用户缺什么
+    """
+    for key in ("umid", "machine_token", "machineToken"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def machine_id_of(data: dict) -> str:
     """机器标识（COSY 头要带）。
 
@@ -194,6 +216,13 @@ def import_record(db: Session, record: dict, *,
         "machine_id": str(record.get("machine_id") or uuid.uuid4()),
         "source": str(record.get("source") or "import"),
     }
+    # 签到风控身份：导入时必须一起带过来，否则这台机器上的号**签不了到**
+    # （活动列表只回促销，不回可领权益）。现场见的三种写法都认。
+    for key in ("umid", "machine_token", "machineToken"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            payload["umid"] = value
+            break
     # ⚠️ 总是拉一次 profile —— 不只是为了补 uid。
     #
     # 设备授权返回的凭证里有 uid 但**没有 name**，只在「uid 为空」时
@@ -367,6 +396,55 @@ def accounts_for(db: Session, realm: str = "") -> list[Account]:
     if realm:
         query = query.filter(Account.domain == realm)
     return query.order_by(Account.id.asc()).all()
+
+
+def export_record(account: Account, *, reveal: bool = False) -> dict:
+    """单个号 → 可导出记录（与 `import_record` 对称，issue #25）。
+
+    Qoder 的凭证是作业令牌（`jt-…`）+ 续期令牌，都只能从本机原生层或
+    设备授权拿到 —— 所以「导出/导入」在这个平台上的真实用途是
+    **换机器搬号池**，而不是从客户端抓。
+
+    `reveal=True` 带完整 token / refresh_token / machine_id，
+    导出的 JSONL 能直接喂回 `/api/qoder/import-batch` 还原；
+    `reveal=False` 只给台账字段，不含任何可用于登录的东西。
+    """
+    data = credentials_of(account)
+    token = token_of(data)
+    realm = realm_of(account)
+    record: dict = {
+        "platform": PLATFORM,
+        "realm": realm,
+        "uid": str(account.uid or data.get("uid") or ""),
+        "name": str(getattr(account, "name", "") or data.get("name") or ""),
+        "status": getattr(account, "status", "") or "",
+        "balance_remain": int(getattr(account, "balance_remain", 0) or 0),
+        "balance_total": int(getattr(account, "balance_total", 0) or 0),
+        "expires_at": int(float(data.get("expires_at") or 0)),
+    }
+    email = str(data.get("email") or "")
+    if email:
+        if reveal:
+            record["email"] = email
+        else:
+            local, _, domain = email.partition("@")
+            record["email"] = ("%s***@%s" % (local[:2], domain)) if domain else "***"
+    if reveal:
+        if not token:
+            return {}
+        record["token"] = token
+        record["refresh_token"] = str(data.get("refresh_token") or "")
+        # machine_id 决定 COSY 签名与风控头（Cosy-Machine*）：丢了这个值，
+        # 搬过去的号在新机器上会被判成「换了设备」，签到与对话都可能被拦。
+        record["machine_id"] = machine_id_of(data)
+        # **UMID 必须一起导出**：签到（活动领取）认的就是它。
+        # 丢了 umid 的号导进来能对话、但永远领不到签到权益，
+        # 而控制台只会显示「无活动」，根本看不出缺的是设备身份。
+        umid = umid_of(data)
+        if umid:
+            record["umid"] = umid
+        record["source"] = str(data.get("source") or "export")
+    return record
 
 
 def select(db: Session, realm: str = "", mark_picked: bool = False) -> Account | None:

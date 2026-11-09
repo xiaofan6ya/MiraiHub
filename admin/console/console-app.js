@@ -6156,6 +6156,42 @@ async function platformExportAccounts(spec, storage) {
     </div>`, "max-w-md");
 }
 
+/**
+ * 把一段文本落成文件；**移动端走系统保存器并回报位置**。
+ *
+ * ## 为什么必须分流（2026-11-09）
+ *
+ * 桌面浏览器里 `a.download` 直接落到默认下载目录，用不着问。但 APK 是
+ * WebView：`a.download` 在大多数机型上**什么都不发生**（既不下载也不报错），
+ * 用户点完「导出」只看到一句「已导出 N 个账号」，然后哪都找不到文件。
+ *
+ * 所以移动端改走 `WBAndroid.saveText`：它会拉起系统
+ * `ACTION_CREATE_DOCUMENT` 让用户选位置，写完后端弹系统对话框告诉
+ * 「保存到 内部存储/Download/xxx.json」，并带一个「打开文件位置」按钮。
+ *
+ * @param {string} filename 建议文件名（系统保存器允许用户改）
+ * @param {string} text     文件内容
+ * @param {string} mime     MIME
+ * @returns {Promise<{path:string}>} 移动端返回保存位置；桌面端为空串
+ */
+async function saveTextToDevice(filename, text, mime) {
+  if (window.WBMobile && typeof window.WBMobile.saveText === "function"
+      && window.WBAndroid && window.WBAndroid.saveText) {
+    await window.WBMobile.saveText(filename, text, mime);
+    return { path: (window.WBAndroid.lastExportPath && window.WBAndroid.lastExportPath()) || "" };
+  }
+  const blob = new Blob([text], { type: mime || "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return { path: "" };
+}
+
 async function platformExportDownload(base, mode, storage) {
   try {
     const r = await api(base + "/export?mode=" + encodeURIComponent(mode), {
@@ -6175,16 +6211,13 @@ async function platformExportDownload(base, mode, storage) {
       const p = n => String(n).padStart(2, "0");
       return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
     })();
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${storage || "accounts"}-${mode}-${stamp}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-    toast(`已导出 ${count} 个账号（${mode === "plain" ? "脱敏清单" : "含凭证备份"}）`, "ok");
+    const filename = `${storage || "accounts"}-${mode}-${stamp}.json`;
+    const saved = await saveTextToDevice(filename, JSON.stringify(data, null, 2),
+                                         "application/json");
+    const kind = mode === "plain" ? "脱敏清单" : "含凭证备份";
+    toast(saved.path
+      ? `已导出 ${count} 个账号（${kind}）→ ${saved.path}`
+      : `已导出 ${count} 个账号（${kind}）`, "ok");
     closeModal();
   } catch (error) {
     toast("导出异常：" + (error && error.message ? error.message : error), "err");
@@ -9107,9 +9140,16 @@ async function submitUpload(){
    单账号为官方加密 .info，批量为加密凭证集合或明文备份。
    ========================================================================== */
 
-/** 触发浏览器下载一个文本文件。 */
+/** 触发下载一个文本文件，并把「存到哪了」告诉用户。 */
 async function downloadText(filename, text, mime = "application/json") {
-  if(window.WBMobile?.saveText) return WBMobile.saveText(filename, text, mime);
+  if(window.WBMobile?.saveText) {
+    // 移动端：系统保存器选位置 → 写完由原生弹「导出完成 + 打开文件位置」。
+    await WBMobile.saveText(filename, text, mime);
+    // 原生已经弹了对话框（含路径），这里只补一条可回看的提示。
+    const path = window.WBAndroid?.lastExportPath?.() || "";
+    if (path) toast(`已保存到 ${path}`, "ok");
+    return;
+  }
   if(window.pywebview?.api?.save_text) {
     const result = await pywebview.api.save_text(filename, text, mime);
     if (!result?.ok) throw new Error(result?.cancelled ? '已取消保存' : result?.error || '文件未保存');
@@ -9267,10 +9307,24 @@ async function exportAsync() {
   });
 }
 
-/** 凭 token 触发浏览器下载导出文件（供 onFinish 自动下载等场景）。 */
-function downloadExportToken(token) {
+/** 凭 token 触发下载导出文件（供 onFinish 自动下载等场景）。 */
+async function downloadExportToken(token) {
+  const url = `/api/accounts/export-download?token=${encodeURIComponent(token)}`;
+  // APK 的 WebView 不支持 `a.download`：必须自己取回内容再走系统保存器，
+  // 否则用户点了「导出」什么都不会发生，也看不到任何错误。
+  if (window.WBMobile?.saveText) {
+    try {
+      const r = await api(url, { method: "GET" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const text = await r.text();
+      await downloadText(`miraihub-accounts-${exportStamp()}.json`, text, "application/json");
+    } catch (e) {
+      toast("导出文件下载失败：" + (e && e.message ? e.message : e), "err");
+    }
+    return;
+  }
   const a = document.createElement('a');
-  a.href = `/api/accounts/export-download?token=${encodeURIComponent(token)}`;
+  a.href = url;
   a.download = "";
   document.body.appendChild(a); a.click(); a.remove();
 }
@@ -9728,7 +9782,24 @@ function keyPlatformSelect(id, platforms, value) {
  *
  * @param {string} prefix   "k"（创建）/ "ek"（编辑）
  */
-function keyAccountPicker(prefix, accounts, selected, platform) {
+/**
+ * 账号多选面板（Key 表单用）。
+ *
+ * ## 为什么不能一次拉全量（2026-11-09 用户反馈）
+ *
+ * 聚合平台上线后一个号池动辄几千个号，`/api/accounts?all_platforms=1`
+ * 一次把**所有平台的账号**拉回来：接口几百 KB、浏览器要建几千个 DOM 节点，
+ * 打开「新建 Key」就卡两秒。列表里的搜索框还只是本地 `display` 过滤，
+ * 对没拉下来的号完全无效 —— 等于「搜不到就是不支持」。
+ *
+ * 现在的做法：
+ *   · 首屏只取第一页（`page_size=50`），脚注显示「已加载 50 / 共 N」；
+ *   · 搜索走**服务端**（`search=` 防抖 250ms），命中范围是整库；
+ *   · 已勾选的 id 存在隐藏域里，翻页/搜索都不会丢。
+ */
+const KEY_PICKER_PAGE = 50;
+
+function keyAccountPicker(prefix, accounts, selected, platform, total) {
   const picked = new Set((selected || []).map(Number));
   const rows = (accounts || []).filter(item => {
     if (!platform) return true;
@@ -9737,7 +9808,42 @@ function keyAccountPicker(prefix, accounts, selected, platform) {
   const summary = picked.size
     ? `已选 ${picked.size} 个账号 · 只用这些，不换号`
     : "不限制（使用公共账号池）";
-  const list = rows.length ? rows.map(item => {
+  const shown = total != null ? Number(total) : rows.length;
+  return `<div class="mb-2 key-picker" id="${prefix}AccountPicker">
+    <label class="text-xs text-slate-500">独占绑定账号（可选，多选）</label>
+    <div class="mt-1">
+      <button type="button" class="key-picker-trigger"
+              onclick="keyAccToggle(${jsv(prefix)})">
+        <span class="key-picker-summary${picked.size ? " has-value" : ""}"
+              id="${prefix}AccountSummary">${esc(summary)}</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="key-picker-pop" id="${prefix}AccountPop" hidden>
+        <input class="key-picker-search" id="${prefix}AccountSearch"
+               placeholder="搜索账号 / UID / 平台（服务端检索）" autocomplete="off"
+               oninput="keyAccSearch(${jsv(prefix)}, this.value)">
+        <div class="key-picker-list" id="${prefix}AccountList">${keyAccRows(prefix, rows, picked, platform)}</div>
+        <div class="key-picker-foot">
+          <span id="${prefix}AccountCount">已加载 ${rows.length} / 共 ${shown} 个</span>
+          <button type="button" class="key-picker-clear"
+                  onclick="keyAccClear(${jsv(prefix)})">清空选择</button>
+        </div>
+      </div>
+      <input type="hidden" id="${prefix}AccountIds"
+             value="${JSON.stringify([...picked])}">
+    </div>
+    <p class="text-[11px] text-slate-400 mt-1">不勾选 = 使用公共账号池；勾选后该 Key 只用这些账号，账号不可用时不换号。</p>
+  </div>`;
+}
+
+/** 渲染账号行（首屏与搜索共用）。 */
+function keyAccRows(prefix, rows, picked, platform) {
+  if (!rows.length) {
+    return `<p class="sentinel-empty" style="padding:8px 6px">${
+      platform ? "没有匹配的账号" : "没有可用账号"}</p>`;
+  }
+  return rows.map(item => {
     const on = picked.has(Number(item.id));
     const name = esc(item.name || item.uid || "账号") + " #" + item.id;
     const sub = [
@@ -9754,34 +9860,40 @@ function keyAccountPicker(prefix, accounts, selected, platform) {
         <span class="key-picker-row-sub">${sub || "—"}</span>
       </span>
     </label>`;
-  }).join("") : `<p class="sentinel-empty" style="padding:8px 6px">${
-    platform ? "该平台下没有可用账号" : "没有可用账号"}</p>`;
-  return `<div class="mb-2 key-picker" id="${prefix}AccountPicker">
-    <label class="text-xs text-slate-500">独占绑定账号（可选，多选）</label>
-    <div class="mt-1">
-      <button type="button" class="key-picker-trigger"
-              onclick="keyAccToggle(${jsv(prefix)})">
-        <span class="key-picker-summary${picked.size ? " has-value" : ""}"
-              id="${prefix}AccountSummary">${esc(summary)}</span>
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
-             stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-      <div class="key-picker-pop" id="${prefix}AccountPop" hidden>
-        <input class="key-picker-search" id="${prefix}AccountSearch"
-               placeholder="搜索账号 / UID / 平台" autocomplete="off"
-               oninput="keyAccFilter(${jsv(prefix)}, this.value)">
-        <div class="key-picker-list" id="${prefix}AccountList">${list}</div>
-        <div class="key-picker-foot">
-          <span>${rows.length} 个可选账号</span>
-          <button type="button" class="key-picker-clear"
-                  onclick="keyAccClear(${jsv(prefix)})">清空选择</button>
-        </div>
-      </div>
-      <input type="hidden" id="${prefix}AccountIds"
-             value="${JSON.stringify([...picked])}">
-    </div>
-    <p class="text-[11px] text-slate-400 mt-1">不勾选 = 使用公共账号池；勾选后该 Key 只用这些账号，账号不可用时不换号。</p>
-  </div>`;
+  }).join("");
+}
+
+/** 服务端搜索（防抖）。已在列表里的行不再重建，避免闪烁。 */
+let _keyAccTimers = {};
+function keyAccSearch(prefix, term) {
+  const query = String(term || "").trim();
+  clearTimeout(_keyAccTimers[prefix]);
+  _keyAccTimers[prefix] = setTimeout(async () => {
+    const list = document.getElementById(prefix + "AccountList");
+    const counter = document.getElementById(prefix + "AccountCount");
+    if (!list) return;
+    list.innerHTML = `<p class="sentinel-empty" style="padding:8px 6px">搜索中…</p>`;
+    try {
+      const params = new URLSearchParams({
+        all_platforms: "1", page_size: String(KEY_PICKER_PAGE), page: "1",
+      });
+      if (query) params.set("search", query);
+      const r = await api("/api/accounts?" + params.toString());
+      const { ok, data } = await safeJson(r);
+      if (!ok) throw new Error((data && data.detail) || "搜索失败");
+      const items = (data.items || data.accounts || []);
+      const picked = new Set(keySelectedAccountIds(prefix));
+      list.innerHTML = keyAccRows(prefix, items, picked, "");
+      if (counter) {
+        counter.textContent = query
+          ? `「${query}」命中 ${items.length} 个`
+          : `已加载 ${items.length} / 共 ${data.total ?? items.length} 个`;
+      }
+    } catch (error) {
+      list.innerHTML = `<p class="sentinel-empty" style="padding:8px 6px">${
+        esc(error && error.message ? error.message : "搜索失败")}</p>`;
+    }
+  }, 250);
 }
 
 function keyAccToggle(prefix) {
@@ -9798,7 +9910,13 @@ function keyAccToggle(prefix) {
     // 决定向下还是向上展开。滚动/缩放时重新贴一次。
     keyAccPlace(prefix);
     const search = document.getElementById(prefix + "AccountSearch");
-    if (search) { search.value = ""; keyAccFilter(prefix, ""); search.focus(); }
+    if (search) {
+      // 打开时不发请求：首屏已经带了第一页。清空输入只是把列表还原成本地
+      // 已加载的那一页，避免一次多余的整库查询。
+      search.value = "";
+      keyAccFilter(prefix, "");
+      search.focus();
+    }
   }
 }
 
@@ -9854,10 +9972,20 @@ function keyAccFilter(prefix, term) {
   });
 }
 
+/**
+ * 勾选变化。**必须先合并隐藏域里已选的 id**：面板是分页/服务端搜索的，
+ * 当前列表可能只是结果集的一页，直接读 DOM 会把别页的勾选丢掉。
+ */
 function keyAccChange(prefix) {
-  const ids = [...document.querySelectorAll(`#${prefix}AccountList input[type="checkbox"]:checked`)]
-    .map(node => Number(node.value)).filter(value => Number.isFinite(value) && value > 0);
   const hidden = document.getElementById(prefix + "AccountIds");
+  const selected = new Set(keySelectedAccountIds(prefix));
+  document.querySelectorAll(`#${prefix}AccountList input[type="checkbox"]`)
+    .forEach(node => {
+      const value = Number(node.value);
+      if (!Number.isFinite(value) || value <= 0) return;
+      if (node.checked) selected.add(value); else selected.delete(value);
+    });
+  const ids = [...selected].sort((a, b) => a - b);
   if (hidden) hidden.value = JSON.stringify(ids);
   const summary = document.getElementById(prefix + "AccountSummary");
   if (summary) {
@@ -9871,7 +9999,13 @@ function keyAccChange(prefix) {
 function keyAccClear(prefix) {
   document.querySelectorAll(`#${prefix}AccountList input[type="checkbox"]`)
     .forEach(node => { node.checked = false; });
-  keyAccChange(prefix);
+  const hidden = document.getElementById(prefix + "AccountIds");
+  if (hidden) hidden.value = "[]";
+  const summary = document.getElementById(prefix + "AccountSummary");
+  if (summary) {
+    summary.textContent = "不限制（使用公共账号池）";
+    summary.classList.remove("has-value");
+  }
 }
 
 document.addEventListener("click", event => {
@@ -9897,10 +10031,11 @@ function keyAccountSelect(id, options, value = 0) {
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
     <p class="text-[11px] text-slate-400 mt-1">绑定后公共池跳过该账号；此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
 }
-/** 拉平台列表 + 全平台账号（Key 表单用）。 */
+/** 拉平台列表 + 首屏一页账号（Key 表单用）。 */
 async function keyFormData() {
   let platforms = [];
   let accounts = [];
+  let total = 0;
 
   // 1) 平台列表：按 storage_platform 去重（trae-cn/trae-intl 同为 trae），
   //    保留每个 storage 的第一个 label。
@@ -9924,16 +10059,24 @@ async function keyFormData() {
     console.warn("[keyForm] 平台列表加载失败", error);
   }
 
-  // 2) 全平台账号：显式带 all_platforms=1，否则只回当前平台的
+  // 2) 账号：**只取第一页**，不再整库拉取。
+  //
+  // 聚合平台上线后一个号池几千个号，`all_platforms=1` 无分页会把所有平台
+  // 的账号一次性拉回来（几百 KB + 几千个 DOM 节点），打开「新建 Key」
+  // 就卡两秒。选择器内部改成服务端搜索 + 分页，这里只要首屏那 50 条。
   try {
-    const r = await api("/api/accounts?all_platforms=1");
+    const r = await api("/api/accounts?all_platforms=1&page_size=" + KEY_PICKER_PAGE + "&page=1");
     const { ok, data } = await safeJson(r);
-    if (ok && data && Array.isArray(data.items)) accounts = data.items;
+    if (ok && data) {
+      accounts = Array.isArray(data.items) ? data.items
+        : (Array.isArray(data.accounts) ? data.accounts : []);
+      total = Number(data.total || accounts.length);
+    }
   } catch (error) {
     console.warn("[keyForm] 账号列表加载失败", error);
   }
 
-  return { platforms, accounts };
+  return { platforms, accounts, total };
 }
 
 /** 平台切换时重渲染账号选择器。 */
@@ -9950,7 +10093,8 @@ async function onKeyPlatformChange() {
   if (!host) return;
   const state = window._keyFormState || {};
   const picked = keySelectedAccountIds(prefix);
-  host.innerHTML = keyAccountPicker(prefix, state.accounts || [], picked, platform);
+  host.innerHTML = keyAccountPicker(prefix, state.accounts || [], picked, platform,
+                                    state.total);
   window._keyFormState = { ...state, platform, picked };
 }
 
@@ -13964,26 +14108,64 @@ function initLogSelects() {
 let _logPlatformLoaded = false;
 //: 落库平台名 -> 展示名（筛选提示与表格徽标共用）
 let _logPlatformLabels = {};
-async function fillLogPlatformOptions(force) {
-  if (_logPlatformLoaded && !force) return;
-  let items = [];
+
+/**
+ * 「按平台筛选」的选项，两处共用（使用记录 / 用量统计）。
+ *
+ * ## 为什么有两级来源（2026-11-09 用户反馈「按平台只有全部、选不了别的」）
+ *
+ * 原来只读 `/api/platforms`，而且 `if (!items.length) return;` ——
+ * 一旦这个接口失败（或插件没装配好、返回空数组），下拉就**永远停在**
+ * 一项「全部平台」，用户完全没法按平台查使用统计，也看不出是加载失败。
+ *
+ * 现在：
+ *   1. 首选 `/api/platforms`（有展示名、有顺序）；
+ *   2. 拿不到就退回 `/api/stats/usage/options` 里**真实出现过**的平台
+ *      （必定非空，因为那条统计本身就是从 usage_logs 聚合出来的）；
+ *   3. 两级都空 → 至少把「全部平台」留下，并在控制台 warn 一句。
+ */
+async function platformFilterOptions() {
+  const options = [{ value: "", label: "全部平台" }];
+  const seen = new Set();
+  const push = (value, label) => {
+    const key = String(value || "").toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    options.push({ value: key, label: label || key });
+    _logPlatformLabels[key] = label || key;
+  };
+  // 1) 平台注册表
   try {
     const r = await api("/api/platforms");
     const { ok, data } = await safeJson(r);
-    if (ok && data && Array.isArray(data.items)) items = data.items;
-  } catch (e) { return; }
-  if (!items.length) return;
+    if (ok && data && Array.isArray(data.items)) {
+      data.items.forEach(item => {
+        push(item.storage_platform || item.id, item.label || "");
+      });
+    }
+  } catch (e) { /* 走下一级兜底 */ }
+  // 2) 窗口内真的出现过的平台（也是筛选项的「有数据」提示）
+  if (options.length === 1) {
+    try {
+      const blank = new URLSearchParams();
+      const r = await api("/api/stats/usage/options?" + blank.toString());
+      const { ok, data } = await safeJson(r);
+      if (ok && data && Array.isArray(data.platforms)) {
+        data.platforms.forEach(item => push(item.value, item.label));
+      }
+    } catch (e) { /* 两级都失败就只留「全部平台」 */ }
+  }
+  if (options.length === 1) {
+    console.warn("[platform-filter] 平台清单为空，按平台筛选只能显示「全部平台」");
+  }
+  return options;
+}
+
+async function fillLogPlatformOptions(force) {
+  if (_logPlatformLoaded && !force) return;
+  const options = await platformFilterOptions();
+  if (options.length <= 1) return;
   _logPlatformLoaded = true;
-  // 同一个 storage 平台只留一项（trae-cn/trae-intl 存的是同一个 trae）
-  const seen = new Set();
-  const options = [{ value: "", label: "全部平台" }];
-  items.forEach(item => {
-    const storage = String(item.storage_platform || item.id || "").toLowerCase();
-    if (!storage || seen.has(storage)) return;
-    seen.add(storage);
-    options.push({ value: storage, label: item.label || storage });
-    _logPlatformLabels[storage] = item.label || storage;
-  });
   const cur = uiSelectValue("logPlatformSel") || "";
   const box = $("#logPlatformSel");
   if (box) box.outerHTML = uiSelectHTML("logPlatformSel", {
@@ -15043,9 +15225,24 @@ function initUsageSelects() {
   const platformBox = $("#usagePlatformSel");
   if (platformBox) platformBox.outerHTML = uiSelectHTML("usagePlatformSel", {
     value: "",
+    // 先给「全部平台」+ 占位：真正的平台清单由 loadUsageFilterOptions
+    // 按窗口内出现过的平台填充。这里如果只写死一项，一旦后面的填充失败，
+    // 用户看到的就是「按平台只有全部、选不了别的」。
     options: [{ value: "", label: "全部平台（全网关）" }],
     onChange: () => loadUsageStats(),
   });
+  // 不论统计接口是否返回 platforms，先把注册表里的平台灌进去兜底。
+  platformFilterOptions().then(options => {
+    const box = $("#usagePlatformSel");
+    if (!box || options.length <= 1) return;
+    if (_uiSelectMap.get("usagePlatformSel")?.options?.length > 1) return;
+    box.outerHTML = uiSelectHTML("usagePlatformSel", {
+      value: "",
+      options: [{ value: "", label: "全部平台（全网关）" }].concat(
+        options.filter(o => o.value)),
+      onChange: () => loadUsageStats(),
+    });
+  }).catch(() => {});
   const daysBox = $("#usageDaysSel");
   if (daysBox) daysBox.outerHTML = uiSelectHTML("usageDaysSel", {
     // 默认今日（自然日）+ 按小时：最常见的诉求是「今天怎么样」，

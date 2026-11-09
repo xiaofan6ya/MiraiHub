@@ -83,6 +83,10 @@ CAMPAIGNS_QUERY = "?forceRefresh=true"
 #: 换成 10 才给出完整活动包（含可领取的签到活动）。
 SASH_CLIENT_TYPE = "10"
 SASH_USER_AGENT = "Qoder"
+#: 风控头里的机器类型（与 `core/cosy.py` 的 COSY 头保持同一个值）。
+#: 两处写死同一个字面量是有意的：COSY 头与 sash 头必须自称同一台设备，
+#: 一边 5 一边 6 会被判成「客户端被改过」。
+MACHINE_TYPE = "5"
 
 
 def web_origin(realm: str) -> str:
@@ -152,18 +156,38 @@ def open_api_headers(token: str | None = None) -> dict:
     return headers
 
 
-def sash_headers(token: str) -> dict:
-    """活动/签到一族的请求头（**最小集、无签名**）。
+def sash_headers(token: str, *, uid: str = "", umid: str = "") -> dict:
+    """活动/签到一族的请求头。
 
     小写头名照抄抓包结果 —— HTTP 头名大小写不敏感，但保持一致便于对拍。
+
+    ## UMID 风控头（`Cosy-Machine*`）
+
+    不带这三个头时，活动列表里**永远只有 `VIEW_DETAILS` 促销**，看起来
+    像「这个平台没有签到」，实际是缺风控身份（见 `skill/QODER-QUOTA.md`）：
+
+        Cosy-MachineToken    客户端 UMID 组件生成的设备令牌
+        Cosy-MachineCode     机器码
+        Cosy-MachineType     机器类型
+
+    风控身份是**按 uid 生成的**，所以调用方必须先拉一次活动列表拿到
+    `uid`，再带上这三个头重拉一次，然后才能领取 —— 顺序不能反。
+    `umid` 为空时只发基础头（保持老行为，不伪造设备身份）。
     """
-    return {
+    headers = {
         "authorization": "Bearer " + token,
         "cosy-clienttype": SASH_CLIENT_TYPE,
         "accept": "application/json",
         "accept-language": "zh-CN",
         "user-agent": SASH_USER_AGENT,
     }
+    if umid:
+        headers["cosy-machinetoken"] = umid
+        # 机器码优先用 UMID 派生的稳定值：`MachineCode` 与 `MachineToken`
+        # 在客户端里来自同一个 UMID，用 uid 拼会与 token 不匹配被判伪造。
+        headers["cosy-machinecode"] = (uid or "") + ("-" + umid[:8] if umid else "")
+        headers["cosy-machinetype"] = MACHINE_TYPE
+    return headers
 
 
 def refresh_headers() -> dict:

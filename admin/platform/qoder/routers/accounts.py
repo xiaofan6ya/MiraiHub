@@ -1,6 +1,7 @@
 """Qoder 管理接口：`/api/qoder/*`。"""
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, Request, HTTPException
@@ -78,6 +79,37 @@ def import_account(body: ImportIn, _: bool = Depends(require_admin),
     except (ValueError, Exception) as exc:  # noqa: BLE001
         raise HTTPException(400, detail=str(exc)[:300]) from exc
     raise HTTPException(400, detail="需要 pat 或 credential")
+
+
+@router.get("/export")
+def export(realm: str = "", mode: str = "", reveal: int = 0,
+           _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """导出号池（issue #25：Qoder 国内/国际的导入导出入口都没了）。
+
+    `mode=plain`（默认）→ **脱敏清单**：uid / 昵称 / 邮箱打码 / 余额 / 到期。
+    `mode=backup`       → **完整凭证**：含 token / refresh_token / machine_id，
+                          可直接喂回 `/api/qoder/import-batch` 换机器还原。
+
+    `reveal=1` 是老参数，等同 `mode=backup`。
+
+    返回体同时给 `accounts` 数组（控制台通用导出按钮读它）与 `text`
+    （JSONL，与 `import_batch` 严格对称）—— 这是「导出→导入」能闭环的前提。
+    """
+    realm = _realm_or_400(realm) or "cn"
+    full = bool(reveal) or str(mode or "").strip().lower() == "backup"
+    rows = qoder_accounts.accounts_for(db, realm)
+    records: list[dict] = []
+    for account in rows:
+        record = qoder_accounts.export_record(account, reveal=full)
+        if record:
+            records.append(record)
+    return {"realm": realm, "count": len(records),
+            "mode": "backup" if full else "plain", "reveal": full,
+            "format": "jsonl", "accounts": records,
+            "text": "\n".join(json.dumps(item, ensure_ascii=False) for item in records),
+            "note": ("完整凭证含登录态与设备标识，请私密保存"
+                     if full else
+                     "已脱敏：不含 token，不能直接导入还原同一账号")}
 
 
 class ImportBatchIn(BaseModel):

@@ -107,32 +107,37 @@ class ImportLocalIn(BaseModel):
 
 
 @router.get("/export")
-def export(realm: str = "", reveal: int = 0, _: bool = Depends(require_admin),
-           db: Session = Depends(get_db)):
+def export(realm: str = "", mode: str = "", reveal: int = 0,
+           _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     """导出号池（issue #25：Loomy 之前只有导入、没有导出）。
 
-    `reveal=0`（默认）导出**脱敏清单**：只有 uid / 手机号打码 / 余额 /
-    到期时间 —— 可以直接发给别人做台账。
-    `reveal=1` 导出**完整凭证**（含 session token）：只能自己留档，
-    等于把这个号的登录态交出去。
+    ## 两档，口径与控制台通用导出按钮一致
 
-    输出 JSONL（每行一条），与 `/import-batch` 完全对称 ——
-    导出的文件可以直接喂回导入，实现「换机器搬号池」。
+    `mode=plain`（默认）→ **脱敏清单**：uid / 手机号打码 / 余额 / 到期时间，
+    可以直接发给别人做台账，不含任何能登录的东西。
+    `mode=backup`       → **完整凭证**（含 session token），只能自己留档。
+
+    `reveal=1` 是老参数，等同 `mode=backup`。
+
+    返回体同时给 `accounts` 数组（通用导出按钮读它）和 `text`（JSONL，
+    与 `/import-batch` 严格对称）—— 导出的文件可以直接喂回导入，
+    实现「换机器搬号池」。
     """
     from admin.platform.loomy.services import accounts as loomy_accounts
 
+    full = bool(reveal) or str(mode or "").strip().lower() == "backup"
     rows = loomy_accounts.accounts_for(db, _realm_or_400(realm))
-    lines: list[str] = []
+    records: list[dict] = []
     for account in rows:
-        record = loomy_accounts.export_record(account, reveal=bool(reveal))
+        record = loomy_accounts.export_record(account, reveal=full)
         if record:
-            lines.append(json.dumps(record, ensure_ascii=False))
-    return {"realm": realm, "count": len(lines),
-            "reveal": bool(reveal),
-            "format": "jsonl",
-            "text": "\n".join(lines),
-            "note": ("完整凭证导出一律含登录态，请私密保存"
-                     if reveal else "已脱敏：不含 session token，不能直接导入同一账号")}
+            records.append(record)
+    return {"realm": realm, "count": len(records), "mode": "backup" if full else "plain",
+            "reveal": full, "format": "jsonl",
+            "accounts": records,
+            "text": "\n".join(json.dumps(item, ensure_ascii=False) for item in records),
+            "note": ("完整凭证含登录态，请私密保存"
+                     if full else "已脱敏：不含 session token，不能直接导入同一账号")}
 
 
 @router.post("/import-local")

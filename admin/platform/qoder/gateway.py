@@ -180,11 +180,21 @@ def _attempt(db, request, key, body: dict, *, realm: str, model_hint: str = ""):
     for _ in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=qoder_accounts.PLATFORM, realm=realm,
-            key=key, model=model_hint, exclude_ids=exclude)
+            key=key, model=model_hint, exclude_ids=exclude,
+            # **不要用 `None` 冒充「没有号」**（用户反馈「qoder 老是报错，
+            # 是不是要排队」）。不传这个参数时 `POOL.available()` 会把
+            # 「在途已满」的号直接滤掉，`select_account` 于是返回 None，
+            # 上层报「没有可用账号」—— 号明明在，只是此刻都在跑。
+            # 置 True 先拿最闲的那个，由下面的 lease 失败分支去排队/退避。
+            ignore_capacity=True)
         if account is None:
             break
         if not shared.lease(account):
-            exclude.add(account.id)
+            # 租约失败 = 这一瞬间并发满了。**不是坏号**，不能加入 exclude
+            # （那会把它从整轮里抹掉，随后又报「没有号」）。
+            # 短暂退避后重选，让排队的请求自然消化。
+            exclude.discard(account.id)
+            time.sleep(0.15)
             continue
         try:
             data = qoder_accounts.ensure_token(db, account)

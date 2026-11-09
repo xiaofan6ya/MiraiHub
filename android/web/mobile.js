@@ -15,7 +15,8 @@ window.WBMobile = (() => {
     const pending = saves.get(String(id));
     if (!pending) return;
     saves.delete(String(id)); clearTimeout(pending.timer);
-    if(ok) pending.resolve(); else pending.reject(new Error(message || '文件未保存'));
+    if(ok) pending.resolve({ ok: true, path: (window.WBAndroid?.lastExportPath?.() || ""), message: message || '' });
+    else pending.reject(new Error(message || '文件未保存'));
   }
   function initialize(token) {
     // 桥接令牌**不是**长期凭据，也绝不能落 localStorage / JS 全局：
@@ -132,5 +133,8 @@ window.WBMobile = (() => {
   }
   compact.addEventListener('change', arrangeHeader);
   arrangeHeader();
-  return {initialize, saveText, saveResult};
+  return {initialize, saveText, saveResult,
+    // 「打开文件位置」/ 查看上次导出落点：给设置页与导出完成提示用。
+    revealLastExport: () => window.WBAndroid?.revealLastExport?.(),
+    lastExportPath: () => window.WBAndroid?.lastExportPath?.() || ""};
 })();

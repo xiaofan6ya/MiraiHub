@@ -333,7 +333,10 @@ def install() -> None:
             # 动作能力（前端据此渲染按钮）
             # checkin 不在这里：WorkBuddy 的签到走定时任务 daily_checkin，
             # 没有手动接口。声明了但没实现 -> 点了 404。
-            "actions": ["scan", "import", "refresh-quota", "usage"],
+            # export：通用号池导出（备份含凭证 / 清单脱敏），端点一直有
+            # （`/api/accounts/export`），但没声明时控制台不渲染按钮，
+            # 用户只能导出别的平台（issue #25 的同一类问题）。
+            "actions": ["scan", "import", "export", "refresh-quota", "usage"],
         },
     ))
     logger.debug("WorkBuddy 平台已登记")

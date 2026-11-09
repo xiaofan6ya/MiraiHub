@@ -237,7 +237,18 @@ def run_daily_checkin(db: Session, schedule=None, realm: str = "") -> dict:
         try:
             data = qoder_accounts.ensure_token(db, account)
             token = qoder_accounts.token_of(data)
+            umid = qoder_accounts.umid_of(data)
+            # ---- 第 1 步：先用基础头拉一次，拿 uid ----
+            # 风控身份是**按 uid 生成的**，所以必须先拿到它，才能带
+            # `Cosy-Machine*` 重拉（顺序反了上游不认，见 skill/QODER-QUOTA.md）。
             campaigns = client.fetch_campaigns(token, account_realm)
+            uid = str(campaigns.get("uid") or data.get("uid") or "")
+            # ---- 第 2 步：带 UMID 风控头重拉 ----
+            # 不带这三个头时活动列表**永远只有 VIEW_DETAILS 促销**，
+            # 看起来就像「这个号没有签到」。
+            if umid:
+                campaigns = client.fetch_campaigns(
+                    token, account_realm, uid=uid, umid=umid)
         except client.UpstreamError as exc:
             failed.append({"account_id": account.id, "account": account.name,
                            "error": exc.message[:160]})
@@ -252,7 +263,8 @@ def run_daily_checkin(db: Session, schedule=None, realm: str = "") -> dict:
                 continue
             try:
                 result = client.claim_campaign(token, account_realm,
-                                               row["campaign_id"])
+                                               row["campaign_id"],
+                                               uid=uid, umid=umid)
                 if str(result.get("status") or "") == STATUS_CLAIMED:
                     granted_amount += row["amount"]
                     granted_now += 1
@@ -282,13 +294,21 @@ def run_daily_checkin(db: Session, schedule=None, realm: str = "") -> dict:
             status_key, status_text = "claimed", "已领取"
         elif already_claimed_here:
             status_key, status_text = "already", "今日已领"
+        elif not rows and not umid:
+            # 没有可领权益 **且** 缺 UMID：这不是「这个号没有签到」，
+            # 而是我们这边缺客户端设备身份。报成失败会误导用户去重装/换号。
+            status_key, status_text = "no_umid", "缺 UMID，无法签到"
         elif not rows:
             status_key, status_text = "skipped", "无可领活动"
         else:
             status_key, status_text = "already", "今日已领"
         reason = ("、".join(granted_titles[:3]) if granted_titles
                   else ("今日签到权益已领取" if already_claimed_here
-                        else ("上游未下发可领取的签到活动" if not rows else "")))
+                        else ("缺少客户端 UMID（Cosy-Machine* 风控头），"
+                              "上游只返回促销活动。请从本机客户端导出带 umid 的"
+                              " .info 再导入，或在该账号里补填 umid"
+                              if (not rows and not umid)
+                              else ("上游未下发可领取的签到活动" if not rows else ""))))
 
         items.append({
             "account_id": account.id,

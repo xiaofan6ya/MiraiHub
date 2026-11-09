@@ -252,26 +252,31 @@ def fetch_usage(token: str, realm: str) -> dict:
                         headers=endpoints.open_api_headers(token))
 
 
-def fetch_campaigns(token: str, realm: str) -> dict:
+def fetch_campaigns(token: str, realm: str, *, uid: str = "",
+                    umid: str = "") -> dict:
     """活动列表（签到入口）。
 
     ⚠️ 不要用 legacy 的 `/sash/api/v1/me/daily-check-in/status`：
     两个地区都已停用（国际版 404、中国版恒 `DISABLED`）。
+
+    `umid` 非空时带上 `Cosy-Machine*` 风控头 —— 不带这些头，活动列表里
+    永远只有 `VIEW_DETAILS` 促销，看起来就像「这个号没有签到」。
     """
     conf = endpoints.REGIONS.get(realm) or endpoints.REGIONS["cn"]
     return request_json(
         conf["open_api"] + endpoints.CAMPAIGNS_PATH + endpoints.CAMPAIGNS_QUERY,
         action="活动列表查询",
-        headers=endpoints.sash_headers(token))
+        headers=endpoints.sash_headers(token, uid=uid, umid=umid))
 
 
-def claim_campaign(token: str, realm: str, campaign_id: str) -> dict:
+def claim_campaign(token: str, realm: str, campaign_id: str, *,
+                   uid: str = "", umid: str = "") -> dict:
     conf = endpoints.REGIONS.get(realm) or endpoints.REGIONS["cn"]
     return request_json(
         "%s%s/%s/claim" % (conf["open_api"], endpoints.CAMPAIGNS_PATH,
                            campaign_id),
         action="领取权益", method="POST", body={},
-        headers=endpoints.sash_headers(token))
+        headers=endpoints.sash_headers(token, uid=uid, umid=umid))
 
 
 # ---------------------------------------------------------------------------
