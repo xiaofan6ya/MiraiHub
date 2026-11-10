@@ -46,7 +46,7 @@ window.WBDesktop = (() => {
       if (native) releases = await pywebview.api.check_updates();
       else {
         const response = await api('/api/app/releases');
-        if (!response.ok) throw new Error(`检查失败（HTTP ${response.status}）`);
+        if (!response.ok) throw new Error(`检查失败：${statusText(response.status)}`);
         releases = await response.json();
       }
       label();

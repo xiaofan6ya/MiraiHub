@@ -4,7 +4,7 @@ window.WBReview = (() => {
   let installMethod = 'docker';
   async function json(path, options) {
     const result = await safeJson(await api(path, options));
-    if (!result.ok) throw new Error(typeof result.data.detail === 'string' ? result.data.detail : 'HTTP ' + result.status);
+    if (!result.ok) throw new Error(typeof result.data.detail === 'string' ? result.data.detail : statusText(result.status));
     return result.data;
   }
   function options(id, rows, label) {
@@ -209,7 +209,7 @@ window.WBReview = (() => {
         body: JSON.stringify({ path: value }),
       });
       const { ok, data } = await safeJson(r);
-      if (!ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      if (!ok) throw new Error(data.detail || statusText(r.status));
       toast('备份位置已更新：' + (data.backup_dir || ''));
       loadUpdate();
     } catch (e) {
@@ -225,7 +225,7 @@ window.WBReview = (() => {
         body: JSON.stringify({ reset: true }),
       });
       const { ok, data } = await safeJson(r);
-      if (!ok) throw new Error(data.detail || ('HTTP ' + r.status));
+      if (!ok) throw new Error(data.detail || statusText(r.status));
       toast('已恢复默认位置：' + (data.backup_dir || ''));
       loadUpdate();
     } catch (e) {
@@ -240,7 +240,7 @@ window.WBReview = (() => {
       try {
         const pr = await api('/api/maintenance/backup/info');
         const { ok, data } = await safeJson(pr);
-        if (!ok) throw new Error(data.detail || ('HTTP ' + pr.status));
+        if (!ok) throw new Error(data.detail || statusText(pr.status));
         probe = data;
       } catch (e) {
         throw new Error('连不上后端（' + (e.message || '网络错误') +
@@ -267,7 +267,7 @@ window.WBReview = (() => {
         clearTimeout(timer);
       }
       if (!response.ok) {
-        let detail = 'HTTP ' + response.status;
+        let detail = statusText(response.status);
         try { const r = await safeJson(response); detail = r.data.detail || detail; } catch (_) {}
         throw new Error(detail);
       }
@@ -319,7 +319,7 @@ window.WBReview = (() => {
     try {
       const response = await api('/api/maintenance/restore', {method: 'POST', body: file, headers: {'Content-Type': 'application/octet-stream'}});
       const result = await safeJson(response);
-      if (!result.ok) throw new Error(result.data.detail || 'HTTP ' + result.status);
+      if (!result.ok) throw new Error(result.data.detail || statusText(result.status));
       closeModal();
       const t = result.data.tables || {};
       toast('恢复完成：账号 ' + (t.accounts ?? '?') + ' · Key ' + (t.api_keys ?? '?') + ' · 安全副本 ' + (result.data.safety_copy || '已保存') + '。建议重启服务。', 'ok');
@@ -334,7 +334,7 @@ window.WBReview = (() => {
     try {
       const response = await api('/api/maintenance/restart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})});
       const result = await safeJson(response);
-      if (!result.ok) throw new Error(result.data.detail || 'HTTP ' + result.status);
+      if (!result.ok) throw new Error(result.data.detail || statusText(result.status));
       closeModal();
       toast('已触发重启：新实例将在几秒内就绪，页面将自动重连', 'ok');
       setTimeout(() => location.reload(), 8000);
