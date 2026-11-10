@@ -3506,6 +3506,134 @@ function consoleIcon(name) {
 }
 
 /**
+ * 登录设备面板：多设备在线 + 踢下线 + 拉黑。
+ *
+ * 用户的原话：「允许多台设备登录，系统再做一个登录日志管理就行了，
+ * 可以踢下线、拉黑，表格记录 ip、最近登录时间等信息就好了」。
+ *
+ * 默认就是多设备在线；这里负责处置：
+ *   · 踢下线 —— 只废掉那台机器**当前这次**登录，它下次还能登
+ *   · 拉黑   —— 那台机器的**所有后续登录**都被拒（登录接口签发会话前就查）
+ */
+async function openSessionsPanel() {
+  openModal(`<h3 class="font-semibold text-lg mb-1">登录设备</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+      允许多台设备同时在线。<b>凭证不可搬运</b>：会话与设备标识绑定，
+      把 Cookie 复制到另一台机器也过不了校验。
+    </p>
+    <div id="sessionsBody"><p class="text-xs" style="color:var(--fg-subtle)">加载中…</p></div>
+    <p id="sessionsMsg" class="text-xs mt-2 mb-0" style="color:var(--brand)"></p>
+    <div class="flex flex-wrap justify-end gap-2 mt-3">
+      <button class="console-btn quiet" onclick="sessionsReload()">刷新</button>
+      <button class="console-btn danger-quiet" onclick="sessionsRevokeOthers()">踢掉其它设备</button>
+      <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+    </div>`, "max-w-2xl");
+  await sessionsReload();
+}
+
+async function sessionsReload() {
+  const host = $("#sessionsBody");
+  if (!host) return;
+  let data = {};
+  try {
+    const { ok, data: payload } = await safeJson(await api("/api/sessions"));
+    if (!ok) throw new Error((payload && payload.detail) || "读取失败");
+    data = payload || {};
+  } catch (error) {
+    host.innerHTML = `<p class="text-xs" style="color:var(--danger)">读取失败：${esc(String(error.message || error))}</p>`;
+    return;
+  }
+  const items = data.items || [];
+  const bans = data.bans || [];
+  const rows = items.map(it => {
+    const state = it.state === "active"
+      ? (it.current ? '<span class="badge badge-ok">本机</span>' : '<span class="badge badge-ok">在线</span>')
+      : it.state === "revoked"
+        ? '<span class="badge badge-warn">已踢下线</span>'
+        : '<span class="badge badge-warn">已过期</span>';
+    const seen = it.last_seen_at ? String(it.last_seen_at).replace("T", " ").slice(0, 19) : "—";
+    const created = it.created_at ? String(it.created_at).replace("T", " ").slice(0, 19) : "—";
+    const ops = it.state !== "active" ? "" : (it.current
+      ? '<span class="text-[11px]" style="color:var(--fg-subtle)">当前设备</span>'
+      : `<button class="console-btn quiet" onclick="sessionsRevoke(${jsv(it.sid)})">踢下线</button>
+         <button class="console-btn danger-quiet ml-1" onclick="sessionsBan(${jsv(it.sid)})">拉黑</button>`);
+    return `<tr>
+      <td>${esc(it.label || "未知设备")} ${state}</td>
+      <td class="text-xs">${esc(it.ip || "—")}</td>
+      <td class="text-xs">${esc(created)}</td>
+      <td class="text-xs">${esc(seen)}</td>
+      <td class="text-right">${ops}</td>
+    </tr>`;
+  }).join("");
+  const banRows = bans.length ? `<p class="text-xs mt-3 mb-1" style="color:var(--fg-muted)">已拉黑设备</p>
+    ${bans.map(b => `<div class="flex items-center justify-between text-xs py-1">
+      <span>${esc(b.label || "未知设备")} · ${esc(b.ip || "—")} · ${esc(b.reason || "")}</span>
+      <button class="console-btn quiet" onclick="sessionsUnban(${b.id})">解除</button>
+    </div>`).join("")}` : "";
+  host.innerHTML = `<table class="tbl w-full">
+    <thead><tr><th>设备</th><th>IP</th><th>登录时间</th><th>最近活动</th><th class="text-right">操作</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="text-xs">没有登录记录</td></tr>'}</tbody>
+  </table>${banRows}
+  <p class="text-[11px] mt-2 mb-0" style="color:var(--fg-subtle)">
+    当前 ${data.active || 0} 台在线${data.max_devices ? `（上限 ${data.max_devices}）` : ""}。
+  </p>`;
+}
+
+async function sessionsRevoke(sid) {
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/${encodeURIComponent(sid)}/revoke`, { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已踢下线";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "踢下线失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsRevokeOthers() {
+  if (!await uiConfirm({ message: "确认踢掉除本机外的全部登录？", title: "踢掉其它设备" })) return;
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api("/api/sessions/revoke-others", { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = `已踢下线 ${data.revoked || 0} 台设备`;
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "操作失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsBan(sid) {
+  if (!await uiConfirm({ kind: "warn", danger: false, title: "拉黑这台设备",
+    message: "拉黑后这台机器**所有后续登录都会被拒绝**（不只是当前这次）。\n可以在本面板的「已拉黑设备」里解除。", okText: "拉黑" })) return;
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/${encodeURIComponent(sid)}/ban`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "手动拉黑" }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已拉黑该设备";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "拉黑失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsUnban(banId) {
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/ban/${banId}`, { method: "DELETE" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已解除拉黑";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "解除失败：" + String(error.message || error);
+  }
+}
+
+/**
  * Loomy 邀请码：单号绑定 / 单号兑换 / 平台面板（同步 + 默认码 + 批量）。
  *
  * ## 上游两条硬规则（实测 2026-11-09，用户确认）

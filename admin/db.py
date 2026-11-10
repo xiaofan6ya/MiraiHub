@@ -168,6 +168,10 @@ def init_db() -> bool:
         # NULL; schedule timing treats NULL and an empty config identically.
         _ensure_column("schedules", "timing_config", "TEXT", "NULL")
 
+        # 迁移：登录管理（设备列表显示用，2026-11-10）
+        _ensure_column("admin_sessions", "device_label", "VARCHAR(120)", "DEFAULT ''")
+        _ensure_column("admin_sessions", "ip_label", "VARCHAR(120)", "DEFAULT ''")
+
         # 迁移：给 usage_logs 表加详细用量与真实客户端 IP 列
         _ensure_column("usage_logs", "prompt_tokens", "INT", "NULL")
         _ensure_column("usage_logs", "completion_tokens", "INT", "NULL")

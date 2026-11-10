@@ -495,6 +495,46 @@ class AdminSession(Base):
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
     revoked_reason = Column(String(48), default="")
+    #: 人类可读的设备标签（"Chrome / Windows"），登录时从 UA 解析。
+    #: 只用于登录管理界面显示，不参与任何校验。
+    device_label = Column(String(120), default="")
+    #: 最近一次活动 IP 的归属描述（注册地 / 内网），仅展示用。
+    ip_label = Column(String(120), default="")
+
+
+class AdminDeviceBan(Base):
+    """登录设备黑名单（「拉黑」）。
+
+    ## 为什么单独一张表，而不是在 `admin_sessions` 上加 `blocked`
+
+    会话是**一次登录**，设备是**一台机器**：踢下线只废掉当前这次登录，
+    拉黑要挡住这台机器**以后的所有登录**。两者的生命周期不同，混在一张表里
+    会出现「踢了又自动登回来」的困惑。
+
+    维度：
+      * `bind_hash` —— 设备标识 Cookie 的摘要（主键维度，必填）；
+      * `fp` —— 可选，前端上报的指纹补充维度。
+
+    匹配规则：`bind_hash` 命中即拒；`fp` 命中**且** `bind_hash` 为空的那种
+    手工拉黑记录也拒（用于「还没登录过、先拉黑指纹」的场景）。
+    """
+
+    __tablename__ = "admin_device_bans"
+    __table_args__ = (
+        Index("ix_admin_device_bans_active", "revoked_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #: 设备标识摘要（与 `admin_sessions.bind_hash` 同算法）。
+    bind_hash = Column(String(64), nullable=False, default="", index=True)
+    #: 补充指纹。
+    fp = Column(String(64), nullable=False, default="", index=True)
+    label = Column(String(120), default="")
+    ip = Column(String(64), default="")
+    reason = Column(String(200), default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    #: 解除拉黑的时间（NULL = 仍在黑名单里）。
+    revoked_at = Column(DateTime, nullable=True)
 
 
 class ClientIdentity(Base):

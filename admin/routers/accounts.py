@@ -27,6 +27,12 @@ from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
+#: 导入任务多久算僵死（秒）。超过这个时长 + 进度长时间不动 → 接管重跑。
+#: 取 20 分钟：正常几百个号带验证也就几分钟，20 分钟还不推进基本是卡死了。
+_STALE_JOB_SECONDS = 20 * 60
+#: 进度空闲多久算卡住（秒）。
+_STALE_JOB_IDLE_SECONDS = 5 * 60
+
 # 模块内多处（含 _post_login_automation 的兜底日志）用 _logger；不定义的话
 # 那些 except 分支会再抛一个 NameError，把原始异常盖掉。
 _logger = logging.getLogger("admin.accounts")
@@ -633,7 +639,30 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
 
     running = jobrunner.RUNNER.get(key)
     if running and running.status == "running":
-        return {"reused": True, **running.snapshot()}
+        # ## 卡死自愈（2026-11-10）
+        #
+        # 原来只要这个平台有一条 job 处于 running，新的导入请求就直接
+        # `reused: True` 把旧 job 的快照返回 —— 用户看到的是「点了没反应」。
+        # 一旦那条 job 因上游超时/网络卡住没退出，这个平台的导入就**永久
+        # 被锁死**（实测：WorkBuddy 导十几个号卡一次之后，后面每次导入
+        # 都立刻返回同一个旧进度）。
+        #
+        # 判定僵死：跑了超过 `_STALE_JOB_SECONDS` 且最近
+        # `_STALE_JOB_IDLE_SECONDS` 内进度完全没推进。
+        age = (datetime.utcnow()
+               - (running.started_at or datetime.utcnow())).total_seconds()
+        last = getattr(running, "updated_at", None) or running.started_at
+        idle = (datetime.utcnow() - last).total_seconds() if last else age
+        if age > _STALE_JOB_SECONDS and idle > _STALE_JOB_IDLE_SECONDS:
+            _logger.warning("导入任务僵死，接管重跑 key=%s age=%.0fs idle=%.0fs",
+                           key, age, idle)
+            try:
+                running.status = "failed"
+                running.error = "stale_takeover"
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            return {"reused": True, **running.snapshot()}
 
     def worker(job: jobrunner.Job) -> dict:
         db = SessionLocal()
@@ -676,7 +705,13 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
                     return {"ok": False, "added": 0, "updated": 0, "failed": 0,
                             "total": 0,
                             "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}
-                chunk_size = 200
+                # 分块大小：小批次用小块，保证「导一个算一个」的语义。
+                #
+                # 固定 200 时，十几个号的备份等于**一整块**：平台 `import_batch`
+                # 内部统一提交，中途一卡死整批丢失。≤50 条时降成 5 条一块，
+                # 丢的窗口最多 5 个；大批次仍用 200（块太小会把逐块探活的开销
+                # 放大成主要耗时）。
+                chunk_size = 5 if len(records) <= 50 else 200
                 agg = {"ok": True, "added": 0, "updated": 0, "failed": 0,
                        "total": 0, "errors": []}
                 # 平台若支持细粒度进度（例如 Loomy 的并发探活），把 job 的
@@ -1789,10 +1824,22 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
     #: 落库后需要补刷余额的账号 id（并发刷，见下方第 3) 段）
     needs_refresh: list[int] = []
 
-    def _flush(every: int = 200) -> None:
+    #: 每条记录落库后立即提交（「导一个算一个」）。
+    #:
+    #: 用户的原话：「导入不用堵塞，确保是异步操作，就是导一个算一个而不是等
+    #: 全部导入成功才算导，一个一个导进来，哪怕卡死也只是导入进卡死前的账号」。
+    #:
+    #: 原来固定 200 条提交一次 —— 十几个号的批次等于**整批只在最后提交一次**，
+    #: 中途一卡死，前面成功的也全丢了，用户看到「导入报错、号一个没进来」。
+    #:
+    #: 大批次（>500）退化成每 20 条一次：几千条逐条 commit 的 fsync 太贵，
+    #: 而每 20 条的丢失窗口已经足够小。
+    commit_every = 1 if total <= 500 else 20
+
+    def _flush(every: int | None = None) -> None:
         nonlocal pending
         pending += 1
-        if pending >= every:
+        if pending >= (every or commit_every):
             db.commit()
             pending = 0
 

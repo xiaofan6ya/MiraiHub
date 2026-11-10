@@ -18,7 +18,8 @@ from admin.models import SystemSetting
 from admin import env_guard, session_store
 from admin.routers import (accounts, credits, groups,
                            growth, keys, login as login_router, logs, models,
-                           proxy, proxies, schedules, stats, sync)
+                           proxy, proxies, schedules, sessions as sessions_router,
+                           stats, sync)
 from admin.ratelimit import (client_ip_from_request, clear_failures,
                              is_locked, record_failure)
 from admin.security import (
@@ -337,6 +338,8 @@ app.include_router(logs.router)
 app.include_router(groups.router)
 app.include_router(stats.router)
 app.include_router(credits.router)
+# 登录设备管理（多设备在线 + 踢下线 + 拉黑）
+app.include_router(sessions_router.router)
 app.include_router(maintenance.router)
 from admin.routers import runtime_config
 app.include_router(runtime_config.router)
@@ -667,6 +670,21 @@ def login(
     # 唯一的有效副本是 HttpOnly Cookie，`document.cookie` 读不到，
     # XSS 再复发也拿不走凭证。
     device_id, new_device = _ensure_device_id(request)
+
+    # 拉黑的设备连登录都不给（放在签发之前：黑名单里的机器拿不到会话行）
+    _ban_db = SessionLocal()
+    try:
+        ban = session_store.banned_for(
+            _ban_db, bind_hash=session_store.bind_digest(device_id),
+            fp=str(fingerprint or ""))
+    finally:
+        _ban_db.close()
+    if ban is not None:
+        logger.warning("被拉黑的设备尝试登录 ip=%s label=%s", ip, ban.label or "-")
+        raise HTTPException(
+            status_code=403,
+            detail="该设备已被禁止登录，请在「登录设备」里解除或换一台设备")
+
     token, session_row = _issue_admin_session(
         request, ip=ip, fingerprint=fingerprint, device_id=device_id)
 
@@ -675,6 +693,8 @@ def login(
         "expires_in": settings.JWT_EXPIRE_HOURS * 3600,
         # 会话标识只用于排障与「当前设备」展示，不是凭证。
         "sid": session_row.sid[:8],
+        # 多设备模式：明确告诉前端「当前在线设备数」，方便它提示
+        "multi_device": not settings.SESSION_SINGLE,
     })
     _attach_auth_cookies(response, request, token, device_id, new_device)
     return response
@@ -690,7 +710,13 @@ def _ensure_device_id(request: Request) -> tuple[str, bool]:
 
 def _issue_admin_session(request: Request, *, ip: str, fingerprint: str | None,
                          device_id: str):
-    """签发一条新会话（并吊销该账号此前的全部会话）。"""
+    """签发一条新会话。
+
+    多设备策略（2026-11-10）：
+      * `SESSION_SINGLE=1` 时仍踢掉旧会话（显式开启才这样）；
+      * 默认**允许多设备同时在线**，只受 `SESSION_MAX_DEVICES` 上限约束；
+      * 设备被拉黑时直接拒绝登录（`banned_for` 在校验密码之前就查）。
+    """
     ttl = settings.JWT_EXPIRE_HOURS * 3600
     sid = session_store.new_sid()
     token = create_admin_token(sid)
@@ -707,6 +733,9 @@ def _issue_admin_session(request: Request, *, ip: str, fingerprint: str | None,
             device_id=device_id if settings.SESSION_BIND_DEVICE else "",
             ttl_seconds=ttl,
             single=settings.SESSION_SINGLE,
+            # 多设备模式下的上限；0 表示不限
+            max_devices=(0 if settings.SESSION_SINGLE
+                         else max(0, int(getattr(settings, "SESSION_MAX_DEVICES", 0) or 0))),
         )
     finally:
         db.close()
