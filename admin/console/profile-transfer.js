@@ -6,7 +6,7 @@ window.WBProfileTransfer = (() => {
     if (!el) return;
     try {
       const r = await api('/api/client-profile');
-      if (!r.ok) throw new Error(`读取失败（HTTP ${r.status}）`);
+      if (!r.ok) throw new Error(`读取失败：${statusText(r.status)}`);
       const d = await r.json();
       const p = d.effective || {};
       el.textContent = `${d.source === 'saved' ? '已启用保存的参数' : '优先自动探测'} · WorkBuddy ${p.desktop_version || '—'} · CLI ${p.cli_version || '—'}`;

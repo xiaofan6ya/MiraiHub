@@ -807,6 +807,33 @@ async function clearInvitation() {
   $('#invitationInput').value = '';
   await saveInvitation();
 }
+/* HTTP 状态码 → 中文人话（前端本地表，纯函数、无副作用）。
+ *
+ * 为什么不复用后端那张表：后端 admin/data/upstream_error_messages.json（147 条）
+ * 只被 admin/upstream_errors.py 消费成 `client_message`，且只随「单账号刷新失败」
+ * 一条通道下发；没有任何接口、也没有静态目录把整张表交给前端
+ * （/admin/assets → admin/console、/static → admin/static，admin/data 不对外）。
+ * 而前端渲染裸「HTTP 502」的地方（toast / 表格空态 / 启动探针）手里只有一个数字。
+ *
+ * 所以这里内嵌**最小的**四条 + 回落，不做第二份 147 条映射表；
+ * 后端将来若开放接口，只需把这张表换成查表，调用点无需再动。
+ */
+const HTTP_STATUS_TEXT = {
+  500: "服务端内部错误，请稍后重试",
+  502: "服务网关异常，请稍后重试",
+  503: "服务暂时不可用，请稍后重试",
+  504: "网关等待上游超时，请稍后重试",
+};
+/** 状态码 → 人话；**始终保留状态码**（人话里带「（HTTP 502）」），
+ *  未知码 / 无码原样回落「HTTP N」——排障时状态码是唯一线索，不能吞。
+ *  顶层声明，同页其它面板脚本（key-ip / ip-management / agent）可直接调用。 */
+function statusText(status, fallback) {
+  const code = Number(status);
+  const text = HTTP_STATUS_TEXT[code];
+  if (text) return `${text}（HTTP ${code}）`;
+  return fallback || `HTTP ${status || "?"}`;
+}
+
 /** 把接口错误收敛成一句人话。
  *
  * 反代 / 隧道挂掉时会返回整页 HTML（Cloudflare 502、nginx 500…），
@@ -820,16 +847,16 @@ function apiErrText(data, status, fallback) {
   }
   raw = String(raw).trim();
   if (/^<!doctype|^<html|<\/html>|<head[\s>]|<body[\s>]/i.test(raw)) {
-    return `网关返回了非 JSON 页面（HTTP ${status || "?"}），请检查反向代理 / 隧道是否正常`;
+    return `网关返回了非 JSON 页面：${statusText(status)}。请检查反向代理 / 隧道是否正常`;
   }
-  return (raw || fallback || `HTTP ${status || "?"}`).slice(0, 160);
+  return (raw || fallback || statusText(status)).slice(0, 160);
 }
 
 async function safeJson(r) {
   /* 容错解析：后端偶发返回非 JSON（如 500 明文）时，避免报 "Unexpected token" 崩溃 */
   const t = await r.text();
   try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
-  catch (e) { return { ok: false, status: r.status, data: { detail: t || ("HTTP " + r.status), _parse_error: true } }; }
+  catch (e) { return { ok: false, status: r.status, data: { detail: t || statusText(r.status), _parse_error: true } }; }
 }
 /* ============================================================================
    按钮防呆：点下去立刻转圈 + 禁用，防重复提交
@@ -2574,7 +2601,7 @@ async function loadGateway() {
     ]);
     if (!cfgResp.ok) {
       const host = $("#gwStrategies");
-      if (host) host.innerHTML = `<p class="ov-note">配置加载失败（HTTP ${cfgResp.status}）</p>`;
+      if (host) host.innerHTML = `<p class="ov-note">配置加载失败：${statusText(cfgResp.status)}</p>`;
       return;
     }
     _gwConfig = await cfgResp.json();
@@ -2826,7 +2853,7 @@ async function loadJoinGate() {
   try {
     const r = await api("/api/join/gate/status");
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     _joinGate = data;
     const open = !!data.open;
     $("#joinGateDot").classList.toggle("on", open);
@@ -2924,7 +2951,7 @@ async function loadPlatformOverview() {
   try {
     const r = await api("/api/platforms/" + encodeURIComponent(platformId) + "/overview");
     if (!r.ok) {
-      host.innerHTML = `<p class="ov-note">该平台概览加载失败（HTTP ${r.status}）</p>`;
+      host.innerHTML = `<p class="ov-note">该平台概览加载失败：${statusText(r.status)}</p>`;
       return;
     }
     const data = await r.json();
@@ -3532,7 +3559,7 @@ async function accInviteBind(id) {
       body: JSON.stringify({ code: String(code).trim() }),
     });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     if (data.ok) {
       toast(`#${id} 已绑定邀请码 ${data.applied_code || data.code}`, "ok");
     } else {
@@ -3558,7 +3585,7 @@ async function accRedeemCode(id) {
       body: JSON.stringify({ code: String(code).trim() }),
     });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     toast(data.ok
       ? `#${id} 兑换成功，当前余额 ${fmtCredit(data.balance)}`
       : `#${id} 兑换失败：${data.reason || "上游拒绝"}`, data.ok ? "ok" : "err");
@@ -3724,7 +3751,7 @@ async function accRunTask(id, task, label) {
       toast(data.reason || "该平台没有这个单账号任务", "err");
       return;
     }
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     const summary = data.summary || (data.ok ? name + "完成" : name + "未完成");
     toast(`${name}：#${id} ${summary}`, data.ok ? "ok" : "err");
     accReloadActive();
@@ -4573,7 +4600,7 @@ async function accBulkRun(action) {
       body: JSON.stringify({ action, ids }),
     });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     const parts = [`${label}：影响 ${data.affected} 个`];
     if (data.skipped && data.skipped.length) parts.push(`跳过 ${data.skipped.length} 条`);
     if (data.errors && data.errors.length) parts.push(`失败 ${data.errors.length} 条`);
@@ -4599,7 +4626,7 @@ async function accBulkExport() {
       body: JSON.stringify({ ids, format: "client" }),
     });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     // 大号池走异步任务：接口返回 job_id，进度在「后台任务」里看
     if (data.job_id) { toast("已提交导出任务，进度见「后台任务」", "ok"); return; }
     const text = data.text || JSON.stringify(data.accounts || data, null, 2);
@@ -4935,7 +4962,7 @@ async function loadQoderAccounts(platform) {
     const body = $("#accBody");
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 Qoder 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 Qoder 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -5041,7 +5068,7 @@ async function loadLoomyAccounts(platform) {
     const body = $("#accBody");
     if (body) {
       body.innerHTML = `<tr><td colspan="7"><div class="account-empty">
-        <strong>读取 Loomy 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 Loomy 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -5234,7 +5261,7 @@ async function loadCodeArtsAccounts(platform) {
   if (!r.ok) {
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 CodeArts 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 CodeArts 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -5378,7 +5405,7 @@ async function loadMinimaxAccounts(platform) {
   if (!r.ok) {
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 MiniMax 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 MiniMax 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -5788,7 +5815,7 @@ async function traeUsageDetail(spec) {
   const { ok, data } = await safeJson(r);
   if (!ok) {
     openModal(`<h3 class="font-semibold text-lg mb-2">用量明细</h3>
-      <p style="color:var(--danger)">读取失败：${esc((data && data.detail) || r.status)}</p>`);
+      <p style="color:var(--danger)">读取失败：${esc((data && data.detail) || statusText(r.status))}</p>`);
     return;
   }
 
@@ -6712,7 +6739,7 @@ async function platformBeginAuth(spec, storage) {
       if (window.WBPlatform) window.WBPlatform.refreshCounts();
       setTimeout(() => closeModal(), 900);
     } else {
-      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || claim.status}`;
+      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || statusText(claim.status)}`;
     }
     return;
   }
@@ -6739,7 +6766,7 @@ async function platformActivity(spec, storage) {
   }
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`活跃失败：${(data && data.detail) || r.status}`, "err");
+    toast(`活跃失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -6770,7 +6797,7 @@ async function platformBanRecheck(spec, storage) {
   const r = await api(prefix + "/ban-recheck", { method: "POST" });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`复检失败：${(data && data.detail) || r.status}`, "err");
+    toast(`复检失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   const recovered = (data && data.recovered) || [];
@@ -6802,7 +6829,7 @@ async function platformOnboarding(spec, storage) {
   try {
     const r = await api(base + "/onboarding" + qs, { method: "GET" });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     preview = data;
   } catch (error) {
     toast("读取任务失败：" + (error && error.message ? error.message : error), "err");
@@ -6847,7 +6874,7 @@ async function platformOnboarding(spec, storage) {
   try {
     const r = await api(base + "/onboarding" + qs, { method: "POST" });
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     const gained = data.gained || 0;
     openModal(`<h3 class="font-semibold text-lg mb-1">新手任务 · ${label}</h3>
       <p class="text-xs mb-3" style="color:var(--fg-subtle)">
@@ -6890,7 +6917,7 @@ async function platformCheckin(spec, storage) {
   }
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`签到失败：${(data && data.detail) || r.status}`, "err");
+    toast(`签到失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   if (data.supported === false) {
@@ -6984,7 +7011,7 @@ async function platformScanLocal(spec, storage) {
   const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`扫描失败：${(data && data.detail) || r.status}`, "err");
+    toast(`扫描失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   await showScanResult(data, spec, storage);
@@ -7086,7 +7113,7 @@ async function platformExportDownload(base, mode, storage) {
     });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
-      toast(`导出失败：${d.detail || r.status}`, "err");
+      toast(`导出失败：${d.detail || statusText(r.status)}`, "err");
       return;
     }
     // 后端返回的是 JSON（含 accounts 数组），这里落成文件而不是弹窗展示 ——
@@ -7144,7 +7171,7 @@ async function platformScanAll(btn) {
           });
           // safeJson 返回 {ok,status,data}，data 才是响应体
           const { ok, data: d } = await safeJson(r);
-          if (!ok) row.note = (d && d.detail) || ("HTTP " + r.status);
+          if (!ok) row.note = (d && d.detail) || statusText(r.status);
           else {
             row.imported = d.added || 0;
             row.skipped = d.skipped || 0;
@@ -7156,7 +7183,7 @@ async function platformScanAll(btn) {
           // 只报告发现数量，导入仍走「授权登录」。
           const r = await api("/api/qoder/scan-local", platformActionOptions(spec));
           const { ok, data: d } = await safeJson(r);
-          if (!ok) row.note = "扫描失败（HTTP " + r.status + "）";
+          if (!ok) row.note = "扫描失败：" + statusText(r.status);
           else {
             row.scanned = (d.items || []).length;
             row.note = row.scanned
@@ -7169,7 +7196,7 @@ async function platformScanAll(btn) {
           const prefix = platformApiPrefix(spec, storage);
           const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
           const { ok, data: d } = await safeJson(r);
-          if (!ok) { row.note = "扫描失败（HTTP " + r.status + "）"; continue; }
+          if (!ok) { row.note = "扫描失败：" + statusText(r.status); continue; }
           const items = d.items || [];
           row.scanned = items.length;
           if (!items.length) { row.note = "本机没有可读凭证"; continue; }
@@ -7182,7 +7209,7 @@ async function platformScanAll(btn) {
             body: JSON.stringify(uids.length ? { uids, all: false } : { all: true }),
           }));
           const { ok: ok2, data: d2 } = await safeJson(r2);
-          if (!ok2) row.note = "入库失败：" + ((d2 && d2.detail) || ("HTTP " + r2.status));
+          if (!ok2) row.note = "入库失败：" + ((d2 && d2.detail) || statusText(r2.status));
           else {
             row.imported = d2.imported || 0;
             row.skipped = d2.skipped || 0;
@@ -7269,7 +7296,7 @@ async function platformExportAllDownload(mode) {
     const r = await api("/api/platforms/export-all?mode=" + encodeURIComponent(mode)
       + (platform ? "&platform=" + encodeURIComponent(platform) : ""));
     const { ok, data: d } = await safeJson(r);
-    if (!ok) { toast("导出失败：" + ((d && d.detail) || r.status), "err"); return; }
+    if (!ok) { toast("导出失败：" + ((d && d.detail) || statusText(r.status)), "err"); return; }
     const platforms = (d && d.platforms) || {};
     const count = Object.values(platforms).reduce((s2, p2) => s2 + (p2.count || 0), 0);
     if (!count) { toast("该平台没有账号可导出", "err"); return; }
@@ -7347,7 +7374,7 @@ async function platformImportAllRun() {
       // /api/accounts/import-async 返回 job.snapshot()：有 job_id，没有 ok 字段
       const { ok, data: d } = await safeJson(r);
       if (!ok || !(d && d.job_id)) {
-        show(`平台 ${storage} 提交失败：` + ((d && d.detail) || ("HTTP " + r.status)));
+        show(`平台 ${storage} 提交失败：` + ((d && d.detail) || statusText(r.status)));
         continue;
       }
       jobs.push({ storage, job_id: d.job_id });
@@ -7399,7 +7426,7 @@ async function platformImportConfirm(spec, storage, uids) {
   }));
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`导入失败：${(data && data.detail) || r.status}`, "err");
+    toast(`导入失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   if (data.imported > 0) {
@@ -7552,7 +7579,7 @@ async function platformRefreshAll(spec, storage) {
   const r = await api(base + qs);
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`刷新失败：读取账号列表失败（HTTP ${r.status}）`, "err");
+    toast(`刷新失败：读取账号列表失败，${statusText(r.status)}`, "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -8037,7 +8064,7 @@ async function refreshAcc(id){
     const reason = (err && err.message)
       || (typeof detail === 'object' && detail && detail.message)
       || (typeof detail === 'string' && detail)
-      || `HTTP ${r.status}`;
+      || statusText(r.status);
     toast(`刷新失败：${reason}`, 'err');
     // 有结构化上游证据才弹窗；否则只弹 toast（小浣熊这类用 error 字段，
     // 没有 upstream 明细，弹一个空窗只会更困惑）。
@@ -8126,7 +8153,7 @@ async function toggleAcc(id, st) {
   });
   if (!r.ok) {
     const d = await r.json().catch(() => ({}));
-    toast("操作失败：" + (d.detail || r.status), "err");
+    toast("操作失败：" + (d.detail || statusText(r.status)), "err");
     return;
   }
   toast(st === "active" ? "已启用" : "已禁用");
@@ -8138,7 +8165,7 @@ async function delAcc(id) {
   if (!await uiConfirm({ message: "确认删除该账号？", title: "删除账号" })) return;
   const r = await api(`/api/accounts/${id}`, { method: "DELETE" });
   const d = r.ok ? {} : await r.json().catch(() => ({}));
-  toast(r.ok ? "已删除" : ("删除失败：" + (d.detail || r.status)), r.ok ? "ok" : "err");
+  toast(r.ok ? "已删除" : ("删除失败：" + (d.detail || statusText(r.status))), r.ok ? "ok" : "err");
   if (r.ok) {
     accReloadActive();
     refreshPlatformSurfaces();
@@ -8153,7 +8180,7 @@ async function injectAcc(id){
 
   let r = await post(false);
   let d = await r.json().catch(()=>({}));
-  if(!r.ok){ toast("注入失败: "+(d.detail||r.status), "err"); return; }
+  if(!r.ok){ toast("注入失败: "+(d.detail||statusText(r.status)), "err"); return; }
 
   // 客户端**把登录态放在内存里**，只改磁盘文件撑不过一次令牌刷新：
   // 实测注入后 2 分钟就被它整份重写回去。所以这里必须把「文件写了」
@@ -8167,7 +8194,7 @@ async function injectAcc(id){
     toast("正在重启客户端…");
     r = await post(true);
     d = await r.json().catch(()=>({}));
-    if(!r.ok){ toast("重启注入失败: "+(d.detail||r.status), "err"); return; }
+    if(!r.ok){ toast("重启注入失败: "+(d.detail||statusText(r.status)), "err"); return; }
   }
 
   if(d.verified) {
@@ -8995,7 +9022,7 @@ async function scanLocal(btn){
       return;
     }
     if (!r.ok) {
-      toast("扫描失败（HTTP " + r.status + "）" + (d && d.detail ? "：" + d.detail : ""), "err");
+      toast("扫描失败：" + statusText(r.status) + (d && d.detail ? "：" + d.detail : ""), "err");
       return;
     }
     if (!d.exists) { openModal(`<h3 class="font-bold mb-3">扫描本机账号</h3><p class="text-sm text-slate-500">未找到登录目录：<br><code class="text-xs">${esc(d.dir||"")}</code></p><div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`); return; }
@@ -10250,7 +10277,7 @@ async function downloadExportToken(token) {
   if (window.WBMobile?.saveText) {
     try {
       const r = await api(url, { method: "GET" });
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) throw new Error(statusText(r.status));
       const text = await r.text();
       await downloadText(`miraihub-accounts-${exportStamp()}.json`, text, "application/json");
     } catch (e) {
@@ -10289,7 +10316,7 @@ async function _fetchExport() {
     body: JSON.stringify(body)
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return null; }
+  if (!r.ok) { toast("导出失败：" + (d.detail || statusText(r.status)), "err"); return null; }
   if (!d.items || !d.items.length) { toast("没有可导出的账号", "err"); return null; }
   return d;
 }
@@ -10345,7 +10372,7 @@ async function exportAcc(id, name) {
   try {
     const r = await api(`/api/accounts/${id}/export?format=${window.WBMobile ? 'backup' : 'client'}`);
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return; }
+    if (!r.ok) { toast("导出失败：" + (d.detail || statusText(r.status)), "err"); return; }
     const safe = String(name || d.name || d.uid || id).replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
     // WorkBuddy 系 = 加密 .info（可注入客户端）；其它平台 = backup 原文
     // （auth_json 原样，可直接再导入）——后端按账号平台决定，看响应里的 format。
@@ -11497,7 +11524,7 @@ async function modelConfigSave(id){
     body: JSON.stringify(body),
   });
   const { ok, data } = await safeJson(r);
-  if(!ok){ toast(`保存失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  if(!ok){ toast(`保存失败：${(data&&data.detail)||statusText(r.status)}`, "err"); return; }
   toast("已保存（只影响这一个模型）");
   closeModal();
   loadModels();
@@ -11510,7 +11537,7 @@ async function modelConfigReset(id){
     body: JSON.stringify({enabled: true, caps: {}, sort: 0}),
   });
   const { ok, data } = await safeJson(r);
-  if(!ok){ toast(`恢复失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  if(!ok){ toast(`恢复失败：${(data&&data.detail)||statusText(r.status)}`, "err"); return; }
   toast("已恢复上游默认");
   closeModal();
   loadModels();
@@ -12682,7 +12709,7 @@ async function saveClientPathOverride(storage){
     const r = await api(`/api/client-paths/${encodeURIComponent(storage)}`,
       { method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ values }) });
-    if (!r.ok) { toast("保存失败：" + r.status, "err"); return; }
+    if (!r.ok) { toast("保存失败：" + statusText(r.status), "err"); return; }
     await api("/api/client-paths/refresh", { method: "POST" }).catch(() => {});
     toast("路径已保存，正在重新探测");
     await detectClient();
@@ -12803,7 +12830,7 @@ async function loadClientProfile(){
     // 这里明确提示，否则用户只会看到一个空白面板。
     if($("#clientHint")) $("#clientHint").innerHTML = r.status === 404
       ? `<span class="text-amber-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>后端尚未加载客户端参数接口（HTTP 404）。请重启服务后刷新本页。</span>`
-      : `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+      : `<span class="text-red-500">加载失败：${statusText(r.status)}</span>`;
     return;
   }
   const d = await r.json(); _clientProfile = d;
@@ -13556,7 +13583,7 @@ async function saveGwSpread(checked) {
   });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast("保存失败：" + ((data && data.detail) || r.status), "err");
+    toast("保存失败：" + ((data && data.detail) || statusText(r.status)), "err");
     return;
   }
   toast(checked
@@ -13570,7 +13597,7 @@ async function detectAllClients() {
   const r = await api("/api/client-profile/detect-all", { method: "POST" });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast("探测失败：" + ((data && data.detail) || r.status), "err");
+    toast("探测失败：" + ((data && data.detail) || statusText(r.status)), "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -13646,7 +13673,7 @@ async function detectClient(){
   const parsed = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (body) {
-      body.innerHTML = `<p style="color:var(--danger)">探测失败：${esc(parsed.detail || response.status)}</p>`;
+      body.innerHTML = `<p style="color:var(--danger)">探测失败：${esc(parsed.detail || statusText(response.status))}</p>`;
     }
     return;
   }
@@ -13705,7 +13732,7 @@ async function loadAppSource(){
     // 404 = 该功能被 ADMIN_DEV_TOOLS=0 关闭；整块隐藏，不给用户看死按钮
     if(r.status === 404){ $("#appSourceBlock")?.classList.add("hidden"); return; }
     if($("#appSourceStatus")) $("#appSourceStatus").innerHTML =
-      `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+      `<span class="text-red-500">加载失败：${statusText(r.status)}</span>`;
     return;
   }
   const d = await r.json();
@@ -14238,7 +14265,7 @@ async function runSchedule(id){
     const r=await api("/api/schedules/"+id+"/run",{method:"POST"});
     const d=await r.json().catch(()=>({}));
     if(!r.ok){
-      toast("运行失败: "+(d.detail||r.status),"err");
+      toast("运行失败: "+(d.detail||statusText(r.status)),"err");
       return;
     }
     const result = d.result || {};
@@ -16653,7 +16680,7 @@ if (!_localConsoleShell) {
     }
     // 其它状态：先进应用，由各面板自己提示错误
     if (!_booted()) enterApp();
-    toast("部分数据加载失败（HTTP " + r.status + "），可稍后重试", "err");
+    toast("部分数据加载失败：" + statusText(r.status) + "，可稍后重试", "err");
   }).catch(e => {
     // 网络异常也不清 token，允许用户手动重试
     if (!_booted()) enterApp();

@@ -127,7 +127,7 @@ window.WBAgent = (() => {
       credentials: 'same-origin',
     });
     if (!response.ok) {
-      let detail = `HTTP ${response.status}`;
+      let detail = statusText(response.status);
       try {
         const data = await response.json();
         detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
@@ -879,7 +879,7 @@ window.WBAgent = (() => {
         signal: controller.signal,
       });
       if (!response.ok) {
-        let detail = `HTTP ${response.status}`;
+        let detail = statusText(response.status);
         try { const data = await response.json(); detail = data.detail || detail; } catch (_) {}
         throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
       }

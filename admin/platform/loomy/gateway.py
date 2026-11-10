@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 from starlette.responses import JSONResponse, StreamingResponse
@@ -49,7 +50,63 @@ PATHS = (
 )
 
 PUBLIC = "loomy"
-MAX_ATTEMPTS = 3
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """读整型环境变量；**非法值回落默认值，启动绝不因配置崩**。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+#: 换号重试预算。可用环境变量覆盖（`LOOMY_MAX_ATTEMPTS`，默认 3）；
+#: 非数字 / < 1 回落 3（见 `_env_int`），启动不会因配置崩。
+MAX_ATTEMPTS = _env_int("LOOMY_MAX_ATTEMPTS", 3)
+
+#: 上游 5xx（`kind == "upstream_error"`）失败后的**短冷却**秒数。
+#: 上游抖动期，同一个号不该被每个新请求立刻重新撞一遍。
+#: 环境变量 `LOOMY_UPSTREAM_COOL_SECONDS` 可覆盖，允许 0 = 不冷却。
+#: 只做短冷却，**不引入 trae 式熔断**（见 `_cool_seconds`）。
+UPSTREAM_COOL_SECONDS = _env_int("LOOMY_UPSTREAM_COOL_SECONDS", 15, minimum=0)
+
+#: 换号前需要退避的失败类型：只覆盖上游 5xx 与网络异常；
+#: auth / quota_exceeded / 4xx 的既有行为**不变**。
+BACKOFF_KINDS = ("upstream_error", "network")
+#: 退避基数：第 1 次失败后 0.5s，第 2 次 1.0s，第 3 次 2.0s，封顶 3.0s。
+BACKOFF_BASE_SECONDS = 0.5
+#: 单次退避上限（秒）。
+BACKOFF_MAX_SECONDS = 3.0
+
+
+def _backoff_seconds(step: int) -> float:
+    """第 `step` 次（从 1 开始）上游失败后、换号前的退避秒数。
+
+    **按失败序号算，不做累加**：0.5 → 1.0 → 2.0 → …，封顶
+    `BACKOFF_MAX_SECONDS`。只给 5xx / 网络类用（`BACKOFF_KINDS`）。
+    """
+    if step < 1:
+        step = 1
+    return min(BACKOFF_BASE_SECONDS * (2 ** (step - 1)), BACKOFF_MAX_SECONDS)
+
+
+def _cool_seconds(kind: str) -> int:
+    """失败后的冷却秒数（0 = 不冷却，下一个请求立刻可再选中）。
+
+    - `auth` / `quota_exceeded`：600 秒（号真坏了，长时间摘掉）—— **不变**；
+    - `upstream_error`（上游 5xx）：`UPSTREAM_COOL_SECONDS`（默认 15 秒），
+      避免上游抖动期每个新请求都把同一个号重新实撞一遍；
+    - 其它（含 4xx）：0 —— **不变**。
+    """
+    if kind in ("auth", "quota_exceeded"):
+        return 600
+    if kind == "upstream_error":
+        return UPSTREAM_COOL_SECONDS
+    return 0
 
 
 async def _body_of(request) -> dict:
@@ -84,6 +141,56 @@ def _client_ip(request) -> str:
         return ""
 
 
+#: 上游错误里「传输层根本没拿到 HTTP 响应」时回给客户端的错误码。
+#: 与 `kind == "network"` 对应，好让面板 / 日志把「网络类失败」与
+#: 「上游**真的**回了 5xx」分开 —— 两者以前都长成 `upstream_error` + 502。
+UNREACHABLE_CODE = "upstream_unreachable"
+
+#: 由本网关合成的 503 附带的客户端重试间隔（秒）。
+SYNTHETIC_RETRY_AFTER = "3"
+
+
+def _status_of(exc: client.UpstreamError) -> tuple[int, bool]:
+    """上游错误 -> 回给客户端的 `(HTTP 状态码, 是否由本网关合成)`。
+
+    ## 为什么要重写这段（2026-11-10 契约修复 ⑤）
+
+    旧实现是 `status = exc.status or 502`，再来一句越界兜 `502`。
+    `exc.status == 0` 的真实含义是「**传输层根本没拿到 HTTP 响应**」
+    （`admin/platform/loomy/core/client.py:233` 网络失败 / `:247` 返回非
+    JSON），它是 falsy，于是被兜成 **502** —— 面板上的超时 / 连接重置就
+    显示成「HTTP 502」，跟上游**真的**回 502 混为一谈。
+
+    ## 现在的规则
+
+    * 上游真的给了 HTTP 状态（100..599）→ **原样透传**；
+      上游 502 必须还是 502，不得改写。**越界值（<100 或 >599）也不再兜 502**。
+    * `status` 为 0 / None / 越界 → 由 `kind` 合成 **503**：
+      `network`（超时 / 连接重置 / DNS / TLS）与其它（如 `bad_response`）
+      都是 503。两者的区分信息在响应体 `code` 与日志的 `kind` 里，不靠状态码。
+
+    ## 为什么网络类选 503 而不是 504（二选一，依据）
+
+    1. **语义**：`kind == "network"` 是超时之外的合集 —— `client.py:231-234`
+       那句 `except Exception` 把连接被重置 / DNS 解析失败 / TLS 失败都归进来。
+       504 的规范含义是「网关等上游响应超时」，对连接重置属于过度声明；
+       503「服务暂时不可用」才是诚实的统称。
+    2. **契约**：`admin/platform/dispatch.py:66`
+       `_RETRYABLE_STATUS = frozenset({404, 502, 503})`（只读核对，未改）
+       用它决定**跨平台换路**。503 仍会被换到下一个候选平台；
+       504 **不在集合里**（`admin/platform/dispatch.py:1426`），会让网络抖动
+       恰好丢掉跨平台兜底 —— 那是回归。`admin/routers/proxy.py:1907`
+       也把 503 计入可重试、`:3468` 还会为它补 Retry-After。
+    """
+    try:
+        raw = int(exc.status or 0)
+    except (TypeError, ValueError):
+        raw = 0
+    if 100 <= raw <= 599:
+        return raw, False
+    return 503, True
+
+
 def _fail(exc: client.UpstreamError) -> JSONResponse:
     # **把上游原始错误完整记下来**：Loomy 的 400 只回「请求失败（HTTP 400）」，
     # 看不出到底哪里不合法。detail 里是上游原文，必须落日志才排得动。
@@ -94,13 +201,15 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
                        str(getattr(exc, "detail", ""))[:600])
     except Exception:  # noqa: BLE001
         pass
-    status = exc.status or 502
-    if status < 400 or status > 599:
-        status = 502
+    status, synthetic = _status_of(exc)
+    # `code` 也要能区分：`network` 类此前落进 `or "upstream_error"`，
+    # 与「上游真回 5xx」同名；现在单独给 `upstream_unreachable`。
+    code = (UNREACHABLE_CODE if exc.kind == "network"
+            else (exc.code or "upstream_error"))
+    headers = {"Retry-After": SYNTHETIC_RETRY_AFTER} if synthetic else None
     return JSONResponse(
-        {"error": {"type": exc.kind, "code": exc.code or "upstream_error",
-                    "message": exc.message}},
-        status_code=status)
+        {"error": {"type": exc.kind, "code": code, "message": exc.message}},
+        status_code=status, headers=headers)
 
 
 #: 上游（OpenAI 兼容 /chat/completions）接受的角色。
@@ -346,7 +455,10 @@ def _attempt(db, request, key, body: dict, realm: str):
     model = str(body.get("model") or "")
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
-    for _ in range(MAX_ATTEMPTS):
+    #: 触发退避的上游失败次数（只统计 upstream_error / network），
+    #: 用来算退避时长 —— **按序号算，不累加**。
+    fail_step = 0
+    for attempt_idx in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
             model=model, exclude_ids=exclude,
@@ -356,7 +468,12 @@ def _attempt(db, request, key, body: dict, realm: str):
         if account is None:
             break
         if not shared.lease(account):
-            exclude.add(account.id)
+            # 租约失败 = 这一瞬间并发满了。**不是坏号**，不能加入 exclude
+            # （那会把它从整轮里抹掉，随后又报「没有号」）。逐字对齐
+            # qoder/gateway.py:192-198：discard 掉 + 0.15s 退避后重选，
+            # 让排队的请求自然消化。
+            exclude.discard(account.id)
+            time.sleep(0.15)
             continue
         started = time.perf_counter()
         try:
@@ -376,7 +493,7 @@ def _attempt(db, request, key, body: dict, realm: str):
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
+                cool_seconds=_cool_seconds(exc.kind),
                 # 额度类失败把余额落成 0，从选号候选里摘掉 ——
                 # 否则冷却到期它又排回来，每次请求都先撞一次「额度已用尽」。
                 zero_balance=exc.kind == "quota_exceeded")
@@ -394,16 +511,64 @@ def _attempt(db, request, key, body: dict, realm: str):
             if exc.status == 400 and exc.kind != "quota_exceeded":
                 time.sleep(0.8)
                 continue
+            # **上游 5xx / 网络类：换下一个号之前先指数退避**。
+            # 上游抖动期每个号都会失败，立刻连撞等于把重试预算在几百毫秒内
+            # 打光，客户端只看到 503。退避按失败序号算：0.5 → 1.0 → 2.0（封顶 3s）。
+            # auth / quota_exceeded 已在上面的 note_failure 里冷却，不在这里等。
+            if exc.kind in BACKOFF_KINDS:
+                fail_step += 1
+                # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
+                if attempt_idx < MAX_ATTEMPTS - 1:
+                    time.sleep(_backoff_seconds(fail_step))
             exclude.add(account.id)
         except Exception as exc:  # noqa: BLE001
             shared.release(account)
             logger.exception("Loomy 调用失败 acc=%s", account.id)
             last_error = client.UpstreamError(str(exc), kind="network")
+            fail_step += 1
+            # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
+            if attempt_idx < MAX_ATTEMPTS - 1:
+                time.sleep(_backoff_seconds(fail_step))
             exclude.add(account.id)
             continue
     if last_error is not None:
+        # 上游 / 网络类失败把换号预算用尽 → 503 + Retry-After
+        # （见 `_exhausted_rejection`）；其它失败原样抛出，保持既有语义。
+        rejected = _exhausted_rejection(last_error)
+        if rejected is not None:
+            raise rejected
         raise last_error
     raise _no_account_error(db, realm)
+
+
+def _exhausted_rejection(exc: client.UpstreamError) -> shared.PlatformRejected | None:
+    """换号循环耗尽后的对外错误（`None` = 不改造，按原样抛出）。
+
+    ## 为什么耗尽要单列（2026-11-10 契约修复 ⑥）
+
+    循环里每个号都撞了**同一类上游 / 网络故障**（`BACKOFF_KINDS`）才可能走到
+    这里，说明问题不在某一个号，而在这个平台此刻不可用。把最后一个号的原始
+    状态码（多半是 502 / 0）直接甩给客户端，既不告诉它「我们已经替你换了号」，
+    也让面板继续看到一个孤立的 502。改成 **503 + `Retry-After: 3`**：
+    语义是「本平台暂时不可用，请稍后重试」。
+
+    `shared.PlatformRejected` 是本仓既有机制（`admin/platform/shared.py:44`），
+    `dispatch()`（本文件末尾）已经统一把它转成 OpenAI / Anthropic 两种协议的
+    错误体，并且**会带上 `headers`**（`PlatformRejected.openai / anthropic`
+    都把它传给了 `JSONResponse(headers=...)`）。
+
+    上游 / 网络**以外**的失败（400 校验错、401/403 鉴权、404、429…）返回
+    `None`，调用方按原样抛出 —— 不能把「你的 Key 失效了」伪装成「平台不可用」。
+    """
+    if exc.kind not in BACKOFF_KINDS:
+        return None
+    detail = str(getattr(exc, "message", "") or "").strip()[:120]
+    return shared.PlatformRejected(
+        503,
+        "Loomy 上游连续失败（%s%s），本轮换号重试已用尽，请稍后重试。"
+        % (exc.kind, "：" + detail if detail else ""),
+        kind="server_error", code="upstream_unavailable",
+        headers={"Retry-After": SYNTHETIC_RETRY_AFTER})
 
 
 def _no_account_error(db, realm: str):
@@ -619,7 +784,9 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
     chunks = None
     last_error = None
     started = time.perf_counter()
-    for _ in range(MAX_ATTEMPTS):
+    #: 同 _attempt：触发退避的上游失败次数（按序号算退避，不累加）。
+    fail_step = 0
+    for attempt_idx in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
             model=model, exclude_ids=exclude,
@@ -628,7 +795,9 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
         if account is None:
             break
         if not shared.lease(account):
-            exclude.add(account.id)
+            # 同 _attempt：租约满 ≠ 坏号，逐字对齐 qoder/gateway.py:192-198。
+            exclude.discard(account.id)
+            time.sleep(0.15)
             continue
         try:
             data = loomy_accounts.ensure_token(db, account)
@@ -641,7 +810,7 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
+                cool_seconds=_cool_seconds(exc.kind),
                 zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
             exclude.add(account.id)
@@ -650,10 +819,21 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             if (not exc.retryable()
                     and exc.kind not in ("auth", "quota_exceeded")):
                 break
+            # **上游 5xx / 网络类：换下一个号之前先指数退避**（与非流式
+            # `_attempt` 同口径）。这里原来任何错误都直接换号、零等待。
+            if exc.kind in BACKOFF_KINDS:
+                fail_step += 1
+                # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
+                if attempt_idx < MAX_ATTEMPTS - 1:
+                    time.sleep(_backoff_seconds(fail_step))
         except Exception as exc:  # noqa: BLE001
             shared.release(account)
             logger.exception("Loomy 流式调用失败 acc=%s", account.id)
             last_error = client.UpstreamError(str(exc), kind="network")
+            fail_step += 1
+            # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
+            if attempt_idx < MAX_ATTEMPTS - 1:
+                time.sleep(_backoff_seconds(fail_step))
             exclude.add(account.id)
     return chunks, account, last_error, started
 
@@ -687,6 +867,13 @@ async def _forward_stream(body: dict, request):
         exhausted = _no_account_error(db, realm) if last_error is None else None
         db.close()
         if last_error is not None:
+            # 与 `_attempt` 的耗尽处理**同口径**（见 `_exhausted_rejection`）。
+            # ⚠️ 流式路径没有 `_forward` 那层 `except client.UpstreamError`，
+            # 所以非上游 / 网络类失败必须继续走 `_fail()` 转成响应，
+            # 不能直接抛出去（那会变成未处理异常 / 500）。
+            rejected = _exhausted_rejection(last_error)
+            if rejected is not None:
+                raise rejected
             return _fail(last_error)
         raise exhausted
 

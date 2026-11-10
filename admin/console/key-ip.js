@@ -17,7 +17,7 @@ window.WBKeyIP = (() => {
   };
   async function request(path, options) {
     const result = await safeJson(await api(path, options));
-    if (!result.ok) throw new Error(typeof result.data.detail === 'string' ? result.data.detail : '请求失败（HTTP '+result.status+'）');
+    if (!result.ok) throw new Error(typeof result.data.detail === 'string' ? result.data.detail : '请求失败：' + statusText(result.status));
     return result.data;
   }
   async function open(id) {
