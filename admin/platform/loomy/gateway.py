@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 from starlette.responses import JSONResponse, StreamingResponse
@@ -49,7 +50,24 @@ PATHS = (
 )
 
 PUBLIC = "loomy"
-MAX_ATTEMPTS = 3
+
+#: 单次请求最多换几个号。
+#:
+#: ## 为什么从 3 提到 8（2026-11-10）
+#:
+#: 用户反馈「当前请求的额度已用尽，网关没在尝试使用其它账号的吗」。
+#: 实测当时池子里有 **33 个可选号**（余额 > 0、不在冷却），但请求仍然报
+#: 额度用尽 —— 因为循环上限是 3：只要前 3 个被选中的号都回了 402，
+#: 就直接 `raise last_error` 把错误甩给客户端。
+#:
+#: 而 402 有两种，混在一起时前 3 个很容易全中：
+#:   * **永久余额为 0** —— 这号确实没钱；
+#:   * **当日额度用尽** —— Loomy 有 `dailyQuota`，当天的额度花完了但
+#:     `currentBalance` 还是正的。这类号**换一个就能成**，不该让客户端看到错误。
+#:
+#: 提到 8 之后，撞上几个当日额度用尽的号也能继续往后试。
+#: 上限仍有：每次尝试都要占用一个号的租约，无上限会让一个坏请求打遍整池。
+MAX_ATTEMPTS = int(os.getenv("LOOMY_MAX_ATTEMPTS", "8"))
 
 
 async def _body_of(request) -> dict:
@@ -373,13 +391,40 @@ def _attempt(db, request, key, body: dict, realm: str):
             return result, account, started, stats
         except client.UpstreamError as exc:
             shared.release(account)
+            # ---- 402 先复核，再决定要不要把这个号判死（2026-11-10）----
+            #
+            # 上游的 402 有两种含义：
+            #   1. **永久余额为 0** —— 该号真的没钱了，判死是对的；
+            #   2. **当日额度用尽** —— `dailyQuota` 花完而 `currentBalance`
+            #      仍是正的。这类号只是今天不能用了，把 `balance_remain`
+            #      写成 0 会**永久**丢掉它（要等下次同步才恢复），而且会
+            #      让「可选号」数量虚低，最终表现就是「明明有几十个号，
+            #      却一直报额度用尽」。
+            #
+            # 这里用一次便宜的积分接口复核：上游说还有余额 → 只做短暂冷却
+            # （当日额度类），不判死；上游也说 0 → 按原来的判死处理。
+            zero_balance = exc.kind == "quota_exceeded"
+            cool_seconds = 600 if exc.kind in ("auth", "quota_exceeded") else 0
+            if exc.kind == "quota_exceeded":
+                try:
+                    probe = loomy_accounts.sync_quota(db, account, with_models=False)
+                    quota = (probe or {}).get("quota") or {}
+                    available = int(quota.get("available") or 0)
+                    if available > 0:
+                        # 上游确认还有余额：这是「当日额度/瞬时限额」，不是没钱
+                        zero_balance = False
+                        cool_seconds = 300
+                        logger.info(
+                            "Loomy 402 但余额仍为 %s，判为当日/瞬时限额，短暂冷却 300s（acc=%s）",
+                            available, account.id)
+                except Exception:  # noqa: BLE001 - 复核失败就按原逻辑保守处理
+                    logger.debug("Loomy 402 余额复核失败 acc=%s", account.id,
+                                 exc_info=True)
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
-                # 额度类失败把余额落成 0，从选号候选里摘掉 ——
-                # 否则冷却到期它又排回来，每次请求都先撞一次「额度已用尽」。
-                zero_balance=exc.kind == "quota_exceeded")
+                cool_seconds=cool_seconds,
+                zero_balance=zero_balance)
             last_error = exc
             # **额度耗尽 / 登录失效必须换号，不能把客户端晾在错误上**：
             # 这两类错都是「号坏了」而不是「请求坏了」，换下一个号就能成。
@@ -402,6 +447,17 @@ def _attempt(db, request, key, body: dict, realm: str):
             exclude.add(account.id)
             continue
     if last_error is not None:
+        # 试满一轮还是失败：把「试了几个号」说清楚。
+        # 用户看到「额度已用尽」时最想知道的就是「到底试过几个，还有没有号」。
+        tried = len(exclude)
+        if tried >= 2:
+            raise shared.PlatformRejected(
+                502 if last_error.kind not in ("quota_exceeded",) else 402,
+                "Loomy 已连续尝试 %d 个账号都失败（最后一个原因：%s）。"
+                "已自动跳过这些号，其它账号会在 5 分钟内回到候选。"
+                % (tried, last_error.message[:80]),
+                kind=last_error.kind, code="attempts_exhausted",
+                headers={"Retry-After": "5"})
         raise last_error
     raise _no_account_error(db, realm)
 
@@ -638,11 +694,27 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             break
         except client.UpstreamError as exc:
             shared.release(account)
+            # 与 `_attempt` 同口径：402 先复核余额，别把「当日额度用尽」判死。
+            zero_balance = exc.kind == "quota_exceeded"
+            cool_seconds = 600 if exc.kind in ("auth", "quota_exceeded") else 0
+            if exc.kind == "quota_exceeded":
+                try:
+                    probe = loomy_accounts.sync_quota(db, account, with_models=False)
+                    available = int(((probe or {}).get("quota") or {}).get("available") or 0)
+                    if available > 0:
+                        zero_balance = False
+                        cool_seconds = 300
+                        logger.info(
+                            "Loomy 流式 402 但余额仍为 %s，短暂冷却 300s（acc=%s）",
+                            available, account.id)
+                except Exception:  # noqa: BLE001
+                    logger.debug("流式 402 余额复核失败 acc=%s", account.id,
+                                 exc_info=True)
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota_exceeded") else 0),
-                zero_balance=exc.kind == "quota_exceeded")
+                cool_seconds=cool_seconds,
+                zero_balance=zero_balance)
             last_error = exc
             exclude.add(account.id)
             # 额度耗尽 / 登录失效：号坏了不是请求坏了，换下一个号
