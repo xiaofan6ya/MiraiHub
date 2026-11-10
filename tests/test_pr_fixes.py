@@ -21,6 +21,7 @@ from admin.models import Account
 from admin.routers import models as models_router
 from admin.platform import protocol_bridge as bridge
 from admin.platform import registry
+from admin.platform.shared import exclude_identity
 
 
 def frames(*payloads):
@@ -111,6 +112,28 @@ class AnthropicSseEventLine(unittest.TestCase):
         for expected in ('message_start', 'content_block_start', 'content_block_delta',
                          'content_block_stop', 'message_delta', 'message_stop'):
             self.assertIn('event: %s' % expected, events, raw)
+
+
+class AccountIdentityExclusion(unittest.TestCase):
+    """换号必须排除同 UID 的重复数据库记录。"""
+
+    def test_excludes_duplicate_upstream_identity(self):
+        engine = create_engine('sqlite:///:memory:')
+        Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            first = Account(uid='same-upstream', auth_json='{}', status='active')
+            duplicate = Account(uid='same-upstream', auth_json='{}', status='active')
+            other = Account(uid='other-upstream', auth_json='{}', status='active')
+            db.add_all([first, duplicate, other])
+            db.commit()
+            db.refresh(first)
+            db.refresh(duplicate)
+
+            excluded = set()
+            exclude_identity(db, excluded, first)
+
+        self.assertEqual(excluded, {first.id, duplicate.id})
+        engine.dispose()
 
 
 if __name__ == '__main__':

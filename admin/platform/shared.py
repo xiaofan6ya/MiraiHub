@@ -792,6 +792,19 @@ def release(account: Account | None) -> None:
         pass
 
 
+def exclude_identity(db: Session, exclude_ids: set[int], account: Account | None) -> None:
+    """排除当前上游身份的全部重复数据库记录，避免换号仍命中同一 UID。"""
+    if account is None:
+        return
+    if account.id:
+        exclude_ids.add(int(account.id))
+    uid = str(getattr(account, "uid", "") or "")
+    if not uid:
+        return
+    rows = db.query(Account.id).filter(Account.uid == uid).all()
+    exclude_ids.update(int(row[0]) for row in rows if row[0])
+
+
 def note_success(account: Account | None) -> None:
     if account is None:
         return

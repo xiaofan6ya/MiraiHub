@@ -67,6 +67,7 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
 #: 换号重试预算。可用环境变量覆盖（`LOOMY_MAX_ATTEMPTS`，默认 3）；
 #: 非数字 / < 1 回落 3（见 `_env_int`），启动不会因配置崩。
 MAX_ATTEMPTS = _env_int("LOOMY_MAX_ATTEMPTS", 3)
+LEASE_WAIT_SECONDS = 2.0
 
 #: 上游 5xx（`kind == "upstream_error"`）失败后的**短冷却**秒数。
 #: 上游抖动期，同一个号不该被每个新请求立刻重新撞一遍。
@@ -458,7 +459,9 @@ def _attempt(db, request, key, body: dict, realm: str):
     #: 触发退避的上游失败次数（只统计 upstream_error / network），
     #: 用来算退避时长 —— **按序号算，不累加**。
     fail_step = 0
-    for attempt_idx in range(MAX_ATTEMPTS):
+    attempt_idx = 0
+    lease_deadline = time.monotonic() + LEASE_WAIT_SECONDS
+    while attempt_idx < MAX_ATTEMPTS:
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
             model=model, exclude_ids=exclude,
@@ -473,8 +476,14 @@ def _attempt(db, request, key, body: dict, realm: str):
             # qoder/gateway.py:192-198：discard 掉 + 0.15s 退避后重选，
             # 让排队的请求自然消化。
             exclude.discard(account.id)
+            if time.monotonic() >= lease_deadline:
+                raise shared.PlatformRejected(
+                    429, "Loomy 账号当前都在使用中，请稍后重试。",
+                    kind="server_error", code="account_capacity_full",
+                    headers={"Retry-After": "3"})
             time.sleep(0.15)
             continue
+        attempt_idx += 1
         started = time.perf_counter()
         try:
             data = loomy_accounts.ensure_token(db, account)
@@ -520,7 +529,7 @@ def _attempt(db, request, key, body: dict, realm: str):
                 # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
                 if attempt_idx < MAX_ATTEMPTS - 1:
                     time.sleep(_backoff_seconds(fail_step))
-            exclude.add(account.id)
+            shared.exclude_identity(db, exclude, account)
         except Exception as exc:  # noqa: BLE001
             shared.release(account)
             logger.exception("Loomy 调用失败 acc=%s", account.id)
@@ -529,7 +538,7 @@ def _attempt(db, request, key, body: dict, realm: str):
             # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
             if attempt_idx < MAX_ATTEMPTS - 1:
                 time.sleep(_backoff_seconds(fail_step))
-            exclude.add(account.id)
+            shared.exclude_identity(db, exclude, account)
             continue
     if last_error is not None:
         # 上游 / 网络类失败把换号预算用尽 → 503 + Retry-After
@@ -786,7 +795,9 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
     started = time.perf_counter()
     #: 同 _attempt：触发退避的上游失败次数（按序号算退避，不累加）。
     fail_step = 0
-    for attempt_idx in range(MAX_ATTEMPTS):
+    attempt_idx = 0
+    lease_deadline = time.monotonic() + LEASE_WAIT_SECONDS
+    while attempt_idx < MAX_ATTEMPTS:
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
             model=model, exclude_ids=exclude,
@@ -797,8 +808,14 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
         if not shared.lease(account):
             # 同 _attempt：租约满 ≠ 坏号，逐字对齐 qoder/gateway.py:192-198。
             exclude.discard(account.id)
+            if time.monotonic() >= lease_deadline:
+                raise shared.PlatformRejected(
+                    429, "Loomy 账号当前都在使用中，请稍后重试。",
+                    kind="server_error", code="account_capacity_full",
+                    headers={"Retry-After": "3"})
             time.sleep(0.15)
             continue
+        attempt_idx += 1
         try:
             data = loomy_accounts.ensure_token(db, account)
             chunks = client.chat_stream(
@@ -813,7 +830,7 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                 cool_seconds=_cool_seconds(exc.kind),
                 zero_balance=exc.kind == "quota_exceeded")
             last_error = exc
-            exclude.add(account.id)
+            shared.exclude_identity(db, exclude, account)
             # 额度耗尽 / 登录失效：号坏了不是请求坏了，换下一个号
             # （与非流式 `_attempt` 同口径，见那里的注释）。
             if (not exc.retryable()
@@ -834,7 +851,7 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             # 末次失败后循环即结束，此时退避是纯延迟（客户端白等到 503）。
             if attempt_idx < MAX_ATTEMPTS - 1:
                 time.sleep(_backoff_seconds(fail_step))
-            exclude.add(account.id)
+            shared.exclude_identity(db, exclude, account)
     return chunks, account, last_error, started
 
 
