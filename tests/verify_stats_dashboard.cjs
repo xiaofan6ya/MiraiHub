@@ -190,6 +190,8 @@ const server = http.createServer((req, res) => {
 
     await page.locator('#panel-stats:not(.hidden)').waitFor();
     await page.locator('.wbd-kpi').first().waitFor();
+    // KPI 有 620ms 的滚动动效，断言前先等它落地。
+    await page.waitForTimeout(900);
 
     if (process.env.WBD_DEBUG) {
       console.log('PAGE_ERRORS', JSON.stringify(errors));
