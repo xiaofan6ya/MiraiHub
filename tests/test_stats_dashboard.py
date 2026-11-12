@@ -161,6 +161,24 @@ class StatsDashboardTests(unittest.TestCase):
         self.assertEqual(data["ranking"], [])
         self.assertTrue(data["distribution"]["series"] == [])
 
+    def test_sum_coercion_handles_mysql_decimal(self):
+        """MySQL 的 SUM() 返回 Decimal；直接拿它除 float 会 500（线上已复现）。"""
+        from decimal import Decimal
+
+        from admin import rollup
+
+        latency = rollup._coerce("latency_sum", Decimal("12000"))
+        self.assertEqual(latency, 12000)
+        self.assertIsInstance(latency, int)
+        credits = rollup._coerce("credits", Decimal("0.5"))
+        self.assertAlmostEqual(credits, 0.5)
+        self.assertIsInstance(credits, float)
+        # None 也要能落地（空窗口 / 全失败）
+        self.assertEqual(rollup._coerce("requests", None), 0)
+        self.assertEqual(rollup._coerce("credits", None), 0.0)
+        # 复现事故现场：int/Decimal 混算必须不出异常
+        self.assertAlmostEqual(latency / float("0.5"), 24000.0)
+
     def test_model_market_joins_pricing_and_availability(self):
         """模型广场：用量来自汇总、价格来自配置、可用性看活跃账号 − 冷却。"""
         db = self.session_factory()

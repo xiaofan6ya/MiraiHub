@@ -230,8 +230,17 @@
         api("/api/stats/model-market?hours=" + state.hours),
         api("/api/models/aggregate").catch(function () { return null; }),
       ]);
-      var market = await results[0].json();
-      var aggregate = results[1] ? await results[1].json().catch(function () { return null; }) : null;
+      // 先读文本再解析：500 时服务端返回的是纯文本 "Internal Server Error"，
+      // 直接 `response.json()` 会抛 SyntaxError，把真实错误盖成一句看不懂的话。
+      var rawMarket = await results[0].text();
+      var market;
+      try { market = JSON.parse(rawMarket); }
+      catch (_) { market = { detail: rawMarket.slice(0, 160) || ("HTTP " + results[0].status) }; }
+      var aggregate = null;
+      if (results[1]) {
+        var rawAggregate = await results[1].text();
+        try { aggregate = JSON.parse(rawAggregate); } catch (_) { aggregate = null; }
+      }
       if (seq !== state.seq) return;
       if (!results[0].ok) throw new Error(market.detail || ("HTTP " + results[0].status));
       state.data = market;

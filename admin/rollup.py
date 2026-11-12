@@ -54,6 +54,21 @@ _SUM_FIELDS = ("requests", "successes", "prompt_tokens", "completion_tokens",
                "total_tokens", "cached_tokens", "credits", "latency_sum",
                "latency_count", "ttfb_sum", "ttfb_count")
 
+#: 只有 credits 是浮点，其余全是整数计数。
+_FLOAT_FIELDS = ("credits",)
+
+
+def _coerce(name: str, value):
+    """把 MySQL 的 `SUM()` 结果（`Decimal`）收敛成 int/float。
+
+    MySQL 对 BIGINT/FLOAT 求 SUM 会返回 `Decimal`，而 `Decimal / float`
+    在 Python 里直接 TypeError —— 接口就变成一个纯文本 500，
+    前端 `JSON.parse("Internal Server Error")` 当场炸（2026-11-12 线上复现）。
+    """
+    if value is None:
+        return 0.0 if name in _FLOAT_FIELDS else 0
+    return float(value) if name in _FLOAT_FIELDS else int(value)
+
 
 def hour_start(value: datetime) -> datetime:
     return value.replace(minute=0, second=0, microsecond=0)
@@ -400,7 +415,8 @@ def iter_buckets(db: Session, start: datetime, end: datetime,
                 query = query.filter(UsageRollup.model == model)
             for row in query.all():
                 yield (row[0], (row[1] or "").lower(), row[2] or "",
-                       dict(zip(_SUM_FIELDS, row[3:])))
+                       {name: _coerce(name, row[3 + index])
+                        for index, name in enumerate(_SUM_FIELDS)})
         else:
             for row in _aggregate_raw(db, seg_start, seg_end):
                 if platform and row["platform"] != platform:
@@ -426,7 +442,7 @@ def window_rows(db: Session, start: datetime, end: datetime,
     def _merge(key, values) -> None:
         target = out.setdefault(key, _empty())
         for index, name in enumerate(_SUM_FIELDS):
-            target[name] += values[index] or 0
+            target[name] += _coerce(name, values[index])
 
     platform = (filters.get("platform") or "").strip().lower()
     model = (filters.get("model") or "").strip()
@@ -465,7 +481,7 @@ def window_series(db: Session, start: datetime, end: datetime, granularity: str,
     def _add(key, values, dt) -> None:
         target = buckets.setdefault(key, {**_empty(), "hour": dt})
         for index, name in enumerate(_SUM_FIELDS):
-            target[name] += values[index] or 0
+            target[name] += _coerce(name, values[index])
 
     platform = (filters.get("platform") or "").strip().lower()
     model = (filters.get("model") or "").strip()
