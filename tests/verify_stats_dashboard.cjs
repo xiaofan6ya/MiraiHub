@@ -85,6 +85,54 @@ const dashboard = {
   ],
 };
 
+const market = {
+  window_hours: 24,
+  start: '2026-11-11T00:00:00Z',
+  end: '2026-11-12T00:00:00Z',
+  source: 'rollup',
+  total: 4,
+  available_models: 3,
+  items: [
+    { key: 'gpt-4.1', name: 'GPT-4.1', platforms: ['workbuddy'], platform_labels: ['WorkBuddy'],
+      models: ['gpt-4.1'], requests: 312000, success_rate: 0.9999, tokens: 510000000,
+      credits: 905.2, avg_latency_ms: 12400, avg_ttfb_ms: 380, tps: 82.1,
+      pricing: [{ platform: 'workbuddy', platform_label: 'WorkBuddy', model_id: 'gpt-4.1',
+                  multiplier: 0.5, free: false }],
+      free: false, min_multiplier: 0.5, active_accounts: 5, exhausted_accounts: 0, available: true },
+    { key: 'claude-sonnet-4', name: 'Claude Sonnet 4', platforms: ['workbuddy', 'loomy'],
+      platform_labels: ['WorkBuddy', 'Loomy'], models: ['claude-sonnet-4'],
+      requests: 221000, success_rate: 0.9996, tokens: 402000000, credits: 712.4,
+      avg_latency_ms: 13800, avg_ttfb_ms: 520, tps: 66.4,
+      pricing: [{ platform: 'loomy', platform_label: 'Loomy', model_id: 'claude-sonnet-4',
+                  multiplier: 0.8, free: false }],
+      free: false, min_multiplier: 0.8, active_accounts: 3, exhausted_accounts: 1, available: true },
+    { key: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', platforms: ['trae'],
+      platform_labels: ['Trae'], models: ['gemini-2.5-pro'], requests: 168000,
+      success_rate: 0.9999, tokens: 268000000, credits: 402.1, avg_latency_ms: 11200,
+      avg_ttfb_ms: 340, tps: 91.2,
+      pricing: [{ platform: 'trae', platform_label: 'Trae', model_id: 'gemini-2.5-pro',
+                  multiplier: 0.4, free: false }],
+      free: false, min_multiplier: 0.4, active_accounts: 2, exhausted_accounts: 2, available: false },
+    { key: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', platforms: ['workbuddy'],
+      platform_labels: ['WorkBuddy'], models: ['dfmodel'], requests: 0,
+      success_rate: null, tokens: 0, credits: 0, avg_latency_ms: 0, avg_ttfb_ms: 0, tps: 0,
+      pricing: [{ platform: 'workbuddy', platform_label: 'WorkBuddy', model_id: 'dfmodel',
+                  multiplier: 0, free: true }],
+      free: true, min_multiplier: 0, active_accounts: 5, exhausted_accounts: 0, available: true },
+  ],
+};
+
+const aggregate = {
+  items: [
+    { key: 'gpt-4.1', name: 'GPT-4.1', platforms: [
+      { platform: 'workbuddy', platform_label: 'WorkBuddy', model_id: 'gpt-4.1',
+        client_id: 'gpt-4.1-workbuddy', multiplier: 0.5 }] },
+    { key: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', platforms: [
+      { platform: 'workbuddy', platform_label: 'WorkBuddy', model_id: 'dfmodel',
+        client_id: 'dfmodel-workbuddy', multiplier: 0 }] },
+  ],
+};
+
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
   let file;
@@ -125,6 +173,8 @@ const server = http.createServer((req, res) => {
       let data = { items: [], accounts: [], summary: {}, models: [], platforms: [] };
       if (url.pathname === '/api/app/version') data = { version: '1.1.1' };
       else if (url.pathname === '/api/stats/dashboard') data = dashboard;
+      else if (url.pathname === '/api/stats/model-market') data = market;
+      else if (url.pathname === '/api/models/aggregate') data = aggregate;
       else if (url.pathname === '/api/overview') data = {
         balance: { total: 1000, used: 200 }, today: { requests: 10, tokens: 100 },
         cache: { hit: 0.3 }, accounts: { total: 3, active: 3 },
@@ -182,6 +232,29 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator('.wbd-rank-row').count(), 6, '排行行数');
     assert((await page.locator('.wbd-rank-row').first().innerText()).includes('35.9%'), '排行占比');
     await page.screenshot({ path: path.join(out, 'dashboard-ranking.png'), fullPage: true });
+
+    // ── 模型广场 ────────────────────────────────────────────────────────
+    await page.evaluate(() => activateTab('market'));
+    await page.locator('#panel-market:not(.hidden)').waitFor();
+    await page.locator('.wbm-card').first().waitFor();
+    assert.equal(await page.locator('.wbm-card').count(), 4, '广场卡片数');
+    assert((await page.locator('.wbm-card').first().innerText()).includes('×0.50'), '定价显示');
+    assert((await page.locator('.wbm-card').nth(3).innerText()).includes('免费'), '免费模型');
+    assert((await page.locator('.wbm-card').nth(2).innerText()).includes('当前不可用'), '不可用标记');
+    await page.screenshot({ path: path.join(out, 'market-desktop.png'), fullPage: true });
+
+    await page.locator('#wbmAvailable').check();
+    await page.waitForFunction(() => document.querySelectorAll('.wbm-card').length === 3);
+    await page.getByRole('button', { name: '列表' }).click();
+    await page.locator('.wbm-table tbody tr').first().waitFor();
+    assert.equal(await page.locator('.wbm-table tbody tr').count(), 3, '列表行数');
+    await page.screenshot({ path: path.join(out, 'market-list.png'), fullPage: true });
+    await page.locator('#wbmAvailable').uncheck();
+    await page.getByRole('button', { name: '卡片' }).click();
+
+    // 回到看板再拍深浅两套主题
+    await page.evaluate(() => activateTab('stats'));
+    await page.locator('#panel-stats:not(.hidden)').waitFor();
 
     // 深色 + 窄屏
     for (const [name, width, height, dark] of [['dark', 1280, 960, true], ['mobile', 390, 844, false]]) {

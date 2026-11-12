@@ -454,6 +454,15 @@ def _startup():
     except Exception:
         logger.exception("手机号登录会话回收线程启动失败（不影响其它功能）")
 
+    # 用量汇总（usage_rollups）的后台回填：老库升级后历史不在汇总表里，
+    # 不补的话第一次打开数据看板会走原表、慢到不可用。前台请求有 0.4 秒预算
+    # 补最近一小段，剩下的历史交给这个线程慢慢补（默认 5 分钟检查一次）。
+    try:
+        from admin import rollup
+        rollup.start_backfill_thread()
+    except Exception:
+        logger.exception("用量汇总后台回填线程启动失败（统计会自动降级为原表）")
+
     # 未配置登录凭据时给出醒目告警：此时后台登录一律 503，不会退化成空口令
     if not settings.ADMIN_USERNAME or not settings.ADMIN_PASSWORD:
         logger.warning(

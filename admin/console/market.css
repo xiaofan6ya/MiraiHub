@@ -1,0 +1,132 @@
+/* ============================================================================
+   模型广场（panel-market）
+   ----------------------------------------------------------------------------
+   参考 new-api 的 Model Square：每个模型一张卡，定价 / 可用性 / 延迟 / 吞吐
+   一屏读完。全部走控制台主题变量，深浅两套不用写第二遍。
+   ========================================================================== */
+
+.wbm-summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  margin-bottom: 10px; font-size: 12px; color: var(--fg-muted);
+}
+.wbm-summary b {
+  font-family: var(--mono); font-size: 15px; color: var(--fg);
+}
+
+/* ── 卡片网格 ─────────────────────────────────────────────────────────── */
+
+.wbm-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(292px, 1fr));
+}
+
+.wbm-card {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); box-shadow: var(--sh-1);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.wbm-card:hover { border-color: var(--brand); box-shadow: var(--sh-2); }
+.wbm-card.is-off { opacity: .78; }
+
+.wbm-card-head { display: flex; align-items: flex-start; gap: 8px; }
+.wbm-title { min-width: 0; flex: 1; }
+.wbm-title h3 {
+  margin: 0; font-size: 14px; font-weight: 600; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbm-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.wbm-chip {
+  padding: 0 6px; height: 18px; line-height: 18px; border-radius: 5px;
+  background: var(--surface-3); color: var(--fg-muted);
+  font-size: 10px; letter-spacing: .02em;
+}
+.wbm-copy {
+  flex: 0 0 auto; height: 24px; padding: 0 8px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface); color: var(--fg-muted); font-size: 11px;
+}
+.wbm-copy:hover { color: var(--brand-ink); border-color: var(--brand); }
+
+.wbm-price { display: flex; align-items: baseline; gap: 8px; }
+.wbm-price b {
+  font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--fg);
+}
+.wbm-price span { font-size: 11px; color: var(--fg-subtle); }
+
+.wbm-stats {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 8px; margin: 0; padding: 10px 0 0;
+  border-top: 1px solid var(--border-soft);
+}
+.wbm-stats > div { min-width: 0; }
+.wbm-stats dt { font-size: 10px; color: var(--fg-subtle); }
+.wbm-stats dd {
+  margin: 2px 0 0; font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.wbm-bar {
+  display: block; height: 4px; border-radius: 3px; overflow: hidden;
+  background: var(--surface-3);
+}
+.wbm-bar i { display: block; height: 100%; border-radius: 3px; }
+
+.wbm-foot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  font-size: 11px; color: var(--fg-muted);
+}
+.wbm-foot code, .wbm-code {
+  margin-left: auto; max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 10px; color: var(--fg-subtle);
+}
+.wbm-code { margin-left: 0; max-width: 220px; }
+
+/* ── 列表视图 ─────────────────────────────────────────────────────────── */
+
+.wbm-table-wrap {
+  overflow-x: auto; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--r);
+}
+.wbm-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.wbm-table th {
+  padding: 8px 10px; text-align: left; font-weight: 600;
+  color: var(--fg-subtle); background: var(--surface-2);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.wbm-table td {
+  padding: 8px 10px; border-bottom: 1px solid var(--border-soft);
+  color: var(--fg); vertical-align: middle;
+}
+.wbm-table tr:hover td { background: var(--surface-2); }
+.wbm-table .num { text-align: right; font-family: var(--mono); }
+.wbm-name { font-weight: 600; }
+.wbm-sub { margin-top: 2px; font-size: 10px; color: var(--fg-subtle); }
+
+/* ── 工具条 / 骨架 ────────────────────────────────────────────────────── */
+
+.wbm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.wbm-toolbar input[type="search"] {
+  height: 28px; min-width: 180px; padding: 0 9px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--fg); font-size: 12px;
+}
+.wbm-toolbar label {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--fg-muted);
+}
+
+.wbm-skeleton {
+  height: 232px; border-radius: var(--r);
+  background: linear-gradient(100deg, var(--surface-2) 20%, var(--surface-3) 42%, var(--surface-2) 62%);
+  background-size: 220% 100%;
+  animation: wbd-shimmer 1.2s ease-in-out infinite;
+}
+
+@media (max-width: 767px) {
+  .wbm-grid { grid-template-columns: minmax(0, 1fr); }
+  .wbm-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .wbm-toolbar input[type="search"] { flex: 1 1 100%; }
+}

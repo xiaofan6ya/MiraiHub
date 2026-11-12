@@ -485,6 +485,17 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
             db.add(log)
             db.commit()
             log_id = log.id
+            # 小时级预聚合：数据看板 / 模型广场读这张表，不再扫全表。
+            # 失败已在 rollup.record 内部吞掉并降级，绝不会影响记账。
+            from admin import rollup
+            rollup.record(
+                db, platform=log.platform, model=log.model,
+                created_at=log.created_at, credits=log.credits,
+                prompt_tokens=log.prompt_tokens,
+                completion_tokens=log.completion_tokens,
+                total_tokens=log.total_tokens, cached_tokens=log.cached_tokens,
+                latency_ms=log.latency_ms, ttfb_ms=log.ttfb_ms,
+                error_kind=log.error_kind or "")
             # Commit accounting first. Optional content must never roll back a
             # debit or trigger inference retries if caching fails.
             try:
@@ -581,6 +592,15 @@ def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str
                 if acc is not None:
                     acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(delta))
                 db.commit()
+                # 汇总表里的积分是估算值，这里按差值校正；失败只记日志，
+                # 不影响已经完成的回写。
+                try:
+                    from admin import rollup
+                    rollup.adjust_credits(
+                        db, platform=log.platform, model=log.model,
+                        created_at=log.created_at, delta=delta)
+                except Exception:  # noqa: BLE001
+                    pass
                 _logger.info("真实积分回写完成 log=%s real=%s delta=%s", log_id, real, delta)
             finally:
                 db.close()

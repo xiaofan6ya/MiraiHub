@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from admin import stats_cache  # noqa: E402
 from admin.db import get_db  # noqa: E402
-from admin.models import Base, UsageLog  # noqa: E402
+from admin.models import (Account, Base, ModelConfig, UsageLog)  # noqa: E402
 from admin.routers import stats as stats_routes  # noqa: E402
 from admin.security import require_admin  # noqa: E402
 
@@ -160,6 +160,42 @@ class StatsDashboardTests(unittest.TestCase):
         self.assertIsNone(data["summary"]["success_rate"])
         self.assertEqual(data["ranking"], [])
         self.assertTrue(data["distribution"]["series"] == [])
+
+    def test_model_market_joins_pricing_and_availability(self):
+        """模型广场：用量来自汇总、价格来自配置、可用性看活跃账号 − 冷却。"""
+        db = self.session_factory()
+        try:
+            db.add(ModelConfig(level="system", platform="workbuddy",
+                               model_id="dfmodel", enabled=1, credit_multiplier=0.5))
+            db.add(ModelConfig(level="system", platform="workbuddy",
+                               model_id="never-used-model", enabled=1,
+                               credit_multiplier=0))
+            db.add(Account(platform="workbuddy", name="a1", uid="u1",
+                           auth_json="{}", status="active"))
+            db.commit()
+        finally:
+            db.close()
+
+        response = self.client.get("/api/stats/model-market", params={"hours": 24})
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["source"], "rollup")
+        by_key = {item["key"]: item for item in data["items"]}
+
+        # dfmodel 有真实调用：请求数、成功率、延迟都要在
+        hit = next(item for item in data["items"] if "dfmodel" in item["models"])
+        self.assertGreater(hit["requests"], 0)
+        self.assertFalse(hit["free"])
+        self.assertAlmostEqual(hit["min_multiplier"], 0.5, places=3)
+        self.assertTrue(hit["available"])
+        self.assertGreater(hit["avg_latency_ms"], 0)
+        # never-used-model 没有流量也要出现在广场里（0 次调用），且标记为免费
+        zero = next(item for item in data["items"]
+                    if "never-used-model" in item["models"])
+        self.assertEqual(zero["requests"], 0)
+        self.assertTrue(zero["free"])
+        self.assertIsNone(zero["success_rate"])
+        self.assertTrue(by_key)
 
 
 if __name__ == "__main__":

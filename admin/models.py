@@ -1,8 +1,8 @@
 """ORM 模型：账号、API Key、用量日志。"""
 from datetime import datetime
 
-from sqlalchemy import (Boolean, Column, DateTime, Float, Index, Integer,
-                      String, Text)
+from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Float, Index,
+                      Integer, String, Text, UniqueConstraint)
 
 from admin.db import Base
 
@@ -308,6 +308,72 @@ class UsageLog(Base):
     error_kind = Column(String(32), default="")  # hard_credit | soft_rate | server | not_found | session_dead | transport | client | success
     diagnostic_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UsageRollup(Base):
+    """`usage_logs` 的**小时级预聚合**（2026-11-12，2c2g 部署的查询加速层）。
+
+    ## 为什么必须有这张表
+
+    数据看板/模型广场要的都是「窗口内按模型、按平台、按小时」的统计。直接扫
+    `usage_logs` 时，30 天窗口在一台 2c2g 的机器上要 10 秒以上（本机 8.6s，
+    线上更慢），首屏根本打不开。而按小时预聚合之后，同样的窗口只需要读
+    `小时数 × 模型数` 行 —— 30 天 × 8 个模型 ≈ 5760 行，毫秒级。
+
+    ## 写入方式
+
+    每个请求在 `usage_logs` 落库后，由 `admin/rollup.py` 对
+    `(hour, platform, model)` 做一次原子 upsert（`ON DUPLICATE KEY UPDATE`）。
+    多一次单行写，换来统计页 100 倍提速 —— 对「2 核 2G 还要带看板」是正收益。
+
+    ## 口径
+
+    与 `usage_logs` 完全一致：`requests` 含失败，Token/积分/延迟只累计成功
+    （`error_kind in ('', 'success')`）。`*_sum/*_count` 用来还原平均值，
+    不能直接存 avg（跨小时/跨模型合并时会错）。
+    """
+
+    __tablename__ = "usage_rollups"
+    __table_args__ = (
+        # 一个「小时 × 平台 × 模型」只有一行：写入是 upsert，读取是范围扫描。
+        UniqueConstraint("hour", "platform", "model", name="ux_usage_rollups_bucket"),
+        # 看板按时间范围取全部行；模型广场按模型取最近 N 小时。
+        Index("ix_usage_rollups_hour", "hour"),
+        Index("ix_usage_rollups_model_hour", "model", "hour"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    hour = Column(DateTime, nullable=False)
+    platform = Column(String(24), nullable=False, default="")
+    model = Column(String(120), nullable=False, default="")
+    requests = Column(BigInteger, nullable=False, default=0)
+    successes = Column(BigInteger, nullable=False, default=0)
+    prompt_tokens = Column(BigInteger, nullable=False, default=0)
+    completion_tokens = Column(BigInteger, nullable=False, default=0)
+    total_tokens = Column(BigInteger, nullable=False, default=0)
+    cached_tokens = Column(BigInteger, nullable=False, default=0)
+    credits = Column(Float, nullable=False, default=0)
+    latency_sum = Column(BigInteger, nullable=False, default=0)
+    latency_count = Column(BigInteger, nullable=False, default=0)
+    ttfb_sum = Column(BigInteger, nullable=False, default=0)
+    ttfb_count = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UsageRollupState(Base):
+    """预聚合的覆盖水位（单行，id 固定 1）。
+
+    `covered_from`…`covered_to` 是**半开区间**：`[covered_from, covered_to)` 内
+    的每个整点小时都已经从 `usage_logs` 回填过。读取时据此决定「这段走汇总表
+    还是走原表」，也是回填任务只补缺口、不重复扫全表的依据。
+    """
+
+    __tablename__ = "usage_rollup_state"
+
+    id = Column(Integer, primary_key=True)
+    covered_from = Column(DateTime, nullable=True)
+    covered_to = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class IPRequestBucket(Base):

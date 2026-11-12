@@ -1261,7 +1261,7 @@ function enterApp() {
 
 // Tabs
 // 面板清单与默认面板：默认面板不写进 URL（保持地址栏干净）。
-const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
+const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","market","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
 const TAB_DEFAULT = "overview";
 
 /** 从地址栏读当前应显示的面板；非法/缺失一律回落到默认面板。 */
@@ -1390,7 +1390,7 @@ const _SUB_TAB_LABELS = {
   platforms: '平台管理', gateway: '平台网关',
   accounts: '账号池', credits: '积分到期', journal: '积分流水', growth: '成长计划',
   usage: '使用记录', logs: '用量日志', keys: 'API Keys', ip: 'IP 管理',
-  models: '模型配置', groups: '分组管理', schedules: '定时任务',
+  models: '模型配置', market: '模型广场', groups: '分组管理', schedules: '定时任务',
   client: '客户端参数', sync: '同步设置', alerts: '预警管理',
   agent: '智能体',
   settings: '设置', maintenance: '更新与备份',
@@ -1497,6 +1497,11 @@ function activateTab(name, opts) {
   if (name === "stats") {
     if (window.WBStatsDashboard) window.WBStatsDashboard.load(true);
     else setTimeout(() => window.WBStatsDashboard?.load(true), 120);
+  }
+  // 模型广场：独立模块，同样按需加载；进入时重取（价格与可用性会变）。
+  if (name === "market") {
+    if (window.WBModelMarket) window.WBModelMarket.load(true);
+    else setTimeout(() => window.WBModelMarket?.load(true), 120);
   }
   if (name === "sentinel") {
     if (typeof loadSentinel === "function") loadSentinel();
@@ -2006,6 +2011,7 @@ function panelSkeletonShow(name, force) {
   if (name === "agent") return;
   // 数据看板同理：它自己画骨架并整块替换，克隆出来的第二套外壳只会闪一下。
   if (name === "stats") return;
+  if (name === "market") return;
   const panel = document.getElementById("panel-" + name);
   if (!panel) return;
   const first = !_panelSeen.has(name);

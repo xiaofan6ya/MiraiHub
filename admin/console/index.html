@@ -1097,6 +1097,7 @@
   <link rel="stylesheet" href="/admin/assets/console.css?v=20261109-tiers1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
     <link rel="stylesheet" href="/admin/assets/dashboard.css?v=20261112-stats1">
+    <link rel="stylesheet" href="/admin/assets/market.css?v=20261112-market1">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261105-ui6" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
@@ -1111,6 +1112,7 @@
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/console-app.js?v=20261107-exp1"></script>
     <script defer src="/admin/assets/dashboard.js?v=20261112-stats1"></script>
+    <script defer src="/admin/assets/market.js?v=20261112-market1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261105-ui3"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -1195,7 +1197,7 @@
         <button class="side-item" data-tab="platforms" data-group-tabs="platforms,gateway" data-group-title="平台"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> 平台</button>
         <button class="side-item" data-tab="accounts" data-group-tabs="accounts,credits,journal,growth" data-group-title="账号"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3"/></svg> 账号</button>
         <button class="side-item" data-tab="usage" data-group-tabs="usage,logs,keys,ip" data-group-title="调用"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z"/></svg> 调用</button>
-        <button class="side-item" data-tab="models" data-group-tabs="models,groups,schedules" data-group-title="配置"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg> 配置</button>
+        <button class="side-item" data-tab="models" data-group-tabs="models,market,groups,schedules" data-group-title="配置"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg> 配置</button>
         <button class="side-item" data-tab="client" data-group-tabs="client,sync,alerts" data-group-title="接入"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0m-13 5v-5a5 5 0 0 1 10 0v3m-7 5v-8a2 2 0 0 1 4 0v5m-1 5a12 12 0 0 0 4-4M3 16v-1"/></svg> 接入</button>
         <button class="side-item" data-tab="agent" data-group-tabs="agent" data-group-title="智能体"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg> 智能体</button>
         <button class="side-item" data-tab="settings" data-group-tabs="settings,maintenance" data-group-title="系统"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-1 3-3 1-2 3 2 2v3l2 2 3-1 2 2 3-1 1-3 3-1 1-3-3-2V7l-3-2-2 1Z"/><circle cx="12" cy="12" r="3"/></svg> 系统</button>
@@ -2182,6 +2184,36 @@
         </div>
         <div id="wbdRoot"></div>
       </div>
+    </section>
+
+    <!-- 模型广场（参考 new-api 的 Model Square）：每个模型一张卡 ——
+         定价 / 24h 用量 / 延迟吞吐 / 可用账号 / 复制调用名。 -->
+    <section id="panel-market" class="hidden">
+      <div class="panel-toolbar">
+        <p class="panel-subtitle">按模型看这个平台现在能提供什么：价格、近 24 小时用量、成功率与延迟、可用账号数。可用性 = 活跃账号 − 该模型冷却中的账号。</p>
+        <div class="wbm-toolbar">
+          <input id="wbmSearch" type="search" placeholder="搜索模型名 / 调用名" aria-label="搜索模型">
+          <select id="wbmPlatform" aria-label="按平台筛选"></select>
+          <select id="wbmSort" aria-label="排序">
+            <option value="requests">按调用量</option>
+            <option value="price">按价格</option>
+            <option value="availability">按可用账号</option>
+            <option value="name">按名称</option>
+          </select>
+          <label><input id="wbmAvailable" type="checkbox"> 仅看可用</label>
+          <div class="wbd-seg" role="group" aria-label="视图">
+            <button type="button" data-wbm-view="cards" class="active" onclick="WBModelMarket.setView('cards')">卡片</button>
+            <button type="button" data-wbm-view="list" onclick="WBModelMarket.setView('list')">列表</button>
+          </div>
+          <div class="wbd-seg" role="group" aria-label="统计窗口">
+            <button type="button" data-wbm-hours="24" class="active" onclick="WBModelMarket.setHours(24)">24 小时</button>
+            <button type="button" data-wbm-hours="72" onclick="WBModelMarket.setHours(72)">3 天</button>
+            <button type="button" data-wbm-hours="168" onclick="WBModelMarket.setHours(168)">7 天</button>
+          </div>
+          <button type="button" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" onclick="WBModelMarket.load(true)">刷新</button>
+        </div>
+      </div>
+      <div id="wbmRoot"></div>
     </section>
 
     <!-- 定时任务面板 -->
