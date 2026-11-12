@@ -172,6 +172,28 @@
 
 .wbd-chart { padding: 10px 12px 12px; min-height: 264px; }
 .wbd-svg { display: block; overflow: visible; }
+
+/* 图加载动效：柱子从底部长出来、折线从左往右画、面积淡入。
+   只做一次（`both` + 无 repeat），不干扰悬停与重绘。 */
+@keyframes wbd-grow {
+  from { transform: scaleY(.02); opacity: .35; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+.wbd-bar {
+  transform-box: fill-box;
+  transform-origin: bottom;
+  animation: wbd-grow .42s cubic-bezier(.38, 0, .24, 1) both;
+}
+@keyframes wbd-draw {
+  from { stroke-dasharray: 1600; stroke-dashoffset: 1600; }
+  to { stroke-dasharray: 1600; stroke-dashoffset: 0; }
+}
+.wbd-line { animation: wbd-draw .9s cubic-bezier(.38, 0, .24, 1) both; }
+.wbd-svg circle { transition: r .12s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .wbd-bar, .wbd-line { animation: none; }
+}
+.wbd-svg { display: block; overflow: visible; }
 .wbd-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
 .wbd-axis { fill: var(--fg-subtle); font-size: 10px; font-family: var(--mono); }
 

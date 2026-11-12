@@ -220,6 +220,10 @@ const server = http.createServer((req, res) => {
     assert(bars >= 24, '消耗分布应有柱子，实际 ' + bars);
     await page.screenshot({ path: path.join(out, 'dashboard-desktop.png'), fullPage: true });
 
+    // 悬停提示：图表柱子必须有气泡（不能只有原生 title 的 1 秒延迟）
+    await page.locator('#wbdDistChart svg rect').first().hover();
+    await page.locator('#chartTip:not([hidden])').waitFor({ timeout: 3000 });
+
     // 切面积图
     await page.getByRole('button', { name: '面积图' }).click();
     await page.waitForFunction(() => document.querySelectorAll('#wbdDistChart svg path').length >= 3);

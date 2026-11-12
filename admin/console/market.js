@@ -287,28 +287,38 @@
         render();
       });
     }
-    var platform = el("wbmPlatform");
+    var platform = el("wbmPlatformSel");
     if (platform && !platform.dataset.bound) {
       platform.dataset.bound = "1";
-      var options = [""].concat(((state.data && state.data.items) || [])
-        .reduce(function (all, item) { return all.concat(item.platforms || []); }, [])
-        .filter(function (value, index, list) { return value && list.indexOf(value) === index; }));
+      var values = [""];
       var labels = {};
       ((state.data && state.data.items) || []).forEach(function (item) {
         (item.platforms || []).forEach(function (value, index) {
+          if (value && values.indexOf(value) < 0) values.push(value);
           labels[value] = (item.platform_labels || [])[index] || value;
         });
       });
-      platform.innerHTML = options.map(function (value) {
-        return '<option value="' + esc(value) + '">' +
-          esc(value ? labels[value] || value : "全部平台") + "</option>";
-      }).join("");
-      platform.addEventListener("change", function () { state.platform = platform.value; render(); });
+      platform.innerHTML = uiSelectHTML("wbmPlatform", {
+        value: state.platform,
+        options: values.map(function (value) {
+          return { value: value, label: value ? (labels[value] || value) : "全部平台" };
+        }),
+        onChange: function (value) { state.platform = value; render(); },
+      });
     }
-    var sort = el("wbmSort");
+    var sort = el("wbmSortSel");
     if (sort && !sort.dataset.bound) {
       sort.dataset.bound = "1";
-      sort.addEventListener("change", function () { state.sort = sort.value; render(); });
+      sort.innerHTML = uiSelectHTML("wbmSort", {
+        value: state.sort,
+        options: [
+          { value: "requests", label: "按调用量" },
+          { value: "price", label: "按价格" },
+          { value: "availability", label: "按可用账号" },
+          { value: "name", label: "按名称" },
+        ],
+        onChange: function (value) { state.sort = value; render(); },
+      });
     }
   }
 

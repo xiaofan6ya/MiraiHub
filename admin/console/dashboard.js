@@ -129,10 +129,22 @@
   }
 
   function withTooltip(element, text) {
-    var title = node("title", {});
-    title.textContent = text;
-    element.appendChild(title);
+    // 用 `data-tip` 而不是 SVG `<title>`：原生 title 有 1 秒延迟、样式不可控，
+    // 控制台已有统一的图表气泡（showTip/hideTip），直接复用。
+    element.setAttribute("data-tip", text);
     return element;
+  }
+
+  /** 图表悬停提示：一次委托在 SVG 上，不为每个元素挂监听。 */
+  function bindChartTips(svg) {
+    svg.addEventListener("pointermove", function (event) {
+      var node = event.target.closest ? event.target.closest("[data-tip]") : null;
+      if (node && window.showTip) window.showTip(event, node.getAttribute("data-tip"));
+      else if (window.hideTip) window.hideTip();
+    });
+    svg.addEventListener("pointerleave", function () {
+      if (window.hideTip) window.hideTip();
+    });
   }
 
   /**
@@ -170,6 +182,7 @@
       svg: svg,
     };
     build(svg, plot);
+    bindChartTips(svg);
     host.appendChild(svg);
   }
 
@@ -238,6 +251,8 @@
             var rect = node("rect", {
               x: x, y: base, width: barWidth, height: Math.max(0.8, h),
               fill: colors[index % colors.length], rx: Math.min(2, barWidth / 3),
+              "class": "wbd-bar",
+              style: "animation-delay:" + Math.min(320, i * 12) + "ms",
             });
             svg.appendChild(withTooltip(rect, item.name + " · " + fmt(value) + " · " + bucketLabel(buckets[i])));
           });
@@ -271,6 +286,7 @@
           points: points.map(function (pair) { return pair[0] + "," + pair[1]; }).join(" "),
           fill: "none", stroke: color, "stroke-width": 1.8,
           "stroke-linejoin": "round", "stroke-linecap": "round",
+          "class": "wbd-line",
         }));
         points.forEach(function (pair, i) {
           var dot = node("circle", { cx: pair[0], cy: pair[1], r: 2.2, fill: color });

@@ -260,7 +260,7 @@
        * Windows: Segoe UI (Latin) + Microsoft YaHei UI (CJK)
        * macOS: San Francisco + PingFang SC
        * 这个顺序确保跨平台一致性和最佳渲染效果 */
-      --font-sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei UI","Hiragino Sans GB",sans-serif;
+      --font-sans:"Inter","Inter Variable","Segoe UI Variable Text","Segoe UI","PingFang SC","HarmonyOS Sans SC","Noto Sans SC","Microsoft YaHei UI","Hiragino Sans GB",system-ui,sans-serif;
       --mono:SF Mono,Menlo,Consolas,ui-monospace,SFMono-Regular,Monaco,"Liberation Mono","Courier New",monospace;
 
       /* 字号阶梯（对齐官方 CSS 实测分布：12px 1580 处 / 14px 1094 / 13px 930 /
@@ -347,10 +347,15 @@
         --c1:#6a9ef0; --c2:#4fc4b0; --c3:#7fa8ff; --c4:#b98ae0;
         --c5:#e8b562; --c6:#f08a8a; --c7:#63b6e8; --c8:#9fc470;
       }
-    body{
-      /* 走上面的 --font-sans（含 "Microsoft YaHei UI" 中文兜底）。
-         直接写死字体名会在 Windows 上掉到宋体，中文观感与官方差一截。 */
+    /* 全局字体：html/body 一起定，子元素不要再各自覆盖 ——
+       局部换字体是「同一屏两种字宽」的根源（表格数字会错位）。
+       Inter 排第一：没装时自然落到 Segoe UI Variable / 苹方，中文不会掉宋体。 */
+    html, body{
       font-family:var(--font-sans);
+      font-feature-settings:"cv02","cv03","cv04","cv11";
+      letter-spacing:-.005em;
+    }
+    body{
       background:var(--bg); color:var(--fg);
       -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
       font-synthesis:none;
@@ -2193,13 +2198,8 @@
         <p class="panel-subtitle">按模型看这个平台现在能提供什么：价格、近 24 小时用量、成功率与延迟、可用账号数。可用性 = 活跃账号 − 该模型冷却中的账号。</p>
         <div class="wbm-toolbar">
           <input id="wbmSearch" type="search" placeholder="搜索模型名 / 调用名" aria-label="搜索模型">
-          <select id="wbmPlatform" aria-label="按平台筛选"></select>
-          <select id="wbmSort" aria-label="排序">
-            <option value="requests">按调用量</option>
-            <option value="price">按价格</option>
-            <option value="availability">按可用账号</option>
-            <option value="name">按名称</option>
-          </select>
+          <div id="wbmPlatformSel" class="wbm-sel" role="group" aria-label="按平台筛选"></div>
+          <div id="wbmSortSel" class="wbm-sel" role="group" aria-label="排序"></div>
           <label><input id="wbmAvailable" type="checkbox"> 仅看可用</label>
           <div class="wbd-seg" role="group" aria-label="视图">
             <button type="button" data-wbm-view="cards" class="active" onclick="WBModelMarket.setView('cards')">卡片</button>

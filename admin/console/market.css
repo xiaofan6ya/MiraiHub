@@ -108,6 +108,8 @@
 /* ── 工具条 / 骨架 ────────────────────────────────────────────────────── */
 
 .wbm-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.wbm-sel { min-width: 132px; }
+.wbm-toolbar .ui-select-btn { height: 30px; padding: 0 10px; font-size: 12px; }
 .wbm-toolbar input[type="search"] {
   height: 28px; min-width: 180px; padding: 0 9px;
   border: 1px solid var(--border); border-radius: 8px;
