@@ -32,7 +32,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from admin.models import UsageLog, UsageRollup, UsageRollupState
@@ -48,14 +48,65 @@ _BACKFILL_BUDGET = 2.0
 
 _lock = threading.Lock()
 _thread = None
+_schema_ready = False
+
+
+def ensure_schema(db: Session) -> None:
+    """老库补列：`tps_sum` / `tps_count` 是 2026-11-12 新加的。
+
+    已有的汇总行里没有逐请求 t/s，补列后必须清空重算，否则看板会一直显示 0。
+    清空只是丢一次回填的活，后台线程会按新口径重建（前台先走原表）。
+    """
+    global _schema_ready
+    if _schema_ready:
+        return
+    from sqlalchemy import inspect as _inspect
+
+    engine = db.get_bind()
+    names = set(_inspect(engine).get_table_names())
+    if "usage_rollups" not in names:
+        _schema_ready = True
+        return
+    columns = {column["name"] for column in _inspect(engine).get_columns("usage_rollups")}
+    if "tps_sum" not in columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE usage_rollups ADD COLUMN tps_sum FLOAT NOT NULL DEFAULT 0")
+            connection.exec_driver_sql(
+                "ALTER TABLE usage_rollups ADD COLUMN tps_count BIGINT NOT NULL DEFAULT 0")
+            connection.exec_driver_sql("DELETE FROM usage_rollups")
+            try:
+                connection.exec_driver_sql(
+                    "UPDATE usage_rollup_state SET covered_from=NULL, covered_to=NULL")
+            except Exception:  # noqa: BLE001 - 状态表缺失时由下次回填自建
+                pass
+        logger.info("usage_rollups 已补 tps 列，历史汇总已清空等待重算")
+    _schema_ready = True
 
 #: 汇总字段（同时用于 upsert 的加减、以及两段结果的合并）。
 _SUM_FIELDS = ("requests", "successes", "prompt_tokens", "completion_tokens",
                "total_tokens", "cached_tokens", "credits", "latency_sum",
-               "latency_count", "ttfb_sum", "ttfb_count")
+               "latency_count", "ttfb_sum", "ttfb_count", "tps_sum", "tps_count")
 
-#: 只有 credits 是浮点，其余全是整数计数。
-_FLOAT_FIELDS = ("credits",)
+#: 只有 credits / tps_sum 是浮点，其余全是整数计数。
+_FLOAT_FIELDS = ("credits", "tps_sum")
+
+
+def _request_tps(completion_tokens, latency_ms, ttfb_ms):
+    """单请求生成速度，与日志页/`bench_router` 完全同口径。
+
+    分母是**纯解码段**（latency − ttfb），不是整段耗时；0.3 秒以下视为
+    没有有效分段，300 t/s 以上视为整包突发（都不计入）。
+    """
+    try:
+        tokens = float(completion_tokens or 0)
+        decode = float(latency_ms or 0) - float(ttfb_ms or 0)
+    except (TypeError, ValueError):
+        return None
+    if tokens <= 0 or decode < 300:
+        return None
+    value = tokens * 1000.0 / decode
+    return value if 0 < value <= 300 else None
 
 
 def _coerce(name: str, value):
@@ -127,6 +178,7 @@ def record(db: Session, *, platform: str, model: str, created_at: datetime,
     """
     try:
         success = 1 if (error_kind or "") in OK_KINDS else 0
+        tps = _request_tps(completion_tokens, latency_ms, ttfb_ms) if success else None
         values = {
             "hour": hour_start(created_at or datetime.utcnow()),
             "platform": (platform or "").lower(),
@@ -142,6 +194,8 @@ def record(db: Session, *, platform: str, model: str, created_at: datetime,
             "latency_count": 1 if (success and latency_ms is not None) else 0,
             "ttfb_sum": int(ttfb_ms or 0) if success else 0,
             "ttfb_count": 1 if (success and ttfb_ms is not None) else 0,
+            "tps_sum": float(tps) if tps else 0.0,
+            "tps_count": 1 if tps else 0,
         }
         _upsert(db, values, replace=False)
         db.commit()
@@ -203,6 +257,20 @@ def _earliest_log(db: Session) -> datetime | None:
     return hour_start(value) if value else None
 
 
+def _tps_expr():
+    """SQL 侧的逐请求 t/s（纯解码段），与 Python 版 `_request_tps` 同公式。"""
+    decode = UsageLog.latency_ms - UsageLog.ttfb_ms
+    return (func.coalesce(UsageLog.completion_tokens, 0) * 1000.0
+            / func.nullif(decode, 0))
+
+
+def _tps_ok():
+    decode = UsageLog.latency_ms - UsageLog.ttfb_ms
+    return and_(UsageLog.error_kind.in_(OK_KINDS),
+                func.coalesce(UsageLog.completion_tokens, 0) > 0,
+                decode >= 300, _tps_expr() <= 300)
+
+
 def _aggregate_raw(db: Session, start: datetime, end: datetime) -> list[dict]:
     """把 `[start, end)` 的原表行按 (hour, platform, model) 聚成汇总行。"""
     ok = UsageLog.error_kind.in_(OK_KINDS)
@@ -225,6 +293,9 @@ def _aggregate_raw(db: Session, start: datetime, end: datetime) -> list[dict]:
             func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
             func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
             func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
+            # 逐请求 t/s 的累加：口径与日志页一致（纯解码段、0.3s 起、300 上限）
+            func.sum(case((_tps_ok(), _tps_expr()), else_=0.0)),
+            func.sum(case((_tps_ok(), 1), else_=0)),
         )
         .filter(UsageLog.created_at >= start, UsageLog.created_at < end)
         .group_by("h", UsageLog.platform, UsageLog.model)
@@ -248,6 +319,8 @@ def _aggregate_raw(db: Session, start: datetime, end: datetime) -> list[dict]:
             "latency_count": int(row[11] or 0),
             "ttfb_sum": int(row[12] or 0),
             "ttfb_count": int(row[13] or 0),
+            "tps_sum": float(row[14] or 0),
+            "tps_count": int(row[15] or 0),
         })
     return out
 
@@ -260,6 +333,10 @@ def ensure_coverage(db: Session, *, until: datetime | None = None,
     读请求先用「已完成的部分走汇总、剩下的走原表」照样能出数。
     """
     deadline = time.monotonic() + max(0.0, budget)
+    try:
+        ensure_schema(db)
+    except Exception as exc:  # noqa: BLE001 - 补列失败就继续走原表
+        logger.warning("usage_rollups 补列失败：%s", exc)
     now = datetime.utcnow()
     # 只回填**已经走完**的整点：当前这一小时还在写，进汇总就会滞后一小时。
     target_to = hour_start(until or now)
@@ -377,6 +454,8 @@ def _raw_rows(db: Session, start: datetime, end: datetime):
             func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
             func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
             func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
+            func.sum(case((_tps_ok(), _tps_expr()), else_=0.0)),
+            func.sum(case((_tps_ok(), 1), else_=0)),
         )
         .filter(UsageLog.created_at >= start, UsageLog.created_at < end)
         .group_by(UsageLog.platform, UsageLog.model)

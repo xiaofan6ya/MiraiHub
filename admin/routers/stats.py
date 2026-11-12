@@ -969,11 +969,12 @@ def model_market(hours: int = Query(default=24, ge=1, le=168),
                 "requests": 0, "successes": 0, "tokens": 0, "credits": 0.0,
                 "latency_sum": 0, "latency_count": 0,
                 "ttfb_sum": 0, "ttfb_count": 0, "completion_tokens": 0,
+                "tps_sum": 0.0, "tps_count": 0,
                 "platforms": set(), "models": set(),
             })
             for name in ("requests", "successes", "tokens", "credits",
                          "latency_sum", "latency_count", "ttfb_sum",
-                         "ttfb_count", "completion_tokens"):
+                         "ttfb_count", "completion_tokens", "tps_sum", "tps_count"):
                 entry[name] += values.get("total_tokens" if name == "tokens" else name) or 0
             entry["platforms"].add(plat)
             entry["models"].add(mid)
@@ -990,6 +991,7 @@ def model_market(hours: int = Query(default=24, ge=1, le=168),
                 "requests": 0, "successes": 0, "tokens": 0, "credits": 0.0,
                 "latency_sum": 0, "latency_count": 0,
                 "ttfb_sum": 0, "ttfb_count": 0, "completion_tokens": 0,
+                "tps_sum": 0.0, "tps_count": 0,
                 "platforms": {item["platform"] for item in prices},
                 "models": {item["model_id"] for item in prices},
             }
@@ -1016,8 +1018,8 @@ def model_market(hours: int = Query(default=24, ge=1, le=168),
                                    if entry["latency_count"] else 0),
                 "avg_ttfb_ms": (int(round(entry["ttfb_sum"] / entry["ttfb_count"]))
                                 if entry["ttfb_count"] else 0),
-                "tps": (round(float(entry["completion_tokens"]) * 1000.0 / entry["latency_sum"], 2)
-                        if entry["latency_sum"] else 0.0),
+                "tps": (round(entry["tps_sum"] / entry["tps_count"], 2)
+                        if entry["tps_count"] else 0.0),
                 "pricing": prices,
                 "free": bool(prices) and all(item["free"] for item in prices),
                 "min_multiplier": min((item["multiplier"] for item in prices), default=0.0),
@@ -1115,8 +1117,19 @@ def _dashboard_from_rollup(db: Session, days: int, granularity: str, platform: s
     def _avg(total_sum, count):
         return int(round(total_sum / count)) if count else 0
 
-    def _tps(completion, latency_sum):
-        return round(float(completion) * 1000.0 / float(latency_sum), 2) if latency_sum else 0.0
+    def _tps(values):
+        """平均生成速度：逐请求 t/s 的算术平均（与日志页同一口径）。
+
+        旧实现用 `Σcompletion / Σlatency`，被少数排队/重试十几分钟的请求拖垮
+        （实测卡片 42 t/s、日志每行 200+）。没有有效样本时退回区间总吞吐。
+        """
+        count = values.get("tps_count") or 0
+        if count:
+            return round(float(values.get("tps_sum") or 0) / count, 2)
+        latency = values.get("latency_sum") or 0
+        if not latency:
+            return 0.0
+        return round(float(values.get("completion_tokens") or 0) * 1000.0 / latency, 2)
 
     requests = int(total["requests"])
     summary = {
@@ -1135,7 +1148,7 @@ def _dashboard_from_rollup(db: Session, days: int, granularity: str, platform: s
         "tpm": round(float(total["total_tokens"]) / minutes, 2),
         "avg_latency_ms": _avg(total["latency_sum"], total["latency_count"]),
         "avg_ttfb_ms": _avg(total["ttfb_sum"], total["ttfb_count"]),
-        "throughput_tps": _tps(total["completion_tokens"], total["latency_sum"]),
+        "throughput_tps": _tps(total),
         "window_minutes": int(minutes),
     }
 
@@ -1157,7 +1170,7 @@ def _dashboard_from_rollup(db: Session, days: int, granularity: str, platform: s
             "credits": round(float(values["credits"]), 4),
             "avg_latency_ms": _avg(values["latency_sum"], values["latency_count"]),
             "avg_ttfb_ms": _avg(values["ttfb_sum"], values["ttfb_count"]),
-            "tps": _tps(values["completion_tokens"], values["latency_sum"]),
+            "tps": _tps(values),
         })
     models.sort(key=lambda item: item["requests"], reverse=True)
 

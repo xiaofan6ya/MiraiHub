@@ -357,6 +357,14 @@ class UsageRollup(Base):
     latency_count = Column(BigInteger, nullable=False, default=0)
     ttfb_sum = Column(BigInteger, nullable=False, default=0)
     ttfb_count = Column(BigInteger, nullable=False, default=0)
+    #: 单请求生成速度（t/s）的累加与计数（2026-11-12）。
+    #:
+    #: 为什么不能再用 `Σcompletion / Σlatency`：上游排队/重试会把少数请求的
+    #: 总耗时拉到十几分钟，平均值被它们拖垮（实测显示 42 t/s，而日志里每行
+    #: 都是 200+）。这里按**日志页同一口径**逐请求算完再平均：
+    #:   decode = latency − ttfb，0.3s ≤ decode 且 0 < tps ≤ 300 才计入。
+    tps_sum = Column(Float, nullable=False, default=0)
+    tps_count = Column(BigInteger, nullable=False, default=0)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
