@@ -1114,12 +1114,27 @@ def log_summary(
                 "avg_latency_ms": int(avg_lat or 0),
                 "last_used_at": last.isoformat() if last else None,
             })
-        return {"range_days": days, "total_requests": sum(i["requests"] for i in items),
+        # 顶部摘要（对齐 new-api 使用日志的「用量 / RPM / TPM」三个 chip）：
+        # 窗口长度取「起点 → 现在（或指定结束时间）」，RPM/TPM 才不会被窗口
+        # 首尾的空白时间稀释。
+        from datetime import datetime as _dt
+        window_end = _dt.utcnow()
+        if end:
+            try:
+                window_end = _dt.fromisoformat(str(end).replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                window_end = _dt.utcnow()
+        window_minutes = max(1, int((window_end - window_start).total_seconds() / 60))
+        return {"range_days": days,
+                "total_requests": sum(i["requests"] for i in items),
                 "ok_requests": sum(i["ok_requests"] for i in items),
                 "failed_requests": sum(i["failed_requests"] for i in items),
                 "account_count": sum(1 for i in items if i["account_id"]),
                 "unattributed_requests": sum(i["requests"] for i in items if not i["account_id"]),
-                "total_credits": round(sum(i["credits"] for i in items), 4), "items": items}
+                "total_credits": round(sum(i["credits"] for i in items), 4),
+                "total_tokens": sum(i["total_tokens"] for i in items),
+                "window_minutes": window_minutes,
+                "items": items}
 
     return _cached_stats(cache_key, compute, ttl=_ttl_for_days(days))
 

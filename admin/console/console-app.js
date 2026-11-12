@@ -15843,7 +15843,16 @@ async function loadLogSummary(silent = false) {
     if (usageRevision === _logUsageRevision) _logSummaryDirty = false;
     _logSummarySignature = filterSignature;
     _logSummaryAt = Date.now();
-    if (hint) hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests} · ${ovCredit(data.total_credits)} 积分${data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : ""}`;
+    if (hint) {
+      // 顶部摘要：对齐 new-api 使用日志的「用量 / RPM / TPM」。
+      // RPM/TPM 用后端给的窗口分钟数算，前端不自己猜窗口长度。
+      const mins = Math.max(1, Number(data.window_minutes) || 1);
+      const rpm = (Number(data.total_requests) || 0) / mins;
+      const tpm = (Number(data.total_tokens) || 0) / mins;
+      hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests}`
+        + ` · 用量 ${ovCredit(data.total_credits)} 积分 · RPM ${ovNum(rpm)} · TPM ${ovNum(tpm)}`
+        + (data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : "");
+    }
     if (!items.length) { box.innerHTML = `<div class="empty">该时间范围内没有账号产生请求。</div>`; return; }
     const maxC = Math.max(1, ...items.map(x => x.credits));
     box.innerHTML = `<table class="tbl" style="min-width:820px">

@@ -9,6 +9,21 @@
 
 .wbd-page { display: block; min-width: 0; }
 
+/* 进场：整块淡入 + 轻微上移，按 --i 错峰。
+   目的不是炫技，而是让「这一屏是刚取回来的」有明确的视觉反馈 ——
+   数据刷新时如果只有数字跳变，用户很难判断是不是真的重新查过。 */
+@keyframes wbd-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.wbd-enter {
+  animation: wbd-rise .34s cubic-bezier(.38, 0, .24, 1) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wbd-enter { animation: none; }
+}
+
 /* ── 分段控件（区间 / 粒度 / 图表类型）────────────────────────────────── */
 
 .wbd-seg {
@@ -32,13 +47,19 @@
 /* ── KPI 一排 ─────────────────────────────────────────────────────────── */
 
 .wbd-kpis {
-  display: grid; gap: 10px; margin-bottom: 10px;
+  display: grid; gap: 12px; margin-bottom: 14px;
   grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
 }
 .wbd-kpi {
-  min-width: 0; padding: 12px 14px;
+  min-width: 0; padding: 14px 16px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); box-shadow: var(--sh-1);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.wbd-kpi:hover {
+  border-color: var(--brand);
+  box-shadow: var(--sh-2);
+  transform: translateY(-1px);
 }
 .wbd-kpi-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .wbd-kpi-glyph {
@@ -53,14 +74,16 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .wbd-kpi-value {
-  margin-top: 6px; font-family: var(--mono);
-  font-size: 21px; line-height: 1.2; font-weight: 700;
-  letter-spacing: -.01em; color: var(--fg);
+  margin-top: 8px; font-family: var(--mono);
+  font-size: 24px; line-height: 1.18; font-weight: 700;
+  letter-spacing: -.02em; color: var(--fg);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .wbd-kpi-note {
-  margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--fg-subtle);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: 4px; font-size: 11px; line-height: 1.45; color: var(--fg-subtle);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .wbd-kpi-ok .wbd-kpi-glyph { background: var(--ok-soft); color: var(--ok); }
 .wbd-kpi-warn .wbd-kpi-glyph { background: var(--warn-soft); color: var(--warn); }
@@ -116,13 +139,15 @@
 /* ── 卡片 ─────────────────────────────────────────────────────────────── */
 
 .wbd-card {
-  margin-bottom: 10px; overflow: hidden;
+  margin-bottom: 14px; overflow: hidden;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); box-shadow: var(--sh-1);
+  transition: box-shadow .15s ease;
 }
+.wbd-card:hover { box-shadow: var(--sh-2); }
 .wbd-card-head {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-  gap: 8px 12px; padding: 10px 14px;
+  gap: 8px 12px; padding: 12px 16px;
   border-bottom: 1px solid var(--border-soft);
 }
 .wbd-card-title {
@@ -145,10 +170,36 @@
   width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto;
 }
 
-.wbd-chart { padding: 4px 8px 8px; min-height: 240px; }
+.wbd-chart { padding: 10px 12px 12px; min-height: 264px; }
 .wbd-svg { display: block; overflow: visible; }
 .wbd-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
 .wbd-axis { fill: var(--fg-subtle); font-size: 10px; font-family: var(--mono); }
+
+/* ── 平台分流（横向条）────────────────────────────────────────────────── */
+
+.wbd-split-wrap { padding: 10px 16px 16px; }
+.wbd-split { display: grid; gap: 8px; }
+.wbd-split-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: minmax(90px, 1.1fr) minmax(120px, 3fr) 64px 52px minmax(120px, 1.4fr);
+  font-size: 12px; color: var(--fg);
+}
+.wbd-split-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+.wbd-split-bar { height: 8px; border-radius: 5px; background: var(--surface-3); overflow: hidden; }
+.wbd-split-bar i { display: block; height: 100%; border-radius: 5px; }
+.wbd-split-num, .wbd-split-share {
+  font-family: var(--mono); font-size: 11px; text-align: right; color: var(--fg-muted);
+}
+.wbd-split-extra {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  font-size: 11px; color: var(--fg-subtle);
+}
+.wbd-split-extra em {
+  font-family: var(--mono); font-style: normal; font-weight: 700;
+}
 
 /* ── 排行 ─────────────────────────────────────────────────────────────── */
 

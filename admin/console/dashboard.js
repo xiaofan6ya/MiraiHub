@@ -321,21 +321,28 @@
 
     host.innerHTML =
       /* KPI 一排：对齐 new-api 顶部 7 张 */
-      '<section class="wbd-kpis">' +
-        kpi("Σ", "info", "总数", exact(summary.requests), "请求数（含失败）") +
-        kpi("¥", "ok", "总积分", credit(summary.credits), "成功请求消耗") +
+      '<section class="wbd-kpis wbd-enter" style="--i:0">' +
+        kpi("Σ", "info", "总数", exact(summary.requests), "请求数（含失败）",
+            summary.requests, "int") +
+        kpi("¥", "ok", "总积分", credit(summary.credits), "成功请求消耗",
+            summary.credits, "credit") +
         kpi("T", "brand", "总 Token", cnum(summary.total_tokens),
-            "入 " + cnum(summary.prompt_tokens) + " · 出 " + cnum(summary.completion_tokens)) +
+            "入 " + cnum(summary.prompt_tokens) + " · 出 " + cnum(summary.completion_tokens),
+            summary.total_tokens, "compact") +
         kpi("C", "purple", "缓存读取", cnum(summary.cached_tokens),
-            summary.cache_hit_rate == null ? "无样本" : "命中率 " + pct(summary.cache_hit_rate, 1)) +
-        kpi("RPM", "teal", "平均 RPM", cnum(summary.rpm), "每分钟请求数") +
-        kpi("TPM", "amber", "平均 TPM", cnum(summary.tpm), "每分钟 Token 数") +
+            summary.cache_hit_rate == null ? "无样本" : "命中率 " + pct(summary.cache_hit_rate, 1),
+            summary.cached_tokens, "compact") +
+        kpi("RPM", "teal", "平均 RPM", cnum(summary.rpm), "每分钟请求数",
+            summary.rpm, "num2") +
+        kpi("TPM", "amber", "平均 TPM", cnum(summary.tpm), "每分钟 Token 数",
+            summary.tpm, "num2") +
         kpi("✓", rateTone(summary.success_rate), "成功率", pct(summary.success_rate),
-            "成功 " + exact(summary.successes) + " · 失败 " + exact(summary.failures)) +
+            "成功 " + exact(summary.successes) + " · 失败 " + exact(summary.failures),
+            summary.success_rate, "pct") +
       "</section>" +
 
       /* 性能健康条 */
-      '<section class="wbd-health">' +
+      '<section class="wbd-health wbd-enter" style="--i:1">' +
         '<span class="wbd-health-title">性能健康</span>' +
         '<span class="wbd-health-cell">成功率 <b class="' + rateClass(summary.success_rate) + '">' + pct(summary.success_rate) + "</b></span>" +
         '<span class="wbd-health-cell">平均延迟 <b>' + latency(summary.avg_latency_ms) + "</b></span>" +
@@ -349,7 +356,7 @@
       "</section>" +
 
       /* 消耗分布 */
-      '<section class="wbd-card">' +
+      '<section class="wbd-card wbd-enter" style="--i:2">' +
         '<header class="wbd-card-head">' +
           '<div class="wbd-card-title">消耗分布' +
             '<span class="wbd-card-total">' + (distUnit === "credits"
@@ -367,27 +374,30 @@
       "</section>" +
 
       /* 模型调用分析 */
-      '<section class="wbd-card">' +
+      '<section class="wbd-card wbd-enter" style="--i:3">' +
         '<header class="wbd-card-head">' +
           '<div class="wbd-card-title">模型调用分析' +
             '<span class="wbd-card-total">总计 ' + exact(summary.requests) + " 次调用</span></div>" +
           segmented([{ value: "trend", label: "调用趋势" },
                      { value: "distribution", label: "调用次数分布" },
-                     { value: "ranking", label: "调用次数排行" }],
+                     { value: "ranking", label: "调用次数排行" },
+                     { value: "platforms", label: "平台分流" }],
                     state.analysisMode, "setAnalysisMode") +
         "</header>" +
         (state.analysisMode === "ranking"
           ? '<div class="wbd-rank-wrap">' + renderRanking(data.ranking || []) + "</div>"
-          : '<div class="wbd-legend">' + (trend.series || []).map(function (item, index) {
-              var colors = palette();
-              return '<span class="wbd-legend-item"><i style="background:' +
-                colors[index % colors.length] + '"></i>' + esc(item.name) + "</span>";
-            }).join("") + "</div>" +
-            '<div id="wbdAnalysisChart" class="wbd-chart"></div>') +
+          : state.analysisMode === "platforms"
+            ? '<div class="wbd-split-wrap">' + renderPlatformSplit(data.platforms || [], summary) + "</div>"
+            : '<div class="wbd-legend">' + (trend.series || []).map(function (item, index) {
+                var colors = palette();
+                return '<span class="wbd-legend-item"><i style="background:' +
+                  colors[index % colors.length] + '"></i>' + esc(item.name) + "</span>";
+              }).join("") + "</div>" +
+              '<div id="wbdAnalysisChart" class="wbd-chart"></div>') +
       "</section>" +
 
       /* 平台贡献 + 失败分类 */
-      '<div class="wbd-grid2">' +
+      '<div class="wbd-grid2 wbd-enter" style="--i:4">' +
         '<section class="wbd-card">' +
           '<header class="wbd-card-head"><div class="wbd-card-title">平台贡献</div>' +
             '<span class="wbd-muted">点击切换筛选</span></header>' +
@@ -425,20 +435,85 @@
       drawStacked(el("wbdAnalysisChart"), trend.buckets,
         [{ name: "调用次数", values: trend.total_requests || [] }], "bar", "requests");
     }
+    // 数字动效放在图表之后：先让骨架/图形就位，再滚数字，视觉上更稳。
+    requestAnimationFrame(animateKpis);
   }
 
-  function rateTone(rate) {
+  /* ── KPI 数字动效 ────────────────────────────────────────────────────── */
+
+var KPI_FORMATTERS = {
+  int: function (value) { return Math.round(value).toLocaleString("zh-CN"); },
+  // RPM/TPM 用同一套缩写（万/亿）：否则动画结束时会从「99.3万」跳成
+  // 「993,055.56」，在窄卡片里被省略号截断，看起来像数据没加载完。
+  num2: function (value) { return cnum(value); },
+  credit: function (value) { return credit(value); },
+  compact: function (value) { return cnum(value); },
+  pct: function (value) { return (value * 100).toFixed(2) + "%"; },
+};
+
+/**
+ * KPI 从 0 滚到目标值。
+ *
+ * 为什么要动效：这排数字是「结论」，直接跳变会让人怀疑是不是没刷新；
+ * 从 0 滚上去能明确传达「这是刚取回来的新数据」。620ms + easeOutCubic，
+ * 再长就拖沓；`prefers-reduced-motion` 下直接落到终值（无障碍要求）。
+ */
+function animateKpis() {
+  var reduce = window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  document.querySelectorAll("[data-kpi-value]").forEach(function (node) {
+    var target = Number(node.dataset.kpiValue);
+    var format = KPI_FORMATTERS[node.dataset.kpiFormat] || KPI_FORMATTERS.int;
+    if (!Number.isFinite(target)) return;
+    if (reduce) { node.textContent = format(target); return; }
+    var begin = performance.now();
+    var duration = 620;
+    var frame = function (now) {
+      var t = Math.min(1, (now - begin) / duration);
+      var eased = 1 - Math.pow(1 - t, 3);
+      node.textContent = format(t < 1 ? target * eased : target);
+      if (t < 1) requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+}
+
+/* ── 平台分流 ────────────────────────────────────────────────────────── */
+
+/** 横向条形：平台维度用 HTML 画（比 SVG 更容易对齐中文名与数字）。 */
+function renderPlatformSplit(rows, summary) {
+  if (!rows || !rows.length) return '<div class="wbd-empty">窗口内没有平台流量</div>';
+  var max = Math.max.apply(null, rows.map(function (row) { return row.requests || 0; }).concat([1]));
+  var colors = palette();
+  return '<div class="wbd-split">' + rows.map(function (row, index) {
+    var width = Math.max(2, ((row.requests || 0) / max) * 100);
+    return '<div class="wbd-split-row">' +
+      '<span class="wbd-split-name">' + esc(row.label) + "</span>" +
+      '<span class="wbd-split-bar"><i style="width:' + width.toFixed(1) +
+        "%;background:" + colors[index % colors.length] + '"></i></span>' +
+      '<span class="wbd-split-num">' + exact(row.requests) + "</span>" +
+      '<span class="wbd-split-share">' +
+        pct(summary.requests ? row.requests / summary.requests : 0, 1) + "</span>" +
+      '<span class="wbd-split-extra">' + credit(row.credits) + " 积分" +
+        '<em class="' + rateClass(row.success_rate) + '">' + pct(row.success_rate, 2) + "</em></span>" +
+      "</div>";
+  }).join("") + "</div>";
+}
+
+function rateTone(rate) {
     if (rate === null || rate === undefined) return "info";
     if (rate >= 0.995) return "ok";
     if (rate >= 0.97) return "warn";
     return "danger";
   }
 
-  function kpi(glyph, tone, label, value, note) {
+  function kpi(glyph, tone, label, value, note, raw, format) {
+    var animate = (raw === null || raw === undefined || !Number.isFinite(Number(raw)))
+      ? "" : ' data-kpi-value="' + Number(raw) + '" data-kpi-format="' + esc(format || "int") + '"';
     return '<div class="wbd-kpi wbd-kpi-' + tone + '">' +
       '<div class="wbd-kpi-head"><i class="wbd-kpi-glyph">' + esc(glyph) + "</i>" +
       '<span class="wbd-kpi-label">' + esc(label) + "</span></div>" +
-      '<div class="wbd-kpi-value">' + esc(value) + "</div>" +
+      '<div class="wbd-kpi-value"' + animate + ">" + esc(value) + "</div>" +
       '<div class="wbd-kpi-note">' + esc(note) + "</div>" +
       "</div>";
   }
