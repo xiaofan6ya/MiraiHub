@@ -422,6 +422,9 @@ public class MainActivity extends Activity {
                 data.put("background_restricted", Build.VERSION.SDK_INT >= 28 && activity.isBackgroundRestricted());
                 data.put("power_save", power.isPowerSaveMode());
                 data.put("wake_lock", LocalApiService.wakeLockHeld());
+                data.put("keeper_enabled", ServiceKeeper.enabled(MainActivity.this));
+                data.put("interrupts", ServiceKeeper.interrupts(MainActivity.this));
+                data.put("last_interrupt", ServiceKeeper.lastInterrupt(MainActivity.this));
                 data.put("origin", LocalApiService.origin);
                 data.put("error", LocalApiService.error);
             } catch (Exception ignored) { }
@@ -454,6 +457,8 @@ public class MainActivity extends Activity {
                         intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                                             Uri.parse("package:" + getPackageName()));
                     }
+                } else if ("startup".equals(section) && selfStartIntent() != null) {
+                    intent = selfStartIntent();
                 } else {
                     intent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                         Uri.parse("package:" + getPackageName()));
@@ -469,6 +474,33 @@ public class MainActivity extends Activity {
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
+    /**
+     * 国产 ROM 的「自启动 / 关联启动」管理页。
+     *
+     * 这些页面不在公开 SDK 里，只能按类名猜；猜不中就返回 null，
+     * 调用方退回应用详情页 —— 用户至少还能手动摸过去。
+     * 顺序按机型常见度排，ColorOS 放最前（issue #37 的复现机是 OPPO）。
+     */
+    private Intent selfStartIntent() {
+        String[][] routes = new String[][]{
+            {"com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"},
+            {"com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"},
+            {"com.oplus.safecenter", "com.oplus.safecenter.startupapp.StartupAppListActivity"},
+            {"com.oplus.battery", "com.oplus.powermanager.fuelgaue.PowerUsageModelActivity"},
+            {"com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"},
+            {"com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"},
+            {"com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"},
+            {"com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity"},
+        };
+        for (String[] route : routes) {
+            try {
+                Intent intent = new Intent().setClassName(route[0], route[1]);
+                if (getPackageManager().resolveActivity(intent, 0) != null) return intent;
+            } catch (Exception ignored) { }
+        }
+        return null;
+    }
 
     private boolean isAdmin(String url) {
         if (loadedOrigin == null || url == null) return false;
@@ -487,8 +519,11 @@ public class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume();
-        // Re-register the foreground service even when Python left an old origin in memory.
-        if (web != null) startLocalService();
+        // 只在「服务确实不在了」时补一次启动。
+        // 每次 onResume 都无条件 startForegroundService，会和看门狗抢着重建服务，
+        // 通知跟着闪一下 —— 这就是 issue #37 里「一回到前台就重启服务」的观感来源。
+        if (web != null && (!LocalApiService.registered
+                || (LocalApiService.origin == null && !LocalApiService.starting))) startLocalService();
         if (web != null) web.evaluateJavascript("window.dispatchEvent(new Event('wb-shell-resume'))", null);
         if (LocalApiService.origin != null && Python.isStarted()) new Thread(() -> {
             try {

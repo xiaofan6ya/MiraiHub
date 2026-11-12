@@ -1,0 +1,258 @@
+/* ============================================================================
+   数据看板（panel-stats）
+   ----------------------------------------------------------------------------
+   设计参照 new-api 的 Dashboard 截图：一行 KPI → 一条性能健康带 → 消耗分布
+   （按模型堆叠）→ 调用分析三视图。这里只写这一屏的样式，全部走控制台已有的
+   主题变量（--surface / --border / --fg 三档 / --brand / --c1..--c8），
+   所以深浅两套主题不用再写第二遍。
+   ========================================================================== */
+
+.wbd-page { display: block; min-width: 0; }
+
+/* ── 分段控件（区间 / 粒度 / 图表类型）────────────────────────────────── */
+
+.wbd-seg {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-2);
+}
+.wbd-seg button {
+  height: 26px; padding: 0 10px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--fg-muted);
+  font-size: 12px; line-height: 1; cursor: pointer;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+  white-space: nowrap;
+}
+.wbd-seg button:hover { color: var(--fg); }
+.wbd-seg button.active {
+  background: var(--surface); color: var(--fg);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .08);
+}
+
+/* ── KPI 一排 ─────────────────────────────────────────────────────────── */
+
+.wbd-kpis {
+  display: grid; gap: 10px; margin-bottom: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+}
+.wbd-kpi {
+  min-width: 0; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); box-shadow: var(--sh-1);
+}
+.wbd-kpi-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wbd-kpi-glyph {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; font-style: normal;
+  background: var(--brand-soft); color: var(--brand-ink);
+}
+.wbd-kpi-label {
+  min-width: 0; font-size: 11px; font-weight: 500;
+  color: var(--fg-muted); letter-spacing: .02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbd-kpi-value {
+  margin-top: 6px; font-family: var(--mono);
+  font-size: 21px; line-height: 1.2; font-weight: 700;
+  letter-spacing: -.01em; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbd-kpi-note {
+  margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--fg-subtle);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbd-kpi-ok .wbd-kpi-glyph { background: var(--ok-soft); color: var(--ok); }
+.wbd-kpi-warn .wbd-kpi-glyph { background: var(--warn-soft); color: var(--warn); }
+.wbd-kpi-danger .wbd-kpi-glyph { background: var(--danger-soft); color: var(--danger); }
+.wbd-kpi-purple .wbd-kpi-glyph { background: rgba(150, 120, 220, .14); color: var(--purple, #9379c2); }
+.wbd-kpi-teal .wbd-kpi-glyph { background: rgba(51, 166, 160, .14); color: #33a6a0; }
+.wbd-kpi-amber .wbd-kpi-glyph { background: rgba(206, 154, 67, .16); color: #b9863a; }
+
+/* ── 性能健康带 ───────────────────────────────────────────────────────── */
+
+.wbd-health {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px;
+  padding: 10px 14px; margin-bottom: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); box-shadow: var(--sh-1);
+}
+.wbd-health-title {
+  font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--fg-subtle);
+}
+.wbd-health-cell { font-size: 12px; color: var(--fg-muted); }
+.wbd-health-cell b {
+  margin-left: 4px; font-family: var(--mono); font-size: 12px;
+  font-weight: 700; color: var(--fg);
+}
+/* 成功率用语义色：绿/橙/红直接告诉人「这一档要不要处理」，
+   但字号与字重仍与旁边的普通数字一致，避免抢视线。 */
+.wbd-health-cell b.wbd-ok { color: var(--ok); }
+.wbd-health-cell b.wbd-warn { color: var(--warn); }
+.wbd-health-cell b.wbd-danger { color: var(--danger); }
+.wbd-health-models {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; margin-left: auto;
+  min-width: 0;
+}
+.wbd-model-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-muted);
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbd-model-chip i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--fg-subtle);
+  flex: 0 0 auto;
+}
+.wbd-model-chip i.wbd-ok { background: var(--ok); }
+.wbd-model-chip i.wbd-warn { background: var(--warn); }
+.wbd-model-chip i.wbd-danger { background: var(--danger); }
+
+.wbd-ok { color: var(--ok); }
+.wbd-warn { color: var(--warn); }
+.wbd-danger { color: var(--danger); }
+.wbd-neutral { color: var(--fg-muted); }
+
+/* ── 卡片 ─────────────────────────────────────────────────────────────── */
+
+.wbd-card {
+  margin-bottom: 10px; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); box-shadow: var(--sh-1);
+}
+.wbd-card-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px 12px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.wbd-card-title {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--fg);
+}
+.wbd-card-total { font-size: 11px; font-weight: 400; color: var(--fg-subtle); }
+.wbd-muted { font-size: 11px; color: var(--fg-subtle); }
+
+.wbd-legend {
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  padding: 8px 14px 0;
+}
+.wbd-legend-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-muted);
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wbd-legend-item i {
+  width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto;
+}
+
+.wbd-chart { padding: 4px 8px 8px; min-height: 240px; }
+.wbd-svg { display: block; overflow: visible; }
+.wbd-grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+.wbd-axis { fill: var(--fg-subtle); font-size: 10px; font-family: var(--mono); }
+
+/* ── 排行 ─────────────────────────────────────────────────────────────── */
+
+.wbd-rank-wrap { padding: 6px 14px 14px; }
+.wbd-rank { display: grid; gap: 2px; }
+.wbd-rank-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: 22px minmax(120px, 1.6fr) minmax(80px, 3fr) 72px 56px;
+  padding: 6px 4px; border-radius: 7px;
+  font-size: 12px; color: var(--fg);
+}
+.wbd-rank-row:hover { background: var(--surface-2); }
+.wbd-rank-no {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-subtle);
+  text-align: right;
+}
+.wbd-rank-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+.wbd-rank-bar {
+  height: 6px; border-radius: 4px; background: var(--surface-3); overflow: hidden;
+}
+.wbd-rank-bar i { display: block; height: 100%; border-radius: 4px; }
+.wbd-rank-num, .wbd-rank-pct {
+  font-family: var(--mono); font-size: 11px; text-align: right;
+  color: var(--fg-muted);
+}
+
+/* ── 平台 / 失败分类 ──────────────────────────────────────────────────── */
+
+.wbd-grid2 {
+  display: grid; gap: 10px; margin-bottom: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.wbd-platforms { display: grid; gap: 6px; padding: 10px 14px 14px; }
+.wbd-platform {
+  display: grid; align-items: center; gap: 4px 10px;
+  grid-template-columns: minmax(90px, 1fr) minmax(120px, 2fr) auto;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); text-align: left; cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.wbd-platform:hover { background: var(--surface-2); }
+.wbd-platform.active { border-color: var(--brand); background: var(--brand-soft); }
+.wbd-platform b { font-size: 12px; font-weight: 600; color: var(--fg); }
+.wbd-platform span { font-size: 11px; color: var(--fg-muted); }
+.wbd-platform em {
+  font-family: var(--mono); font-size: 11px; font-style: normal; font-weight: 700;
+}
+
+.wbd-errors { display: grid; gap: 6px; padding: 10px 14px 14px; }
+.wbd-error-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: minmax(80px, 1fr) minmax(80px, 2fr) 56px;
+  font-size: 12px; color: var(--fg-muted);
+}
+.wbd-error-row span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11px;
+}
+.wbd-error-row i { height: 6px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.wbd-error-row i b { display: block; height: 100%; background: var(--danger); border-radius: 4px; }
+.wbd-error-row em {
+  font-family: var(--mono); font-size: 11px; font-style: normal; text-align: right;
+  color: var(--fg);
+}
+
+/* ── 空 / 错 / 骨架 ───────────────────────────────────────────────────── */
+
+.wbd-empty, .wbd-error {
+  padding: 28px 14px; text-align: center;
+  font-size: 12px; color: var(--fg-subtle);
+}
+.wbd-error { color: var(--danger); }
+
+.wbd-skeleton { display: grid; gap: 10px; padding: 2px 0; }
+.wbd-skeleton-kpis { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); }
+.wbd-skeleton-kpis i, .wbd-skeleton-block {
+  display: block; height: 82px; border-radius: var(--r);
+  background: linear-gradient(100deg, var(--surface-2) 20%, var(--surface-3) 42%, var(--surface-2) 62%);
+  background-size: 220% 100%;
+  animation: wbd-shimmer 1.2s ease-in-out infinite;
+}
+.wbd-skeleton-block { height: 260px; }
+@keyframes wbd-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -60% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wbd-skeleton-kpis i, .wbd-skeleton-block { animation: none; }
+}
+
+.is-loading .wbd-kpi-value { opacity: .55; }
+
+/* ── 窄屏 ─────────────────────────────────────────────────────────────── */
+
+@media (max-width: 767px) {
+  .wbd-health { gap: 6px 12px; }
+  .wbd-health-models { margin-left: 0; width: 100%; }
+  .wbd-kpi-value { font-size: 18px; }
+  .wbd-rank-row { grid-template-columns: 20px minmax(90px, 1.4fr) minmax(60px, 2fr) 58px; }
+  .wbd-rank-pct { display: none; }
+  .wbd-platform { grid-template-columns: minmax(70px, 1fr) auto; }
+  .wbd-platform span { display: none; }
+  .wbd-chart { min-height: 200px; }
+}

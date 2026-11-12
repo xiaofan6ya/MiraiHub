@@ -1261,7 +1261,7 @@ function enterApp() {
 
 // Tabs
 // 面板清单与默认面板：默认面板不写进 URL（保持地址栏干净）。
-const TABS = ["overview","sentinel","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
+const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
 const TAB_DEFAULT = "overview";
 
 /** 从地址栏读当前应显示的面板；非法/缺失一律回落到默认面板。 */
@@ -1386,7 +1386,7 @@ function _tabLabel(name) {
 }
 
 const _SUB_TAB_LABELS = {
-  overview: '概览', sentinel: '风控哨兵',
+  overview: '概览', sentinel: '风控哨兵', stats: '数据看板',
   platforms: '平台管理', gateway: '平台网关',
   accounts: '账号池', credits: '积分到期', journal: '积分流水', growth: '成长计划',
   usage: '使用记录', logs: '用量日志', keys: 'API Keys', ip: 'IP 管理',
@@ -1492,6 +1492,12 @@ function activateTab(name, opts) {
   // 概览：每次进入面板都强制重跑计数动效（force=true），
   // 让「切 tab / 点刷新」都能看到数字从 0 滚到目标值。
   if (name === "overview") loadOverview(true);
+  // 数据看板：脚本独立加载（dashboard.js），首屏可能还没到位，稍等一拍再拉；
+  // 已加载过就直接重画 —— 主题切换后 SVG 里的颜色要跟着换。
+  if (name === "stats") {
+    if (window.WBStatsDashboard) window.WBStatsDashboard.load(true);
+    else setTimeout(() => window.WBStatsDashboard?.load(true), 120);
+  }
   if (name === "sentinel") {
     if (typeof loadSentinel === "function") loadSentinel();
     setTimeout(() => {
@@ -1998,6 +2004,8 @@ function panelSkeletonShow(name, force) {
   // 骨架克隆只会复制出第二份外壳；且它的请求不走 api()，骨架只能靠
   // 1.8s 兜底才收 —— 网慢时用户看到的就是「两套创作台」。
   if (name === "agent") return;
+  // 数据看板同理：它自己画骨架并整块替换，克隆出来的第二套外壳只会闪一下。
+  if (name === "stats") return;
   const panel = document.getElementById("panel-" + name);
   if (!panel) return;
   const first = !_panelSeen.has(name);
@@ -3067,7 +3075,9 @@ document.addEventListener("wb-platform-change", () => {
  */
 function _sideTabLabel(name) {
   const el = document.querySelector(`.side-item[data-tab="${name}"]`);
-  if (!el) return name;
+  // 组内非首项（风控哨兵 / 数据看板 …）没有独立侧栏项，退回子标签名，
+  // 否则手机顶栏会把 tab 的英文 id 直接显示出来。
+  if (!el) return _SUB_TAB_LABELS[name] || name;
   for (const node of el.childNodes) {
     if (node.nodeType === Node.TEXT_NODE) {
       const t = (node.textContent || "").trim();

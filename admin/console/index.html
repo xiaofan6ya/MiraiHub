@@ -1096,6 +1096,7 @@
   </style>
   <link rel="stylesheet" href="/admin/assets/console.css?v=20261109-tiers1" />
 <link rel="stylesheet" href="/admin/assets/traffic.css?v=20261031-r2">
+    <link rel="stylesheet" href="/admin/assets/dashboard.css?v=20261112-stats1">
   <link rel="stylesheet" href="/admin/assets/model-vendor.css?v=20261105-ui6" />
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
@@ -1109,6 +1110,7 @@
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/console-app.js?v=20261107-exp1"></script>
+    <script defer src="/admin/assets/dashboard.js?v=20261112-stats1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261105-ui3"></script>
 <script defer src="/admin/assets/date-time-picker.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/review-improvements.js?v=20261102-ui1"></script>
@@ -1189,7 +1191,7 @@
         <!-- 平台管理：放在**最上面**。它是全局数据上下文的开关，
              每次进来第一件事就是确认「我现在在哪个平台」，所以排在内容型
              面板（账号池/用量/日志）之前。 -->
-        <button class="side-item" data-tab="overview" data-group-tabs="overview,sentinel" data-group-title="概览"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 4-6"/></svg> 概览</button>
+        <button class="side-item" data-tab="overview" data-group-tabs="overview,sentinel,stats" data-group-title="概览"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 4-6"/></svg> 概览</button>
         <button class="side-item" data-tab="platforms" data-group-tabs="platforms,gateway" data-group-title="平台"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> 平台</button>
         <button class="side-item" data-tab="accounts" data-group-tabs="accounts,credits,journal,growth" data-group-title="账号"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-17a3 3 0 0 1 0 6m2 4a5 5 0 0 1 2 4v3"/></svg> 账号</button>
         <button class="side-item" data-tab="usage" data-group-tabs="usage,logs,keys,ip" data-group-title="调用"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9v9Zm-5-9a9 9 0 0 1 5 5h-5Z"/></svg> 调用</button>
@@ -2157,6 +2159,29 @@
         <div class="card p-4"><div class="flex items-center justify-between mb-3"><h3 class="text-sm font-semibold">请求结果分布</h3><span class="text-xs text-slate-400">全部请求</span></div><div id="usageResultChart"></div></div>
       </div>
       <div id="usageAccountModels" class="card p-4 mb-4 hidden"></div>
+    </section>
+
+    <!-- 数据看板（口径对齐 new-api 的「模型调用分析」一屏）：
+         KPI 一排 → 性能健康条 → 消耗分布（按模型堆叠）→ 调用趋势/次数分布/次数排行。 -->
+    <section id="panel-stats" class="hidden">
+      <div class="wbd-page">
+        <div class="flex flex-wrap justify-between items-center mb-3 gap-2 panel-toolbar">
+          <p class="panel-subtitle">模型调用分析：窗口内的请求、积分、Token、成功率、延迟与吞吐。数据来自本地 usage_logs，聚合全部在 SQL 侧完成。</p>
+          <div class="flex flex-wrap gap-2 items-center">
+            <div class="wbd-seg" id="wbdDaysSeg" role="group" aria-label="统计区间">
+              <button type="button" data-wbd-days="1" class="active" onclick="WBStatsDashboard.setDays(1)">今日</button>
+              <button type="button" data-wbd-days="7" onclick="WBStatsDashboard.setDays(7)">7 天</button>
+              <button type="button" data-wbd-days="30" onclick="WBStatsDashboard.setDays(30)">30 天</button>
+            </div>
+            <div class="wbd-seg" id="wbdGrainSeg" role="group" aria-label="聚合粒度">
+              <button type="button" data-wbd-grain="hour" class="active" onclick="WBStatsDashboard.setGranularity('hour')">按小时</button>
+              <button type="button" data-wbd-grain="day" onclick="WBStatsDashboard.setGranularity('day')">按天</button>
+            </div>
+            <button onclick="WBStatsDashboard.load(true)" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50">刷新</button>
+          </div>
+        </div>
+        <div id="wbdRoot"></div>
+      </div>
     </section>
 
     <!-- 定时任务面板 -->
