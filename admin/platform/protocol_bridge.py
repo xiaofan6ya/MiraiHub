@@ -97,12 +97,22 @@ COMMENT_PING = b": ping\n\n"
 
 
 def _chat_ping_frame() -> bytes:
-    """chat/completions 形态的空增量保活帧（合法 OpenAI SSE chunk）。"""
+    """chat/completions 形态的空增量保活帧（合法 OpenAI SSE chunk）。
+
+    ⚠️ `created` 与 `model` **不能省**（2026-11-15 用真 SDK 实测）：
+    `openai.types.chat.ChatCompletionChunk` 里这两个字段是**必填**（无默认值）。
+    SDK 默认走 `construct_type()` 宽松构造，缺字段只会得到 `None` 不报错；
+    但用户一旦开 `strict_response_validation=True`（或换用 pydantic/TS 强校验
+    的客户端），这一帧就会抛 `ValidationError` —— 于是「保活帧」反而把流打断，
+    比不发还糟。补上这两个字段即两种模式都能过。
+    """
     if not KEEPALIVE_DATA_FRAME:
         return COMMENT_PING
     payload = {
-        "id": "keepalive",
+        "id": "chatcmpl-keepalive",
         "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "keepalive",
         "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
     }
     return ("data: %s\n\n" % json.dumps(payload, separators=(",", ":"))).encode()

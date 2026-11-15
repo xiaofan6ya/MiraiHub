@@ -1,8 +1,15 @@
 services:
   admin:
     build: .
+    # 把 `.env` 里的自定义变量带进容器（上游 UA、超时、限流等）。
+    # ⚠️ `required: false` 不能省：`.env` 是被 gitignore 的**本地文件**，
+    # 全新克隆的仓库里没有它。写成必填（`env_file: [.env]`）会让
+    # `docker compose up` 直接以「env file not found」失败，而本文件下方
+    # 的 `${VAR:-default}` 插值本来也不依赖它存在。
+    # 需要 `required` 关键字：Docker Compose ≥ 2.24。
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
       - "${ADMIN_PORT:-8790}:8790"
     volumes:

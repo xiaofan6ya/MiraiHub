@@ -69,6 +69,13 @@ def install() -> None:
             storage_platform=PLATFORM,
             realm=realm,
             icon="marvis",
+            # 平台自评（控制台「平均级」徽标）。契约要求每个内建平台都声明，
+            # 否则 `/api/platforms` 只回空 dict、卡片上缺徽标（测试会挡）。
+            rating={
+                "tier": "npc",
+                "reason": "令牌钱包制、量给得很足（每号每日 1000 万计费 token），"
+                          "但登录态只有约 2 小时，过期要重新扫码；不扫本机。",
+            },
             notes="腾讯 Marvis（应用宝 AI 助手）：OpenAI 协议上游，"
                   "Ual-Access 头鉴权；令牌钱包制（每号每日 1000 万计费 token，"
                   "缓存免费、输入输出五折）；支持扫码登录 + 凭证导入",

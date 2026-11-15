@@ -87,7 +87,11 @@ class LoopNotBlockedTests(unittest.TestCase):
         """流式建连（urlopen 等响应头）同样不能占住事件循环。"""
         def slow_open(db, request, key, body, realm, stats, model):
             time.sleep(SLOW)
-            return iter(()), object(), None, time.perf_counter()
+            # `_open_stream` 返回 5 元组（chunks, account, last_error,
+            # started, served_model）。这里必须跟着改，否则
+            # `_forward_stream` 解包就 ValueError —— 测出来的「阻塞」
+            # 其实是解包失败，属于假阳性。
+            return iter(()), object(), None, time.perf_counter(), model
 
         def noop(*a, **kw):
             return None

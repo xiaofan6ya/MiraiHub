@@ -356,8 +356,15 @@ def test_migration() -> None:
     print("数据库迁移")
     from sqlalchemy import text
 
-    from admin.db import SessionLocal, init_db
+    from admin.db import SessionLocal, engine, init_db
     from admin.models import Account
+
+    # `account_ids` / 回填这类查询用的是 MySQL 专有语法（`SHOW COLUMNS`）。
+    # 本地若存在 `tests/__init__.py`（不在仓库里）会把 ADMIN_DATABASE_URL
+    # 指到 SQLite，这里就必须跳过，否则报的是「方言不支持」而不是真缺陷。
+    if engine.dialect.name != "mysql":
+        print("  [skip] 当前方言 %s 不支持 SHOW COLUMNS，跳过" % engine.dialect.name)
+        return
 
     check("init_db 返回成功", init_db() is True)
     with SessionLocal() as db:
