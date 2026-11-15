@@ -18,6 +18,7 @@ from admin.models import SystemSetting
 from admin import env_guard, session_store
 from admin.routers import (accounts, credits, groups,
                            growth, keys, login as login_router, logs, models,
+                           model_market_key as model_market_key_router,
                            proxy, proxies, schedules, sessions as sessions_router,
                            stats, sync)
 from admin.ratelimit import (client_ip_from_request, clear_failures,
@@ -33,6 +34,7 @@ from admin.gateway_limits import GatewayAdmissionMiddleware
 from admin.ip_access import IPBlockMiddleware
 from admin.routers import join_invites
 join_invites_router = join_invites.router
+from admin.public_auth import router as public_auth_router
 from admin.routers import releases
 from admin.routers import audio
 from admin.routers import images
@@ -165,7 +167,7 @@ app.add_middleware(
 async def _join_gate_middleware(request: Request, call_next):
     """join 入口的统一门禁：没有有效访问 Cookie 一律 404。
 
-    覆盖 `/join` 与全部 `/api/join/*`，但**排除**三类：
+    覆盖 `/join`、全部 `/api/join/*` 与聚合入口 `/api/open/*`，但**排除**三类：
       * `/api/join/ticket/exchange` —— 它就是来换 Cookie 的；
       * `/api/join/gate/*`         —— 后台总闸，自己要求管理员鉴权；
       * `/api/join/invites*`       —— 后台邀请码管理，同上。
@@ -174,11 +176,13 @@ async def _join_gate_middleware(request: Request, call_next):
     """
     path = request.url.path
     is_join = (path in ("/join", "/join/", "/static/join.html")
-               or path.startswith("/api/join/"))
+               or path.startswith("/api/join/")
+               or path.startswith("/api/open/"))
     if is_join and not (
         path == "/api/join/ticket/exchange"
         or path.startswith("/api/join/gate/")
         or path.startswith("/api/join/invites")
+        or path.startswith("/api/open/admin/")
     ):
         try:
             from admin import join_gate as _jg
@@ -337,6 +341,8 @@ app.include_router(schedules.router)
 app.include_router(logs.router)
 app.include_router(groups.router)
 app.include_router(stats.router)
+# 给 API Key 用的模型广场（/v1/model-market）：只返回该 Key 能用的模型
+app.include_router(model_market_key_router.router)
 app.include_router(credits.router)
 # 登录设备管理（多设备在线 + 踢下线 + 拉黑）
 app.include_router(sessions_router.router)
@@ -424,6 +430,11 @@ try:
     app.include_router(wps_lingxi_accounts_router.router)
 except Exception:  # noqa: BLE001 - wps_lingxi 目录被裁剪时降级为不挂载
     logger.exception("WPS 灵犀管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.marvis.routers import accounts as marvis_accounts_router
+    app.include_router(marvis_accounts_router.router)
+except Exception:  # noqa: BLE001 - marvis 目录被裁剪时降级为不挂载
+    logger.exception("腾讯 Marvis 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1" and not env_guard.IS_PROD:
     # 逆向产物管理（任意目录创建 + 递归读取）：**生产不挂载**。
     # 中间件还有一道 404，双保险 —— 见 env_guard.PROD_BLOCKED_PREFIXES。
@@ -433,8 +444,9 @@ app.include_router(login_router.router)
 app.include_router(releases.router)
 # 自助上传页（无需后台登录态）：复刻 WorkBuddy 手机号登录页，
 # 让「发给朋友」这一诉求成立 —— 对方不需要知道后台口令。
-app.include_router(login_router.public_router)
 app.include_router(join_invites_router)
+# 多平台公开注册入口（/api/open/*）：与 /join 同一把总闸，默认关闭
+app.include_router(public_auth_router)
 # join 总闸：状态 / 开关 / 签发访问链接 + 公开的票据兑换端点。
 from admin.routers import join_gate as join_gate_api
 app.include_router(join_gate_api.router)

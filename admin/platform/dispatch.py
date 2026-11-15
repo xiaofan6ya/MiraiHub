@@ -70,6 +70,15 @@ _GENERIC_MODEL_NAMES = frozenset({
     "auto", "default", "chat", "best", "smart", "fast", "router", "auto-model",
 })
 
+#: **已整体下线**的平台 → 模型名前缀。
+#:
+#: 用途只有一个：认出「客户端配置里还留着的旧模型名」，直接回 404 讲清楚，
+#: 绝不让它落到默认平台去打真上游（见 `_retired_platform_of`）。
+#: 豆包网关 2026-11-15 删除；以后删平台在这里补一行即可。
+RETIRED_PLATFORM_PREFIXES = {
+    "doubao-": "doubao",
+}
+
 #: 平台顺序缓存（秒）。热路径每次请求都算一遍健康度太贵。
 _ORDER_TTL = 3.0
 _order_cache: dict = {"at": 0.0, "value": None, "signature": ""}
@@ -417,6 +426,7 @@ def _model_catalog(db) -> list[dict]:
         return _model_cache["rows"]
     from admin.model_alias import canonical_key, model_display
     from admin.models import ModelConfig
+    from admin.platform import models_router as _mr
 
     raw = (db.query(ModelConfig.platform, ModelConfig.model_id,
                     ModelConfig.credit_multiplier, ModelConfig.upstream_metadata)
@@ -430,11 +440,22 @@ def _model_catalog(db) -> list[dict]:
         if not storage or not model_id:
             continue
         display = model_display(metadata)
+        # **归一 key 用「可读名」算**（2026-11-15）：
+        # 腾讯 Marvis 的 model_configs 里存的是上游槽位名（`main-auto`），
+        # 它的归一 key 是 `mainauto` —— 与客户端发的 `deepseek-v4.1-flash`
+        # （key `deepseekv41flash`）永远对不上，于是 dispatch 认为
+        # 「Marvis 没有这个模型」，直接回
+        # 「模型不属于平台 marvis（该模型在：workbuddy、loomy…）」。
+        # 用 `readable_model_id()` 把槽位换成真实模型名后再算 key，
+        # 聚合视图与自动选路才认得它；转发时仍用原始 model_id（上游只认槽位）。
+        readable = _mr.readable_model_id(storage, model_id)
+        key = canonical_key(readable or model_id, display)
         entry = {
             "platform": storage,
             "model_id": model_id,
+            "readable": readable,
             "display": display,
-            "key": canonical_key(model_id, display),
+            "key": key,
             "multiplier": multiplier,
         }
         rows.append(entry)
@@ -516,6 +537,24 @@ def _model_platforms(db, model: str) -> list[tuple[str, str]]:
     return [key for key, _ in sorted(hits.items(), key=lambda kv: (kv[1], kv[0]))]
 
 
+def _retired_platform_of(model: str) -> str:
+    """模型名指向一个**已整体下线**的平台时，返回那个平台 id。
+
+    2026-11-15 豆包网关整体删除后，客户端配置里还留着
+    `doubao-office-xxx` / `xxx-doubao` 这类名字。它们既不在任何平台
+    模型清单里、也不在主应用白名单里 —— 如果不拦，请求会落到默认平台
+    （WorkBuddy），拿一个不认识的模型去打真上游：表现是长时间挂起或
+    上游报错，还白占默认平台的账号额度。
+    """
+    name = str(model or "").strip().lower()
+    if not name:
+        return ""
+    for prefix, platform in RETIRED_PLATFORM_PREFIXES.items():
+        if name.startswith(prefix) or name.endswith("-" + platform):
+            return platform
+    return ""
+
+
 def _model_id_for(db, storage: str, model: str) -> str:
     """把请求里的模型名映射成**目标平台自己的 model_id**。
 
@@ -561,9 +600,41 @@ def _model_id_for(db, storage: str, model: str) -> str:
                 exact = row["model_id"]
                 break
 
+    # 4) **平台自己的归一钩子**（2026-11-15）。
+    #    有些平台的上游 id 与对外名完全不同（Marvis：槽位 `main-auto` ↔
+    #    真实 `deepseek-v4-1-flash-261017` ↔ 可读 `deepseek-v4.1-flash`），
+    #    `model_configs` 只存槽位名，按 id/key 都查不到另外两种写法。
+    #    平台若在自己模块里提供了 `canonical_model_id()`，就交它兜底 ——
+    #    这样新增平台不必改 dispatch。
+    if not exact:
+        normalized = _platform_canonical(storage, model)
+        if normalized and normalized != model:
+            exact = normalized
+
     if not exact:
         return model
     return exact.split(":", 1)[0] if storage == "trae" else exact
+
+
+def _platform_canonical(storage: str, model: str) -> str:
+    """问平台「这个名字对应你的哪个上游 id」（没有钩子就返回空串）。
+
+    约定：平台包可提供 `core.endpoints.canonical_model_id(str) -> str`。
+    异常一律吞掉 —— 兜底逻辑坏掉不能影响正常转发。
+    """
+    storage = str(storage or "").lower()
+    if not storage or not model:
+        return ""
+    try:
+        mod = __import__("admin.platform.%s.core.endpoints" % storage,
+                         fromlist=["canonical_model_id"])
+        fn = getattr(mod, "canonical_model_id", None)
+        if callable(fn):
+            value = str(fn(model) or "")
+            return value if value and value != model else ""
+    except Exception:  # noqa: BLE001 - 平台没有这个钩子 / 导入失败
+        return ""
+    return ""
 
 
 def _disabled_model_id(db, storage: str, model: str) -> str:
@@ -635,6 +706,12 @@ def _model_for_platform(db, storage: str, model: str) -> tuple[str, dict | None]
     # 这种 id 的归一 key 可能是展示名算出来的（dfmodel -> deepseekv41flash），
     # 单看 key 会误判成「不属于该平台」，把本来正确的调用打成 404。
     if any(row["model_id"] == model for row in (by_storage.get(storage) or [])):
+        return model, None
+    # **可读名也是原生 id**（2026-11-15）：Marvis 的 model_configs 存槽位名
+    # （`main-auto`），但 `/v1/models` 对外发的是可读名（`deepseek-v4.1-flash`）。
+    # 客户端拿着可读名回来时必须按同平台命中，否则会被判成「属于别的平台」。
+    if any(str(row.get("readable") or "").lower() == str(model or "").strip().lower()
+           for row in (by_storage.get(storage) or [])):
         return model, None
     owners: list[str] = []
     for row in by_key.get(alias) or []:
@@ -1293,6 +1370,23 @@ class PlatformDispatchMiddleware:
                     suffix_platform)
 
         if platform_id == registry.DEFAULT_PLATFORM and not explicit_platform:
+            # **已下线平台的模型名：直接 404，不许漏进主应用。**
+            # 没有任何平台认领它、主应用白名单里也没有；漏过去就是拿一个
+            # 不存在的模型打真上游（挂起/报错，还白占默认平台额度）。
+            if body:
+                _retired_model = _model_of_body(body)
+                _retired = _retired_platform_of(_retired_model)
+                if _retired:
+                    logger.info("已下线平台的模型请求被拒 | model=%r platform=%r",
+                                _retired_model, _retired)
+                    return await JSONResponse(
+                        status_code=404,
+                        content={"error": {
+                            "message": "模型 %s 所属的平台（%s）已下线，请改用其它模型"
+                                       % (_retired_model, _retired),
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                        }})(scope, receive, send)
             # 默认平台走主应用。但**聚合名要先映射成它自己的 model_id**：
             # 主应用只认白名单里的 id，`deepseek-flash` 这类聚合名会被
             # 直接 400「模型不存在」。之前只有非默认平台做映射，
@@ -1350,6 +1444,16 @@ class PlatformDispatchMiddleware:
         module = _module_of(spec)
         dispatch = getattr(module, "dispatch", None) if module is not None else None
         if dispatch is None:
+            if _retired_platform_of(str(platform_id) + "-") or str(platform_id) in \
+                    RETIRED_PLATFORM_PREFIXES.values():
+                # 显式点了已下线平台（`X-Platform: doubao`）：给 404 而不是 503，
+                # 免得用户以为是暂时故障、反复重试。
+                return await JSONResponse(
+                    status_code=404,
+                    content={"error": {
+                        "message": "平台 %s 已下线，请改用其它平台" % platform_id,
+                        "type": "invalid_request_error",
+                        "code": "platform_retired"}})(scope, receive, send)
             logger.warning("平台 %s 未装配网关实现，请求被拒绝", platform_id)
             return await JSONResponse(
                 status_code=503,

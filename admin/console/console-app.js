@@ -1261,7 +1261,7 @@ function enterApp() {
 
 // Tabs
 // 面板清单与默认面板：默认面板不写进 URL（保持地址栏干净）。
-const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","market","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
+const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","market","groups","agent","schedules","client","sync","alerts","gateway","openentry","settings","maintenance"];
 const TAB_DEFAULT = "overview";
 
 /** 从地址栏读当前应显示的面板；非法/缺失一律回落到默认面板。 */
@@ -1393,6 +1393,7 @@ const _SUB_TAB_LABELS = {
   models: '模型配置', market: '模型广场', groups: '分组管理', schedules: '定时任务',
   client: '客户端参数', sync: '同步设置', alerts: '预警管理',
   agent: '智能体',
+  openentry: '公开注册入口',
   settings: '设置', maintenance: '更新与备份',
 };
 
@@ -1514,6 +1515,8 @@ function activateTab(name, opts) {
     loadPlatformBench();
   });
   if (name === "gateway") { loadGateway(); loadGatewaySpeed(); }
+  // 公开注册入口独立 Tab：切进来时刷新状态
+  if (name === "openentry") loadJoinGate();
   if (name === "accounts") {
     // 平台动作区（授权登录 / 扫描本机 / 签到 …）也要在这时候渲染。
     //
@@ -2856,13 +2859,81 @@ function renderGatewayOrder(order) {
  * 所以"关"不是"暂停"，是"全部重来"。
  */
 let _joinGate = null;
+let _openConfig = null;
+let oeTtlValue = 86400;
+
+/* ---------------- 公开页文案编辑器（多行文本组件） ----------------
+ *
+ * 四个字段全部用 `<textarea class="oe-textarea">`（见 index.html 「公开页文案」卡）：
+ * 文案本身就是多行语义（说明还是「一行一条」），单行 input 会把换行吃掉。
+ * 计数口径对齐服务端 `_sanitize_copy()`：标题 40 / 副标题 120 / 页脚 160，
+ * 说明每行 200 字、最多 6 行 —— 前端只做提示与拦截，真正的截断仍在服务端。
+ */
+const OE_COPY_FIELDS = {
+  openCopyTitle: { limit: 40, count: "openCopyTitleCount" },
+  openCopySub:   { limit: 120, count: "openCopySubCount" },
+  openCopyIntro: { limit: 200, count: "openCopyIntroCount", maxLines: 6 },
+  openCopyFoot:  { limit: 160, count: "openCopyFootCount" },
+};
+
+/** 取字段元素（不要用 $("#id") 直接连点，缺元素时会抛错打断整段加载）。 */
+function oeCopyEl(id) {
+  return document.getElementById(id);
+}
+
+/** 写值 + 立刻刷新计数（加载配置时用）。 */
+function oeCopySet(id, value) {
+  const el = oeCopyEl(id);
+  if (el) el.value = value == null ? "" : String(value);
+  oeCopyPaint(id);
+}
+
+/** 统计一段文案：有效行数、最长行字数、总字数。 */
+function oeCopyStats(id) {
+  const meta = OE_COPY_FIELDS[id] || {};
+  const el = oeCopyEl(id);
+  const raw = el ? String(el.value || "") : "";
+  const rows = raw.split("\n").map(function (s) { return s.trim(); });
+  const lines = rows.filter(Boolean).length;
+  const maxLen = rows.reduce(function (m, s) { return Math.max(m, s.length); }, 0);
+  return { lines: lines, maxLen: maxLen, chars: raw.length, meta: meta };
+}
+
+/** 画计数与超限状态（输入时逐字刷新）。 */
+function oeCopyPaint(id) {
+  const meta = OE_COPY_FIELDS[id];
+  if (!meta) return;
+  const stats = oeCopyStats(id);
+  const over = meta.maxLines
+    ? (stats.lines > meta.maxLines || stats.maxLen > meta.limit)
+    : (stats.chars > meta.limit);
+  const out = document.getElementById(meta.count);
+  if (out) {
+    out.textContent = meta.maxLines
+      ? `${stats.lines} / ${meta.maxLines} 行 · 最长 ${stats.maxLen} / ${meta.limit} 字`
+      : `${stats.chars} / ${meta.limit} 字`;
+    out.classList.toggle("over", over);
+  }
+  const el = oeCopyEl(id);
+  if (el) el.classList.toggle("over", over);
+}
+
+/** 全量重画（保存失败 / 恢复默认之后回到一致状态）。 */
+function oeCopyPaintAll() {
+  Object.keys(OE_COPY_FIELDS).forEach(oeCopyPaint);
+}
+
+// 事件委托：文案卡是静态 DOM，挂一次即可；用户打字时实时更新字数与超限提示。
+document.addEventListener("input", function (e) {
+  const el = e.target;
+  if (!el || !el.classList || !el.classList.contains("oe-textarea")) return;
+  oeCopyPaint(el.id);
+});
 
 async function loadJoinGate() {
   const card = $("#joinGateCard");
   if (!card) return;
-  const cur = window.WBPlatform ? window.WBPlatform.current() : null;
-  const pid = (cur && cur.platform) || "";
-  if (pid && pid !== "workbuddy") { card.hidden = true; return; }
+  // 多平台聚合入口：管理卡在所有平台页都显示（它管的是入口模块本身）
   card.hidden = false;
   try {
     const r = await api("/api/join/gate/status");
@@ -2875,7 +2946,9 @@ async function loadJoinGate() {
     $("#joinGateMeta").textContent =
       `代次 ${data.epoch} · 可用票据 ${data.active_tickets} · 有效邀请码 ${data.active_invites}`;
     $("#joinGateHint").textContent = open
-      ? `链接 ${joinGateTtlText(data.ticket_ttl)} 内有效、可重复打开`
+      ? (joinGateTtlText(data.ticket_ttl) === "永久"
+         ? "链接永久有效，可重复打开"
+         : `链接有效 ${joinGateTtlText(data.ticket_ttl)}，可重复打开`)
       : "开启后才能签发访问链接";
     // 只改文字节点，不要 textContent 整个按钮 —— 那会把里面的图标一起抹掉
     const toggleText = $("#joinGateToggleText");
@@ -2885,6 +2958,207 @@ async function loadJoinGate() {
   } catch (e) {
     $("#joinGateHint").textContent = "状态读取失败：" + (e.message || e);
   }
+  loadOpenEntryConfig();
+}
+
+/* 平台开关 + 链接时效：来自 /api/open/admin/config（管理端点） */
+async function loadOpenEntryConfig() {
+  const list = $("#openPlatFlagsList");
+  if (!list) return;
+  try {
+    const r = await api("/api/open/admin/config");
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    _openConfig = data;
+    while (list.firstChild) list.removeChild(list.firstChild);
+    (data.platforms || []).forEach(function (p) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "open-plat-flag" + (p.enabled ? " on" : "");
+      // 提示统一走系统 actionTooltip（data-tooltip / data-tooltip-description）：
+      // 原生 title 要悬停一两秒才出、样式不受控，而且和整屏其它提示长得不一样。
+      chip.dataset.tooltip = p.label + (p.enabled ? " · 公开页可见" : " · 公开页隐藏");
+      chip.dataset.tooltipDescription = p.enabled
+        ? "点击从公开注册页移除该平台（已在公开页的不再显示，已注册账号不受影响）。"
+        : "点击把这个平台放到公开注册页，立即生效。";
+      chip.setAttribute("aria-pressed", p.enabled ? "true" : "false");
+      chip.setAttribute("aria-label", p.label + (p.enabled ? "（公开页可见）" : "（公开页隐藏）"));
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(p.label + (p.legacy ? "" : "")));
+      chip.addEventListener("click", async function () {
+        const patch = { platforms: {} };
+        patch.platforms[p.id] = !p.enabled;
+        const rr = await api("/api/open/admin/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const { ok: rok } = await safeJson(rr);
+        if (rok) { toast(p.label + (p.enabled ? " 已从公开页隐藏" : " 已在公开页开放"), "ok"); loadOpenEntryConfig(); }
+        else toast("保存失败", "err");
+      });
+      list.appendChild(chip);
+    });
+    const flagMeta = document.getElementById("openPlatFlagsMeta");
+    if (flagMeta) {
+      const all = (data.platforms || []).length;
+      const on = (data.platforms || []).filter(function (p) { return p.enabled; }).length;
+      flagMeta.textContent = `已开放 ${on} / ${all} · 点击切换，立即生效`;
+    }
+    const copy = data.copy || {};
+    // 逐个取元素再赋值：文案区是可选的（旧版 HTML / 精简布局里可能没有），
+    // 任何一个字段缺失都不该把整个配置加载打断（原来一个不存在的变量
+    // `flagsBox` 就抛 ReferenceError，导致开关列表之后的链接列表全不加载）。
+    oeCopySet("openCopyTitle", copy.title || "");
+    oeCopySet("openCopySub", copy.sub || "");
+    oeCopySet("openCopyIntro", (copy.intro || []).join("\n"));
+    oeCopySet("openCopyFoot", copy.foot || "");
+    const ttlRaw = Number(data.ticket_ttl);
+    oeTtlValue = Number.isFinite(ttlRaw) ? Math.max(0, ttlRaw) : 86400;
+    // 0 = 永久（公告里长期挂的那条链接），标签表里 0 单独给「永久」。
+    const label = ({ 0: "永久", 3600: "1 小时", 21600: "6 小时", 86400: "24 小时",
+                     259200: "3 天", 604800: "7 天" })[oeTtlValue] || (oeTtlValue + " 秒");
+    const lbl = $("#openTtlLabel");
+    if (lbl) lbl.textContent = label;
+    loadOpenEntryTickets();
+  } catch (e) {
+    toast("公开入口配置加载失败：" + (e.message || e), "err");
+  }
+}
+
+/* 时效下拉（ui-select 组件） */
+let oeTtlOpen = false;
+function oeTtlToggle(ev) {
+  ev.stopPropagation();
+  const box = $("#openTtlSelect");
+  if (box) box.classList.toggle("open");
+}
+function oeTtlPick(v, label) {
+  oeTtlValue = Number(v);
+  const lbl = $("#openTtlLabel");
+  if (lbl) lbl.textContent = label;
+  const box = $("#openTtlSelect");
+  if (box) box.classList.remove("open");
+  openEntrySaveConfig();
+}
+
+/* 已生成的访问链接列表（公共共享、按时间失效） */
+async function loadOpenEntryTickets() {
+  const box = $("#oeTicketsList"), meta = $("#oeTicketsMeta");
+  if (!box) return;
+  try {
+    const r = await api("/api/open/admin/tickets");
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error(statusText(r.status));
+    while (box.firstChild) box.removeChild(box.firstChild);
+    const items = data.tickets || [];
+    if (meta) meta.textContent = "有效 " + items.length + " 个";
+    if (!items.length) {
+      const p = document.createElement("p");
+      p.className = "ov-note";
+      p.textContent = data.open ? "还没有链接，点上面的「生成访问链接」签发" :
+        "入口未开启；开启后可签发";
+      box.appendChild(p);
+      return;
+    }
+    const base = location.origin + "/j#k=";
+    items.forEach(function (t) {
+      const row = document.createElement("div");
+      row.className = "oe-ticket";
+      const code = document.createElement("code");
+      code.textContent = base + t.code;
+      row.appendChild(code);
+      const exp = document.createElement("span");
+      exp.className = "oe-exp";
+      exp.textContent = t.permanent ? "永久有效" : "剩余 " + joinGateTtlText(t.expires_in);
+      row.appendChild(exp);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "console-btn";
+      btn.textContent = "复制";
+      btn.addEventListener("click", async function () {
+        try {
+          await navigator.clipboard.writeText(base + t.code);
+          btn.textContent = "已复制";
+          setTimeout(function () { btn.textContent = "复制"; }, 1500);
+        } catch (e) { toast("复制失败，请手动选择链接", "err"); }
+      });
+      row.appendChild(btn);
+      box.appendChild(row);
+    });
+  } catch (e) {
+    box.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "ov-note";
+    p.textContent = "链接列表加载失败：" + (e.message || e);
+    box.appendChild(p);
+  }
+}
+
+async function openEntrySaveCopy() {
+  const val = function (id) {
+    const el = oeCopyEl(id);
+    return el ? String(el.value || "").trim() : "";
+  };
+  const intro = val("openCopyIntro").split("\n").map(s => s.trim()).filter(Boolean);
+  // 与服务端 _sanitize_copy() 同一条线：超了就在前端拦住，别让用户保存后
+  // 发现「怎么少了两条」——服务端是静默截断，看起来像 bug。
+  if (intro.length > 6) { toast("说明最多 6 行，请合并后再保存", "err"); return; }
+  const tooLong = intro.find(s => s.length > 200);
+  if (tooLong) { toast("说明每行不超过 200 字，第 " + (intro.indexOf(tooLong) + 1) + " 行超了", "err"); return; }
+  const payload = {
+    page_copy: {
+      title: val("openCopyTitle"),
+      sub: val("openCopySub"),
+      intro: intro,
+      foot: val("openCopyFoot"),
+    },
+  };
+  const rr = await api("/api/open/admin/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const { ok, data } = await safeJson(rr);
+  if (ok) { toast("公开页文案已保存", "ok"); loadOpenEntryConfig(); }
+  else toast(msgOf2(data), "err");
+}
+
+async function openEntryResetCopy() {
+  const yes = await uiConfirm({
+    title: "恢复默认文案",
+    message: "公开页会回到默认标题与空说明；已填的标题 / 副标题 / 说明 / 页脚全部清空。",
+    okText: "恢复默认",
+  });
+  if (!yes) return;
+  const rr = await api("/api/open/admin/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ page_copy: {} }),
+  });
+  const { ok } = await safeJson(rr);
+  if (ok) { toast("已恢复默认文案", "ok"); loadOpenEntryConfig(); }
+  else toast("操作失败", "err");
+}
+
+function msgOf2(data) {
+  const d = data && data.detail;
+  if (!d) return "操作失败，请稍后重试";
+  if (typeof d === "string") return d;
+  return d.message || "操作失败，请稍后重试";
+}
+
+async function openEntrySaveConfig() {
+  const rr = await api("/api/open/admin/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket_ttl: oeTtlValue }),
+  });
+  const { ok } = await safeJson(rr);
+  if (ok) { toast("链接时效已保存：新签发的链接按新时效生效", "ok"); loadJoinGate(); }
+  else toast("保存失败", "err");
 }
 
 async function joinGateToggle() {
@@ -2907,9 +3181,10 @@ async function joinGateToggle() {
   else toast("操作失败", "err");
 }
 
-/** 票据 TTL → 人话（>=1 天按天，>=1 小时按小时）。 */
+/** 票据 TTL → 人话（0 = 永久；>=1 天按天，>=1 小时按小时）。 */
 function joinGateTtlText(seconds) {
   const n = Number(seconds) || 0;
+  if (n <= 0) return "永久";
   if (n >= 86400) return Math.round(n / 86400) + " 天";
   if (n >= 3600) return Math.round(n / 3600) + " 小时";
   return Math.max(1, Math.round(n / 60)) + " 分钟";
@@ -2927,15 +3202,15 @@ async function joinGateMakeLink() {
   if (!url) { toast("签发失败：空链接", "err"); return; }
   try {
     await navigator.clipboard.writeText(url);
-    toast(`链接已复制，${joinGateTtlText(_joinGate && _joinGate.ticket_ttl)} 内有效`);
+    const ttl = joinGateTtlText(oeTtlValue);
+    toast(ttl === "永久"
+      ? "链接已生成并复制：**永久有效**，可重复使用（关闸即作废）"
+      : `链接已生成并复制：${ttl}内有效，可重复使用`);
   } catch (_) {
-    // 剪贴板被拒（非 https / 无权限）时退化为弹窗展示，不能把链接弄丢
-    showModal(`<div class="text-sm" style="color:var(--fg-muted)">复制下面的链接发给对方：</div>
-      <textarea readonly class="w-full mt-2" rows="3" onclick="this.select()">${esc(url)}</textarea>
-      <div class="flex justify-end mt-2"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`,
-      "max-w-lg");
+    toast("链接已生成（见下方列表）");
   }
   loadJoinGate();
+  loadOpenEntryTickets();
 }
 
 async function loadPlatformOverview() {
@@ -2947,7 +3222,6 @@ async function loadPlatformOverview() {
   // 加载对应网关 → 渲染卡片 → 平台增删自动反映，互不影响。
   const host = $("#platformOverview");
   if (!host || !window.WBPlatform) return;
-  loadJoinGate();
   const cur = window.WBPlatform.current();
   const spec = window.WBPlatform.spec() || {};
   const platformId = cur.platform || spec.id || "";
@@ -2989,10 +3263,17 @@ async function loadPlatformOverview() {
       const num = Number(raw);
       if (!Number.isFinite(num) || raw === "") return;
       const suffix = String(card.value).includes("%") ? "%" : "";
+      // token 制平台的额度是 10^7~10^9 量级：滚动动画也走 K/M/B 缩写，
+      // 否则动画中途会闪出一串十几位的数字，把卡片撑变形。
+      const isTokenQuota = card.unit === "token";
       animateNumber(node, num, {
         format: (n) => (suffix ? Math.round(n) + suffix
-                              : Math.round(n).toLocaleString("zh-CN")),
+                              : isTokenQuota ? fmtToken(n)
+                                             : Math.round(n).toLocaleString("zh-CN")),
       });
+      if (isTokenQuota) {
+        node.setAttribute("title", exactTokenTitle(num, card.unit_label || "Token"));
+      }
     });
   } catch (e) {
     host.innerHTML = `<p class="ov-note" style="color:var(--danger)">概览加载失败：${esc(e.message)}</p>`;
@@ -3007,11 +3288,15 @@ async function loadPlatformOverview() {
  */
 function renderPlatformCard(card) {
   const tone = card.tone ? ` is-${card.tone}` : "";
+  // `unit=token` 的卡片：value 通常已是缩写串（后端给 `12.3M`），
+  // 有 `raw` 就把精确值放进 title，鼠标悬停能看原数。
+  const title = card.unit === "token" && card.raw != null
+    ? ` title="${esc(exactTokenTitle(card.raw, card.unit_label || "Token"))}"` : "";
   return `<div class="stat${tone}" data-card-key="${esc(card.key || "")}">
     <div class="stat-head">
       <span class="stat-label">${esc(card.label || "")}</span>
     </div>
-    <div class="stat-value">${esc(String(card.value ?? "—"))}</div>
+    <div class="stat-value"${title}>${esc(String(card.value ?? "—"))}</div>
     ${card.sub ? `<div class="stat-sub">${esc(card.sub)}</div>` : ""}
   </div>`;
 }
@@ -4444,6 +4729,14 @@ function platformTaskOps(a) {
 }
 
 function accRow(a) {
+  // 额度口径由**当前平台**声明：积分制用千分位，token 制用 K/M/B 缩写。
+  // 同一条账号可能来自不同平台（跨平台号池视图），所以优先用行内的
+  // `a.platform` 反查 spec，拿不到再退回当前平台。
+  const rowSpec = (window.WBPlatform && window.WBPlatform.specOf)
+    ? window.WBPlatform.specOf(a.platform) : null;
+  const spec = rowSpec || ((window.WBPlatform && window.WBPlatform.spec)
+    ? window.WBPlatform.spec() : null);
+  const unitLabel = quotaLabelOf(spec);
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
   // 条目形状：[onclick, icon, tooltip, group]
   // 配色不再逐个手涂（原来红蓝绿紫粉像调色盘，用户点名批评）——
@@ -4494,8 +4787,10 @@ function accRow(a) {
       ${accountLimitBadge(a)}
     </td>
     <td class="col-status" data-label="状态">${badge(a.status)}</td>
-    <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${fmtInt(a.balance_total)}</td>
-    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}">${fmtInt(a.balance_remain)}</td>
+    <td class="tnum text-right" data-label="总${esc(unitLabel)}" style="color:var(--fg-muted)"
+        title="${esc(quotaTitle(a.balance_total, spec))}">${esc(fmtQuota(a.balance_total, spec))}</td>
+    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#33587F)':'var(--danger)'}"
+        title="${esc(quotaTitle(a.balance_remain, spec))}">${esc(fmtQuota(a.balance_remain, spec))}</td>
     <td class="col-expiry" data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.enterprise ? '企业版周期' : a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
     ${accCreatedCell(a)}
     <td class="c-ops" data-label="操作">${accOpsHtml(a, ops)}</td>
@@ -4894,15 +5189,18 @@ async function loadAccounts() {
   setAccOpsWidth(272);
   const headEl = $("#accTableHead");
   if (headEl) {
+    // 列名跟着平台口径走：token 制平台是「总 Token / Token 到期」，
+    // 积分制还是「总积分 / 积分到期」—— 用户不需要自己换算单位。
+    const unitLabel = quotaLabelOf(spec);
     headEl.innerHTML = `<th class="col-name">名称</th><th class="col-status">状态</th>
-      <th class="col-balance text-right">总积分</th><th class="col-extra text-right">剩余</th>
-      <th class="col-expiry">积分到期</th><th class="col-created">入库时间</th>
+      <th class="col-balance text-right">总${esc(unitLabel)}</th><th class="col-extra text-right">剩余</th>
+      <th class="col-expiry">${esc(unitLabel)}到期</th><th class="col-created">入库时间</th>
       <th class="col-ops text-right">操作</th>`;
   }
   const footEl = $("#accFootNote");
-  if (footEl) footEl.textContent = "积分统计仅包含已启用账号";
+  if (footEl) footEl.textContent = quotaLabelOf(spec) + "统计仅包含已启用账号";
   const footHintEl = $("#accFootHint");
-  if (footHintEl) footHintEl.textContent = "调度优先级与到期明细可在「积分到期」查看";
+  if (footHintEl) footHintEl.textContent = "调度优先级与到期明细可在「" + quotaLabelOf(spec) + "到期」查看";
   const d = await r.json();
   const s = d.summary;
   const soon = Number(s.credits_expiring_soon || 0);
@@ -6241,6 +6539,10 @@ async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
 
+  // 豆包：扫码 / 手机号直连 accounts.doubao.com passport（起的是官方接口，
+  // 不弹官方网页）。凭证拿到即入库，与「扫描本机」是同一条入库路径。
+  if (id === "doubao") { return doubaoAuthPanel(); }
+
   // Loomy：**手机号 + 短信验证码**（与 WorkBuddy 的登录手感一致）。
   //
   // Loomy 没有设备授权/扫码换票，凭证只能来自它自己的账号服务：
@@ -6347,6 +6649,232 @@ async function platformBeginAuth(spec, storage) {
           host.textContent = "▸ 会话已超时，请重新发起授权";
         } else if (data && data.remaining_s !== undefined) {
           host.textContent = "▸ 等待登录中…（剩余 " + data.remaining_s + " 秒）";
+        }
+      } catch (e) { /* 下一轮再试 */ }
+    }, 3000);
+    return;
+  }
+
+  // 腾讯 Marvis（应用宝 AI 助手）：QQ / 微信 OAuth。
+  //
+  // 为什么要单独一段：通用分支打的是 `/api/{platform}/device/start`（设备码，
+  // 服务端轮询取凭证）。Marvis 不是设备码 —— 它的回调地址
+  // `marvis_oauth?code=...` 在部署机上打不开，只能**扫码后把浏览器跳转后的
+  // 那条地址贴回来**。协议如此，不是前端偷懒。
+  if (id === "marvis") {
+    let loginType = "QC";
+    let authId = "";
+    let timer = null;
+
+    const stopPoll = () => { if (timer) { clearInterval(timer); timer = null; } };
+
+    const startAuth = async (kind) => {
+      stopPoll();
+      const { ok, data } = await safeJson(await api("/api/marvis/auth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ login_type: kind }),
+      }));
+      if (!ok || !data || !data.auth_id) {
+        toast((data && (data.detail || data.message)) || "无法发起授权", "err");
+        return null;
+      }
+      return data;
+    };
+
+    
+
+    const first = await startAuth(loginType);
+    if (!first) return;
+    authId = first.auth_id;
+
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · 腾讯 Marvis</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        1）用手机扫下面的二维码（或在同一台设备点开授权页）→ 2）授权完成后浏览器会跳到一条
+        <code>marvis_oauth?code=…</code> 的地址 → 3）把那条地址整条复制，粘到下面提交。
+      </p>
+      <p class="text-xs mb-3" style="color:var(--fg-subtle);line-height:1.7;background:var(--surface-2);
+         border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <b>授权后页面显示 <code>{"code":-109,"msg":"RC_PARAMS_INVALID"}</code> 是正常的</b>，
+        不是失败：那一步是浏览器直接打开回调页，缺我们自己要带的设备标识。
+        <b>授权码没有被消耗</b>，照常复制地址栏回来提交即可。
+        QQ / 微信的授权码只有几分钟有效期，<b>拿到后请立刻提交</b>，否则会变成「已过期（-107）」。
+      </p>
+      <div class="flex gap-2 mb-3">
+        <button type="button" data-mv="QC" class="console-btn primary">QQ 登录</button>
+        <button type="button" data-mv="WX" class="console-btn">微信登录</button>
+      </div>
+      <div class="flex items-center gap-3 mb-3">
+        <img id="marvisQr" alt="授权二维码" width="150" height="150"
+             style="border:1px solid var(--border);border-radius:8px;background:#fff;padding:6px"
+             src="${esc(first.qr || "")}">
+        <div class="text-xs" style="color:var(--fg-subtle);line-height:1.8">
+          扫不出来？<a id="marvisLink" href="${esc(first.url || "")}" target="_blank"
+          rel="noopener" style="color:var(--brand);text-decoration:underline">点这里直接打开授权页</a>
+        </div>
+      </div>
+      <input id="marvisCb" autocomplete="off" spellcheck="false"
+             placeholder="授权后把地址栏那条地址粘进来（含 code=…），粘上就自动导入"
+             style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);
+                    border-radius:8px;background:var(--surface);color:var(--fg);font-size:12.5px">
+      <p id="marvisStatus" class="text-sm mt-2" style="color:var(--brand)">▸ 等待授权…（粘贴后自动导入，不用再点按钮）</p>
+      <div class="flex justify-end gap-2 mt-3">
+        <button id="marvisPaste" class="console-btn">从剪贴板导入</button>
+        <button id="marvisSubmit" class="console-btn primary">提交并入库</button>
+        <button class="console-btn quiet" onclick="closeModal()">收起</button>
+      </div>`, "max-w-md");
+
+    const statusEl = () => document.getElementById("marvisStatus");
+    const paint = (data) => {
+      const img = document.getElementById("marvisQr");
+      const link = document.getElementById("marvisLink");
+      if (img && data && data.qr) img.src = data.qr;
+      if (link && data && data.url) link.href = data.url;
+    };
+
+    document.querySelectorAll('[data-mv]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const kind = btn.getAttribute("data-mv");
+        if (kind === loginType) return;
+        loginType = kind;
+        document.querySelectorAll('[data-mv]').forEach((b) => {
+          b.className = "console-btn" + (b.getAttribute("data-mv") === kind ? " primary" : "");
+        });
+        const el = statusEl();
+        if (el) el.textContent = "▸ 正在换" + (kind === "QC" ? " QQ " : "微信") + "授权链接…";
+        const data = await startAuth(kind);
+        if (!data) return;
+        authId = data.auth_id;
+        paint(data);
+        if (el) el.textContent = "▸ 等待授权…";
+      });
+    });
+
+    const submitBtn = document.getElementById("marvisSubmit");
+    const cbInput = document.getElementById("marvisCb");
+
+    // ---- 一个统一的「提交」动作：粘贴触发、按钮触发、回车触发都走这里 ----
+    //
+    // 为什么要自动：这个流程本来就只剩「复制地址栏」这一步，再逼用户点一次
+    // 按钮纯属多余。粘上就自动换码，失败才退回手动（码过期要重扫，不能死循环）。
+    let busy = false;
+    let lastTried = "";
+    const submitCallback = async (raw, { auto } = {}) => {
+      const callback = String(raw || "").trim();
+      const el = statusEl();
+      if (!callback) {
+        if (el && !auto) el.textContent = "▸ 先把回调地址贴进来";
+        return;
+      }
+      // 自动模式：同一串不重复打（input 事件会连续触发），且必须像条回调地址
+      if (auto) {
+        if (callback === lastTried) return;
+        if (!/code=/i.test(callback) && callback.length < 8) return;
+      }
+      if (busy) return;
+      busy = true;
+      lastTried = callback;
+      if (submitBtn) submitBtn.disabled = true;
+      if (el) el.textContent = "▸ 正在用 code 换登录态…";
+      try {
+        const { ok, data } = await safeJson(await api("/api/marvis/auth/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auth_id: authId, callback: callback }),
+        }));
+        if (!ok) {
+          const msg = (data && (data.detail || data.message)) || "提交失败";
+          if (el) el.textContent = "▸ " + msg;
+          toast(msg, "err");
+          if (submitBtn) submitBtn.disabled = false;
+          busy = false;
+          return;
+        }
+        stopPoll();
+        toast("已入库：" + ((data && data.account && (data.account.name || data.account.uid)) || "Marvis 账号"));
+        closeModal();
+        loadAccounts();
+        if (window.WBPlatform) window.WBPlatform.refreshCounts();
+      } catch (e) {
+        if (el) el.textContent = "▸ 提交失败：" + (e && e.message ? e.message : e);
+        if (submitBtn) submitBtn.disabled = false;
+        busy = false;
+      }
+    };
+
+    if (submitBtn) {
+      submitBtn.addEventListener("click", () => submitCallback(cbInput && cbInput.value));
+    }
+
+    if (cbInput) {
+      // 粘贴后自动导入：paste 事件里拿到的是剪贴板原文（比 input 更早更整）
+      cbInput.addEventListener("paste", () => {
+        // paste 事件里 value 还没更新，下一帧再读
+        setTimeout(() => submitCallback(cbInput.value, { auto: true }), 0);
+      });
+      // 手输 / 拖拽 / 浏览器自动填充也只走一次（lastTried 去重）
+      cbInput.addEventListener("input", () => {
+        submitCallback(cbInput.value, { auto: true });
+      });
+      cbInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); submitCallback(cbInput.value); }
+      });
+      // 点进输入框时**主动读一次剪贴板**：多数人的动作就是「在手机上复制 →
+      // 切回控制台」，这里直接帮他把值填好并提交，连 Ctrl+V 都省了。
+      // 无手势/无权限/剪贴板不像回调地址时静默放弃，不打扰。
+      cbInput.addEventListener("focus", async () => {
+        if (cbInput.value.trim()) return;
+        try {
+          if (!navigator.clipboard || !navigator.clipboard.readText) return;
+          const text = (await navigator.clipboard.readText() || "").trim();
+          if (!/marvis_oauth|code=/i.test(text)) return;
+          cbInput.value = text;
+          toast("已从剪贴板填入回调地址");
+          submitCallback(text, { auto: true });
+        } catch (e) { /* 无权限就手动粘贴，不报错 */ }
+      });
+      cbInput.focus();
+    }
+
+    // 「从剪贴板导入」：剪贴板里就是那条回调，一步到位
+    const pasteBtn = document.getElementById("marvisPaste");
+    if (pasteBtn) {
+      pasteBtn.addEventListener("click", async () => {
+        const el = statusEl();
+        let text = "";
+        try {
+          text = await navigator.clipboard.readText();
+        } catch (e) {
+          if (el) el.textContent = "▸ 浏览器不允许读剪贴板，请手动粘贴到输入框";
+          if (cbInput) cbInput.focus();
+          return;
+        }
+        if (!text.trim()) {
+          if (el) el.textContent = "▸ 剪贴板是空的";
+          return;
+        }
+        if (cbInput) cbInput.value = text.trim();
+        submitCallback(text, { auto: true });
+      });
+    }
+
+    // 扫码完成后如果用户在别的设备上提交了，这里也会自动收到结果。
+    timer = setInterval(async () => {
+      if (!document.getElementById("marvisQr")) { stopPoll(); return; }
+      try {
+        const { ok, data } = await safeJson(await api(
+          "/api/marvis/auth/poll?auth_id=" + encodeURIComponent(authId)));
+        if (!ok || !data) return;
+        if (data.status === "done") {
+          stopPoll();
+          toast("已入库：" + ((data.account && (data.account.name || data.account.uid)) || "Marvis 账号"));
+          closeModal();
+          loadAccounts();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        } else if (data.status === "expired" || data.status === "failed") {
+          stopPoll();
+          const el = statusEl();
+          if (el) el.textContent = "▸ " + (data.error || "会话已失效，请重新发起授权");
         }
       } catch (e) { /* 下一轮再试 */ }
     }, 3000);
@@ -16195,6 +16723,68 @@ function fmtInt(n) {
   const v = Math.round(Number(n) || 0);
   return v.toLocaleString('zh-CN');
 }
+
+/* ==================== Token 量级缩写（K / M / B）====================
+ *
+ * 为什么需要单独一套：**Token 制平台的数字不是积分量级**。
+ * Marvis 每号每日 1000 万计费 token，一个号池动辄上亿 —— 千分位全展开
+ * 就是 `12,345,678,901`，比表头还长，等宽列被直接撑开、右对齐也废了。
+ *
+ * 口径（与 `fmtNum` 的差异是**故意的**）：
+ *   · 1 万以下**原样**显示（`8,500` / `512`）—— 小数字缩写反而不好读；
+ *   · 1 万起用 `K`（万=10^4 → 显示成 12.3K 会不符合国内习惯，所以
+ *     阈值取 1e4 但单位仍是 K/M/B：12.3K = 12,300，用户一眼能对回量级）；
+ *   · 一位小数，去掉无意义的 `.0`（`12K` 而非 `12.0K`）。
+ *
+ * 完整精确值放在 `title` / tooltip 里（`exactTitle`），鼠标悬停能看到原数 ——
+ * 缩写只影响排版，不影响对账。
+ */
+function fmtToken(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "0";
+  const abs = Math.abs(v);
+  const sign = v < 0 ? "-" : "";
+  const trim = s => s.replace(/\.0+$/, "");
+  if (abs >= 1e9) return sign + trim((abs / 1e9).toFixed(2)) + "B";
+  if (abs >= 1e6) return sign + trim((abs / 1e6).toFixed(2)) + "M";
+  if (abs >= 1e4) return sign + trim((abs / 1e3).toFixed(1)) + "K";
+  return sign + Math.round(abs).toLocaleString("zh-CN");
+}
+
+/** 精确值的 tooltip 文案（`12,345,678 计费 token`）。 */
+function exactTokenTitle(n, unitLabel) {
+  const v = Math.round(Number(n) || 0);
+  return v.toLocaleString("zh-CN") + " " + (unitLabel || "Token");
+}
+
+/**
+ * 当前平台的额度口径（`credits` / `token`）与列名。
+ *
+ * 读 `/api/platforms` 下发的 `quota_unit`（由平台在 `extra` 里声明），
+ * 前端**不认识具体平台** —— 新增一个 token 制平台不用改这里。
+ */
+function quotaUnitOf(spec) {
+  const unit = String((spec && spec.quota_unit) || "credits").toLowerCase();
+  return unit === "token" ? "token" : "credits";
+}
+
+function quotaLabelOf(spec) {
+  const label = String((spec && spec.quota_unit_label) || "").trim();
+  if (label) return label;
+  return quotaUnitOf(spec) === "token" ? "Token" : "积分";
+}
+
+/** 按平台口径格式化一个额度数字（积分→千分位；token→K/M/B 缩写）。 */
+function fmtQuota(n, spec) {
+  return quotaUnitOf(spec) === "token" ? fmtToken(n) : fmtInt(n);
+}
+
+/** 按平台口径给出「精确值」提示文案。 */
+function quotaTitle(n, spec) {
+  return quotaUnitOf(spec) === "token"
+    ? exactTokenTitle(n, quotaLabelOf(spec))
+    : fmtInt(n) + " " + quotaLabelOf(spec);
+}
 /* 注意：`fmtCredit` 定义在上面（组件区），**不要在这里再定义一次** ——
  * 之前这里有一份 `return n.toFixed(2)` 的重复实现，因为声明在后，
  * 直接把上面那版覆盖掉，于是「积分不保留小数」的改动完全没生效。
@@ -16840,3 +17430,182 @@ if (!_localConsoleShell) {
     toast("网络异常：" + (e && e.message ? e.message : e), "err");
   });
 } else { /* 显示登录 */ }
+
+/* ==========================================================================
+   豆包授权登录（扫码 / 手机号）
+   --------------------------------------------------------------------------
+   两条路都直连 accounts.doubao.com 的 passport 接口（签名在网关侧算），
+   不需要拉起官方网页，也不依赖客户端是否安装。
+   扫码：生成二维码 → 2s 轮询 → 手机确认 → 入库
+   手机号：发验证码 → 输码登录 →（一个号挂多个账号时）选账号 → 入库
+   ========================================================================== */
+async function doubaoAuthPanel() {
+  openModal(`
+    <h3 class="font-semibold text-lg mb-1">授权登录 · 豆包</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+      两种方式都直连官方 passport，登录成功后凭证<b>直接入库</b>。
+      扫码请用手机上的豆包 App；手机号登录会收到一条短信验证码。
+    </p>
+    <div class="flex gap-2 mb-3">
+      <button class="console-btn quiet" onclick="doubaoShowQr()">扫码登录</button>
+      <button class="console-btn quiet" onclick="doubaoShowSms()">手机号登录</button>
+    </div>
+    <div id="dbStage" class="text-sm"></div>
+    <p id="dbStatus" class="text-xs mt-2" style="color:var(--brand)"></p>
+    <div class="flex justify-end gap-2 mt-3">
+      <button class="console-btn quiet" onclick="doubaoAuthClose()">关闭</button>
+    </div>
+  `, "max-w-md");
+  if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+  window.__dbSession = "";
+  window.__dbMobile = "";
+  doubaoShowQr();
+}
+
+function doubaoAuthStatus(text) {
+  const el = document.getElementById("dbStatus");
+  if (el) el.textContent = text || "";
+}
+
+async function doubaoShowQr() {
+  const stage = document.getElementById("dbStage");
+  if (!stage) return;
+  if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+  stage.innerHTML = '<p class="text-xs" style="color:var(--fg-subtle)">正在生成二维码…</p>';
+  try {
+    const r = await api("/api/doubao/login/qr/start", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.message || data.detail || "生成二维码失败");
+    window.__dbSession = data.session;
+    const src = data.qrcode_url || ("data:image/png;base64," + data.qrcode_base64);
+    stage.innerHTML =
+      '<div class="flex flex-col items-center gap-2">' +
+      '<img src="' + src + '" alt="豆包登录二维码" style="width:200px;height:200px;border-radius:12px;background:#fff;padding:6px">' +
+      '<p class="text-xs" style="color:var(--fg-subtle)">有效期 ' + (data.expires_in || 120) + ' 秒，扫码后在手机上点确认</p>' +
+      "</div>";
+    doubaoAuthStatus("等待扫码…");
+    window.__dbTimer = setInterval(doubaoPollQr, 2000);
+  } catch (e) {
+    stage.innerHTML = "";
+    doubaoAuthStatus("生成失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function doubaoPollQr() {
+  if (!window.__dbSession) return;
+  try {
+    const r = await api("/api/doubao/login/qr/poll?session=" +
+      encodeURIComponent(window.__dbSession));
+    const data = await r.json();
+    if (data.status === "done") { doubaoAuthDone(data); return; }
+    if (data.status === "expired") {
+      if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+      doubaoAuthStatus("二维码已过期，请重新生成");
+      return;
+    }
+    doubaoAuthStatus(data.message || "等待扫码…");
+  } catch (e) {
+    doubaoAuthStatus("轮询失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+function doubaoShowSms() {
+  const stage = document.getElementById("dbStage");
+  if (!stage) return;
+  if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+  stage.innerHTML =
+    '<label class="text-xs" style="color:var(--fg-muted)">手机号</label>' +
+    '<div class="flex gap-2 mt-1 mb-2">' +
+    '<input id="dbMobile" class="w-full border rounded-lg px-3 py-2 text-sm" inputmode="tel" placeholder="11 位手机号">' +
+    '<button class="console-btn quiet shrink-0" onclick="doubaoSendCode()">发送验证码</button></div>' +
+    '<label class="text-xs" style="color:var(--fg-muted)">短信验证码</label>' +
+    '<input id="dbCode" class="w-full border rounded-lg px-3 py-2 text-sm mt-1 mb-2" inputmode="numeric" maxlength="8" placeholder="短信里的数字">' +
+    '<button class="console-btn" onclick="doubaoDoLogin()">登录并入库</button>';
+  doubaoAuthStatus("");
+}
+
+async function doubaoSendCode() {
+  const mobile = (document.getElementById("dbMobile") || {}).value || "";
+  if (!/^1\d{6,14}$/.test(mobile.trim())) { doubaoAuthStatus("请填写正确的手机号"); return; }
+  doubaoAuthStatus("正在发送…");
+  try {
+    const r = await api("/api/doubao/login/sms/send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mobile: mobile.trim() })
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.message || data.detail || "发送失败");
+    window.__dbSession = data.session;
+    window.__dbMobile = mobile.trim();
+    doubaoAuthStatus("验证码已发送至 " + (data.masked_mobile || mobile) +
+      "（" + (data.retry_time || 60) + " 秒内可重发）");
+  } catch (e) {
+    doubaoAuthStatus("发送失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function doubaoDoLogin() {
+  const code = (document.getElementById("dbCode") || {}).value || "";
+  if (!window.__dbSession) { doubaoAuthStatus("请先发送验证码"); return; }
+  doubaoAuthStatus("正在登录…");
+  try {
+    const r = await api("/api/doubao/login/sms/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: window.__dbSession,
+                             mobile: window.__dbMobile, code: code.trim() })
+    });
+    const data = await r.json();
+    if (data.status === "select_account") {
+      const stage = document.getElementById("dbStage");
+      if (stage) {
+        stage.innerHTML = '<p class="text-xs mb-2" style="color:var(--fg-muted)">' +
+          "该手机号下有多个账号，选一个登录：</p>" + (data.accounts || []).map(
+            a => '<button class="console-btn quiet w-full mb-1" data-db-sec-uid="' +
+              esc(String(a.sec_uid || "")) + '">' + esc(a.name) + " · " + esc(a.type) + "</button>").join("");
+        // sec_uid 是字符串，用事件委托而不是内联 onclick（避免引号转义坑）
+        stage.querySelectorAll("[data-db-sec-uid]").forEach(btn => {
+          btn.addEventListener("click", () => doubaoSelectAccount(btn.dataset.dbSecUid));
+        });
+      }
+      doubaoAuthStatus("请选择要登录的账号");
+      return;
+    }
+    if (!r.ok || !data.ok) throw new Error(data.message || data.detail || "登录失败");
+    doubaoAuthDone(data);
+  } catch (e) {
+    doubaoAuthStatus("登录失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function doubaoSelectAccount(secUid) {
+  doubaoAuthStatus("正在登录所选账号…");
+  try {
+    const r = await api("/api/doubao/login/sms/select", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: window.__dbSession, sec_uid: secUid })
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.message || data.detail || "登录失败");
+    doubaoAuthDone(data);
+  } catch (e) {
+    doubaoAuthStatus("登录失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+function doubaoAuthDone(data) {
+  if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+  const name = (data.account && data.account.name) || "豆包账号";
+  toast("已入库：" + name, "ok");
+  doubaoAuthClose();
+  loadAccounts();
+}
+
+function doubaoAuthClose() {
+  if (window.__dbTimer) { clearInterval(window.__dbTimer); window.__dbTimer = null; }
+  if (window.__dbSession) {
+    api("/api/doubao/login/cancel?session=" + encodeURIComponent(window.__dbSession),
+      { method: "POST" }).catch(() => {});
+    window.__dbSession = "";
+  }
+  closeModal();
+}

@@ -75,6 +75,11 @@
     // 失效复检：disabled 的号再探一次，能通就自动恢复。
     "ban-recheck": { label: "失效复检", icon: "refresh" },
     "begin-auth": { label: "授权登录", icon: "key", primary: true },
+    // 注入客户端：把库里的凭证写回本机客户端（豆包这类「登录态只在
+    // 客户端 Cookie 里」的平台用；写回前必须先退出客户端）。
+    inject: { label: "注入客户端", icon: "key" },
+    // 保活：校验凭证是否还能用，失效的标 disabled 并给出原因。
+    keepalive: { label: "保活校验", icon: "refresh" },
   };
 
   /**

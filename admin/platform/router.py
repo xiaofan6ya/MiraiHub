@@ -93,6 +93,10 @@ def _serialize(spec) -> dict:
         # 取值：scan / import / refresh-quota / usage / web-cookie /
         #       checkin / begin-auth
         "actions": list((spec.extra or {}).get("actions") or []),
+        # 额度口径：`credits`（默认，积分制）/ `token`（令牌钱包）。
+        # 前端据此决定列名与数字格式 —— token 量级是 10^7，必须缩写。
+        "quota_unit": str((spec.extra or {}).get("quota_unit") or "credits"),
+        "quota_unit_label": str((spec.extra or {}).get("quota_unit_label") or ""),
     }
 
 

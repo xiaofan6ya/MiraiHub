@@ -23,6 +23,7 @@ BUILTIN = (
     "admin.platform.codearts",
     "admin.platform.minimax",
     "admin.platform.wps_lingxi",
+    "admin.platform.marvis",
 )
 
 _loaded: list[str] = []

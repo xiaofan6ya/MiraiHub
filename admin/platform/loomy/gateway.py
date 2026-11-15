@@ -25,6 +25,7 @@ Loomy 上游只有非流式接口。`stream: true` 时把完整结果**合成为
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -113,6 +114,109 @@ def _cool_seconds(kind: str) -> int:
     if kind == "upstream_error":
         return UPSTREAM_COOL_SECONDS
     return 0
+
+
+#: 上游「账号已被停用」的业务码（2026-11-13 实测）。
+#:
+#: 这类号的凭证没过期、余额列看着也够（同步接口还会回正数），但对话一律回
+#: `{"code":"100003","desc":"账号已被停用"}`。只冷却没用 —— 冷却到期它又会
+#: 排回队首，于是每个新请求都白撞一次。直接落 `disabled`，等人工或
+#: 「失效复检」任务确认后再放开。
+BANNED_BIZ_CODES = frozenset({"100003"})
+
+
+#: 「上游没报错但悄悄换了模型」的 (账号×模型) 冷却秒数。
+#:
+#: Loomy 上游对账号不可用的模型**不返回错误**，而是用默认模型冒充请求的
+#: 模型回包（2026-11-14 实测：12 个活跃号里 7 个请求 DeepSeek-V4.1-Flash
+#: 都被换成 spark-x2.6-low，而 `/v1/models` 照常列出该模型）。不检测的话
+#: 用户拿到的是错误模型的回答；不冷却的话选号每轮先撞这些号，每个请求
+#: 白耗几次网络往返 —— 用户体感就是「loomy 慢 / 卡」。
+MODEL_MISS_COOL_SECONDS = _env_int("LOOMY_MODEL_MISS_COOL_SECONDS", 3600)
+
+
+def _model_mismatch(requested: str, served: str) -> bool:
+    """上游回包的模型是否与请求的不是同一个（归一 key 对比）。
+
+    大小写差异（`DeepSeek-V4.1-Flash` vs `deepseek-v4.1-flash`）不算替换；
+    只有归一 key 都对不上（如请求 DeepSeek 回 spark-x2.6-low）才算。
+    """
+    from admin.model_alias import canonical_key
+
+    requested = str(requested or "").strip()
+    served = str(served or "").strip()
+    if not requested or not served:
+        return False
+    if served.lower() == requested.lower():
+        return False
+    return canonical_key(served) != canonical_key(requested)
+
+
+def _note_model_not_served(db, account, model: str, served: str) -> None:
+    """(账号×模型) 级冷却：这个号不提供该模型，选号对同模型跳过它。
+
+    与账号级冷却**互相独立**（同 `AccountModelCooldown` 的 6004/11102
+    口径）：号本身是健康的，换个模型就能用，不能整号摘掉。**不抛异常**。
+    """
+    if account is None or not str(model or "").strip():
+        return
+    try:
+        from datetime import datetime, timedelta
+
+        from admin.models import AccountModelCooldown
+
+        now = datetime.utcnow()
+        until = now + timedelta(seconds=MODEL_MISS_COOL_SECONDS)
+        reason = ("上游未提供该模型（回包 %s）" % (served or "?"))[:255]
+        row = (db.query(AccountModelCooldown)
+               .filter(AccountModelCooldown.account_id == account.id,
+                       AccountModelCooldown.model == model)
+               .first())
+        if row is None:
+            db.add(AccountModelCooldown(
+                account_id=int(account.id or 0), model=model, until=until,
+                kind="model_not_served", reason=reason,
+                reset_source="substituted"))
+        else:
+            row.until = until
+            row.kind = "model_not_served"
+            row.reason = reason
+            row.hits = int(row.hits or 0) + 1
+        db.commit()
+    except Exception:  # noqa: BLE001 - 冷却写失败不影响响应
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _maybe_disable(db, account, exc: "client.UpstreamError") -> bool:
+    """账号被上游停用 -> 落 disabled。**不抛异常**。
+
+    返回是否真的改了状态（调用方不需要，留给测试用）。
+    """
+    if account is None:
+        return False
+    code = str(getattr(exc, "code", "") or "")
+    message = str(getattr(exc, "message", "") or "")
+    banned = (code in BANNED_BIZ_CODES
+              or "账号已被停用" in message
+              or "已被停用" in message)
+    if not banned:
+        return False
+    try:
+        if account.status != "disabled":
+            account.status = "disabled"
+            account.last_err_msg = message[:255]
+            db.commit()
+            logger.warning("Loomy 账号 %s 已被上游停用，已落 disabled", account.id)
+            return True
+    except Exception:  # noqa: BLE001 - 写状态失败不能影响响应
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    return False
 
 
 #: 本网关构造「上游连不上」时回的 code（`kind == "network"`）。
@@ -494,6 +598,9 @@ def _attempt(db, request, key, body: dict, realm: str):
     fail_step = 0
     attempt_idx = 0
     lease_deadline = time.monotonic() + LEASE_WAIT_SECONDS
+    #: 全部候选号都被上游「静默替换模型」时，兜底返回最后一个替换结果
+    #: （有回答总比报错强；回包里的 model 字段如实反映真正服务的模型）。
+    substituted: tuple | None = None
     while attempt_idx < MAX_ATTEMPTS:
         account = shared.select_account(
             db, storage=loomy_accounts.PLATFORM, realm=realm, key=key,
@@ -529,6 +636,24 @@ def _attempt(db, request, key, body: dict, realm: str):
                 "ttfb_ms": int(client.LAST_TTFB_MS.get() or 0),
                 "total_ms": int(client.LAST_TOTAL_MS.get() or 0),
             }
+            # **静默替换检测**（2026-11-14）：Loomy 对账号不可用的模型不报
+            # 错，而是用默认模型（spark-x2.6-low）冒充回包。检测到就把它
+            # 当成「这个号不提供该模型」处理 —— (账号×模型) 冷却 + 换下一个
+            # 号重试。号本身没坏（模型级冷却，不动账号状态）。
+            served = str((result or {}).get("model") or "")
+            if _model_mismatch(model, served):
+                logger.info(
+                    "Loomy 上游静默替换模型 acc=%s %r -> %r，换号重试",
+                    account.id, model, served)
+                _note_model_not_served(db, account, model, served)
+                # 覆盖兜底结果前，先释放上一个被保存号的租约；
+                # 最后保存的这一个**保持租约**，交由 `_forward` 的
+                # `_settle` 统一释放 + 记成功（与正常成功路径同契约）。
+                if substituted is not None:
+                    shared.release(substituted[1])
+                shared.exclude_identity(db, exclude, account)
+                substituted = (result, account, started, stats)
+                continue
             return result, account, started, stats
         except client.UpstreamError as exc:
             shared.release(account)
@@ -554,7 +679,12 @@ def _attempt(db, request, key, body: dict, realm: str):
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
                 cool_seconds=cool_seconds,
-                zero_balance=zero_balance)
+                zero_balance=zero_balance,
+                code=str(exc.code or ""))
+            # 上游明确说「账号已被停用」（`100003`）：这不是冷却能好的事，
+            # 直接落 disabled，别让每个新请求都去撞一次（2026-11-13 实测
+            # 21 个 active 号里 13 个是这种状态）。
+            _maybe_disable(db, account, exc)
             last_error = exc
             # **额度耗尽 / 登录失效必须换号，不能把客户端晾在错误上**：
             # 这两类错都是「号坏了」而不是「请求坏了」，换下一个号就能成。
@@ -589,6 +719,11 @@ def _attempt(db, request, key, body: dict, realm: str):
                 time.sleep(_backoff_seconds(fail_step))
             shared.exclude_identity(db, exclude, account)
             continue
+    if substituted is not None:
+        # 所有候选号都被静默替换：有回答总比报错强，返回最后一个替换结果
+        # （回包 model 字段如实反映真正服务的模型）。账号租约未释放，
+        # 由 `_forward` 的 `_settle` 统一收尾。
+        return substituted
     if last_error is not None:
         # 网络 / 上游 5xx 耗尽：交给 `_exhausted_rejection` 转成
         # 503 + Retry-After（dispatch 的 `_RETRYABLE_STATUS` 仍能跨平台换路）。
@@ -851,6 +986,8 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
     account = None
     chunks = None
     last_error = None
+    #: 上游真正服务的模型（首帧回包里的 model 字段；「」= 未能判定）。
+    served_model = ""
     started = time.perf_counter()
     #: 同 _attempt：触发退避的上游失败次数（按序号算退避，不累加）。
     fail_step = 0
@@ -880,6 +1017,34 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             chunks = client.chat_stream(
                 loomy_accounts.token_of(data), realm, _apply_no_think(body),
                 account_id=int(account.id or 0), stats=stats)
+            # **静默替换检测（流式）**：必须在响应开始前判定 —— 一旦开始
+            # yield 就没法换号了。上游 chunk 首帧就带 `model` 字段，窥视
+            # 最多 5 帧（有的上游先发空帧）；判定不了就按原样放行。
+            # `next()` 抛的 UpstreamError 交给下面的既有换号分支处理。
+            peeked: list = []
+            served = ""
+            try:
+                for _ in range(5):
+                    chunk = next(chunks)
+                    peeked.append(chunk)
+                    if isinstance(chunk, dict) and chunk.get("model"):
+                        served = str(chunk["model"])
+                        break
+            except StopIteration:
+                pass  # 流在窥视窗口内就结束：按原样放行（帧照常回放）
+            if _model_mismatch(model, served):
+                logger.info(
+                    "Loomy 上游静默替换模型（流式）acc=%s %r -> %r，换号重试",
+                    account.id, model, served)
+                chunks.close()
+                _note_model_not_served(db, account, model, served)
+                shared.release(account)
+                shared.exclude_identity(db, exclude, account)
+                chunks = None
+                continue
+            if peeked:
+                chunks = itertools.chain(peeked, chunks)
+            served_model = served
             break
         except client.UpstreamError as exc:
             shared.release(account)
@@ -903,7 +1068,9 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
                 cool_seconds=cool_seconds,
-                zero_balance=zero_balance)
+                zero_balance=zero_balance,
+                code=str(exc.code or ""))
+            _maybe_disable(db, account, exc)
             last_error = exc
             shared.exclude_identity(db, exclude, account)
             # 额度耗尽 / 登录失效：号坏了不是请求坏了，换下一个号
@@ -927,7 +1094,7 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
             if attempt_idx < MAX_ATTEMPTS - 1:
                 time.sleep(_backoff_seconds(fail_step))
             shared.exclude_identity(db, exclude, account)
-    return chunks, account, last_error, started
+    return chunks, account, last_error, started, served_model
 
 
 async def _forward_stream(body: dict, request):
@@ -949,7 +1116,8 @@ async def _forward_stream(body: dict, request):
     # 分段耗时容器：**必须在调用 client.chat_stream 之前定义**。
     # 它由上游流式读取器填 ttfb/total，再交给 _bill 记账。
     stats: dict = {}
-    chunks, account, last_error, started = await asyncio.to_thread(
+    (chunks, account, last_error, started,
+     served_model) = await asyncio.to_thread(
         _open_stream, db, request, key, body, realm, stats, model)
 
     if chunks is None:
@@ -973,7 +1141,10 @@ async def _forward_stream(body: dict, request):
 
     def generator():
         try:
-            yield from _sse_from_chunks(chunks, model, holder)
+            # 帧里的 model 用**上游真正服务的模型**：全部候选号都被静默
+            # 替换时，回答确实来自另一个模型，客户端有权看到事实
+            # （非流式路径本来就透传上游回包，行为一致）。
+            yield from _sse_from_chunks(chunks, served_model or model, holder)
         except client.UpstreamError as exc:
             yield ("data: %s\n\n" % json.dumps(
                 {"error": {"message": exc.message, "type": exc.kind}},
@@ -997,9 +1168,13 @@ async def _forward_stream(body: dict, request):
     # 所有标准解析器忽略），把「链路活着」变成可见事实。
     safe_gen = bridge.with_pings(generator(), ping=bridge.CHAT_PING)
 
+    resp_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    if served_model and _model_mismatch(model, served_model):
+        # 替换幸存（所有号都不提供该模型）：响应头明示真正服务的模型。
+        resp_headers["x-upstream-substituted-model"] = served_model
     return StreamingResponse(
         safe_gen, media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        headers=resp_headers)
 
 
 def _sse_from_chunks(chunks, model: str, holder: dict):
@@ -1043,6 +1218,34 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
     for chunk in chunks:
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
             usage_acc.update(chunk["usage"])
+        # **流内错误帧**（2026-11-13）：上游会把审核 / 风控 / 停用这类错误
+        # 塞进 HTTP 200 的 SSE 里，形如
+        #   data: {"error":{"message":"内容可能包含敏感信息，无法处理",
+        #                   "type":"data_inspection_failed","code":403}}
+        # 这一帧没有 `choices`，以前被完全忽略 → 上层照常发 usage + [DONE]，
+        # 客户端只看到「流结束了但没有 finish_reason」。这里明确转成一帧
+        # `error` 事件并把 finish_reason 补成 `stop`，让客户端能显示原因。
+        error = chunk.get("error") if isinstance(chunk.get("error"), dict) else None
+        if error is None and isinstance(chunk.get("code"), str) \
+                and str(chunk.get("code")) not in ("", "0", "200", "000000"):
+            error = {"message": str(chunk.get("desc") or chunk.get("message")
+                                    or "上游业务错误"),
+                     "type": str(chunk.get("code"))}
+        if error is not None:
+            message = str(error.get("message") or "上游拒绝处理本次请求")
+            holder["error"] = message
+            yield ("data: %s\n\n" % json.dumps(
+                {"error": {"message": message,
+                           "type": str(error.get("type") or "upstream_error"),
+                           "code": error.get("code")}},
+                ensure_ascii=False)).encode()
+            holder["usage"] = _usage_with_credit(usage_acc, model)
+            # ⚠️ `frame(..., usage=...)` 会把 `choices` 置空（那样客户端拿不到
+            # finish_reason），所以先发 finish 帧，再单独发 usage 帧。
+            yield frame({}, "stop")
+            yield frame({}, None, usage=holder["usage"])
+            yield b"data: [DONE]\n\n"
+            return
         for choice in (chunk.get("choices") or []):
             if not isinstance(choice, dict):
                 continue
@@ -1099,6 +1302,13 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
         finish_out = "tool_calls"
     elif finish_out:
         yield frame({}, finish_out)
+    else:
+        # **上游没给 finish_reason 也必须补一帧**（2026-11-13）。
+        # 严格解析的客户端（DSH / Codex / Claude Code）把「流结束但没
+        # finish_reason」当成传输中断：报 `Stream ended without finish_reason`
+        # 并自动重试，重试再撞同一个敏感内容审核就形成死循环。
+        # 这里补 `stop`，让本轮正常落定（错误帧分支已单独 return）。
+        yield frame({}, "stop")
 
     # 收尾：带上整合好的 usage + 积分（客户端底部显示消耗要用）
     final_usage = _usage_with_credit(usage_acc, model)

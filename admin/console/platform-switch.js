@@ -373,6 +373,18 @@ function actionsFor(spec) {
     current: function () { return { platform: state.platform, realm: state.realm }; },
     spec: function () { return specOf(state.platform); },
     /**
+     * 按**落库平台 id** 取该平台的 spec（跨平台列表用）。
+     *
+     * 账号池在「全部平台」视图里会混着多平台的账号行，额度口径（积分 /
+     * token）是**平台属性**，不能拿当前选中的平台去格式化别人的数字 ——
+     * 那会把 token 当积分铺成千分位，长数字直接把等宽列撑开。
+     */
+    specOf: function (id) {
+      var key = String(id || "").toLowerCase();
+      if (!key) return specOf(state.platform);
+      return specOf(key) || specOf(state.platform);
+    },
+    /**
      * 已加载的平台清单（`/api/platforms` 的 items）。
      *
      * 给「把落库平台 id 翻成中文名」的场景用：实时请求行、日志、运行平台

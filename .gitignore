@@ -163,7 +163,7 @@ admin/data/agent_assets/
 tmp/
 
 # ===== 旧项目产物（换名后不再上传，避免干扰）=====
-docs/
+docs/**
 # 测试目录整体不入库（历史约定：本地私有的探针/样本太多）。
 # 但**锁真实 bug 的回归用例必须入库**，否则改动静默把它吞掉时毫无知觉。
 tests/
@@ -191,3 +191,37 @@ _backup_*/
 _testenv/
 # 运行时生成的主机标识（与机器绑定，不应入库；用 QODER_MACHINE_ID 显式指定）
 admin/data/qoder_machine_id*
+
+# ===== 本地凭证备份 / 导入报告（含真实账号 token 与手机号，禁止提交）=====
+creds_backup/
+reports/
+zipout/
+ext/
+uc_index.js
+uc_del.js
+urls.txt
+asar_list.txt
+asar_tool.mjs
+asar_extract_prefix.mjs
+ctx.mjs
+ctx2.py
+find_chunks.py
+find_paths.py
+last_refresh_out.json
+search_uc.py
+submit_ticket.py
+wb_credkill.py
+wb_probe_account_revoke.py
+wb_purge_local.ps1
+wb_revoke_semantics.py
+wb_rt_ledger.py
+wb_rt_probe.py
+PERFORMANCE_OPTIMIZATION_PLAN.md
+REPORT_workbuddy_cred_revoke.md
+TICKET_workbuddy_logout_p0.md
+# ===== 发版公告：只让规范命名的 release notes 进库（docs/ 整体忽略）=====
+!docs/RELEASE_NOTES_1.1.3.md
+# ===== 本轮新增的回归用例（锁真 bug，必须入库）=====
+!tests/test_marvis_token_ttl.py
+!tests/test_key_model_market.py
+!tests/test_marvis_platform.py

@@ -46,7 +46,6 @@ _logger = logging.getLogger("admin.wb_login_router")
 
 router = APIRouter(prefix="/api/login", tags=["login"])
 #: 自助注册用的公开路由（不需要后台登录态、也不需要邀请码）。
-public_router = APIRouter(tags=["join"])
 
 #: 同一出口 IP、同一手机号两次发码的最小间隔（秒）。
 SMS_MIN_INTERVAL = 60
@@ -445,42 +444,7 @@ def login_status(sid: str, _: bool = Depends(require_admin)):
     }
 
 
-@public_router.get("/api/join/status/{sid}")
-def join_status(sid: str, request: Request, db: Session = Depends(get_db)):
-    _check_join_invite(None, request, db)
-    return login_status(sid, True)
 
-
-# ===========================================================================
-# 自助注册（公开路由）：把地址发给任何人，对方输入手机号即可完成注册
-# ===========================================================================
-#
-# 这是**完全公开**的端点，不需要后台口令、也不需要邀请码。
-#
-# 安全说明（重要）
-# ----------------
-# 该端点会发真实短信，因此**唯一**的防线是发码节流（见 `_check_sms_quota`）：
-#   * 同一手机号 60 秒内只能发一次（防对单号轰炸）；
-#   * 同一 IP 每小时最多 `SMS_MAX_PER_HOUR` 次（防拿我们的出口 IP 批量刷）。
-#
-# 这比原先「邀请码 fail-closed」的防护弱：任何拿到地址的人都能触发一次真实短信。
-# 之所以接受，是因为需求明确要求「页面公开、操作越简单越好」。
-# 若日后被滥用，最直接的收紧手段是把 `SMS_MAX_PER_HOUR` 调小，
-# 或在此处重新引入一个共享口令。
-
-
-class JoinIn(BaseModel):
-    """自助端点入参。
-
-    三个端点（start / send / verify）共用一个模型，各自只用到一部分字段。
-    """
-    sid: Optional[str] = ""
-    mobile: str = ""
-    country_code: str = "86"
-    sms_code: str = ""
-    #: 自助入口凭证（后台生成）。也可放在 X-Join-Invite 头。
-    #: **禁止放进 query**：URL 会进访问日志与 Referer。
-    invite_code: Optional[str] = ""
 
 
 
@@ -750,7 +714,7 @@ def _try_session_slot(sess):
     return _Ctx()
 
 
-@public_router.post("/api/join/start")
+
 def join_start(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     """公开：发起一次注册会话（需后台生成的凭证）。"""
     _check_join_invite(body, request, db)
@@ -762,7 +726,7 @@ def join_start(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     return {"sid": sess.sid}
 
 
-@public_router.post("/api/join/send")
+
 def join_send(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     """公开：发短信验证码（需后台生成的凭证）。"""
     _check_join_invite(body, request, db)
@@ -770,7 +734,7 @@ def join_send(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     return _send_guarded(body, ip)
 
 
-@public_router.post("/api/join/verify")
+
 def join_verify(body: JoinIn, request: Request, db: Session = Depends(get_db)):
     """公开：校验验证码 → 自动完成授权 → 凭证校验 → 入库。
 
@@ -818,93 +782,7 @@ def join_verify(body: JoinIn, request: Request, db: Session = Depends(get_db)):
 #   * 全程不需要客户端：官方页面走完之后，凭证是靠 state 从服务端换的，
 #     不依赖那个 `workbuddy://` 私有协议回调。
 
-class OfficialIn(BaseModel):
-    sid: Optional[str] = ""
-    #: 自助入口凭证（后台生成）。也可放在 X-Join-Invite 头。
-    #: **禁止放进 query**：URL 会进访问日志与 Referer。
-    invite_code: Optional[str] = ""
 
 
-@public_router.post("/api/join/official/start")
-def join_official_start(body: OfficialIn, request: Request, db: Session = Depends(get_db)):
-    """公开：发起「官方页面接力」——只拿 state + authUrl（需后台生成的凭证）。"""
-    _check_join_invite(body, request, db)
-    with _upstream_slot("official_start"):
-        try:
-            sess = wb_login.start_official_login()
-        except wb_login.WbLoginError as e:
-            raise _fail(e, 502)
-    return {"sid": sess.sid, "auth_url": sess.plugin_auth_url}
 
 
-@public_router.post("/api/join/official/poll")
-def join_official_poll(body: OfficialIn, request: Request, db: Session = Depends(get_db)):
-    """公开：轮询用户是否已在官方页面完成登录；完成后自动换凭证并入库。
-
-    返回：
-      * `{"done": false}`           用户还没登录完 / 系统忙，前端继续轮询
-      * `{"done": true, ...}`       已换到凭证并入库
-      * 502                         会话失效等需要重新开始的错误
-      * 400                         换到了凭证但未通过上游验证（伪造/失效）
-
-    并发保护：并发洪峰下闸门可能已满，此时**不报错**，直接回 `done=false`
-    让前端下一轮再来 —— 轮询本来就是每 2.5s 一次，对用户完全无感。
-    """
-    invite = _check_join_invite(body, request, db)
-    try:
-        sess = wb_login.get_session(body.sid)
-    except wb_login.WbLoginError as e:
-        raise _fail(e, 502)
-
-    # 已成功过 -> 直接复用（幂等）
-    with _try_session_slot(sess) as acquired:
-        if not acquired:
-            return {"done": False, "busy": True}
-        if sess.result_cache is not None:
-            cached = sess.result_cache
-            return {
-                "done": True,
-                "message": "注册成功",
-                "masked": _mask_name((cached.get("account") or {}).get("name") or cached.get("uid")),
-                "invitation": cached.get("invitation"),
-            }
-
-        try:
-            # 闸门满了不算错误：轮询本来就每 2.5s 一次，静默回 done=false
-            # 让前端下一轮再来，对用户完全无感。
-            with _upstream_slot("poll"):
-                token = sess.official_token or wb_login.fetch_credential_by_state(sess.plugin_state)
-                if token:
-                    sess.official_token = token
-        except HTTPException as he:
-            if he.status_code == 503:
-                return {"done": False, "busy": True}
-            raise
-        except wb_login.WbLoginError as e:
-            raise _fail(e, 502)
-        if not token:
-            return {"done": False}
-
-        try:
-            with _upstream_slot("poll_finalize"):
-                credential, meta = wb_login.build_credential_from_token(token)
-                out = _store_verified_credential(credential, meta, db)
-                # 入库成功才消耗凭证次数。
-                join_invite.consume_invite(db, invite)
-                out["invitation"] = wb_login.try_bind_invitation(sess, credential)
-        except HTTPException as he:
-            if he.status_code == 503:
-                return {"done": False, "busy": True}
-            raise
-        except wb_login.WbLoginError as e:
-            raise _fail(e, 502)
-        sess.result_cache = dict(out)
-        sess.consumed = True
-        sess.consumed_at = time.time()
-
-    return {
-        "done": True,
-        "message": "注册成功",
-        "masked": _mask_name(out["account"].get("name") or out["uid"]),
-        "invitation": out.get("invitation"),
-    }

@@ -5888,3 +5888,84 @@ input[type="checkbox"]:not([data-native]):disabled {
   .donut-anim, .donut-anim .chart-arc, .donut-legend tbody tr,
   .trend-line, .trend-area, .trend-dot { animation: none; }
 }
+
+/* 公开注册入口管理（多平台开关 + 时效） */
+.open-plat-flags{margin-top:12px}
+.open-plat-flags.hidden,.open-ttl-row.hidden{display:none}
+.open-plat-flags-title{font-size:11.5px;color:var(--fg-muted);margin-bottom:6px}
+.open-plat-flags-list{display:flex;flex-wrap:wrap;gap:8px}
+.open-plat-flag{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
+  border-radius:999px;padding:5px 12px;font-size:12.5px;cursor:pointer;user-select:none;
+  transition:border-color .15s,background .15s}
+.open-plat-flag.on{border-color:var(--brand);background:rgba(var(--brand-rgb),.12);color:var(--brand-ink);font-weight:600}
+.open-plat-flag .dot{width:8px;height:8px;border-radius:50%;background:var(--fg-subtle)}
+.open-plat-flag.on .dot{background:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.open-plat-flag:hover{border-color:var(--brand-soft);color:var(--fg);background:var(--surface-2)}
+.open-plat-flag:focus-visible{outline:0;border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.open-ttl-row{display:flex;align-items:center;gap:10px;margin-top:12px}
+.open-ttl-row label{font-size:12px;color:var(--fg-muted)}
+.open-ttl-select{height:34px;border:1px solid var(--line);border-radius:8px;
+  background:var(--bg);color:var(--fg);font-family:inherit;font-size:13px;padding:0 8px}
+
+/* 公开入口独立 Tab */
+.openentry-head{margin-bottom:14px}
+.openentry-head h2{font-size:18px;font-weight:600;margin:0 0 4px}
+.openentry-sub{font-size:12.5px;color:var(--fg-muted);line-height:1.7;margin:0;max-width:820px}
+#panel-openentry .join-gate-card{max-width:860px}
+
+/* 公开入口独立 Tab：卡片布局 / 链接列表 / 时效行 */
+#panel-openentry .oe-card{max-width:860px;margin-bottom:14px}
+.oe-ttl-row{display:flex;align-items:center;gap:10px;margin-top:12px}
+.oe-ttl-row .ui-select{min-width:160px}
+.oe-ttl-label{font-size:12px;color:var(--fg-muted)}
+.oe-tickets{display:flex;flex-direction:column;gap:8px}
+.oe-ticket{display:flex;align-items:center;gap:10px;background:var(--surface-2);
+  border:1px solid var(--border);border-radius:10px;padding:8px 12px}
+.oe-ticket code{font-family:var(--mono);font-size:12px;color:var(--fg);
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.oe-ticket .oe-exp{font-size:11.5px;color:var(--fg-subtle);flex:0 0 auto}
+.open-plat-flags-list{display:flex;flex-wrap:wrap;gap:8px}
+
+/* 公开页文案编辑器：多行文本组件（标题 / 副标题 / 说明 / 页脚）
+   原来这四格是裸 <input>/<textarea>，既没有网格也没有边框继承，
+   深色主题下还会露出浏览器默认底色，看起来像「样式崩了」。 */
+.oe-copy-card .sentinel-card-head { align-items:flex-start; flex-wrap:wrap; gap:4px 12px; }
+.oe-copy-card .join-gate-meta { text-align:right; }
+.oe-copy-card .join-gate-meta b { color:var(--fg); font-weight:600; }
+.oe-copy-grid {
+  display:grid; grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:16px 18px; margin:16px 0 4px;
+}
+.oe-copy-grid .oe-field:nth-child(3),
+.oe-copy-grid .oe-field:nth-child(4) { grid-column:1 / -1; }
+.oe-field { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.oe-field-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+.oe-field-head label { font-size:12.5px; font-weight:500; line-height:1.5; color:var(--fg); }
+.oe-count {
+  font-size:11px; color:var(--fg-subtle); white-space:nowrap;
+  font-variant-numeric:tabular-nums; letter-spacing:.01em;
+}
+.oe-count.over { color:var(--danger); font-weight:600; }
+.oe-textarea {
+  display:block; width:100%; min-height:44px; box-sizing:border-box;
+  padding:10px 12px; border:1px solid var(--border); border-radius:9px;
+  background:var(--surface); color:var(--fg);
+  font-family:inherit; font-size:13px; line-height:1.65;
+  resize:vertical; overflow:auto;
+  transition:border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.oe-textarea::placeholder { color:var(--fg-subtle); }
+.oe-textarea:hover { border-color:var(--brand-soft); }
+.oe-textarea:focus {
+  outline:none; border-color:var(--brand);
+  box-shadow:0 0 0 3px var(--brand-soft);
+}
+.oe-textarea.over { border-color:var(--danger); box-shadow:0 0 0 3px var(--danger-soft); }
+.oe-field-hint { margin:0; font-size:11.5px; line-height:1.6; color:var(--fg-subtle); }
+.open-copy-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:16px; }
+.oe-copy-note { font-size:11.5px; color:var(--fg-subtle); }
+@media (max-width:820px) {
+  .oe-copy-grid { grid-template-columns:minmax(0, 1fr); gap:14px; }
+  .oe-copy-card .join-gate-meta { text-align:left; }
+  .open-copy-actions .console-btn { flex:1 1 auto; }
+}

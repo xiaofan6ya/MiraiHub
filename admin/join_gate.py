@@ -83,6 +83,31 @@ def active_ticket_count(db: Session) -> int:
             .count())
 
 
+#: 「永久」票据的到期时间。
+#:
+#: 为什么不引入 NULL：`join_tickets.expires_at` 是 NOT NULL，改列要迁移，
+#: 而所有判断都是 `expires_at > now`——用一个足够远的时间点表达「不过期」，
+#: 语义明确、零迁移、老代码（比较、排序、清理）全部照旧成立。
+PERMANENT_EXPIRY = datetime(2099, 12, 31, 23, 59, 59)
+#: 永久票据的「TTL」标记（配置里存 0 = 永久）。
+PERMANENT_TTL = 0
+
+
+def is_permanent(expires_at) -> bool:
+    return expires_at is not None and expires_at >= PERMANENT_EXPIRY
+
+
+def ttl_to_expiry(ttl) -> datetime:
+    """TTL 秒 → 到期时间。`ttl<=0` 表示永久。"""
+    try:
+        seconds = int(ttl)
+    except (TypeError, ValueError):
+        seconds = 86400
+    if seconds <= 0:
+        return PERMANENT_EXPIRY
+    return datetime.utcnow() + timedelta(seconds=max(600, min(seconds, 604800)))
+
+
 def active_invite_count(db: Session) -> int:
     now = datetime.utcnow()
     rows = (db.query(JoinInvite)
@@ -190,7 +215,8 @@ def _new_code() -> str:
     return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LEN))
 
 
-def issue_tickets(db: Session, count: int = 1, *, operator: str = "") -> list[str]:
+def issue_tickets(db: Session, count: int = 1, *, operator: str = "",
+                  ttl: int | None = None) -> list[str]:
     """签发访问短码（明文只在这里出现一次）。
 
     2026-11-05 改动：
@@ -205,13 +231,16 @@ def issue_tickets(db: Session, count: int = 1, *, operator: str = "") -> list[st
     if not is_open(db):
         raise RuntimeError("join 未开启，拒绝签发票据")
     e = epoch(db)
-    ttl = int(getattr(settings, "JOIN_TICKET_TTL", 86400))
+    # 运行时覆盖（公开入口管理页可配）：0 / 负数 = **永久**（挂公告用），
+    # 其余钳制在 10 分钟 ~ 7 天。
+    raw_ttl = ttl if ttl is not None else getattr(settings, "JOIN_TICKET_TTL", 86400)
+    expires = ttl_to_expiry(raw_ttl)
     out: list[str] = []
     for _ in range(max(1, min(int(count or 1), 50))):
         code = _new_code()
         db.add(JoinTicket(
             jti=code, epoch=e, created_by=(operator or "")[:120],
-            expires_at=datetime.utcnow() + timedelta(seconds=ttl),
+            expires_at=expires,
         ))
         out.append(code)
     db.commit()

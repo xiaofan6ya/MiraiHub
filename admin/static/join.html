@@ -2,216 +2,348 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <meta name="robots" content="noindex, nofollow" />
+<meta name="color-scheme" content="light dark" />
 <title>MiraiHub 注册</title>
 
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   :root{
-    --brand:#07c160; --brand-dark:#06ad56; --ink:#1a1a1a; --muted:#8a8f99;
-    --line:#e8eaed; --bg:#f5f6f8;
+    --brand:#4176e6; --brand-hover:#5a86f0; --brand-rgb:65,118,230;
+    --brand-ink:#2f5cbf; --brand-soft:rgba(65,118,230,.10);
+    --bg:#f5f7fb; --surface:#ffffff; --surface-2:#f7f8fa; --surface-3:#eef1f6;
+    --border:#e5e9f0; --line:#dfe3e8;
+    --fg:#101828; --fg-muted:#5b6472; --fg-subtle:#7b8494;
+    --ok:#12a150; --ok-soft:rgba(18,161,80,.12);
+    --danger:#e00009; --danger-soft:rgba(224,0,9,.10);
+    --on-brand:#ffffff;
+    --r-sm:9px; --r:12px; --r-lg:18px;
+    --sh-1:0 1px 2px rgba(16,24,40,.04);
+    --sh-2:0 2px 6px rgba(16,24,40,.05), 0 18px 44px rgba(16,24,40,.08);
+    --ease:cubic-bezier(.38,0,.24,1);
+    --font:"Inter","Inter Variable","Segoe UI Variable Text","Segoe UI",
+           "PingFang SC","HarmonyOS Sans SC","Noto Sans SC",
+           "Microsoft YaHei UI","Hiragino Sans GB",system-ui,sans-serif;
   }
-  html,body{margin:0;padding:0;height:100%}
+  @media (prefers-color-scheme: dark){
+    :root{
+      --brand:#5385f2; --brand-hover:#6a94f8; --brand-rgb:83,133,242;
+      --brand-ink:#9dbcff; --brand-soft:rgba(83,133,242,.20);
+      --bg:#0d0f13; --surface:#161920; --surface-2:#1c2028; --surface-3:#242933;
+      --border:#262b35; --line:#2c323d;
+      --fg:#e8ebf0; --fg-muted:#9aa3b3; --fg-subtle:#79828f;
+      --ok:#2ad07a; --ok-soft:rgba(42,208,122,.15);
+      --danger:#ff7a7a; --danger-soft:rgba(255,122,122,.14);
+      --sh-1:0 1px 2px rgba(0,0,0,.35);
+      --sh-2:0 2px 6px rgba(0,0,0,.35), 0 18px 44px rgba(0,0,0,.45);
+    }
+  }
+  html,body{margin:0;padding:0;min-height:100%}
   body{
-    background:var(--bg); color:var(--ink);
-    font:14px/1.5 "PingFang SC",-apple-system,BlinkMacSystemFont,"Segoe UI",
-         "Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
-    display:flex; align-items:center; justify-content:center;
-    min-height:100%; padding:20px;
+    background:
+      radial-gradient(820px 520px at 88% -10%, rgba(var(--brand-rgb),.13), transparent 62%),
+      radial-gradient(600px 420px at -10% 30%, rgba(var(--brand-rgb),.08), transparent 60%),
+      var(--bg);
+    background-attachment:fixed;
+    color:var(--fg);
+    font-family:var(--font);
+    font-size:14px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    min-height:100vh; padding:20px 16px;
+    padding-left:max(16px, env(safe-area-inset-left));
+    padding-right:max(16px, env(safe-area-inset-right));
+    padding-bottom:max(20px, env(safe-area-inset-bottom));
   }
+  .shell{width:100%; max-width:420px}
   .card{
-    width:100%; max-width:400px; background:#fff; border-radius:16px;
-    box-shadow:0 8px 32px rgba(0,0,0,.08); padding:32px 24px 24px;
+    width:100%; background:var(--surface);
+    border:1px solid var(--border); border-radius:var(--r-lg);
+    box-shadow:var(--sh-2); padding:26px 24px 22px;
+    animation:card-in .3s var(--ease) both;
   }
-  .logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px}
-  .logo .mark{
-    width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#07c160,#04a04d);
-    display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+  @keyframes card-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  @media (max-width:480px){
+    body{padding:0;justify-content:flex-start}
+    .shell{max-width:none}
+    .card{border-radius:0;border:0;min-height:100vh;box-shadow:none;
+      padding:24px 18px 28px;
+      padding-top:max(24px, env(safe-area-inset-top))}
+    .legal{padding:0 20px 18px}
   }
-  .logo .mark svg{width:22px;height:22px;fill:#fff}
-  .logo .name{font-size:20px;font-weight:600;letter-spacing:.2px}
-  h1{font-size:19px;font-weight:600;text-align:center;margin:14px 0 4px}
-  .sub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:22px}
 
-  label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
-  .field{display:flex;align-items:center;border:1px solid var(--line);border-radius:10px;
-    height:48px;padding:0 12px;background:#fff;transition:border-color .15s,box-shadow .15s}
-  .field:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px rgba(7,193,96,.12)}
-  .field .prefix{color:var(--ink);font-size:15px;padding-right:10px;border-right:1px solid var(--line);
-    margin-right:10px;flex:0 0 auto}
-  .field input{flex:1;min-width:0;border:0;outline:0;font-size:16px;background:transparent;
-    font-family:inherit;letter-spacing:.5px;height:100%}
-  .field input::placeholder{color:#c2c6cc;letter-spacing:0}
-  .field .code{cursor:pointer;color:var(--brand);font-size:13px;font-weight:500;
-    padding-left:10px;border-left:1px solid var(--line);margin-left:10px;flex:0 0 auto;
-    background:none;border-top:0;border-right:0;border-bottom:0;font-family:inherit}
-  .field .code:disabled{color:#c2c6cc;cursor:not-allowed}
-  .row{margin-bottom:16px}
+  .brand{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+  .mark{
+    width:40px;height:40px;border-radius:12px;flex:0 0 auto;
+    background:linear-gradient(135deg,var(--brand),var(--brand-hover));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 4px 12px rgba(var(--brand-rgb),.32);
+  }
+  .mark svg{width:21px;height:21px;fill:#fff}
+  .brand-text{display:flex;flex-direction:column;min-width:0}
+  .brand-text .name{font-size:16.5px;font-weight:650;letter-spacing:.2px;line-height:1.3}
+  .brand-text .tag{font-size:11.5px;color:var(--fg-subtle);line-height:1.5}
 
-  .btn{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand);color:#fff;
-    font-size:16px;font-weight:500;font-family:inherit;cursor:pointer;transition:background .15s}
-  .btn:hover:not(:disabled){background:var(--brand-dark)}
-  .btn:disabled{opacity:.55;cursor:not-allowed}
-  .btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .intro{
+    background:var(--surface-2); border:1px solid var(--border);
+    border-radius:var(--r); padding:13px 15px; margin-bottom:18px;
+    box-shadow:var(--sh-1);
+  }
+  .intro p{margin:0;font-size:12.5px;line-height:1.78;color:var(--fg-muted)}
+  .intro p+p{margin-top:6px}
+  .intro b{color:var(--fg);font-weight:600}
 
-  .note{font-size:12px;color:var(--muted);margin-top:14px;line-height:1.6}
-  .alt{text-align:center;margin-top:10px}
-  .alt a{color:var(--muted);font-size:12px;text-decoration:underline;
-    text-underline-offset:2px;cursor:pointer}
-  .alt a:hover{color:var(--brand)}
+  .closed{
+    border:1px dashed var(--line); border-radius:var(--r);
+    background:var(--surface-2); padding:22px 18px; text-align:center;
+    margin-bottom:16px;
+  }
+  .closed .closed-ico{
+    width:44px;height:44px;margin:0 auto 10px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--surface-3); color:var(--fg-subtle);
+  }
+  .closed .closed-ico svg{width:22px;height:22px}
+  .closed .closed-title{margin:0 0 4px;font-size:14px;font-weight:600;color:var(--fg)}
+  .closed .closed-desc{margin:0;font-size:12.5px;line-height:1.7;color:var(--fg-muted)}
+
+  .plats{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:0 0 18px}
+  .plat{
+    border:1px solid var(--border); border-radius:999px; padding:8px 16px;
+    font-size:13px; color:var(--fg-muted); background:var(--surface);
+    cursor:pointer; font-family:inherit; min-height:36px; line-height:1.4;
+    transition:border-color .16s var(--ease), color .16s var(--ease),
+               background .16s var(--ease), box-shadow .16s var(--ease);
+  }
+  .plat:hover{border-color:var(--brand-soft); color:var(--fg)}
+  .plat.on{
+    border-color:transparent; color:var(--on-brand); font-weight:600;
+    background:linear-gradient(135deg,var(--brand),var(--brand-hover));
+    box-shadow:0 4px 12px rgba(var(--brand-rgb),.28);
+  }
+
+  .steps{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:14px}
+  .steps i{width:30px;height:3px;border-radius:2px;background:var(--border);display:block;transition:background .2s}
+  .steps i.on{background:var(--brand)}
+  h1#platTitle{margin:0 0 6px;font-size:17px;font-weight:650;text-align:center;line-height:1.4}
+  .sub{text-align:center;color:var(--fg-muted);font-size:12.5px;line-height:1.7;margin:0 0 18px}
+
+  label{display:block;font-size:12px;color:var(--fg-muted);margin-bottom:6px;font-weight:500}
+  .field{
+    display:flex;align-items:center;border:1px solid var(--border);border-radius:var(--r);
+    min-height:50px;padding:0 12px;background:var(--surface);
+    transition:border-color .16s var(--ease), box-shadow .16s var(--ease);
+  }
+  .field:hover{border-color:var(--brand-soft)}
+  .field:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+  .field select{
+    appearance:none;-webkit-appearance:none;flex:0 0 auto;max-width:130px;
+    border:0;outline:0;font-size:13px;background:transparent;color:var(--fg);
+    font-family:inherit;height:46px;cursor:pointer;padding-right:8px;
+    border-right:1px solid var(--line);margin-right:10px;
+  }
+  .field input{
+    flex:1;min-width:0;border:0;outline:0;font-size:16px;background:transparent;
+    color:var(--fg);font-family:inherit;letter-spacing:.4px;height:46px;
+  }
+  .field input::placeholder{color:var(--fg-subtle);letter-spacing:0;font-size:14px}
+  .field.bad{border-color:var(--danger);box-shadow:0 0 0 3px var(--danger-soft)}
+  .row{margin-bottom:14px}
+
+  .btn{
+    width:100%;min-height:50px;border:0;border-radius:var(--r);
+    background:linear-gradient(135deg,var(--brand),var(--brand-hover));
+    color:var(--on-brand);font-size:15px;font-weight:600;font-family:inherit;
+    cursor:pointer;box-shadow:0 6px 16px rgba(var(--brand-rgb),.26);
+    transition:filter .16s var(--ease), transform .06s var(--ease), box-shadow .16s var(--ease);
+  }
+  .btn:hover:not(:disabled){filter:brightness(1.05)}
+  .btn:active:not(:disabled){transform:scale(.988);box-shadow:0 3px 10px rgba(var(--brand-rgb),.22)}
+  .btn:disabled{opacity:.55;cursor:not-allowed;box-shadow:none}
+  .btn.ghost{
+    background:var(--surface);color:var(--fg);border:1px solid var(--border);
+    box-shadow:none;font-weight:500;
+  }
+  .btn.ghost:hover:not(:disabled){background:var(--surface-2);filter:none}
+
+  .note{font-size:12px;color:var(--fg-muted);margin-top:12px;line-height:1.7}
+  .alt{text-align:center;margin-top:12px}
+  .alt a{color:var(--fg-subtle);font-size:12px;text-decoration:none;
+    cursor:pointer;border-bottom:1px solid transparent;transition:color .15s,border-color .15s}
+  .alt a:hover{color:var(--brand);border-bottom-color:var(--brand)}
   .hidden{display:none !important}
 
-  .steps{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:20px}
-  .steps i{width:26px;height:3px;border-radius:2px;background:var(--line);display:block}
-  .steps i.on{background:var(--brand)}
+  .qrbox{
+    display:flex;align-items:center;justify-content:center;
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+    padding:14px;margin-bottom:14px;box-shadow:var(--sh-1);
+  }
+  .qrbox img{width:192px;height:192px;display:block;border-radius:6px}
 
-  .result{text-align:center;padding:8px 0 4px}
-  .result .icon{width:56px;height:56px;margin:0 auto 12px;border-radius:50%;
+  .auth-hint{margin:0 0 12px;font-size:12.5px;line-height:1.75;color:var(--fg-muted);text-align:center}
+  .auth-btn{display:flex;align-items:center;justify-content:center;
+    text-decoration:none;letter-spacing:.2px}
+  .auth-btn:hover{filter:brightness(1.05)}
+
+  .selbtn{
+    width:100%;min-height:48px;border:1px solid var(--border);border-radius:var(--r);
+    background:var(--surface);color:var(--fg);font-size:14px;font-family:inherit;
+    cursor:pointer;margin-bottom:8px;transition:border-color .15s,color .15s,background .15s;
+    padding:0 14px;text-align:left;
+  }
+  .selbtn:hover{border-color:var(--brand);color:var(--brand-ink);background:var(--brand-soft)}
+  .selbtn:disabled{opacity:.55;cursor:not-allowed}
+
+  .waiting{display:flex;align-items:center;justify-content:center;gap:8px;
+    margin-top:16px;color:var(--fg-muted);font-size:12.5px}
+
+  .result{text-align:center;padding:12px 0 4px}
+  .result .icon{width:60px;height:60px;margin:0 auto 14px;border-radius:50%;
     display:flex;align-items:center;justify-content:center}
-  .result .icon.ok{background:#e8f8ee}
-  .result .icon.err{background:#fdecec}
+  .result .icon.ok{background:var(--ok-soft);color:var(--ok)}
   .result .icon svg{width:30px;height:30px}
-  .result .title{font-size:16px;font-weight:600;margin-bottom:6px}
-  .result .desc{font-size:13px;color:var(--muted);line-height:1.7;word-break:break-word}
-  .result .desc b{color:var(--ink);font-weight:500}
+  .result .title{font-size:17px;font-weight:650;margin-bottom:6px;color:var(--fg)}
+  .result .desc{font-size:13px;color:var(--fg-muted);line-height:1.75;word-break:break-word}
+  .result .desc b{color:var(--fg);font-weight:600}
 
-  .spin{width:16px;height:16px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;
-    border-radius:50%;display:inline-block;vertical-align:-3px;margin-right:6px;
-    animation:sp .7s linear infinite}
+  .spin{width:15px;height:15px;border:2px solid rgba(var(--brand-rgb),.25);
+    border-top-color:var(--brand);border-radius:50%;display:inline-block;
+    vertical-align:-3px;margin-right:6px;animation:sp .7s linear infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
 
-  .toast-wrap{position:fixed;left:0;right:0;top:16px;z-index:99;
+  .toast-wrap{position:fixed;left:0;right:0;top:14px;z-index:99;
     display:flex;flex-direction:column;align-items:center;gap:8px;
     pointer-events:none;padding:0 16px}
   .toast{
-    max-width:360px;background:rgba(28,30,34,.94);color:#fff;
-    font-size:13.5px;line-height:1.5;padding:10px 14px;border-radius:10px;
-    box-shadow:0 6px 24px rgba(0,0,0,.22);
+    max-width:360px;background:rgba(18,20,26,.95);color:#fff;
+    font-size:12.5px;line-height:1.55;padding:10px 14px;border-radius:10px;
+    box-shadow:0 8px 28px rgba(0,0,0,.28);
     display:flex;align-items:flex-start;gap:8px;
-    animation:tin .22s ease-out;word-break:break-word
+    animation:tin .22s var(--ease) both;word-break:break-word
   }
-  .toast.out{animation:tout .22s ease-in forwards}
+  .toast.out{animation:tout .2s ease-in forwards}
   .toast svg{width:16px;height:16px;flex:0 0 auto;margin-top:1px}
   @keyframes tin{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
   @keyframes tout{to{opacity:0;transform:translateY(-8px)}}
 
-  .ferr{color:#e54545;font-size:12px;margin-top:6px;display:none}
+  .ferr{color:var(--danger);font-size:12px;margin-top:7px;display:none;line-height:1.6}
   .ferr.show{display:block}
-  .field.bad{border-color:#e54545}
-  .field.bad:focus-within{box-shadow:0 0 0 3px rgba(229,69,69,.12)}
 
-  .vbox{display:flex;gap:12px;align-items:flex-start;background:#f7f9fb;
-    border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
-  .vbox .vico{flex:0 0 auto;width:34px;height:34px;border-radius:9px;
-    background:#e8f8ee;display:flex;align-items:center;justify-content:center}
-  .vbox .vico svg{width:18px;height:18px}
-  .vtitle{font-size:14px;font-weight:600;margin-bottom:3px}
-  .vdesc{font-size:12.5px;color:var(--muted);line-height:1.6}
-  .waiting{display:flex;align-items:center;justify-content:center;gap:8px;
-    margin-top:14px;color:var(--muted);font-size:13px}
-  .spin.dark{border-color:rgba(0,0,0,.15);border-top-color:var(--brand)}
-
-  .foot{text-align:center;color:#b8bcc4;font-size:11px;margin-top:18px;line-height:1.6}
+  .foot{text-align:center;color:var(--fg-subtle);font-size:11.5px;
+    margin-top:18px;padding-top:14px;border-top:1px solid var(--border);line-height:1.65}
+  .foot:empty{display:none}
+  .legal{max-width:420px;margin:12px auto 0;text-align:center;
+    font-size:11px;color:var(--fg-subtle);line-height:1.6}
+  .stale{opacity:.4}
 </style>
 </head>
 <body>
 <div class="toast-wrap" id="toasts"></div>
-<div class="card">
-  <div class="logo">
-    <span class="mark">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5zm0 2.3 6.5 3.6-2.06 1.15L12 6.6 7.56 9.05 5.5 7.9 12 4.3zM5 9.6l2 1.12v4.56l-2-1.11V9.6zm4 2.24 3 1.67 3-1.67v3.12l-3 1.67-3-1.67v-3.12zm8-2.24v4.57l-2 1.11V10.7l2-1.1z"/></svg>
-    </span>
-    <span class="name">MiraiHub</span>
-  </div>
-
-  <div id="step1">
-    <h1>手机号注册</h1>
-    <div class="sub">输入手机号，获取短信验证码即可完成注册</div>
-
-    <div class="steps"><i class="on"></i><i></i></div>
-
-    <div class="row">
-      <label for="inviteCode">邀请码</label>
-      <div class="field" id="inviteField">
-        <input id="inviteCode" type="text" autocomplete="off" autocapitalize="off"
-               spellcheck="false" maxlength="64" placeholder="请输入管理员提供的邀请码" />
-      </div>
-      <div class="ferr" id="inviteErr"></div>
-    </div>
-
-    <div class="row">
-      <label for="mobile">手机号</label>
-      <div class="field" id="mobileField">
-        <select id="country" aria-label="地区">
-          <option value="86">+86 中国大陆</option><option value="852">+852 中国香港</option><option value="853">+853 中国澳门</option>
-        </select>
-        <input id="mobile" type="tel" inputmode="numeric" autocomplete="tel"
-               maxlength="11" placeholder="请输入 11 位手机号" />
-      </div>
-      <div class="ferr" id="mobileErr"></div>
-    </div>
-
-    <button id="sendBtn" class="btn">获取验证码</button>
-    <div class="note">验证码由运营商下发至你的手机，仅用于本次登录验证。</div>
-    <div class="alt"><a href="javascript:void(0)" id="officialLink">使用官方手机号验证登录</a></div>
-  </div>
-
-  <div id="step2" class="hidden">
-    <h1>输入验证码</h1>
-    <div class="sub" id="sentTo">验证码已发送</div>
-
-    <div class="steps"><i class="on"></i><i class="on"></i></div>
-
-    <div class="row">
-      <label for="code">短信验证码</label>
-      <div class="field" id="codeField">
-        <input id="code" type="tel" inputmode="numeric" autocomplete="one-time-code"
-               maxlength="6" placeholder="6 位验证码" style="letter-spacing:6px" />
-        <button id="resendBtn" class="code" disabled>重新获取</button>
-      </div>
-      <div class="ferr" id="codeErr"></div>
-    </div>
-
-    <button id="verifyBtn" class="btn">注册</button>
-    <div class="note">验证码仅用于本次登录验证，不会用于其他用途。</div>
-  </div>
-
-  <div id="step3" class="hidden">
-    <div class="result">
-      <div class="icon ok" id="resIcon"></div>
-      <div class="title" id="resTitle"></div>
-      <div class="desc" id="resDesc"></div>
-    </div>
-    <div class="note" id="resHint" style="text-align:center"></div>
-    <button id="againBtn" class="btn ghost hidden" style="margin-top:18px">返回</button>
-  </div>
-
-  <div id="stepOfficial" class="hidden">
-    <h1>请完成手机号验证</h1>
-    <div class="sub">在打开的页面里用手机号登录，完成后这里会自动显示结果</div>
-    <div class="steps"><i class="on"></i><i class="on"></i></div>
-
-    <div class="vbox">
-      <span class="vico">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#07c160" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round">
-          <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-        </svg>
+<div class="shell">
+  <div class="card">
+    <div class="brand">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5zm0 2.3 6.5 3.6-2.06 1.15L12 6.6 7.56 9.05 5.5 7.9 12 4.3zM5 9.6l2 1.12v4.56l-2-1.11V9.6zm4 2.24 3 1.67 3-1.67v3.12l-3 1.67-3-1.67v-3.12zm8-2.24v4.57l-2 1.11V10.7l2-1.1z"/></svg>
       </span>
-      <div>
-        <div class="vtitle">验证页面已打开</div>
-        <div class="vdesc">请在那个页面完成手机号登录。<b>完成后本页会自动显示「注册成功」</b>，无需手动操作。</div>
-      </div>
+      <span class="brand-text">
+        <span class="name">MiraiHub</span>
+        <span class="tag" id="brandTag">公益共享 · 自助注册</span>
+      </span>
     </div>
 
-    <button id="officialOpenBtn" class="btn">重新打开验证页面</button>
-    <div class="waiting"><span class="spin dark"></span><span id="officialTip">等待完成验证…</span></div>
-    <div class="ferr" id="officialErr"></div>
-    <div class="alt"><a href="javascript:void(0)" id="officialBack">返回上一步</a></div>
-  </div>
+    <div id="introBox" class="intro hidden">
+      <p id="copyLine1"></p>
+      <p id="copyLine2"></p>
+      <p id="copyLine3"></p>
+      <p id="copyLine4" class="hidden"></p>
+      <p id="copyLine5" class="hidden"></p>
+      <p id="copyLine6" class="hidden"></p>
+    </div>
 
-  <div class="foot">请勿在非官方地址输入验证码</div>
+    <div id="closedBox" class="closed hidden">
+      <div class="closed-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+        </svg>
+      </div>
+      <p class="closed-title">当前未开放自助注册</p>
+      <p class="closed-desc">入口只在管理员开启并分发访问链接时可用。如果你手上是旧链接，请重新索取一个新的。</p>
+    </div>
+
+    <div id="platBar" class="plats hidden" role="tablist" aria-label="选择平台"></div>
+
+    <div id="stepForm" class="hidden">
+      <div class="steps"><i class="on"></i><i class="on"></i></div>
+      <h1 id="platTitle">注册</h1>
+      <p class="sub" id="platSub"></p>
+
+      <div id="platQR" class="qrbox hidden"><img id="platQRImg" alt="登录二维码" /></div>
+
+      <div id="platAuth" class="hidden">
+        <p class="auth-hint">点下面的按钮打开官方授权页，用同一台手机完成登录；授权成功后回到本页，结果会自动出现。</p>
+        <a id="platAuthBtn" class="btn auth-btn" rel="noopener noreferrer" target="_blank">打开授权页面</a>
+      </div>
+
+      <div id="platSms" class="hidden">
+        <div class="row">
+          <label for="pMobile">手机号</label>
+          <div class="field" id="pMobileField">
+            <select id="pCountry" aria-label="地区">
+              <option value="86">+86 中国大陆</option><option value="852">+852 中国香港</option><option value="853">+853 中国澳门</option>
+            </select>
+            <input id="pMobile" type="tel" inputmode="numeric" autocomplete="tel"
+                   maxlength="11" placeholder="请输入手机号" />
+          </div>
+        </div>
+        <button id="pSendBtn" class="btn">获取验证码</button>
+      </div>
+
+      <div id="platCode" class="hidden">
+        <div class="row">
+          <label for="pCode">短信验证码</label>
+          <div class="field" id="pCodeField">
+            <input id="pCode" type="tel" inputmode="numeric" maxlength="8"
+                   placeholder="输入收到的验证码" />
+          </div>
+          <div class="ferr" id="pCodeErr"></div>
+        </div>
+        <div class="row hidden" id="platPwdRow">
+          <label for="pPwd">设置密码（新账号需要，用于后续续期）</label>
+          <div class="field" id="pPwdField">
+            <input id="pPwd" type="password" maxlength="64" autocomplete="new-password"
+                   placeholder="至少 6 位" />
+          </div>
+        </div>
+        <button id="pVerifyBtn" class="btn">注册</button>
+      </div>
+
+      <div id="platSelect" class="hidden">
+        <p class="sub">该手机号下有多个账号，请选择要注册的账号</p>
+        <div id="platSelList"></div>
+      </div>
+
+      <div class="waiting hidden" id="platWait">
+        <span class="spin"></span><span id="platWaitTip">等待扫码…</span>
+      </div>
+      <div class="ferr" id="platErr"></div>
+      <div class="alt"><a href="javascript:void(0)" id="platBack">返回重选平台</a></div>
+    </div>
+
+    <div id="step3" class="hidden">
+      <div class="result">
+        <div class="icon ok" id="resIcon"></div>
+        <div class="title" id="resTitle"></div>
+        <div class="desc" id="resDesc"></div>
+      </div>
+      <div class="note" id="resHint" style="text-align:center"></div>
+      <button id="againBtn" class="btn ghost hidden" style="margin-top:18px">返回</button>
+    </div>
+
+    <div class="foot" id="footNote"></div>
+  </div>
+  <p class="legal">本页只负责把你的账号接入共享池，不会向你索取任何密码或验证码。</p>
 </div>
 
 <link rel="stylesheet" href="/static/phone-region.css" />
@@ -220,116 +352,56 @@
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var sid = "", timer = null, left = 0, busy = false;
-  WBPhone.mountRegion($('country'), $('mobile'));
-  var retryUntil = 0;
-  function savePhone() {
-    WBPhone.save('wb_join_phone', {sid:sid, mobile:$('mobile').value, country:$('country').value,
-      retryUntil:retryUntil});
-  }
-  async function restorePhone() {
-    var saved = WBPhone.read('wb_join_phone');
-    $('mobile').value = saved.mobile || '';
-    $('country').value = ['86','852','853'].indexOf(saved.country) >= 0 ? saved.country : '86';
-    WBPhone.syncRegion($('country'));
-    $('mobile').maxLength = $('country').value === '86' ? 11 : 8;
-    sid = saved.sid || '';
-    busy = !!sid;
-    countdown(Math.max(0, Math.ceil(((saved.retryUntil || 0)-Date.now())/1000)));
-    if (!saved.sid) return;
-    try {
-      var stHeaders = {};
-      var stCode = inviteValue();
-      if (stCode) stHeaders["X-Join-Invite"] = stCode;
-      var response = await fetch('/api/join/status/' + encodeURIComponent(saved.sid),
-                                 {cache:'no-store', headers: stHeaders});
-      if (!response.ok) throw new Error('无法恢复登录会话');
-      var state = await response.json();
-      if (!state.alive || state.consumed) { sid = ''; WBPhone.clear('wb_join_phone'); return; }
-      sid = saved.sid;
-      if (state.code_sent) {
-        $('mobile').value = state.mobile; $('country').value = state.country_code;
-        WBPhone.syncRegion($('country'));
-        $('sentTo').textContent = '验证码已发送至 +' + state.country_code + ' ' + state.mobile;
-        show('step2');
-        countdown(Math.max(state.retry_after || 0, Math.ceil((retryUntil-Date.now())/1000)));
+
+  var COPY_SUB = "";
+
+  function renderRich(el, text) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    var parts = String(text == null ? "" : text).split("**");
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      if (i % 2 === 1) {
+        var b = document.createElement("b");
+        b.textContent = parts[i];
+        el.appendChild(b);
+      } else {
+        el.appendChild(document.createTextNode(parts[i]));
       }
-    } catch (e) { toast(e.message); }
-    finally {
-      busy = false;
-      $('sendBtn').disabled = Date.now() < retryUntil;
-      $('resendBtn').disabled = Date.now() < retryUntil;
     }
   }
 
-  // 预填邀请码（来自分享链接），并记住本次会话的选择。
-  (function () {
-    var el = $("inviteCode");
-    if (el && INVITE) {
-      el.value = INVITE;
-      try { sessionStorage.setItem("mh_invite", INVITE); } catch (e) {}
-    } else {
-      try {
-        var saved = sessionStorage.getItem("mh_invite");
-        if (saved && el) el.value = saved;
-      } catch (e) {}
+  function applyCopy(copy) {
+    var c = copy || {};
+    document.title = c.title || "MiraiHub 注册";
+    if (c.sub) COPY_SUB = c.sub;
+    var lines = c.intro || [];
+    var intro = $("introBox");
+    if (intro) intro.classList.toggle("hidden", !lines.length);
+    for (var i = 0; i < 6; i++) {
+      var el = $("copyLine" + (i + 1));
+      if (!el) continue;
+      if (i < lines.length) {
+        el.classList.remove("hidden");
+        renderRich(el, lines[i]);
+        if (i === 0) el.style.color = "var(--fg)";
+      } else {
+        el.classList.add("hidden");
+      }
     }
-    if (el) {
-      el.addEventListener("input", function () {
-        try { sessionStorage.setItem("mh_invite", el.value.trim()); } catch (e) {}
-      });
-    }
-  })();
-
-  function show(id) {
-    ["step1", "step2", "step3", "stepOfficial"].forEach(function (k) {
-      $(k).classList.toggle("hidden", k !== id);
-    });
-  }
-
-  // 2026-11-05：**不再从 URL 查询参数预填邀请码**。
-  //
-  // `?invite_code=MH-xxxx` 会原样进 nginx access log、浏览器历史、
-  // 以及页面里任何第三方资源的 Referer —— 等于把一张可用凭证写在日志里。
-  // 现在的分享链路是：
-  //     /j#k=<一次性票据>  →  换 join_access Cookie  →  /join
-  // 邀请码只由用户手动填写，走 POST body / X-Join-Invite 头。
-  var INVITE = "";
-
-  function inviteValue() {
-    var el = $("inviteCode");
-    var v = (el && el.value || "").trim();
-    return v || INVITE;
-  }
-
-  // 邀请码必填校验：没有有效凭证服务端一律 404。
-  function requireInvite() {
-    if (!inviteValue()) {
-      $("inviteErr").textContent = "请先填写邀请码";
-      var f = $("inviteField");
-      if (f) f.focus();
-      return false;
-    }
-    $("inviteErr").textContent = "";
-    return true;
+    if (c.foot) $("footNote").textContent = c.foot;
   }
 
   function api(path, body) {
-    var payload = body || {};
-    // 邀请码同时放 body 与 header：body 兼容旧客户端，header 避免落进 URL 日志。
-    var code = inviteValue();
-    if (code) payload.invite_code = code;
-    var headers = { "Content-Type": "application/json" };
-    if (code) headers["X-Join-Invite"] = code;
     return fetch(path, {
       method: "POST",
-      headers: headers,
-      body: JSON.stringify(payload)
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
     }).then(function (r) {
       return r.text().then(function (t) {
         var d = {};
         try { d = t ? JSON.parse(t) : {}; } catch (e) { d = { detail: t }; }
-        return { ok: r.ok, status: r.status, data: d, retryAfter:Number(r.headers.get('Retry-After')) || 0 };
+        return { ok: r.ok, status: r.status, data: d,
+                 retryAfter: Number(r.headers.get("Retry-After")) || 0 };
       });
     });
   }
@@ -342,9 +414,9 @@
   }
 
   var TOAST_ICON =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="#ff8a8a" stroke-width="2.2" ' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke="#ff9d9d" stroke-width="2.2" ' +
     'stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/>' +
-    '<circle cx="12" cy="16.5" r="1" fill="#ff8a8a" stroke="none"/></svg>';
+    '<circle cx="12" cy="16.5" r="1" fill="#ff9d9d" stroke="none"/></svg>';
 
   function toast(msg, ms) {
     var wrap = $("toasts");
@@ -354,7 +426,6 @@
     el.innerHTML = TOAST_ICON + "<span></span>";
     el.lastChild.textContent = String(msg == null ? "" : msg);
     wrap.appendChild(el);
-
     while (wrap.children.length > 3) wrap.removeChild(wrap.firstChild);
     setTimeout(function () {
       el.classList.add("out");
@@ -362,381 +433,368 @@
     }, ms || 2600);
   }
 
-  function fieldErr(which, msg) {
-    var box = $(which + "Field"), tip = $(which + "Err");
-    if (!box || !tip) { toast(msg); return; }
-    box.classList.add("bad");
-    tip.textContent = msg;
-    tip.classList.add("show");
-    var inp = $(which);
-    if (inp) inp.focus();
-  }
-  function clearFieldErr(which) {
-    var box = $(which + "Field"), tip = $(which + "Err");
-    if (box) box.classList.remove("bad");
-    if (tip) { tip.textContent = ""; tip.classList.remove("show"); }
-  }
-  function clearAllFieldErr() { clearFieldErr("mobile"); clearFieldErr("code"); }
+  var OK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  var offTimer = null, offSid = "", offDeadline = 0, offUrl = "", offWin = null;
-
-  function officialStop() {
-    if (offTimer) { clearInterval(offTimer); offTimer = null; }
+  function show(id) {
+    ["stepForm", "step3"].forEach(function (k) {
+      $(k).classList.toggle("hidden", k !== id);
+    });
+    var intro = $("introBox");
+    if (intro) intro.classList.toggle("hidden", id === "step3");
+    if (id !== "stepForm") hideClosed();
   }
 
-  function officialBeginPoll() {
-    if (offTimer || !offSid) return;
-    offDeadline = Date.now() + 6 * 60 * 1000;
-    offTimer = setInterval(officialPoll, 2500);
-    officialPoll();
+  function hideClosed() {
+    var box = $("closedBox");
+    if (box) box.classList.add("hidden");
   }
 
-  function officialOpen(preOpened) {
-    if (!offUrl) return false;
-    offWin = preOpened || null;
-    if (!offWin) {
-      offWin = window.open("about:blank", "_blank");
-    }
-    var tip = $("officialTip");
-    if (offWin) {
-      try { offWin.location.href = offUrl; } catch (e) { offWin.location = offUrl; }
-      try { offWin.focus(); } catch (e) {}
-      if (tip) tip.textContent = "等待完成验证…";
-      officialBeginPoll();
-      return true;
-    }
-    if (tip) tip.textContent = "新窗口被浏览器拦截了，请点下方按钮打开";
-    var el = $("officialErr");
-    if (el) {
-      el.textContent = "浏览器拦截了新窗口，请点「打开验证页面」继续。";
-      el.classList.add("show");
+  var plats = [], curPlat = "", uSid = "", uTimer = null, uDead = 0,
+      uPollMs = 3000, uFail = 0, uBusy = false, uCdown = null, uNeedPwd = false;
+
+  function loadPlatforms() {
+    fetch("/api/open/platforms", { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("closed");
+      return r.json();
+    }).then(function (d) {
+      plats = (d && d.platforms) || [];
+      if (d && d.copy) applyCopy(d.copy);
+      if (!plats.length) { showClosed(); return; }
+      renderPlatChips();
+      $("platBar").classList.remove("hidden");
+      pickPlat((d && d.default) || plats[0].id, true);
+    }).catch(function () { showClosed(); });
+  }
+
+  function showClosed() {
+    var intro = $("introBox");
+    if (intro) intro.classList.add("hidden");
+    $("platBar").classList.add("hidden");
+    ["stepForm", "step3"].forEach(function (k) {
+      var el = $(k);
+      if (el) el.classList.add("hidden");
+    });
+    var box = $("closedBox");
+    if (box) box.classList.remove("hidden");
+  }
+
+  function renderPlatChips() {
+    var bar = $("platBar");
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    plats.forEach(function (p) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "plat" + (p.id === curPlat ? " on" : "");
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", p.id === curPlat ? "true" : "false");
+      b.textContent = String(p.label || p.id);
+      b.addEventListener("click", function () { pickPlat(p.id, false); });
+      bar.appendChild(b);
+    });
+  }
+
+  function platHasMode(m) {
+    for (var i = 0; i < plats.length; i++) {
+      if (plats[i].id === curPlat) return (plats[i].modes || []).indexOf(m) >= 0;
     }
     return false;
   }
 
-  function officialStart() {
-    // 邀请码必填：没有有效凭证服务端一律 404。
-    if (!requireInvite()) return;
-    officialStop();
-    offUrl = ""; offSid = ""; offWin = null;
-    show("stepOfficial");
-    $("officialTip").textContent = "正在准备验证…";
-    if ($("officialErr")) {
-      $("officialErr").textContent = "";
-      $("officialErr").classList.remove("show");
+  function pickPlat(id, silent, force) {
+    if (uBusy) return;
+    if (!force && id === curPlat && silent) return;
+    platStop();
+    curPlat = id;
+    uNeedPwd = false;
+    renderPlatChips();
+    var label = "";
+    for (var i = 0; i < plats.length; i++) if (plats[i].id === id) label = plats[i].label;
+    $("platTitle").textContent = (label || "") + " · 注册";
+    $("platSub").textContent = COPY_SUB ||
+      "手机号验证或扫码授权，完成后账号自动加入共享池";
+    platErr("");
+    ["platQR", "platSms", "platCode", "platSelect", "platWait", "platPwdRow", "platAuth"].forEach(function (k) {
+      $(k).classList.add("hidden");
+    });
+    show("stepForm");
+    if (platHasMode("qr")) { platBegin("qr"); return; }
+    if (platHasMode("auth_url")) { platBegin("auth_url"); return; }
+    if (platHasMode("sms")) { platShowSms(); return; }
+    if (!silent) toast("该平台暂未开放自助注册");
+    showClosed();
+  }
+
+  function platStop() {
+    if (uTimer) { clearTimeout(uTimer); uTimer = null; }
+    if (uCdown) { clearInterval(uCdown); uCdown = null; }
+    if (uSid && curPlat) {
+      api("/api/open/" + encodeURIComponent(curPlat) + "/cancel",
+          { session: uSid }).catch(function () {});
     }
+    uSid = "";
+  }
 
-    var placeholder = null;
-    try { placeholder = window.open("about:blank", "_blank"); } catch (e) { placeholder = null; }
+  function platErr(msg) {
+    var el = $("platErr");
+    if (el) { el.textContent = msg || ""; el.classList.toggle("show", !!msg); }
+  }
 
-    api("/api/join/official/start", {}).then(function (r) {
+  function platWait(on, tip) {
+    var w = $("platWait");
+    if (w) w.classList.toggle("hidden", !on);
+    if (tip !== undefined) $("platWaitTip").textContent = tip;
+  }
+
+  function platBegin(mode) {
+    platErr("");
+    platWait(true, mode === "qr" ? "正在生成二维码…" : "正在准备授权页面…");
+    $("platAuth").classList.add("hidden");
+    api("/api/open/" + encodeURIComponent(curPlat) + "/begin",
+        { mode: mode }).then(function (r) {
       if (!r.ok) throw { data: r.data };
-      offSid = r.data.sid;
-      offUrl = r.data.auth_url;
-      officialOpen(placeholder);
+      var d = r.data || {};
+      uSid = d.session || "";
+      uDead = Date.now() + (Number(d.expires_in) || 300) * 1000 + 8000;
+      uPollMs = Math.max(2500, Number(d.poll_interval) || 3000);
+      uFail = 0;
+      if (d.qr_svg_data_uri) {
+        $("platQRImg").src = String(d.qr_svg_data_uri);
+        $("platQR").classList.remove("hidden");
+        platWait(true, "请用手机 App 扫码并确认");
+      } else if (d.qr_base64) {
+        $("platQRImg").src = "data:image/png;base64," + String(d.qr_base64);
+        $("platQR").classList.remove("hidden");
+        platWait(true, "请用手机 App 扫码并确认");
+      } else if (d.auth_url) {
+        var link = $("platAuthBtn");
+        if (link) link.setAttribute("href", String(d.auth_url));
+        $("platAuth").classList.remove("hidden");
+        platWait(true, "在授权页完成登录后，本页会自动显示结果");
+      } else if (d.user_code) {
+        $("platAuth").classList.remove("hidden");
+        platWait(true, "请按授权页提示确认，完成后本页自动显示结果");
+      } else {
+        platWait(true, "等待结果…");
+      }
+      platLoop();
     }).catch(function (e) {
-      try { if (placeholder) placeholder.close(); } catch (err) {}
-      var el = $("officialErr");
-      if (el) { el.textContent = msgOf(e && e.data); el.classList.add("show"); }
-      $("officialTip").textContent = "验证准备失败";
+      platWait(false);
+      platErr(msgOf(e && e.data));
     });
   }
 
-  function officialPoll() {
-    if (!offSid) return;
-    if (Date.now() > offDeadline) {
-      officialStop();
-      var el = $("officialErr");
-      if (el) {
-        el.textContent = "验证超时。如果已经登录成功，请点「重新打开验证页面」再走一次，"
-                       + "或刷新本页查看结果。";
-        el.classList.add("show");
-      }
-      $("officialTip").textContent = "验证超时";
-      return;
-    }
-    api("/api/join/official/poll", { sid: offSid }).then(function (r) {
-      if (!r.ok) throw { data: r.data };
-      if (r.data && r.data.done) {
-        officialStop();
-
-        handOffToPopup(r.data);
-        ok(r.data);
-      }
-    }).catch(function (e) {
-      officialStop();
-      var el = $("officialErr");
-      if (el) { el.textContent = msgOf(e && e.data); el.classList.add("show"); }
-      $("officialTip").textContent = "验证失败";
-    });
-  }
-
-  function handOffToPopup(data) {
-    var masked = (data && data.masked) || "";
-    try {
-      localStorage.setItem("wb_join_done", JSON.stringify({
-        t: Date.now(), masked: masked, invitation: data.invitation
-      }));
-    } catch (e) {  }
-    if (!offWin || offWin.closed) return;
-    try {
-      offWin.location.replace("/join?done=1&m=" + encodeURIComponent(masked) +
-        "&invitation=" + encodeURIComponent(data.invitation && data.invitation.status !== 'disabled' ? data.invitation.message : ''));
-    } catch (e) {
-
-    }
-  }
-
-  function showDoneFromUrl() {
-    var q;
-    try { q = new URLSearchParams(location.search); } catch (e) { return false; }
-    if (q.get("done") !== "1") return false;
-    var masked = q.get("m") || "";
-    setTimeout(function () {
-      $("resIcon").className = "icon ok";
-      $("resIcon").innerHTML = OK_ICON;
-      $("resTitle").textContent = "注册成功";
-      $("resDesc").innerHTML = masked
-        ? "欢迎，" + "<b>" + esc(masked) + "</b>"
-        : "欢迎使用";
-      if (q.get('invitation')) {
-        $("resDesc").appendChild(document.createElement('br'));
-        $("resDesc").appendChild(document.createTextNode(q.get('invitation')));
-      }
-      $("resHint").textContent = "可以关闭本页面了。";
-      $("againBtn").classList.add("hidden");
-      show("step3");
-    }, 60);
-    return true;
-  }
-
-  function restoreDone() {
-    var raw;
-    try { raw = localStorage.getItem("wb_join_done"); } catch (e) { return false; }
-    if (!raw) return false;
-    var d;
-    try { d = JSON.parse(raw); } catch (e) { return false; }
-    if (!d || !d.t || (Date.now() - d.t) > 10 * 60 * 1000) {
-      try { localStorage.removeItem("wb_join_done"); } catch (e) {}
-      return false;
-    }
-    setTimeout(function () {
-      $("resIcon").className = "icon ok";
-      $("resIcon").innerHTML = OK_ICON;
-      $("resTitle").textContent = "注册成功";
-      $("resDesc").innerHTML = d.masked
-        ? "欢迎，" + "<b>" + esc(d.masked) + "</b>"
-        : "欢迎使用";
-      if (d.invitation && d.invitation.status !== 'disabled') {
-        $("resDesc").appendChild(document.createElement('br'));
-        $("resDesc").appendChild(document.createTextNode(d.invitation.message));
-      }
-      $("resHint").textContent = "";
-      $("againBtn").classList.remove("hidden");
-      show("step3");
-    }, 60);
-    return true;
-  }
-
-  function countdown(sec) {
-    retryUntil = Date.now() + Math.max(0, sec) * 1000;
-    var btn = $("resendBtn");
-    if (timer) clearInterval(timer);
+  function platLoop() {
+    if (!uSid || uTimer) return;
     var tick = function () {
-      var b = $("resendBtn");
-      left = Math.max(0, Math.ceil((retryUntil-Date.now())/1000));
-      if (!b) { clearInterval(timer); return; }
-      if (left <= 0) {
-        clearInterval(timer); timer = null;
-        b.disabled = busy; b.textContent = "重新获取";
-        $('sendBtn').disabled = busy; $('sendBtn').textContent = '获取验证码';
+      uTimer = null;
+      if (!uSid) return;
+      if (document.hidden) { uTimer = setTimeout(tick, 4000); return; }
+      if (Date.now() > uDead) {
+        platWait(false);
+        platErr("等待超时，请点「返回重选平台」重新开始");
         return;
       }
-      b.disabled = true;
-      b.textContent = left + "s";
-      $('sendBtn').disabled = true; $('sendBtn').textContent = left + 's';
+      fetch("/api/open/" + encodeURIComponent(curPlat) + "/poll?session=" +
+            encodeURIComponent(uSid), { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var st = d && d.status;
+          if (st === "done") { platWait(false); platOk(d.account); return; }
+          if (st === "expired") {
+            platWait(false);
+            platErr("二维码已过期，请点「返回重选平台」重新开始");
+            return;
+          }
+          if (st === "failed") {
+            platWait(false);
+            platErr((d && d.message) || "授权未完成，请重新开始");
+            return;
+          }
+          if (st === "select_account") {
+            platWait(false);
+            platRenderSelect(d.accounts || []);
+            return;
+          }
+          uFail = Math.min(uFail + 1, 5);
+          uPollMs = Math.min(6000, uPollMs + 250 * uFail);
+          uTimer = setTimeout(tick, uPollMs);
+        })
+        .catch(function () {
+          uFail = Math.min(uFail + 1, 5);
+          uTimer = setTimeout(tick, Math.min(8000, uPollMs + 1000 * uFail));
+        });
     };
-    tick();
-    if (left > 0) timer = setInterval(tick, 1000);
-    savePhone();
+    uTimer = setTimeout(tick, uPollMs);
   }
 
-  function send() {
-    if (busy || Date.now() < retryUntil) return;
-    // 邀请码必填：没有有效凭证服务端一律 404。
-    if (!requireInvite()) return;
-    clearAllFieldErr();
-    var mobile = ($("mobile").value || "").replace(/\D/g, "");
-    var country = $('country').value;
-    if (!WBPhone.valid(country, mobile)) {
-      fieldErr("mobile", "请输入所选地区的有效手机号");
-      return;
-    }
+  function platRenderSelect(list) {
+    var box = $("platSelList");
+    while (box.firstChild) box.removeChild(box.firstChild);
+    (list || []).forEach(function (a) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "selbtn";
+      b.textContent = String(a.name || "账号") + " · " + String(a.type || "");
+      b.addEventListener("click", function () {
+        b.disabled = true; b.textContent = "登录中…";
+        api("/api/open/" + encodeURIComponent(curPlat) + "/select",
+            { session: uSid, sec_uid: String(a.sec_uid || "") })
+          .then(function (r) {
+            if (r.ok && r.data && r.data.status === "done") {
+              platOk(r.data.account);
+            } else { platErr(msgOf(r.data)); b.disabled = false; }
+          })
+          .catch(function () { platErr("网络异常，请重试"); b.disabled = false; });
+      });
+      box.appendChild(b);
+    });
+    $("platSelect").classList.remove("hidden");
+  }
 
-    busy = true;
-    var btn = $("sendBtn");
+  function platShowSms() {
+    $("platQR").classList.add("hidden");
+    $("platSelect").classList.add("hidden");
+    $("platCode").classList.add("hidden");
+    $("platPwdRow").classList.add("hidden");
+    $("platSms").classList.remove("hidden");
+    platWait(false);
+    $("platSub").textContent = COPY_SUB ||
+      "输入手机号，获取短信验证码完成注册";
+    try { WBPhone.mountRegion($("pCountry"), $("pMobile")); } catch (e) {}
+  }
+
+  function platSendSms() {
+    if (uBusy) return;
+    platErr("");
+    var mobile = ($("pMobile").value || "").replace(/\D/g, "");
+    var country = $("pCountry").value || "86";
+    try {
+      if (!WBPhone.valid(country, mobile)) { platErr("请输入所选地区的有效手机号"); return; }
+    } catch (e) {}
+    uBusy = true;
+    var btn = $("pSendBtn");
     btn.disabled = true;
     btn.innerHTML = '<span class="spin"></span>发送中…';
-
-    var ensure = sid ? Promise.resolve({ ok: true }) : api("/api/join/start", {});
-    ensure.then(function (s) {
-      if (!s.ok) throw { data: s.data };
-      if (s.data && s.data.sid) sid = s.data.sid;
-      savePhone();
-      return api("/api/join/send", { sid: sid, mobile: mobile, country_code:country });
-    }).then(function (r) {
-      if (!r.ok) {
-        countdown(r.retryAfter || 60);
-
-        if (r.data && r.data.detail && r.data.detail.step === "session") sid = "";
-        throw { data: r.data };
-      }
-      show("step2");
-      $("sentTo").textContent = "验证码已发送至 +" + country + ' ' + mobile;
-      countdown(r.data.retry_after || 60);
-      setTimeout(function () { $("code").focus(); }, 80);
+    api("/api/open/" + encodeURIComponent(curPlat) + "/sms/send",
+        { mobile: mobile, country: country }).then(function (r) {
+      if (!r.ok) throw { data: r.data, retry: r.retryAfter };
+      var d = r.data || {};
+      uSid = d.session || "";
+      uDead = Date.now() + (Number(d.expires_in) || 300) * 1000 + 8000;
+      $("platSms").classList.add("hidden");
+      $("platCode").classList.remove("hidden");
+      platCdown(Math.max(60, Number(d.retry_after) || 60));
+      $("pCode").focus();
     }).catch(function (e) {
-      var d = e && e.data;
-      var step = d && d.detail && d.detail.step;
-      var reason = d && d.detail && d.detail.reason;
-      var msg = msgOf(d);
-
-      if (reason === "need_captcha") {
-        officialStart();
-        return;
-      }
-
-      if (step === "mobile" || step === "sms_send") {
-        show("step1");
-        fieldErr("mobile", msg);
-      } else {
-        toast(msg);
-      }
+      platErr(msgOf(e && e.data));
+      if (e && e.retry) platCdown(e.retry);
     }).then(function () {
-      busy = false;
-      btn.disabled = Date.now() < retryUntil;
-      if (!btn.disabled) btn.textContent = "获取验证码";
+      uBusy = false;
+      btn.disabled = false;
+      btn.textContent = "获取验证码";
     });
   }
 
-  function verify() {
-    if (busy) return;
-    clearFieldErr("code");
-    var code = ($("code").value || "").replace(/\D/g, "");
-    if (code.length !== 6) {
-      fieldErr("code", "请输入 6 位验证码");
-      return;
-    }
-    if (!sid) {
-      toast("会话已失效，请重新获取验证码");
-      show("step1");
-      return;
-    }
+  function platCdown(sec) {
+    var left = Math.max(0, sec);
+    var tick = function () {
+      var b = $("pSendBtn");
+      left = Math.max(0, left - 1);
+      if (left <= 0) {
+        if (uCdown) { clearInterval(uCdown); uCdown = null; }
+        if (b) { b.disabled = false; b.textContent = "重新发送"; }
+        return;
+      }
+      if (b) { b.disabled = true; b.textContent = left + "s"; }
+    };
+    tick();
+    if (uCdown) clearInterval(uCdown);
+    uCdown = setInterval(tick, 1000);
+  }
 
-    busy = true;
-    var btn = $("verifyBtn");
+  function platVerify() {
+    if (uBusy || !uSid) return;
+    platErr("");
+    var code = ($("pCode").value || "").replace(/\D/g, "");
+    if (code.length < 4) { platErr("请输入收到的验证码"); return; }
+    var pwd = uNeedPwd ? ($("pPwd").value || "") : "";
+    if (uNeedPwd && pwd.length < 6) { platErr("请设置至少 6 位的密码"); return; }
+    uBusy = true;
+    var btn = $("pVerifyBtn");
     btn.disabled = true;
     btn.innerHTML = '<span class="spin"></span>注册中…';
-
-    api("/api/join/verify", { sid: sid, sms_code: code })
+    api("/api/open/" + encodeURIComponent(curPlat) + "/sms/verify",
+        { session: uSid, code: code, password: pwd })
       .then(function (r) {
-        if (r.ok) { ok(r.data); } else { fieldErr('code', msgOf(r.data)); }
+        var d = r.data || {};
+        if (r.ok && d.status === "done") { platOk(d.account); return; }
+        if (r.ok && d.status === "need_password") {
+          uNeedPwd = true;
+          $("platPwdRow").classList.remove("hidden");
+          platErr("新账号需要设置密码，请填写后重新提交");
+          return;
+        }
+        if (r.ok && d.status === "select_account") {
+          platRenderSelect(d.accounts || []);
+          return;
+        }
+        platErr(msgOf(d));
       })
-      .catch(function () {
-        fieldErr('code', "网络异常，请检查网络后重试");
-      })
+      .catch(function () { platErr("网络异常，请检查网络后重试"); })
       .then(function () {
-        busy = false;
+        uBusy = false;
         btn.disabled = false;
         btn.textContent = "注册";
       });
   }
 
-  var OK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="#07c160" stroke-width="2.4" ' +
-    'stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-  var ERR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="#e54545" stroke-width="2.4" ' +
-    'stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
-
-  function ok(data) {
-    WBPhone.clear('wb_join_phone'); sid = '';
+  function platOk(account) {
+    platStop();
+    uNeedPwd = false;
     $("resIcon").className = "icon ok";
     $("resIcon").innerHTML = OK_ICON;
-
     $("resTitle").textContent = "注册成功";
-    $("resDesc").innerHTML = data.masked
-      ? "欢迎，" + "<b>" + esc(data.masked) + "</b>"
-      : "欢迎使用";
-    if (data.invitation && data.invitation.status !== 'disabled') {
-      $("resDesc").appendChild(document.createElement('br'));
-      $("resDesc").appendChild(document.createTextNode(data.invitation.message));
-    }
-
-    if (offWin && !offWin.closed) {
-      $("resHint").textContent = "验证页面可以关闭了。";
-    } else {
-      $("resHint").textContent = "";
-    }
+    $("resDesc").textContent = "";
+    $("resDesc").appendChild(document.createTextNode("欢迎，"));
+    var b = document.createElement("b");
+    b.textContent = String((account && account.name) || "") || "账号";
+    $("resDesc").appendChild(b);
+    $("resHint").textContent = "可以关闭本页面了。";
     $("againBtn").classList.remove("hidden");
-    if (timer) { clearInterval(timer); timer = null; }
+    $("platBar").classList.add("hidden");
     show("step3");
   }
 
-  function fail(msg) {
-    $("resIcon").className = "icon err";
-    $("resIcon").innerHTML = ERR_ICON;
-    $("resTitle").textContent = "注册失败";
-    $("resDesc").textContent = msg;
-    $("againBtn").classList.remove("hidden");
-    show("step3");
-  }
-
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  function reset() {
-    WBPhone.clear('wb_join_phone');
-    officialStop();
-    sid = ""; offSid = ""; offUrl = "";
-    offWin = null;
-    try { localStorage.removeItem("wb_join_done"); } catch (e) {}
-    $("mobile").value = ""; $("code").value = "";
-    clearAllFieldErr();
-    if (timer) { clearInterval(timer); timer = null; }
-    $("resIcon").innerHTML = ""; $("resTitle").textContent = ""; $("resDesc").textContent = "";
-    if ($("resHint")) $("resHint").textContent = "";
-    $("againBtn").classList.add("hidden");
-    show("step1");
-  }
-
-  $("sendBtn").addEventListener("click", send);
-  $('country').addEventListener('change', function () {
-    $('mobile').maxLength = this.value === '86' ? 11 : 8;
-    clearFieldErr('mobile'); savePhone();
+  $("pSendBtn").addEventListener("click", platSendSms);
+  $("pVerifyBtn").addEventListener("click", platVerify);
+  $("pMobile").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") platSendSms();
   });
-  $("resendBtn").addEventListener("click", send);
-  $("verifyBtn").addEventListener("click", verify);
-  $("againBtn").addEventListener("click", reset);
-  $("officialLink").addEventListener("click", officialStart);
-  $("officialOpenBtn").addEventListener("click", function () { officialOpen(null); });
-  $("officialBack").addEventListener("click", function () { officialStop(); show("step1"); });
-
-  $("mobile").addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
-  $("code").addEventListener("keydown", function (e) { if (e.key === "Enter") verify(); });
-
-  ["mobile", "code"].forEach(function (id) {
-    $(id).addEventListener("input", function () {
-      this.value = this.value.replace(/\D/g, "");
-      clearFieldErr(id);
-      if (id === 'mobile') savePhone();
-    });
+  $("pCode").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") platVerify();
+  });
+  $("pMobile").addEventListener("input", function () {
+    this.value = this.value.replace(/\D/g, "");
+  });
+  $("pCode").addEventListener("input", function () {
+    this.value = this.value.replace(/\D/g, "");
+  });
+  $("pCountry").addEventListener("change", function () {
+    $("pMobile").maxLength = this.value === "86" ? 11 : 8;
+  });
+  $("platBack").addEventListener("click", function () {
+    platStop();
+    uNeedPwd = false;
+    $("pCode").value = ""; $("pPwd").value = ""; $("pMobile").value = "";
+    platErr("");
+    pickPlat(curPlat || "workbuddy", true, true);
+  });
+  $("againBtn").addEventListener("click", function () {
+    pickPlat(curPlat || "workbuddy", true, true);
   });
 
-  if (!showDoneFromUrl()) {
-    if (!restoreDone()) restorePhone();
-  }
+  loadPlatforms();
 })();
 </script>
 </body>

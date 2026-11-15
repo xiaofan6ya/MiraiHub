@@ -68,12 +68,25 @@ def _public_base(request: Request) -> str:
 
 @router.get("/api/join/gate/status")
 def gate_status(db: Session = Depends(get_db), _=Depends(require_admin)):
+    """总闸状态 + **实际生效的**链接时效。
+
+    `ticket_ttl` 必须读公开入口配置（管理页里选的），不能用
+    `settings.JOIN_TICKET_TTL` —— 那份只是 .env 默认值，管理页改过之后
+    两者会不一致：控制台的「链接有效 xx」会显示成默认的 24 小时，
+    而真正签发用的是配置里的值（0 = 永久）。
+    """
+    from admin.public_auth import _load_config as _entry_config
+
+    try:
+        ttl = int((_entry_config(db) or {}).get("ticket_ttl", 86400))
+    except Exception:  # noqa: BLE001 - 配置损坏时退回环境默认
+        ttl = int(getattr(settings, "JOIN_TICKET_TTL", 900))
     return {
         "open": join_gate.is_open(db),
         "epoch": join_gate.epoch(db),
         "active_tickets": join_gate.active_ticket_count(db),
         "active_invites": join_gate.active_invite_count(db),
-        "ticket_ttl": int(getattr(settings, "JOIN_TICKET_TTL", 900)),
+        "ticket_ttl": ttl,
         "access_ttl": int(getattr(settings, "JOIN_ACCESS_TTL", 3600)),
     }
 
@@ -96,13 +109,18 @@ def gate_tickets(body: TicketsIn, request: Request,
                  db: Session = Depends(get_db), _=Depends(require_admin)):
     """签发访问链接。**明文只在这里返回一次**，服务端只留 jti。"""
     try:
-        tickets = join_gate.issue_tickets(db, body.count, operator="admin")
+        # 链接时效来自公开入口管理页的配置（未配置时用环境默认）
+        from admin.public_auth import _load_config as _pe_config
+
+        cfg = _pe_config(db)
+        tickets = join_gate.issue_tickets(db, body.count, operator="admin",
+                                          ttl=cfg["ticket_ttl"])
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     base = _public_base(request)
     return {
         "ok": True,
-        "expires_in": int(getattr(settings, "JOIN_TICKET_TTL", 900)),
+        "expires_in": int(cfg["ticket_ttl"]),
         "urls": [f"{base}/j#k={t}" for t in tickets],
         "warning": "链接在有效期内可重复打开（默认 24 小时）；通过可信渠道发送，关闸即全部失效。",
     }

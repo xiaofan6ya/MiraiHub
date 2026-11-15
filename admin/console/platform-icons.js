@@ -78,6 +78,12 @@
     // `qn.cache.wpscdn.cn/copilot-test/copilot-cdn/images/copilot/lingxi_logo_512_v1.png`
     // （512×512 RGBA）缩放到 256。自带渐变底，深浅主题都能直接用，tone=color。
     wps: { src: "/admin/assets/logos/wps-lingxi-256.png", tone: "color" },
+    // 豆包：素材取自客户端安装目录 `app/Logo.png`（600×600 RGBA，自带浅蓝
+    // 圆底吉祥物头像），缩放到 256。自带底色 ⇒ tone=color，深浅主题通用。
+    doubao: { src: "/admin/assets/logos/doubao-256.png", tone: "color" },
+    // 腾讯 Marvis（应用宝 AI 助手）：官方应用图标（474×474 RGB，白底黑色
+    // 羊头剪影 + 红围脖），缩放到 256。自带白底 ⇒ tone=color。
+    marvis: { src: "/admin/assets/logos/marvis-256.png", tone: "color" },
   };
 
   /* 兜底：不要用「加号」（看着像「新建平台」）。 */
@@ -117,6 +123,12 @@
     "wps-lingxi": "wps",
     wps_lingxi: "wps",
     wps: "wps",
+    // 豆包（桌面客户端 Cookie 登录态）
+    doubao: "doubao",
+    "doubao-cn": "doubao",
+    // 腾讯 Marvis（应用宝 AI 助手，QQ / 微信扫码登录）
+    marvis: "marvis",
+    "marvis-cn": "marvis",
   };
 
   function resolve(id) {

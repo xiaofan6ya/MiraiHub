@@ -47,6 +47,11 @@ BIZ_AUTH_CODES = frozenset({"020002", "100002"})
 BIZ_OK_CODES = frozenset({"", "0", "200", "000000"})
 #: 业务提示但不算故障（如「当前未切换到团队」）
 BIZ_SOFT_CODES = frozenset({"100001"})
+#: 账号被上游停用（2026-11-13 实测，13/21 个号都是这个）：
+#: 凭证本身没过期、余额看着也够，但对话一律回
+#: `{"code":"100003","desc":"账号已被停用"}`。这类号必须**禁用 + 长冷却**，
+#: 否则每轮选号都会撞它一次。
+BIZ_BANNED_CODES = frozenset({"100003"})
 
 
 class UpstreamError(Exception):
@@ -279,6 +284,51 @@ def _request(url: str, *, method: str = "GET", body: dict | None = None,
     return data
 
 
+def _biz_error(payload: str) -> UpstreamError | None:
+    """流式响应头是 `application/json` 时，把业务错误体翻成 UpstreamError。
+
+    ## 为什么必须有这一步（2026-11-13 线上「对话发不出去」的直接根因）
+
+    Loomy 的 `/chat/completions` 在**账号被停用**时不回 SSE，而是回
+    `200 application/json`：
+
+        {"code":"100003","desc":"账号已被停用","trace_id":"…","data":{}}
+
+    `chat_stream` 只按 `data:` 行解析 SSE —— 这一整行 JSON 既不以 `data:`
+    开头也没有 `choices`，于是被**静默丢弃**，生成器直接结束。上层看到的是
+    「流正常结束了但一帧都没有」，客户端只能报
+    `Stream ended without finish_reason`，用户侧就是「对话发不出去」，
+    而且面板上这条请求还记成成功（0 token）。
+
+    这里把它识别出来，交给调用方走「换号 + 冷却」的既有路径。
+    """
+    text = str(payload or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    code = str(data.get("code") or "")
+    if not code or code in BIZ_OK_CODES or code in BIZ_SOFT_CODES:
+        return None
+    message = str(data.get("desc") or data.get("message") or "上游业务错误")
+    blob = json.dumps(data, ensure_ascii=False)[:400]
+    if code in BIZ_BANNED_CODES:
+        return UpstreamError(message or "账号已被停用", status=403,
+                             code=code, kind="auth", detail=blob)
+    if code in BIZ_AUTH_CODES:
+        return UpstreamError(message, status=401, code=code,
+                             kind="auth", detail=blob)
+    if _is_quota_message(message) or _is_quota_message(blob):
+        return UpstreamError(message or "该账号积分已用尽", status=402,
+                             code=code, kind="quota_exceeded", detail=blob)
+    return UpstreamError(message, status=502, code=code,
+                         kind="upstream_business", detail=blob)
+
+
 def _is_quota_message(text: str) -> bool:
     """消息里是否带「积分/额度用尽」语义（中英文都认）。"""
     t = str(text or "").lower()
@@ -508,7 +558,28 @@ def chat_stream(token: str, realm: str, body: dict, *,
         first_content_at = None   # **首个正文**到达（TTFT 的准确定义）
         last_content_at = None    # **最后一个正文**到达（解码段终点）
         last_at = None
+        saw_chunk = False
         try:
+            # ① 先看响应头：不是 SSE 就说明上游回的是业务错误体
+            #    （`账号已被停用` / 额度不足 / 鉴权失效），见 `_biz_error`。
+            ctype = str(resp.headers.get("content-type") or "").lower()
+            if "text/event-stream" not in ctype:
+                payload = ""
+                try:
+                    payload = resp.read().decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                error = _biz_error(payload)
+                if error is not None:
+                    note_sentinel(realm, account_id, error.kind,
+                                  code=error.code, status=error.status,
+                                  detail=error.detail)
+                    raise error
+                if not payload.strip():
+                    raise UpstreamError("上游返回空响应", status=0,
+                                        kind="bad_response",
+                                        detail="content-type=%s" % ctype)
+                # 认不出来的 JSON：交给下面按 SSE 行解析（有些网关会混着发）
             for raw_line in resp:
                 line = raw_line.decode("utf-8", "replace").strip()
                 if not line:
@@ -516,6 +587,15 @@ def chat_stream(token: str, realm: str, body: dict, *,
                 if line.startswith("event:"):
                     continue
                 if not line.startswith("data:"):
+                    # ② 流里也可能夹着**整段 JSON 错误体**（不是 `data:` 前缀）。
+                    #    以前这里直接 continue，错误被静默吞掉 ——
+                    #    客户端只看到「流结束了但没有 finish_reason」。
+                    error = _biz_error(line)
+                    if error is not None:
+                        note_sentinel(realm, account_id, error.kind,
+                                      code=error.code, status=error.status,
+                                      detail=error.detail)
+                        raise error
                     continue
                 payload = line[5:].strip()
                 if not payload or payload == "[DONE]":
@@ -557,7 +637,15 @@ def chat_stream(token: str, realm: str, body: dict, *,
                     if first_content_at is None:
                         first_content_at = now
                     last_content_at = now
+                saw_chunk = True
                 yield chunk
+            # ③ 一帧都没拿到就结束：必须报错，不能静默收流。
+            #    否则上层发出 usage 汇总帧 + [DONE]，客户端渲染成
+            #    「Stream ended without finish_reason」而看不出真正原因。
+            if not saw_chunk:
+                raise UpstreamError("上游未返回任何数据帧",
+                                    status=0, kind="bad_response",
+                                    detail="content-type=%s, chunks=0" % ctype)
         finally:
             try:
                 resp.close()
