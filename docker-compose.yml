@@ -1,6 +1,8 @@
 services:
   admin:
     build: .
+    env_file:
+      - .env
     ports:
       - "${ADMIN_PORT:-8790}:8790"
     volumes:
@@ -11,6 +13,7 @@ services:
       ADMIN_DATABASE_URL: sqlite:////data/workbuddy.db
       ADMIN_REDIS_URL: ""
       ADMIN_GATEWAY_LIMIT_BACKEND: memory
+      ADMIN_POOL_RETRY_WINDOW: "60"
       ADMIN_LOG_REQUEST_PAYLOAD: ${ADMIN_LOG_REQUEST_PAYLOAD:-0}
       ADMIN_LOG_PAYLOAD_MAX_MB: ${ADMIN_LOG_PAYLOAD_MAX_MB:-8}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

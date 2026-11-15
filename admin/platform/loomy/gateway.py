@@ -116,6 +116,19 @@ def _cool_seconds(kind: str) -> int:
     return 0
 
 
+#: 402 且余额为正（多半是该号没有请求的模型）时的**账号级短冷却**秒数。
+#:
+#: 取值只为「本轮换号 + 短暂避开」：按「额度耗尽」冷却 300s 会把号池
+#: 越用越少，最终真的变成「全都没额度」。本轮已由 `exclude_identity`
+#: 排掉，这里只需让这个号短暂避开，下一轮换号即可。
+#:
+#: ⚠ 与 `MODEL_MISS_COOL_SECONDS` **不是一回事**，别合并：那个是上游
+#: 静默换模型时的 (账号×模型) 级冷却（默认 3600s，见
+#: `_note_model_not_served`）—— 号本身健康、只是这个模型不可用，
+#: 粒度是「号×模型」，不该整号摘掉；本常量是账号级、分钟级短冷却。
+QUOTA_POSITIVE_COOL_SECONDS = 60
+
+
 #: 上游「账号已被停用」的业务码（2026-11-13 实测）。
 #:
 #: 这类号的凭证没过期、余额列看着也够（同步接口还会回正数），但对话一律回
@@ -668,10 +681,15 @@ def _attempt(db, request, key, body: dict, realm: str):
                     available = int(((probe or {}).get("quota") or {}).get("available") or 0)
                     if available > 0:
                         zero_balance = False
-                        cool_seconds = 300
+                        # 402 且余额为正：多半是该号**没有请求的模型**（部分号只开了
+                        # spark 系列，有余额也用不了）。按「额度耗尽」冷却 300s 会把号池
+                        # 越用越少，最终真的变成「全都没额度」。本轮已由 exclude_identity
+                        # 排掉，这里只做短冷却，直接换下一个号即可。
+                        cool_seconds = QUOTA_POSITIVE_COOL_SECONDS
                         logger.info(
-                            "Loomy 402 但余额仍为 %s，判为当日/瞬时限额，冷却 300s（acc=%s）",
-                            available, account.id)
+                            "Loomy 402 但余额仍为 %s（疑似无 %s 模型），"
+                            "短冷却 %ss 换号（acc=%s）",
+                            available, model, cool_seconds, account.id)
                 except Exception:  # noqa: BLE001 - 复核失败按原逻辑保守处理
                     logger.debug("Loomy 402 余额复核失败 acc=%s", account.id,
                                  exc_info=True)
@@ -1057,10 +1075,15 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                     available = int(((probe or {}).get("quota") or {}).get("available") or 0)
                     if available > 0:
                         zero_balance = False
-                        cool_seconds = 300
+                        # 402 且余额为正：多半是该号**没有请求的模型**（部分号只开了
+                        # spark 系列，有余额也用不了）。按「额度耗尽」冷却 300s 会把号池
+                        # 越用越少，最终真的变成「全都没额度」。本轮已由 exclude_identity
+                        # 排掉，这里只做短冷却，直接换下一个号即可。
+                        cool_seconds = QUOTA_POSITIVE_COOL_SECONDS
                         logger.info(
-                            "Loomy 流式 402 但余额仍为 %s，短暂冷却 300s（acc=%s）",
-                            available, account.id)
+                            "Loomy 流式 402 但余额仍为 %s（疑似无 %s 模型），"
+                            "短冷却 %ss 换号（acc=%s）",
+                            available, model, cool_seconds, account.id)
                 except Exception:  # noqa: BLE001
                     logger.debug("流式 402 余额复核失败 acc=%s", account.id,
                                  exc_info=True)
@@ -1164,8 +1187,9 @@ async def _forward_stream(body: dict, request):
             db.close()
 
     # **空闲心跳**：上游排队/限流/慢思考时整条流可能几十秒无字节，
-    # 客户端只能干等。每 8 秒发一帧 `: ping` 注释（SSE 规范，
-    # 所有标准解析器忽略），把「链路活着」变成可见事实。
+    # 客户端只能干等。每 8 秒发一帧**空增量 data 帧**（真实事件，
+    # 会被解析并重置客户端 idle 计时器；旧注释帧已被证明无效，
+    # 可用 MIRAIHUB_KEEPALIVE_DATA_FRAME=0 回退）。
     safe_gen = bridge.with_pings(generator(), ping=bridge.CHAT_PING)
 
     resp_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}

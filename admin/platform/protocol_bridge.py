@@ -68,6 +68,7 @@ loomy / raccoon / qoder 各自拷贝了一份「Anthropic ↔ OpenAI」与
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -78,10 +79,66 @@ from starlette.responses import StreamingResponse
 # ---------------------------------------------------------------------------
 # 心跳
 # ---------------------------------------------------------------------------
-#: OpenAI chat / Responses 的 SSE 注释帧（所有标准 SSE 解析器都忽略）
-CHAT_PING = b": ping\n\n"
-RESPONSES_PING = b": ping\n\n"
-#: Anthropic 的 ping 事件（官方事件，SDK 会触发 message 上的 ping 回调）
+#: 保活帧形态开关：默认发合法的 data 帧，不再发 SSE 注释帧。
+#:
+#: 为什么注释帧不行：冒号开头的行是 SSE 规范里的注释，只用于调试和
+#: 断线重连游标；标准客户端解析器会直接丢弃它、不产生任何事件。
+#: 事件不产生，客户端「流空闲」计时器就不会被重置 —— 上游一直在思考、
+#: 链路一直是活的，客户端仍会按 idle 超时把整条流掐断。
+#: 所以保活必须是一帧能被解析成事件的数据帧，哪怕它的增量是空的。
+#:
+#: 回退开关：MIRAIHUB_KEEPALIVE_DATA_FRAME=0 退回旧的「: ping」注释帧
+#: （只在排查客户端对空增量帧的兼容问题时使用；代价是保活失效）。
+KEEPALIVE_DATA_FRAME = os.getenv(
+    "MIRAIHUB_KEEPALIVE_DATA_FRAME", "1") not in ("0", "false", "False")
+
+#: 旧形态：SSE 注释帧。标准解析器忽略它 ⇒ 不产生事件 ⇒ 不重置 idle 计时器。
+COMMENT_PING = b": ping\n\n"
+
+
+def _chat_ping_frame() -> bytes:
+    """chat/completions 形态的空增量保活帧（合法 OpenAI SSE chunk）。"""
+    if not KEEPALIVE_DATA_FRAME:
+        return COMMENT_PING
+    payload = {
+        "id": "keepalive",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+    }
+    return ("data: %s\n\n" % json.dumps(payload, separators=(",", ":"))).encode()
+
+
+def _responses_ping_frame() -> bytes:
+    """Responses 形态的「仍在进行」事件帧（无内容增量）。
+
+    Responses 流没有 chat 那种「空 choices」的写法，语义上最接近的无内容
+    事件是 response.in_progress：它只更新状态，不产出文本或工具项。
+    注意：本帧当前没有调用方（gateway 只用 CHAT_PING）；将来真要用，
+    sequence_number 必须与同一流内其它事件保持单调递增，这里固定 0
+    只是给一个合法的占位形状。
+    """
+    if not KEEPALIVE_DATA_FRAME:
+        return COMMENT_PING
+    payload = {
+        "type": "response.in_progress",
+        "sequence_number": 0,
+        "response": {
+            "id": "resp-keepalive",
+            "object": "response",
+            "created_at": 0,
+            "status": "in_progress",
+            "output": [],
+        },
+    }
+    return ("event: response.in_progress\ndata: %s\n\n"
+            % json.dumps(payload, separators=(",", ":"))).encode()
+
+
+#: 已按当前开关解析好的保活帧，供各 platform gateway 的 with_pings 使用。
+CHAT_PING = _chat_ping_frame()
+RESPONSES_PING = _responses_ping_frame()
+#: Anthropic 的 ping 事件（官方事件，SDK 会触发 message 上的 ping 回调）。
+#: 它本来就是真事件帧，不受上面的开关影响。
 _ANTHROPIC_PING_PAYLOAD = json.dumps({"type": "ping"}, separators=(",", ":"))
 ANTHROPIC_PING = ("event: ping\ndata: %s\n\n" % _ANTHROPIC_PING_PAYLOAD).encode()
 
@@ -1584,9 +1641,11 @@ def anthropic_upstream_stream_relay(inner, model: str, *, prefix: str = "gw") ->
             if str(data.get("type") or event_name) == "message_stop":
                 break
             if str(data.get("type") or event_name) == "ping":
-                # Anthropic 的 ping 事件 → OpenAI SSE 注释帧：
+                # Anthropic 的 ping 事件 → OpenAI 保活帧：
                 # 上游慢思考/排队期间客户端也要看得到「链路活着」。
-                yield b": ping\n\n"
+                # 必须发 data 帧（注释帧不产生事件、不重置客户端 idle
+                # 计时器，等于保活没做）；开关关闭时回退旧的注释帧。
+                yield CHAT_PING
                 event_name = ""
                 continue
             for piece in aggregator.feed(event_name, data):

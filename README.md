@@ -150,6 +150,22 @@ python admin/platform/skill/scripts/verify_platform.py  # 接入后验收
 上游不管支持哪种，网关负责转换。**工具调用（`tool_calls`）在三条协议上都完整透传** ——
 这一点是硬要求：丢了客户端就只收到一个「该调工具了」的空收尾，任务直接卡死。
 
+### 💓 保活帧：必须是 data 帧，不能是 SSE 注释
+
+上游排队或慢思考时，网关每 8 秒往流里补一帧保活。这一帧**必须**是合法的
+data 帧（Chat Completions 用空增量 chunk，Anthropic 用 `event: ping`），
+不能是 `: ping` 这种 SSE 注释。
+
+原因：注释行在 SSE 规范里只是调试信息，标准客户端解析器（OpenAI SDK、
+Claude Code、DeepSeek Harness 等）会直接丢弃、**不产生事件**。事件不产生，
+客户端维护的「流空闲超时」就不会被重置 —— 上游明明一直在思考，客户端仍会
+在 idle 超时后掐断整条流，表现为「任务跑到一半突然断」。
+
+它和 `ADMIN_STREAM_IDLE_TIMEOUT` 是互补关系：后者管服务端读上游的静默
+上限，前者管客户端能不能「看见」流还活着。回退开关
+`MIRAIHUB_KEEPALIVE_DATA_FRAME=0` 可改回旧的注释帧（仅在排查客户端对
+空增量帧的兼容问题时使用；代价是保活不再重置 idle 计时器）。
+
 ### 📊 实时监控与准确计量
 
 - **用量日志**：每次调用的模型、账号、TTFT、TPS、token、积分

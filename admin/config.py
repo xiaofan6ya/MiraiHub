@@ -309,6 +309,14 @@ class Settings:
     # 600s：这是**帧间隔/静默**上限，不是请求总时长。深度思考模型静默
     # 3~4 分钟属正常工作状态，不能被网关掐断（用户实测反馈）。
     STREAM_IDLE_TIMEOUT = float(os.getenv("ADMIN_STREAM_IDLE_TIMEOUT", "600"))
+
+    # ---------- 保活帧形态（不是本类的取值字段） ----------
+    # `admin/platform/protocol_bridge.py` 在导入时直接读环境变量
+    # `MIRAIHUB_KEEPALIVE_DATA_FRAME`：默认（未设或 1）发合法的 data 帧，
+    # 置 0 回退旧的 `: ping` 注释帧 —— 注释帧不产生事件，客户端 idle
+    # 计时器不会重置。它和上面的 STREAM_IDLE_TIMEOUT 互补：那个管
+    # 「服务端读上游」的静默，这个管「客户端能否看见事件流仍在推进」。
+
     #: 写入（上传 prompt）超时（秒）。
     STREAM_WRITE_TIMEOUT = float(os.getenv("ADMIN_STREAM_WRITE_TIMEOUT", "60"))
     #: 连接池等待超时（秒）：池子饱和就快速失败，交给上层退避，而不是无限排队。

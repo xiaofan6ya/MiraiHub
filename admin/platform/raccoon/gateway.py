@@ -638,8 +638,9 @@ async def _forward_stream(body: dict, request):
 
     return StreamingResponse(
         # **空闲心跳**：上游排队/限流/慢思考时整条流可能几十秒无字节，
-        # 每 8 秒一帧 `: ping` 注释（SSE 规范，所有解析器忽略），
-        # 把「链路活着」变成客户端可见的事实。
+        # 每 8 秒一帧**空增量 data 帧**（真实事件，会被解析并重置客户端
+        # idle 计时器；旧注释帧已被证明无效，可用
+        # MIRAIHUB_KEEPALIVE_DATA_FRAME=0 回退）。
         bridge.with_pings(generator(), ping=bridge.CHAT_PING),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

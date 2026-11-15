@@ -910,7 +910,8 @@ async def _solo_chat(request, db, key, payload, realm, model, messages,
                                    if _last_at else None))
 
         # 空闲心跳：SOLO 上游排队/慢思考时整条流可能几十秒无字节；
-        # Anthropic 目标发官方 ping 事件，其余发 SSE 注释帧
+        # Anthropic 目标发官方 ping 事件，其余发空增量 data 帧
+        # （真实事件，能重置客户端 idle 计时器；开关可回退注释帧）
         return StreamingResponse(
             bridge.with_pings(
                 generator(),
