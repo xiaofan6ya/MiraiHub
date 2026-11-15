@@ -439,36 +439,86 @@ async def chat_completions(request):
 
 
 # ---------------------------------------------------------------- Anthropic
+def _sse(event: str, payload: dict) -> bytes:
+    """Anthropic SSE 帧：**必须同时有 `event:` 与 `data:` 两行**。
+
+    Anthropic 官方流式协议是
+
+        event: content_block_delta
+        data: {"type":"content_block_delta", ...}
+
+    客户端按 **事件名** 分派处理器。只发 `data:` 行时，客户端拿到的事件名
+    是 SSE 规范默认值 `message`，`content_block_delta` / `message_stop`
+    一个都匹配不上 —— 表现是「HTTP 200、有字节流、但消息零内容块」。
+    （这正是 PR #20 报告的问题；本平台一直没修。）
+    """
+    return ("event: %s\ndata: %s\n\n"
+            % (event, json.dumps(payload, ensure_ascii=False))).encode()
+
+
 def _anthropic_frames(result: dict, model: str):
+    """OpenAI 聚合结果 → Anthropic 流式帧（含 tool_use 与缓存 usage）。
+
+    与官方协议的对应关系：
+
+        message_start        usage: input_tokens + cache_read_input_tokens
+        content_block_start  (text / tool_use 各一个块)
+        content_block_delta  text_delta / input_json_delta
+        content_block_stop
+        message_delta        usage: output_tokens（+ 缓存字段）
+        message_stop
+    """
     payload = protocol.openai_to_anthropic(result, model)
-    text = payload["content"][0]["text"] if payload["content"] else ""
     usage = result.get("usage") or {}
-    yield ("data: %s\n\n" % json.dumps({
+    anthropic_usage = protocol._anthropic_usage(usage)  # noqa: SLF001 - 同包协作
+    input_usage = dict(anthropic_usage)
+    input_usage["output_tokens"] = 0
+
+    yield _sse("message_start", {
         "type": "message_start",
         "message": {"id": payload["id"], "type": "message",
                     "role": "assistant", "model": payload["model"],
-                    "content": [], "usage": {
-                        "input_tokens": int(usage.get("prompt_tokens") or 0),
-                        "output_tokens": 0}}}, ensure_ascii=False)).encode()
-    yield ("data: %s\n\n" % json.dumps({
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "text", "text": ""}},
-        ensure_ascii=False)).encode()
-    for index in range(0, len(text), 48):
-        yield ("data: %s\n\n" % json.dumps({
-            "type": "content_block_delta", "index": 0,
-            "delta": {"type": "text_delta", "text": text[index:index + 48]}},
-            ensure_ascii=False)).encode()
-    yield ("data: %s\n\n" % json.dumps({
-        "type": "content_block_stop", "index": 0},
-        ensure_ascii=False)).encode()
-    yield ("data: %s\n\n" % json.dumps({
+                    "content": [], "usage": input_usage},
+    })
+
+    index = 0
+    for block in payload.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = str(block.get("text") or "")
+            yield _sse("content_block_start", {
+                "type": "content_block_start", "index": index,
+                "content_block": {"type": "text", "text": ""}})
+            for offset in range(0, len(text), 48):
+                yield _sse("content_block_delta", {
+                    "type": "content_block_delta", "index": index,
+                    "delta": {"type": "text_delta",
+                              "text": text[offset:offset + 48]}})
+            yield _sse("content_block_stop",
+                       {"type": "content_block_stop", "index": index})
+            index += 1
+        elif block.get("type") == "tool_use":
+            # 工具调用块：**不能静默丢弃** —— 丢了客户端就以为模型没调工具，
+            # 任务直接卡死（旧实现只取 content[0] 的 text）。
+            yield _sse("content_block_start", {
+                "type": "content_block_start", "index": index,
+                "content_block": {"type": "tool_use", "id": block.get("id") or "",
+                                  "name": block.get("name") or "", "input": {}}})
+            args = json.dumps(block.get("input") or {}, ensure_ascii=False)
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta", "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": args}})
+            yield _sse("content_block_stop",
+                       {"type": "content_block_stop", "index": index})
+            index += 1
+
+    yield _sse("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": payload["stop_reason"]},
-        "usage": {"output_tokens": int(usage.get("completion_tokens") or 0)}},
-        ensure_ascii=False)).encode()
-    yield ("data: %s\n\n" % json.dumps({"type": "message_stop"},
-                                       ensure_ascii=False)).encode()
+        "usage": anthropic_usage,
+    })
+    yield _sse("message_stop", {"type": "message_stop"})
 
 
 async def messages(request):

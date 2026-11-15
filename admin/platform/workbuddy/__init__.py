@@ -328,6 +328,12 @@ def install() -> None:
         icon=PLATFORM,
         supports_local_scan=True,
         notes="腾讯 CodeBuddy / WorkBuddy，内置默认平台；/v1 由本网关直接处理。",
+            rating={
+                # 网关自评：稳定、免排队、额度足。改价 / 改策略时跟着改这里。
+                "tier": "hang",
+                "reason": "模型调用稳定、免排队，调用速度快；每月都有免费模型与低倍率模型，"
+                          "新用户最高可免费领 4000 积分。",
+            },
         extra={
             "task_runners": list(_task_runners().keys()),
             # 动作能力（前端据此渲染按钮）

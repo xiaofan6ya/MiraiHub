@@ -16,6 +16,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 STAGING = ROOT / "android/app/build/generated/python"
 
+#: 让 `from scripts.xxx import ...` 在**任何工作目录**下都能解析。
+#:
+#: `python scripts/build_android.py` 时 `sys.path[0]` 是 `scripts/` 而不是仓库根，
+#: 于是 `import scripts.android_signing` 直接
+#: `ModuleNotFoundError: No module named 'scripts.android_signing'`
+#: —— 而且报错发生在**跑完 pip 安装和暂存之后**，白白浪费几分钟。
+#: 仓库根的 `scripts/` 没有 `__init__.py`，靠 PEP 420 命名空间包即可。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def check_runtime() -> None:
     # Run the staged app against Android's pinned dependency versions. Gradle

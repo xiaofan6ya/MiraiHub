@@ -37,7 +37,7 @@ window.WBIP = (() => {
   }
   async function request(path, options) {
     const r = await safeJson(await api(path, options));
-    if (!r.ok) throw new Error(typeof r.data.detail === 'string' ? r.data.detail : '请求失败（HTTP '+r.status+'）');
+    if (!r.ok) throw new Error(typeof r.data.detail === 'string' ? r.data.detail : '请求失败：' + statusText(r.status));
     return r.data;
   }
   const json = (method, body) => ({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

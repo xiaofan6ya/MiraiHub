@@ -37,6 +37,8 @@ public class LocalApiService extends Service {
         startupEvents.addLast("+" + seconds + "s " + safeDiagnostic(message));
     }
     static synchronized String startupHistory() { return android.text.TextUtils.join("\n", startupEvents); }
+    /** 系统回收服务时用来区分「用户主动停止」与「被 ROM 干掉」。 */
+    private volatile boolean stoppedByUser;
     private int instanceGeneration;
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
@@ -46,6 +48,8 @@ public class LocalApiService extends Service {
     private final Handler monitor = new Handler(Looper.getMainLooper());
     private boolean probing;
     private int failedChecks;
+    /** 连续几次「线程真的不在了」才重启，避免解冻瞬间误判打断进行中的对话。 */
+    private int deadChecks;
     private int startFailures;
     private final Runnable healthCheck = new Runnable() {
         @Override public void run() {
@@ -68,9 +72,16 @@ public class LocalApiService extends Service {
                     monitor.post(() -> {
                         probing = false;
                         if (stopping || starting) return;
-                        if (result) { lastHealthy = System.currentTimeMillis(); failedChecks = 0; }
+                        if (result) { lastHealthy = System.currentTimeMillis(); failedChecks = 0; deadChecks = 0; }
                         else if (!runtimeAlive) {
                             failedChecks = 0;
+                            // 解冻瞬间 1 次误判就重启会直接砍掉正在跑的 SSE。
+                            // 两次（约 30 秒）都拿不到活的运行时就当真的死了。
+                            if (++deadChecks < 2) {
+                                noteStartup("服务线程状态未知，等待下一次检查");
+                                return;
+                            }
+                            deadChecks = 0;
                             noteStartup("服务线程已退出，开始恢复");
                             launch(true);
                         } else if (++failedChecks == 2) {
@@ -97,6 +108,9 @@ public class LocalApiService extends Service {
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(1, notification);
         registered = true;
+        stoppedByUser = false;
+        // 看门狗：服务活着的期间每 10 分钟复核一次；被 ROM 回收后由它把人拉回来。
+        if (ServiceKeeper.enabled(this)) ServiceKeeper.scheduleHeartbeat(this);
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, getPackageName() + ":local-api");
         wakeLock.acquire();
@@ -109,14 +123,46 @@ public class LocalApiService extends Service {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), flags);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, LocalApiService.class).setAction("stop"), flags);
         Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
-        return builder.setSmallIcon(R.drawable.notification_icon).setContentTitle("wb2api")
+        builder.setSmallIcon(R.drawable.notification_icon).setContentTitle("wb2api")
             .setContentText(text).setContentIntent(open).setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "停止服务", stop).build()).build();
+            // 同一条通知原地更新：不响铃、不重复弹横幅、不显示时间戳。
+            // 旧实现在每次状态变化时都像「新通知」，用户看到的就是「服务在反复重启」。
+            .setOnlyAlertOnce(true).setShowWhen(false).setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(new Notification.Action.Builder(null, "停止服务", stop).build());
+        // Android 12+ 默认会把前台通知延迟 10 秒才展示；本地网关的用户需要
+        // 立刻确认「服务在跑」，所以显式要求立即显示。
+        if (Build.VERSION.SDK_INT >= 31) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
+        return builder.build();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && "stop".equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
-        launch(intent != null && "restart".equals(intent.getAction()));
+        String action = intent == null ? null : intent.getAction();
+        if ("stop".equals(action)) {
+            // 用户明确停服务：看门狗必须一起停，否则几分钟后通知又冒出来。
+            stoppedByUser = true;
+            ServiceKeeper.setEnabled(this, false);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (ServiceKeeper.ACTION_WATCHDOG.equals(action)) {
+            // 闹钟看门狗：服务活着就只是复核并续排，不碰 Python 运行时。
+            if (!ServiceKeeper.enabled(this)) { stopSelf(); return START_NOT_STICKY; }
+            if (worker != null && worker.isAlive() && !starting && origin != null) {
+                ServiceKeeper.scheduleHeartbeat(this);
+                return START_STICKY;
+            }
+            ServiceKeeper.scheduleRetry(this);
+            launch(false);
+            return START_STICKY;
+        }
+        boolean userRestart = "restart".equals(action);
+        // 走到这里说明「服务本来就该在跑」（打开应用 / 系统重建 / 手动重启）。
+        // 用户上次点过「停止服务」的话，这里把看门狗重新武装 —— 否则他之后再开
+        // 应用，服务起来了却没人保活，后台一被回收就再也不回来。
+        if (!ServiceKeeper.enabled(this)) ServiceKeeper.setEnabled(this, true);
+        ServiceKeeper.scheduleHeartbeat(this);
+        if (userRestart) revision++;      // 只有用户点「重启」才强制页面重挂
+        launch(userRestart);
         return START_STICKY;
     }
 
@@ -141,7 +187,7 @@ public class LocalApiService extends Service {
                     if (stopping || generation.get() != instanceGeneration) return;
                     token = state.getString("token");
                     origin = state.getString("origin");
-                    if (restart || revision == 0) revision++;
+                    if (revision == 0) revision++;
                     lastHealthy = System.currentTimeMillis();
                     startupStage = "本地服务已启动";
                     noteStartup(startupStage);
@@ -188,6 +234,9 @@ public class LocalApiService extends Service {
             data.put("power_save", power.isPowerSaveMode());
             data.put("battery_unrestricted", power.isIgnoringBatteryOptimizations(getPackageName()));
             data.put("wake_lock", wakeLock != null && wakeLock.isHeld());
+            data.put("keeper_enabled", ServiceKeeper.enabled(this));
+            data.put("interrupts", ServiceKeeper.interrupts(this));
+            data.put("last_interrupt", ServiceKeeper.lastInterrupt(this));
             data.put("service_revision", revision);
             ConnectivityManager connectivity = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
@@ -200,15 +249,36 @@ public class LocalApiService extends Service {
         return data.toString();
     }
 
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        // 从最近任务里划掉：ROM 会顺手杀掉进程。1 分钟后由闹钟把前台服务拉回来，
+        // 这样「划掉应用」不再等于「网关下线」。
+        super.onTaskRemoved(rootIntent);
+        if (ServiceKeeper.enabled(this)) {
+            ServiceKeeper.noteInterrupt(this, "应用任务被移除");
+            ServiceKeeper.scheduleRetry(this);
+        }
+    }
+
     @Override public void onDestroy() {
         stopping = true;
         monitor.removeCallbacksAndMessages(null);
+        // 关键区分：用户点了停止 = 彻底收摊；被系统回收 = 内核留着、看门狗拉起。
+        final boolean keepRuntime = !stoppedByUser && ServiceKeeper.enabled(this);
+        if (keepRuntime) {
+            ServiceKeeper.noteInterrupt(this, "前台服务被系统回收");
+            ServiceKeeper.scheduleRetry(this);
+        } else {
+            ServiceKeeper.cancel(this);
+        }
         if (generation.get() == instanceGeneration) {
             registered = false; starting = false; lastHealthy = 0;
             wakeLockActive = false;
             origin = null; token = null;
         }
         new Thread(() -> {
+            // 服务被回收但进程还活着：Python 内核与在途请求继续跑，
+            // 下次拉起时直接复用（1 秒级），不用再冷启动一遍。
+            if (keepRuntime) return;
             if (worker != null) try { worker.join(95000); } catch (InterruptedException ignored) { }
             synchronized (RUNTIME_LOCK) {
                 // A delayed cleanup must not stop a service the user just restarted.

@@ -84,6 +84,10 @@ def install() -> None:
             notes="MiniMax Code（agent.minimax.cn）：Anthropic 协议上游，"
                   "Bearer OAuth；积分制（签到 30 天有效）；"
                   "支持本机扫描 + 设备流扫码授权 + 导入",
+            rating={
+                "tier": "elite",
+                "reason": "只有自家模型，额度消耗不快，速度还行。",
+            },
             extra={
                 "task_runners": list(_task_runners().keys()),
                 "actions": ["scan", "import", "export",

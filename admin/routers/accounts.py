@@ -27,6 +27,12 @@ from admin.security import require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
+#: 导入任务多久算僵死（秒）。超过这个时长 + 进度长时间不动 → 接管重跑。
+#: 取 20 分钟：正常几百个号带验证也就几分钟，20 分钟还不推进基本是卡死了。
+_STALE_JOB_SECONDS = 20 * 60
+#: 进度空闲多久算卡住（秒）。
+_STALE_JOB_IDLE_SECONDS = 5 * 60
+
 # 模块内多处（含 _post_login_automation 的兜底日志）用 _logger；不定义的话
 # 那些 except 分支会再抛一个 NameError，把原始异常盖掉。
 _logger = logging.getLogger("admin.accounts")
@@ -633,7 +639,30 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
 
     running = jobrunner.RUNNER.get(key)
     if running and running.status == "running":
-        return {"reused": True, **running.snapshot()}
+        # ## 卡死自愈（2026-11-10）
+        #
+        # 原来只要这个平台有一条 job 处于 running，新的导入请求就直接
+        # `reused: True` 把旧 job 的快照返回 —— 用户看到的是「点了没反应」。
+        # 一旦那条 job 因上游超时/网络卡住没退出，这个平台的导入就**永久
+        # 被锁死**（实测：WorkBuddy 导十几个号卡一次之后，后面每次导入
+        # 都立刻返回同一个旧进度）。
+        #
+        # 判定僵死：跑了超过 `_STALE_JOB_SECONDS` 且最近
+        # `_STALE_JOB_IDLE_SECONDS` 内进度完全没推进。
+        age = (datetime.utcnow()
+               - (running.started_at or datetime.utcnow())).total_seconds()
+        last = getattr(running, "updated_at", None) or running.started_at
+        idle = (datetime.utcnow() - last).total_seconds() if last else age
+        if age > _STALE_JOB_SECONDS and idle > _STALE_JOB_IDLE_SECONDS:
+            _logger.warning("导入任务僵死，接管重跑 key=%s age=%.0fs idle=%.0fs",
+                           key, age, idle)
+            try:
+                running.status = "failed"
+                running.error = "stale_takeover"
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            return {"reused": True, **running.snapshot()}
 
     def worker(job: jobrunner.Job) -> dict:
         db = SessionLocal()
@@ -676,7 +705,13 @@ def import_accounts_async(body: ImportAsyncIn, request: Request = None,
                     return {"ok": False, "added": 0, "updated": 0, "failed": 0,
                             "total": 0,
                             "errors": ["没有解析出任何账号记录（应为 JSONL 或 JSON 数组）"]}
-                chunk_size = 200
+                # 分块大小：小批次用小块，保证「导一个算一个」的语义。
+                #
+                # 固定 200 时，十几个号的备份等于**一整块**：平台 `import_batch`
+                # 内部统一提交，中途一卡死整批丢失。≤50 条时降成 5 条一块，
+                # 丢的窗口最多 5 个；大批次仍用 200（块太小会把逐块探活的开销
+                # 放大成主要耗时）。
+                chunk_size = 5 if len(records) <= 50 else 200
                 agg = {"ok": True, "added": 0, "updated": 0, "failed": 0,
                        "total": 0, "errors": []}
                 # 平台若支持细粒度进度（例如 Loomy 的并发探活），把 job 的
@@ -1438,6 +1473,253 @@ def reauthenticate_account(acc_id: int, body: AccountIn,
     return {"ok": True, "id": acc.id, "message": "凭证已更新，原账号 ID、排序、Key 绑定及历史记录已保留"}
 
 
+class AccountBulkIn(BaseModel):
+    """批量动作入参。"""
+    action: str = ""
+    ids: list[int] = []
+
+
+@router.post("/{acc_id}/task")
+def run_account_task(acc_id: int, body: dict,
+                     _: bool = Depends(require_admin),
+                     db: Session = Depends(get_db)):
+    """给**单个账号**跑一个平台任务：签到 / 新手任务 / 活跃对话。
+
+    用户的原话：「没有单个账号的操作，签到、任务之类的，其它平台也是一样的」。
+    这些任务原来只有「全池」入口（平台卡的按钮或定时任务），想给某一个号
+    补一次签到就得跑整池，既慢又制造机器特征。
+
+    这里按 `账号归属平台` 分派到各平台的服务层；平台没实现该任务时回
+    `supported: false` + 原因，而不是 500 —— 前端据此不显示那个按钮。
+    """
+    action = str((body or {}).get("task") or (body or {}).get("action") or "").strip().lower()
+    if not action:
+        raise HTTPException(400, "缺少 task")
+    account = db.query(Account).filter(Account.id == acc_id).first()
+    if account is None:
+        raise HTTPException(404, "账号不存在")
+    storage = str(account.platform or "").lower()
+
+    try:
+        if action == "checkin":
+            if storage == "loomy":
+                from admin.platform.loomy.services import checkin as svc
+
+                item = svc.checkin_one(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or ""}
+            if storage == "wps-lingxi":
+                from admin.platform.wps_lingxi.services import checkin as svc
+
+                item = svc.checkin_account(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or ""}
+            if storage == "qoder":
+                from admin.platform.qoder.services import checkin as svc
+
+                # Qoder 的签到是「活动领取」，按账号跑一遍即可
+                result = svc.run_daily_checkin(db, None, account.domain or "cn")
+                row = next((r for r in (result.get("items") or [])
+                            if int(r.get("account_id") or 0) == acc_id), {})
+                return {"ok": bool(row.get("ok", result.get("ok"))), "task": action,
+                        "account_id": acc_id, "item": row,
+                        "summary": row.get("reason") or result.get("summary") or ""}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "%s 平台没有单账号签到入口" % (storage or "该")}
+
+        if action == "onboarding":
+            if storage == "loomy":
+                from admin.platform.loomy.services import onboarding as svc
+
+                result = svc.run_all(db, account.domain or "cn", limit=0)
+                row = next((r for r in (result.get("items") or [])
+                            if int(r.get("account_id") or 0) == acc_id), {})
+                return {"ok": bool(row.get("ok", True)), "task": action,
+                        "account_id": acc_id, "item": row,
+                        "gained": int(row.get("gained") or 0),
+                        "summary": ("+%d 积分" % int(row.get("gained") or 0))
+                                   if row.get("gained") else (row.get("reason") or "已全部完成")}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "只有 Loomy 有新手任务（一次性积分）"}
+
+        if action == "activity":
+            if storage == "wps-lingxi":
+                from admin.platform.wps_lingxi.services import activity as svc
+
+                item = svc.activate_account(db, account)
+                return {"ok": bool(item.get("ok")), "task": action,
+                        "account_id": acc_id, "item": item,
+                        "summary": item.get("reason") or item.get("answer") or ""}
+            return {"ok": False, "supported": False, "task": action,
+                    "reason": "%s 平台没有「活跃对话」任务" % (storage or "该")}
+    except Exception as exc:  # noqa: BLE001 - 单号任务失败如实回，不 500
+        logger.exception("单账号任务失败 acc=%s task=%s", acc_id, action)
+        raise HTTPException(400, "%s 失败：%s" % (action, str(exc)[:160])) from exc
+
+    raise HTTPException(400, "不支持的任务：%s" % action)
+
+
+@router.post("/bulk")
+def bulk_mutate(body: AccountBulkIn, _: bool = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    """对**勾选的一批账号**执行同一个动作（全平台生效）。
+
+    ## 为什么需要它
+
+    账号池支持「勾选」，但勾上之后**没有任何批量入口**：想停用 20 个号只能
+    一个个点。用户反馈「勾选了表格之后对应批量操作的按钮出现，比如批量删除、
+    禁用、导入等，全平台生效」。
+
+    ## 语义
+
+    `action` 取值：
+      `enable`   启用（status=active），清掉冷却/熔断残留
+      `disable`  停用（status=disabled），保留账号与绑定
+      `delete`   物理删除（不可恢复）
+      `refresh`  逐个刷新额度 + token（串行，上游限速友好）
+      `check`    逐个探活（只标记状态，不改凭证）
+
+    **不按当前平台过滤**：勾选本身就是明确意图；跨平台勾选是允许的
+    （例如「把所有 0 积分的号停掉」）。每个 id 单独处理，坏一个不影响其余，
+    结果里给出 `affected / skipped / errors`，前端据此提示。
+    """
+    action = str(body.action or "").strip().lower()
+    ids = [int(i) for i in (body.ids or []) if str(i).strip().lstrip("-").isdigit()]
+    ids = sorted(set(i for i in ids if i > 0))
+    if not ids:
+        raise HTTPException(400, "没有选中任何账号")
+    if len(ids) > 2000:
+        raise HTTPException(400, "单次最多操作 2000 个账号")
+    if action not in ("enable", "disable", "delete", "refresh", "check"):
+        raise HTTPException(400, "不支持的批量动作：%s" % action)
+
+    rows = db.query(Account).filter(Account.id.in_(ids)).all()
+    found = {row.id: row for row in rows}
+    missing = [i for i in ids if i not in found]
+    affected, skipped, errors = 0, [], []
+
+    if action in ("enable", "disable"):
+        target = "active" if action == "enable" else "disabled"
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            account.status = target
+            if target == "active":
+                # 启用时清掉冷却类残留：否则"启用了但还是不接请求"，
+                # 用户会以为批量启用没生效。
+                account.cool_until = None
+                account.cool_kind = ""
+                account.breaker_until = None
+                account.degrade_until = None
+            affected += 1
+        db.commit()
+
+    elif action == "delete":
+        # 绑定了 Key 的号删掉会让 Key 失去专属账号 —— 如实报告，不静默改绑定。
+        bound = {}
+        try:
+            from admin.models import ApiKey
+
+            for key in db.query(ApiKey).filter(ApiKey.account_id.in_(ids)).all():
+                bound.setdefault(int(key.account_id or 0), []).append(key.name or ("#%s" % key.id))
+        except Exception:  # noqa: BLE001 - 读不到绑定不影响删除
+            bound = {}
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            try:
+                db.delete(account)
+                affected += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append("#%s 删除失败：%s" % (acc_id, str(exc)[:80]))
+        db.commit()
+        for acc_id, names in bound.items():
+            skipped.append("#%s 删除前被 Key 独占绑定：%s" % (acc_id, "、".join(names[:3])))
+
+    else:  # refresh / check
+        from admin.platform import registry
+
+        for acc_id in ids:
+            account = found.get(acc_id)
+            if account is None:
+                continue
+            platform = str(account.platform or "").lower()
+            spec = registry.get(platform) or None
+            storage = str(getattr(spec, "storage", lambda: platform)() if spec else platform)
+            try:
+                if action == "refresh":
+                    _refresh_one(storage, account, db)
+                else:
+                    _check_one(storage, account, db)
+                affected += 1
+            except Exception as exc:  # noqa: BLE001 - 单个号失败不影响批量
+                errors.append("#%s：%s" % (acc_id, str(exc)[:90]))
+        db.commit()
+
+    if missing:
+        skipped.append("有 %d 个账号已不存在（可能已被删除）" % len(missing))
+    return {"ok": True, "action": action, "requested": len(ids),
+            "affected": affected, "skipped": skipped[:20], "errors": errors[:20],
+            "note": "" if affected else "没有任何账号被修改"}
+
+
+def _refresh_one(storage: str, account: Account, db: Session) -> None:
+    """批量「刷新额度」：优先调平台自己的服务层（口径与单号刷新一致）。"""
+    if storage == "trae":
+        from admin.platform.trae.services import accounts as svc
+
+        svc.refresh(db, account)
+        return
+    if storage == "loomy":
+        from admin.platform.loomy.services import accounts as svc
+
+        svc.sync_quota(db, account, with_models=False)
+        return
+    if storage == "qoder":
+        from admin.platform.qoder.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "wps-lingxi":
+        from admin.platform.wps_lingxi.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "codearts":
+        from admin.platform.codearts.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "raccoon":
+        from admin.platform.raccoon.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    if storage == "minimax":
+        from admin.platform.minimax.services import accounts as svc
+
+        svc.sync_quota(db, account)
+        return
+    # 默认平台（WorkBuddy）：走通用余额刷新
+    _refresh_balance(account)
+
+
+def _check_one(storage: str, account: Account, db: Session) -> None:
+    """批量「检测」：只探活并标记状态，不改凭证。"""
+    try:
+        from admin import account_health
+
+        account_health.probe_account(db, account)
+        return
+    except Exception:  # noqa: BLE001 - 没有通用探针就回落
+        pass
+    _refresh_one(storage, account, db)
+
+
 @router.post("/batch")
 def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     """批量上传：逐条做**结构校验 + 真实上游验证**，不合格的记进 errors 并跳过。
@@ -1542,10 +1824,22 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
     #: 落库后需要补刷余额的账号 id（并发刷，见下方第 3) 段）
     needs_refresh: list[int] = []
 
-    def _flush(every: int = 200) -> None:
+    #: 每条记录落库后立即提交（「导一个算一个」）。
+    #:
+    #: 用户的原话：「导入不用堵塞，确保是异步操作，就是导一个算一个而不是等
+    #: 全部导入成功才算导，一个一个导进来，哪怕卡死也只是导入进卡死前的账号」。
+    #:
+    #: 原来固定 200 条提交一次 —— 十几个号的批次等于**整批只在最后提交一次**，
+    #: 中途一卡死，前面成功的也全丢了，用户看到「导入报错、号一个没进来」。
+    #:
+    #: 大批次（>500）退化成每 20 条一次：几千条逐条 commit 的 fsync 太贵，
+    #: 而每 20 条的丢失窗口已经足够小。
+    commit_every = 1 if total <= 500 else 20
+
+    def _flush(every: int | None = None) -> None:
         nonlocal pending
         pending += 1
-        if pending >= every:
+        if pending >= (every or commit_every):
             db.commit()
             pending = 0
 

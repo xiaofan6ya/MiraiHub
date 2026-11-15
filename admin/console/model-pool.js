@@ -53,20 +53,56 @@ function _modelPoolBar(entry, quota) {
 function renderModelPoolDetail(data) {
   const s = data.summary || {}, quota = s.est_per_account_quota;
   const fmtQuota = v => v == null ? "未知" : fmtNum(v);
+  // 说明改用小胶囊（`statCard` 的 `chips`）：
+  // 原来四张卡的说明都是「共 162 个 · 日耗尽 0 · 限流 0 · 冷却 1 · 停用 34」
+  // 这种长句，11px 全挤在一起，哪一项异常根本看不出来。
   $("#modelPoolStats").innerHTML = [
-    statCard("可用账号", `${s.usable_accounts ?? 0}`, { icon:"fa-users", iconColor:"text-emerald-600",
-      sub: `共 ${s.total_accounts ?? 0} 个 · 日耗尽 ${s.exhausted_accounts ?? 0} · 限流 ${s.model_limited_accounts ?? 0} · 冷却 ${s.cooling_accounts ?? 0} · 停用 ${s.inactive_accounts ?? 0}` }),
-    statCard("今日已用 Token", fmtNum(s.tokens_today ?? 0), { icon:"fa-fire", iconColor:"text-orange-500",
-      sub: `成功请求 ${fmtNum(s.requests_today ?? 0)} 次 · 北京时间 00:00 起${s.today_elapsed_hours != null ? `（已 ${Number(s.today_elapsed_hours).toFixed(1)} 小时）` : ""}` }),
+    statCard("可用账号", `${s.usable_accounts ?? 0}`, {
+      icon: "fa-users", iconColor: "text-emerald-600",
+      chips: [
+        { label: "总数", value: s.total_accounts ?? 0 },
+        { label: "日耗尽", value: s.exhausted_accounts ?? 0, tone: "bad",
+          title: "当日 Token / 请求数达到上游上限的账号（6004 / 6008）" },
+        { label: "限流", value: s.model_limited_accounts ?? 0, tone: "warn",
+          title: "该模型上处于限速 / 排队 / 模型级冷却的账号" },
+        { label: "冷却", value: s.cooling_accounts ?? 0, tone: "warn" },
+        { label: "停用", value: s.inactive_accounts ?? 0 },
+      ] }),
+    statCard("今日已用 Token", fmtNum(s.tokens_today ?? 0), {
+      icon: "fa-fire", iconColor: "text-orange-500",
+      chips: [
+        { label: "请求", value: s.requests_today ?? 0 },
+        { label: "起算", value: "北京 00:00", tone: "flat" },
+        ...(s.today_elapsed_hours != null
+          ? [{ label: "已过", value: `${Number(s.today_elapsed_hours).toFixed(1)}h`, tone: "flat" }]
+          : []),
+      ] }),
     statCard("近 24 小时（滚动）", fmtNum(s.rolling_24h ? s.rolling_24h.tokens : 0),
-      { icon:"fa-clock-rotate-left", iconColor:"text-indigo-500",
-        sub: `成功请求 ${fmtNum(s.rolling_24h ? s.rolling_24h.requests : 0)} 次 · 与「使用记录→近 1 天」同口径` }),
-    statCard("单账号额度（估·滚动 24h）", fmtQuota(quota), { icon:"fa-gauge-high", iconColor:"text-sky-500",
-      sub: quota == null ? "还没有账号打满，无法推断" : `按 ${s.quota_samples} 个已打满账号·打满时刻回看 24h 的实测均值` }),
+      { icon: "fa-clock-rotate-left", iconColor: "text-indigo-500",
+        chips: [
+          { label: "请求", value: (s.rolling_24h ? s.rolling_24h.requests : 0) },
+          { label: "口径", value: "同「近 1 天」", tone: "flat",
+            title: "与「使用记录 → 近 1 天」完全同口径，可直接对账" },
+        ] }),
+    statCard("单账号额度（估）", fmtQuota(quota), {
+      icon: "fa-gauge-high", iconColor: "text-sky-500",
+      chips: [
+        { label: "口径", value: "滚动 24h", tone: "flat" },
+        ...(quota == null
+          ? [{ label: "样本", value: "0 个打满", tone: "flat" }]
+          : [{ label: "样本", value: `${s.quota_samples ?? 0} 个打满` }]),
+      ],
+      sub: quota == null ? "还没有账号打满，暂时无法推断" : "" }),
     statCard("剩余总额度（估）", s.est_total_remaining == null ? "未知" : fmtNum(s.est_total_remaining),
-      { icon:"fa-battery-half", iconColor:"text-emerald-600", tone:"brand",
-        sub: s.est_pool_capacity == null ? "选出模型后按可用账号估算"
-            : `可用 ${s.usable_accounts} 个 × 估算额度 ${fmtNum(quota)} = ${fmtNum(s.est_pool_capacity)}（剩余 = 额度 − 近 24h 已用）` })
+      { icon: "fa-battery-half", iconColor: "text-emerald-600", tone: "brand",
+        chips: s.est_pool_capacity == null
+          ? [{ label: "估算", value: "待模型选定", tone: "flat" }]
+          : [
+              { label: "可用账号", value: s.usable_accounts },
+              { label: "单号额度", value: fmtNum(quota) },
+              { label: "池容量", value: fmtNum(s.est_pool_capacity) },
+            ],
+        sub: s.est_pool_capacity == null ? "" : "剩余 = 池容量 − 近 24h 已用" })
   ].join("");
   const rows = (data.accounts || []).slice().sort((a, b) =>
     (b.usable - a.usable) || (b.daily_exhausted - a.daily_exhausted) ||

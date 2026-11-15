@@ -50,6 +50,10 @@ def install() -> list[PlatformSpec]:
                       "支持 Chat Completions / Responses / Anthropic Messages 互转。",
                 storage_platform=PLATFORM_ID,
                 realm="cn",
+            rating={
+                    "tier": "npc",
+                    "reason": "可能需要排队，额度给得不多，速度较慢。",
+                },
                 extra={"kind": "proxied", "realm_key": "cn",
                    # begin-auth：Trae 没有设备授权端点，这里的「授权登录」
                    # 打开官方登录页，登录后回到本机点扫描导入 IDE 登录态。
@@ -71,6 +75,12 @@ def install() -> list[PlatformSpec]:
                       "额度按请求次数限额。",
                 storage_platform=PLATFORM_ID,
                 realm="intl",
+                # 两区共用一份自评（账号池也是同一个 storage），
+                # 各自写下同一份，避免只给国内版加徽标、国际版空着。
+                rating={
+                    "tier": "npc",
+                    "reason": "可能需要排队，额度给得不多，速度较慢。",
+                },
                 extra={"kind": "proxied", "realm_key": "intl",
                    "actions": ["begin-auth", "scan", "import",
                                "refresh-quota", "usage", "web-cookie"]},

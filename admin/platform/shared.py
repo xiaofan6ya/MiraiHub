@@ -792,6 +792,19 @@ def release(account: Account | None) -> None:
         pass
 
 
+def exclude_identity(db: Session, exclude_ids: set[int], account: Account | None) -> None:
+    """排除当前上游身份的全部重复数据库记录，避免换号仍命中同一 UID。"""
+    if account is None:
+        return
+    if account.id:
+        exclude_ids.add(int(account.id))
+    uid = str(getattr(account, "uid", "") or "")
+    if not uid:
+        return
+    rows = db.query(Account.id).filter(Account.uid == uid).all()
+    exclude_ids.update(int(row[0]) for row in rows if row[0])
+
+
 def note_success(account: Account | None) -> None:
     if account is None:
         return
@@ -806,7 +819,8 @@ def note_success(account: Account | None) -> None:
 def note_failure(db: Session, account: Account | None, *, kind: str,
                  detail: str = "", status: int = 0, model: str = "",
                  public_platform: str = "", cool_seconds: int = 0,
-                 zero_balance: bool = False) -> None:
+                 zero_balance: bool = False, code: str = "",
+                 signal: str = "", severity: str = "") -> None:
     """把失败写回账号，并按需要进哨兵。**不抛异常**。
 
     ## `zero_balance`：额度类失败要**落一个 0 到余额列**
@@ -875,9 +889,15 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
         from admin import sentinel
 
         if public_platform:
+            # **不要把 HTTP 状态码当业务码传**（以前传的就是 `status`）：
+            # 403 在 WorkBuddy 是「出口被拦」，在别的平台可能只是额度不足，
+            # 混用会让哨兵给出错误的信号名与严重程度。
+            # 平台自己知道真实码就传 `code`；不知道就留空，
+            # 让哨兵按 `kind` 归类（限速/排队/额度/登录失效都有对应 severity）。
             sentinel.note_failure(public_platform, int(account.id or 0), kind,
-                                  code=str(status or ""), status=int(status or 0),
-                                  detail=(detail or "")[:200], model=model or "")
+                                  code=str(code or ""), status=int(status or 0),
+                                  detail=(detail or "")[:200], model=model or "",
+                                  signal=signal or "", severity=severity or "")
     except Exception:  # noqa: BLE001
         logger.debug("哨兵上报失败 kind=%s", kind, exc_info=True)
 
@@ -1253,14 +1273,42 @@ def apply_account_filters(q, model, *, search: str = "", status: str = "",
 
 
 def account_order(q, model, sort: str = "id_desc"):
-    """排序白名单（防注入：直接映射列，不拼字符串）。"""
+    """排序白名单（防注入：直接映射列，不拼字符串）。
+
+    ## 为什么要这么多组合（2026-11-09）
+
+    控制台账号池改成「点表头排序」后，前端只能传 `列_方向` 这一种形状。
+    以前只有 5 个键（`id_asc` / `credits_desc` / `name_asc` / `synced_desc` …），
+    点「名称」升序能排、再点一次想降序就落到白名单外，被**静默忽略**变回
+    `id_desc` —— 用户看到的是「点了没反应/顺序乱跳」。
+
+    所以这里按 `列_asc` / `列_desc` 成对补齐。名称用库里的 `name`，
+    「状态」用 `status`（active < disabled 的字典序，配合方向够用）。
+    """
     order = {
+        # 默认 / 入库顺序
         "id_asc": model.id.asc(),
+        "id_desc": model.id.desc(),
+        # 名称
+        "name_asc": model.name.asc(),
+        "name_desc": model.name.desc(),
+        # 状态（启用/停用）
+        "status_asc": model.status.asc(),
+        "status_desc": model.status.desc(),
+        # 积分（剩余）：`credits` 与 `balance` 都是历史叫法，两个都认
         "credits_desc": model.balance_remain.desc(),
         "credits_asc": model.balance_remain.asc(),
-        "name_asc": model.name.asc(),
+        "balance_desc": model.balance_remain.desc(),
+        "balance_asc": model.balance_remain.asc(),
+        # 入库时间
+        "created_desc": model.created_at.desc(),
+        "created_asc": model.created_at.asc(),
+        # 最近同步 / 最近使用
         "synced_desc": model.last_sync_at.desc(),
-    }.get(sort)
+        "synced_asc": model.last_sync_at.asc(),
+        "used_desc": model.last_used_at.desc(),
+        "used_asc": model.last_used_at.asc(),
+    }.get(str(sort or "").strip().lower())
     return q.order_by(order) if order is not None else q.order_by(model.id.desc())
 
 

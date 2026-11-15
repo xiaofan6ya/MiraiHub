@@ -985,18 +985,31 @@ def _cached_tokens(usage: dict) -> int:
 
 
 def _anthropic_usage(usage: dict) -> dict:
-    """OpenAI usage → Anthropic usage。
+    """OpenAI usage → Anthropic usage（**缓存字段必须一直在**）。
 
-    Anthropic 把缓存命中放在 `cache_read_input_tokens`，不是
-    `prompt_tokens_details`。上游给 0 就写 0，不假装命中。
+    Anthropic 把缓存命中放在 `cache_read_input_tokens`、把写入放在
+    `cache_creation_input_tokens`，**不是** `prompt_tokens_details`。
+
+    ## 为什么 0 也要写出来（2026-11-09）
+
+    原实现是「上游给 0 就不写这个键」，看起来更干净，但客户端（Claude Code /
+    Claude Desktop）读的是**字段是否存在**：缺键 = 不支持缓存，于是它把
+    `cache_read_input_tokens` 显示成「不支持」而不是 0，并据此判断
+    「这个网关没有 prompt caching」—— 用户看到的就是「缓存命中丢了」。
+
+    Anthropic 官方响应里这两个键**恒存在**（未命中时是 0），所以这里照抄。
     """
     prompt = int(usage.get("prompt_tokens") or 0)
     completion = int(usage.get("completion_tokens") or 0)
     cached = _cached_tokens(usage)
-    out = {"input_tokens": prompt, "output_tokens": completion}
-    if cached:
-        out["cache_read_input_tokens"] = cached
-    return out
+    # 写入量：上游（OpenAI 形态）通常不回报，如实给 0，不编造
+    created = int(usage.get("cache_creation_input_tokens") or 0)
+    return {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": created,
+    }
 
 
 def openai_to_anthropic(result: dict, model: str) -> dict:

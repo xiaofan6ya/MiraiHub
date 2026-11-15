@@ -103,6 +103,31 @@ function actionsFor(spec) {
     return (value === undefined || value === null) ? null : value;
   }
 
+  /* 「平均级」徽标（卡片右侧，勾选标记之前）。
+   *
+   * 数据优先取平台**自报**的 `spec.rating`（由 /api/platforms 下发），
+   * 没声明时才回落到 platform-tiers.js 的兜底表。
+   *
+   * 说明走**系统 tooltip 组件**（`data-tooltip` + `data-tooltip-description`）：
+   * 它已经有统一的 200ms 延迟、跟随视口的定位和键盘 focus 支持，
+   * 用原生 `title` 会出现两个提示同时弹（卡片的 data-tooltip 也在），
+   * 而且样式与本项目其它提示完全不一致。
+   * 卡片按钮上的 `data-tooltip` 是"接入说明"，内层徽标的会先被
+   * `closest('[data-tooltip]')` 命中 —— 悬停徽标看等级、悬停别处看接入。 */
+  function tierBadge(item) {
+    var api = window.WBPlatformTiers;
+    if (!api || !api.tierOf) return "";
+    var storage = String(item.storage_platform || item.id || "").toLowerCase();
+    var tier = api.tierOf(storage, item);
+    if (!tier) return "";
+    return '<span class="platform-tier platform-tier-' + esc(tier.key) + '"' +
+      ' data-tooltip="平均级：' + esc(tier.label) + '"' +
+      ' data-tooltip-description="' + esc(tier.reason || "") + '"' +
+      ' aria-label="平均级 ' + esc(tier.label) +
+      (tier.reason ? "：" + esc(tier.reason) : "") + '">' +
+      esc(tier.label) + "</span>";
+  }
+
   function render() {
     var host = $("#platformCards");
     if (!host) return;
@@ -127,6 +152,7 @@ function actionsFor(spec) {
         '<span class="platform-card-sub">' + esc(sub) +
         (realmLabels ? " · " + esc(realmLabels) : "") +
         "</span></span>" +
+        tierBadge(item) +
         '<span class="platform-card-check" aria-hidden="true">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' +
         '<path d="M20 6 9 17l-5-5"/></svg></span>' +

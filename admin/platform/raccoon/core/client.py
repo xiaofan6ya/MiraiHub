@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 
@@ -136,6 +137,45 @@ class UpstreamError(Exception):
                 "kind": self.kind, "code": self.code}
 
 
+#: 上游文案里的 `retry after`（`retry after: 9s` / `retry-after: 500ms`）
+_RETRY_AFTER_RE = re.compile(
+    r"(?:retry[\s-]*after\s*:?\s*)(\d+(?:\.\d+)?)\s*(ms|s)?", re.IGNORECASE)
+
+#: rate 类冷却的夹逼区间：上游给的秒数可能离谱（0 或 9999），
+#: 夹到 [5, 600] —— 下界保证真的退避，上界与 auth/quota 的 600 同量级。
+_RATE_COOL_MIN_SECONDS = 5
+_RATE_COOL_MAX_SECONDS = 600
+
+#: quota 文案的共现判据：`insufficient` 必须与额度语义同现，避免把
+#: `context window is insufficient` 这类上下文长度报错判成「额度耗尽」。
+_QUOTA_CONTEXT_TOKENS = ("point", "credit", "balance", "quota", "token",
+                         "额度", "积分")
+
+#: rate 文案判据（`text` 已 lower，ASCII 项必须小写；中文不受 lower 影响）。
+#:
+#: 刻意**不收裸 `retry after`** —— 普通重试提示（如「请 retry after 稍后」）
+#: 不该被判成限流；只有与 limit/exceed 共现时才认。
+_RATE_TEXT_HINTS = ("限流", "过于频繁", "rate limit", "too many requests",
+                    "limiter_request_error", "exceed max time",
+                    "频率限制", "频率超出", "使用量已超出",
+                    "frequency limit", "usage exceeds", "重置")
+
+
+def retry_after_seconds(text) -> int | None:
+    """解析上游文案里的 `retry after` 秒数；解析不到返回 None。
+
+    只解析、**不夹逼**（夹逼在 `gateway._cool_seconds`），便于无依赖单测。
+    单位 `ms` 向下取整到秒；`s` 或缺省按秒。
+    """
+    match = _RETRY_AFTER_RE.search(str(text or ""))
+    if match is None:
+        return None
+    value = float(match.group(1))
+    if (match.group(2) or "").lower() == "ms":
+        return int(value // 1000)
+    return int(value)
+
+
 def _classify(code: int | None, status: int, message: str) -> str:
     """错误分类。
 
@@ -172,10 +212,12 @@ def _classify(code: int | None, status: int, message: str) -> str:
             or "authentication" in text and "fail" in text):
         return "auth"
     if ("额度" in message or "积分不足" in message or "quota" in text
-            or "insufficient" in text):
+            or ("insufficient" in text
+                and any(token in text for token in _QUOTA_CONTEXT_TOKENS))):
         return "quota"
-    if ("限流" in message or "过于频繁" in message or "rate limit" in text
-            or "too many requests" in text):
+    if (any(hint in text for hint in _RATE_TEXT_HINTS)
+            or ("retry after" in text
+                and ("limit" in text or "exceed" in text))):
         return "rate"
     if "model" in text and ("not found" in text or "不存在" in message):
         return "model"

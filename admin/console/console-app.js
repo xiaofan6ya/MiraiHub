@@ -58,6 +58,49 @@ document.addEventListener("DOMContentLoaded", () => {
  */
 const _uiSelectMap = new Map();  // id -> {options, value, onChange}
 
+/**
+ * 要用户填一段文本的弹窗（Promise 版）。
+ *
+ * `uiConfirm` 只有是/否，没有输入框；邀请码、兑换码这类「填一个值再提交」
+ * 的操作原来只能靠浏览器原生 `prompt()` —— 它会阻塞渲染线程、样式也跟
+ * 主题不一致。这里用同一套 modal 体系做一个，保持观感统一。
+ *
+ * 返回 Promise：确认 → 输入串（已 trim），取消 / 关掉 → null。
+ */
+function uiPrompt(opts) {
+  opts = opts || {};
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      delete window.__uiPromptOk;
+      delete window.__uiPromptCancel;
+      resolve(value === undefined ? null : value);
+      closeModal();
+    };
+    window.__uiPromptOk = () => finish(String($("#uiPromptInput")?.value || "").trim());
+    window.__uiPromptCancel = () => finish(null);
+    openModal(`<h3 class="font-semibold text-lg mb-1">${esc(opts.title || "请输入")}</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.75;white-space:pre-line">${esc(opts.message || "")}</p>
+      <input id="uiPromptInput" class="w-full border rounded-lg px-3 py-2 text-sm"
+             placeholder="${esc(opts.placeholder || "")}" autocomplete="off">
+      <div class="flex justify-end gap-2 mt-4">
+        <button class="console-btn quiet" onclick="window.__uiPromptCancel()">取消</button>
+        <button class="console-btn primary" onclick="window.__uiPromptOk()">${esc(opts.okText || "确定")}</button>
+      </div>`, "max-w-md");
+    setTimeout(() => {
+      const el = $("#uiPromptInput");
+      if (!el) return;
+      el.focus();
+      el.addEventListener("keydown", ev => {
+        if (ev.key === "Enter") { ev.preventDefault(); window.__uiPromptOk(); }
+        if (ev.key === "Escape") { ev.preventDefault(); window.__uiPromptCancel(); }
+      });
+    }, 40);
+  });
+}
+
 function uiSelectHTML(id, opts) {
   opts = opts || {};
   const options = opts.options || [];
@@ -764,6 +807,33 @@ async function clearInvitation() {
   $('#invitationInput').value = '';
   await saveInvitation();
 }
+/* HTTP 状态码 → 中文人话（前端本地表，纯函数、无副作用）。
+ *
+ * 为什么不复用后端那张表：后端 admin/data/upstream_error_messages.json（147 条）
+ * 只被 admin/upstream_errors.py 消费成 `client_message`，且只随「单账号刷新失败」
+ * 一条通道下发；没有任何接口、也没有静态目录把整张表交给前端
+ * （/admin/assets → admin/console、/static → admin/static，admin/data 不对外）。
+ * 而前端渲染裸「HTTP 502」的地方（toast / 表格空态 / 启动探针）手里只有一个数字。
+ *
+ * 所以这里内嵌**最小的**四条 + 回落，不做第二份 147 条映射表；
+ * 后端将来若开放接口，只需把这张表换成查表，调用点无需再动。
+ */
+const HTTP_STATUS_TEXT = {
+  500: "服务端内部错误，请稍后重试",
+  502: "服务网关异常，请稍后重试",
+  503: "服务暂时不可用，请稍后重试",
+  504: "网关等待上游超时，请稍后重试",
+};
+/** 状态码 → 人话；**始终保留状态码**（人话里带「（HTTP 502）」），
+ *  未知码 / 无码原样回落「HTTP N」——排障时状态码是唯一线索，不能吞。
+ *  顶层声明，同页其它面板脚本（key-ip / ip-management / agent）可直接调用。 */
+function statusText(status, fallback) {
+  const code = Number(status);
+  const text = HTTP_STATUS_TEXT[code];
+  if (text) return `${text}（HTTP ${code}）`;
+  return fallback || `HTTP ${status || "?"}`;
+}
+
 /** 把接口错误收敛成一句人话。
  *
  * 反代 / 隧道挂掉时会返回整页 HTML（Cloudflare 502、nginx 500…），
@@ -777,16 +847,16 @@ function apiErrText(data, status, fallback) {
   }
   raw = String(raw).trim();
   if (/^<!doctype|^<html|<\/html>|<head[\s>]|<body[\s>]/i.test(raw)) {
-    return `网关返回了非 JSON 页面（HTTP ${status || "?"}），请检查反向代理 / 隧道是否正常`;
+    return `网关返回了非 JSON 页面：${statusText(status)}。请检查反向代理 / 隧道是否正常`;
   }
-  return (raw || fallback || `HTTP ${status || "?"}`).slice(0, 160);
+  return (raw || fallback || statusText(status)).slice(0, 160);
 }
 
 async function safeJson(r) {
   /* 容错解析：后端偶发返回非 JSON（如 500 明文）时，避免报 "Unexpected token" 崩溃 */
   const t = await r.text();
   try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
-  catch (e) { return { ok: false, status: r.status, data: { detail: t || ("HTTP " + r.status), _parse_error: true } }; }
+  catch (e) { return { ok: false, status: r.status, data: { detail: t || statusText(r.status), _parse_error: true } }; }
 }
 /* ============================================================================
    按钮防呆：点下去立刻转圈 + 禁用，防重复提交
@@ -1191,7 +1261,7 @@ function enterApp() {
 
 // Tabs
 // 面板清单与默认面板：默认面板不写进 URL（保持地址栏干净）。
-const TABS = ["overview","sentinel","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
+const TABS = ["overview","sentinel","stats","platforms","accounts","credits","journal","growth","usage","logs","keys","ip","models","market","groups","agent","schedules","client","sync","alerts","gateway","settings","maintenance"];
 const TAB_DEFAULT = "overview";
 
 /** 从地址栏读当前应显示的面板；非法/缺失一律回落到默认面板。 */
@@ -1316,11 +1386,11 @@ function _tabLabel(name) {
 }
 
 const _SUB_TAB_LABELS = {
-  overview: '概览', sentinel: '风控哨兵',
+  overview: '概览', sentinel: '风控哨兵', stats: '数据看板',
   platforms: '平台管理', gateway: '平台网关',
   accounts: '账号池', credits: '积分到期', journal: '积分流水', growth: '成长计划',
   usage: '使用记录', logs: '用量日志', keys: 'API Keys', ip: 'IP 管理',
-  models: '模型配置', groups: '分组管理', schedules: '定时任务',
+  models: '模型配置', market: '模型广场', groups: '分组管理', schedules: '定时任务',
   client: '客户端参数', sync: '同步设置', alerts: '预警管理',
   agent: '智能体',
   settings: '设置', maintenance: '更新与备份',
@@ -1422,6 +1492,17 @@ function activateTab(name, opts) {
   // 概览：每次进入面板都强制重跑计数动效（force=true），
   // 让「切 tab / 点刷新」都能看到数字从 0 滚到目标值。
   if (name === "overview") loadOverview(true);
+  // 数据看板：脚本独立加载（dashboard.js），首屏可能还没到位，稍等一拍再拉；
+  // 已加载过就直接重画 —— 主题切换后 SVG 里的颜色要跟着换。
+  if (name === "stats") {
+    if (window.WBStatsDashboard) window.WBStatsDashboard.load(true);
+    else setTimeout(() => window.WBStatsDashboard?.load(true), 120);
+  }
+  // 模型广场：独立模块，同样按需加载；进入时重取（价格与可用性会变）。
+  if (name === "market") {
+    if (window.WBModelMarket) window.WBModelMarket.load(true);
+    else setTimeout(() => window.WBModelMarket?.load(true), 120);
+  }
   if (name === "sentinel") {
     if (typeof loadSentinel === "function") loadSentinel();
     setTimeout(() => {
@@ -1433,7 +1514,19 @@ function activateTab(name, opts) {
     loadPlatformBench();
   });
   if (name === "gateway") { loadGateway(); loadGatewaySpeed(); }
-  if (name === "accounts") ensurePlatforms().then(() => loadAccounts());
+  if (name === "accounts") {
+    // 平台动作区（授权登录 / 扫描本机 / 签到 …）也要在这时候渲染。
+    //
+    // 它原来**只**在 `wb-platform-change` 事件里重画：如果页面打开时记住的
+    // 是 Loomy/Qoder 这类非 WorkBuddy 平台，那个事件从来没触发过，于是
+    // 「添加与迁移账号」区只剩 WorkBuddy 的按钮被隐藏 —— 用户看到的就是
+    // 「平台的按钮没传进来」。这里在进入账号池时补一次。
+    ensurePlatforms().then(() => {
+      try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake]", e); }
+      try { renderAccPlatformSwitch(); } catch (e) { console.warn("[acc-switch]", e); }
+      return loadAccounts();
+    });
+  }
   if (name === "journal") window.WBReview?.loadJournal(1);
   if (name === "maintenance") window.WBReview?.loadUpdate();
   if (name === "groups") loadGroups();
@@ -1916,6 +2009,9 @@ function panelSkeletonShow(name, force) {
   // 骨架克隆只会复制出第二份外壳；且它的请求不走 api()，骨架只能靠
   // 1.8s 兜底才收 —— 网慢时用户看到的就是「两套创作台」。
   if (name === "agent") return;
+  // 数据看板同理：它自己画骨架并整块替换，克隆出来的第二套外壳只会闪一下。
+  if (name === "stats") return;
+  if (name === "market") return;
   const panel = document.getElementById("panel-" + name);
   if (!panel) return;
   const first = !_panelSeen.has(name);
@@ -2317,6 +2413,9 @@ document.addEventListener("click", event => {
    ========================================================================== */
 
 let _sentinelData = null;
+//: 信号名 -> 中文（后端 `status().signal_labels` 下发，这里缓存一份给
+//: 表格渲染用；后端没给时退化为展示原始 signal 名）。
+let SIGNAL_LABELS_CACHE = {};
 
 async function loadSentinel(force) {
   const summary = $("#sentinelSummary");
@@ -2326,6 +2425,7 @@ async function loadSentinel(force) {
     if (!r.ok) return;
     const data = await r.json();
     _sentinelData = data;
+    SIGNAL_LABELS_CACHE = data.signal_labels || SIGNAL_LABELS_CACHE;
     renderSentinel(data);
     // 侧栏角标：没打开面板也能看到「有账号正在被风控」
     const n = data.accounts_affected || 0;
@@ -2382,21 +2482,27 @@ function renderSentinel(data) {
     </div>`;
 
   // 账号表：谁处于什么阶段
+  //
+  // **必须带平台列**：以前只写 `#152`，同屏出现 5 个号时根本看不出
+  // 是哪个平台的（一个号池里 workbuddy / trae / loomy 的 id 会混排）。
   const accounts = data.accounts || [];
+  const sevChip = sentinelSeverityChip;
   $("#sentinelAccounts").innerHTML = `
     <div class="sentinel-card-head"><h3>受影响账号</h3>
-      <span>按最近一次信号排序</span></div>
+      <span>按最近一次信号排序 · ${accounts.length} 个账号有信号</span></div>
     ${accounts.length ? `<div class="sentinel-table-wrap"><table class="tbl">
-      <thead><tr><th>账号</th><th>最近信号</th><th>次数</th><th>首次</th><th>最近</th></tr></thead>
+      <thead><tr><th>平台</th><th>账号</th><th>最近信号</th><th>类型</th><th>次数</th><th>首次</th><th>最近</th></tr></thead>
       <tbody>${accounts.map(item => `<tr>
+        <td>${sentinelPlatformChip(item.platform)}</td>
         <td class="sentinel-acc">#${item.account_id}</td>
         <td><span class="sentinel-code">${esc(item.code || item.kind || "-")}</span>
           ${esc(item.label || "")}</td>
+        <td>${sevChip(item.severity, item.signal)}</td>
         <td class="tnum">${item.count}</td>
         <td class="sentinel-ts">${fmtTime(new Date((item.first_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
         <td class="sentinel-ts">${fmtTime(new Date((item.last_ts || 0) * 1000).toISOString().slice(0, 19))}</td>
       </tr>`).join("")}</tbody></table></div>`
-    : `<p class="sentinel-empty">最近没有账号被上游风控。</p>`}`;
+    : `<p class="sentinel-empty">最近没有账号被上游拦。</p>`}`;
 
   // 原始事件流：排障时能定位到具体某次请求
   const events = data.recent || [];
@@ -2404,16 +2510,59 @@ function renderSentinel(data) {
     <div class="sentinel-card-head"><h3>信号明细</h3>
       <span>最近 ${events.length} 条（Redis 保留 15 分钟，自动过期）</span></div>
     ${events.length ? `<div class="sentinel-table-wrap"><table class="tbl">
-      <thead><tr><th>时间</th><th>账号</th><th>类型</th><th>码</th><th>模型</th><th>细节</th></tr></thead>
+      <thead><tr><th>时间</th><th>平台</th><th>账号</th><th>类型</th><th>码</th><th>模型</th><th>细节</th></tr></thead>
       <tbody>${events.map(ev => `<tr>
         <td class="sentinel-ts">${fmtTime(new Date((ev.ts || 0) * 1000).toISOString().slice(0, 19))}</td>
+        <td>${sentinelPlatformChip(ev.platform)}</td>
         <td class="sentinel-acc">#${ev.account_id}</td>
-        <td>${esc(ev.kind || "")}</td>
-        <td><span class="sentinel-code">${esc(ev.code || "-")}</span></td>
+        <td>${sevChip(ev.severity, ev.signal)}</td>
+        <td><span class="sentinel-code ${ev.unmapped ? "is-unmapped" : ""}"
+              ${ev.unmapped ? `data-tooltip="未收录的码" data-tooltip-description="该平台的这个码还没进 sentinel.PLATFORM_SIGNALS，显示为未归类；补一行映射即可。"` : ""}>${esc(ev.code || "-")}</span></td>
         <td class="sentinel-model">${esc(ev.model || "-")}</td>
         <td class="sentinel-detail" data-tooltip="${esc(ev.detail ||"")}">${esc((ev.detail || "").slice(0, 90))}</td>
       </tr>`).join("")}</tbody></table></div>`
     : `<p class="sentinel-empty">暂无明细。</p>`}`;
+}
+
+/**
+ * 平台小标签（复用 `usage-platform-chip` 的形制）。
+ *
+ * 平台名来自事件的 `platform`（落库名），用 `_logPlatformLabels` 换成展示名；
+ * 拿不到就原样显示 —— 宁可显示 `minimax` 也不能显示空白。
+ */
+function sentinelPlatformChip(platform) {
+  const key = String(platform || "").toLowerCase();
+  if (!key) return `<span class="sentinel-plat is-empty">未知平台</span>`;
+  const label = (_logPlatformLabels && _logPlatformLabels[key]) || key;
+  return `<span class="sentinel-plat" data-tooltip="${esc(label)}"
+    data-tooltip-description="该信号来自 ${esc(key)} 平台的上游返回。">${esc(label)}</span>`;
+}
+
+/**
+ * 信号类型小标签。
+ *
+ * 四档语义（见 `admin/sentinel.py`）：
+ *   risk      真封控 —— 计入熔断
+ *   throttle  限速 / 限流 / 排队 / 额度耗尽 —— 只记录
+ *   auth      登录失效 / 退出登录 —— 只记录，需要重新登录
+ *   info      其它留痕
+ */
+const SENTINEL_SEVERITY_META = {
+  risk:     { label: "风控", cls: "is-risk",     hint: "上游在拦（WAF / 渠道 / 账号级风控 / 签名）。会计入批次熔断判定。" },
+  throttle: { label: "限流", cls: "is-throttle", hint: "限速 / 限流 / 排队 / 额度耗尽。属于运营态，只记录、不熔断。" },
+  auth:     { label: "登录", cls: "is-auth",     hint: "登录态失效 / 退出登录。不算风控，需要重新登录；只记录。" },
+  info:     { label: "记录", cls: "is-info",     hint: "留痕用，没有止损动作。" },
+};
+function sentinelSeverityChip(severity, signal) {
+  const key = String(severity || "info");
+  const meta = SENTINEL_SEVERITY_META[key] || SENTINEL_SEVERITY_META.info;
+  const name = (SIGNAL_LABELS_CACHE[String(signal || "")])
+    || (_sentinelData && _sentinelData.signal_labels
+        && _sentinelData.signal_labels[String(signal || "")])
+    || String(signal || "");
+  return `<span class="sentinel-sev ${meta.cls}" data-tooltip="${esc(meta.label)}${
+    name ? " · " + esc(name) : ""}" data-tooltip-description="${esc(meta.hint)}">${
+    esc(meta.label)}${name ? `<em>${esc(name)}</em>` : ""}</span>`;
 }
 
 async function sentinelPause(platform) {
@@ -2466,7 +2615,7 @@ async function loadGateway() {
     ]);
     if (!cfgResp.ok) {
       const host = $("#gwStrategies");
-      if (host) host.innerHTML = `<p class="ov-note">配置加载失败（HTTP ${cfgResp.status}）</p>`;
+      if (host) host.innerHTML = `<p class="ov-note">配置加载失败：${statusText(cfgResp.status)}</p>`;
       return;
     }
     _gwConfig = await cfgResp.json();
@@ -2718,7 +2867,7 @@ async function loadJoinGate() {
   try {
     const r = await api("/api/join/gate/status");
     const { ok, data } = await safeJson(r);
-    if (!ok) throw new Error((data && data.detail) || ("HTTP " + r.status));
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
     _joinGate = data;
     const open = !!data.open;
     $("#joinGateDot").classList.toggle("on", open);
@@ -2816,7 +2965,7 @@ async function loadPlatformOverview() {
   try {
     const r = await api("/api/platforms/" + encodeURIComponent(platformId) + "/overview");
     if (!r.ok) {
-      host.innerHTML = `<p class="ov-note">该平台概览加载失败（HTTP ${r.status}）</p>`;
+      host.innerHTML = `<p class="ov-note">该平台概览加载失败：${statusText(r.status)}</p>`;
       return;
     }
     const data = await r.json();
@@ -2898,7 +3047,11 @@ document.addEventListener("wb-platform-change", () => {
   // 用户会以为有缓存（数据其实一直是各自平台的新数据，只是没重取）。
   if (active === "overview") loadOverview(true);
   if (active === "platforms") { loadPlatformOverview(); loadPlatformBench(); loadJoinGate(); }
-  if (active === "accounts") loadAccounts();
+  if (active === "accounts") {
+    // 切平台后同时重画「添加与迁移账号」的动作区（与首次进入同一套逻辑）
+    try { renderIntakePlatformLogin(); } catch (e) { console.warn("[intake]", e); }
+    loadAccounts();
+  }
   if (active === "usage") loadUsageStats();
   if (active === "logs") openLogsPanel();
   if (active === "credits") loadCreditStats();
@@ -2928,7 +3081,9 @@ document.addEventListener("wb-platform-change", () => {
  */
 function _sideTabLabel(name) {
   const el = document.querySelector(`.side-item[data-tab="${name}"]`);
-  if (!el) return name;
+  // 组内非首项（风控哨兵 / 数据看板 …）没有独立侧栏项，退回子标签名，
+  // 否则手机顶栏会把 tab 的英文 id 直接显示出来。
+  if (!el) return _SUB_TAB_LABELS[name] || name;
   for (const node of el.childNodes) {
     if (node.nodeType === Node.TEXT_NODE) {
       const t = (node.textContent || "").trim();
@@ -3111,13 +3266,45 @@ function statCard(label, value, opts) {
   opts = opts || {};
   const cls = opts.tone ? ` is-${opts.tone}` : "";
   const icon = opts.icon ? ic(opts.icon, opts.iconColor || "") : "";
+  // `chips`：把"一堆用 · 串起来的数字"改成小胶囊 ——
+  // 模型使用统计的四张卡原来靠 `共 162 个 · 日耗尽 0 · 限流 0 · 冷却 1 · 停用 34`
+  // 这种长句说明，11px 挤成一团，扫读成本很高。胶囊化之后每个数字都能被
+  // 单独看见，也为将来"点胶囊下钻"留好了结构。
+  const chips = Array.isArray(opts.chips) && opts.chips.length
+    ? `<div class="stat-chips">${opts.chips.map(chip => {
+        const tone = chip.tone ? ` is-${chip.tone}` : "";
+        const zero = Number(chip.value) === 0 ? " is-zero" : "";
+        const shown = Number.isFinite(Number(chip.value))
+          ? Number(chip.value).toLocaleString("zh-CN")
+          : (chip.value ?? "—");
+        return `<span class="stat-chip${tone}${zero}"${chip.title
+            ? ` data-tooltip="${esc(chip.title)}"` : ""}>${esc(chip.label || "")}<b>${shown}</b></span>`;
+      }).join("")}</div>`
+    : "";
   const sub = opts.sub ? `<div class="stat-sub">${opts.sub}</div>` : "";
   // 数值统一过一遍千分位：同一个「11351」在概览是 11,351、在账号池是 11351，
   // 是 issue #4 里最扎眼的一处不一致。字符串（如「会话鉴权」）原样输出。
   const shown = opts.raw ? value : fmtAuto(value);
   return `<div class="stat${cls}">
     <div class="stat-label">${icon}${esc(label)}</div>
-    <div class="stat-value">${shown}</div>${sub}</div>`;
+    <div class="stat-value">${shown}</div>${chips}${sub}</div>`;
+}
+
+/**
+ * 「共 / 成功 / 错误」这类**纯数值**渲染成小胶囊。
+ *
+ * 原来是一行 `当前筛选 · 共 1234 次 · 成功 1200 次 · 错误 34 次` 的纯文本：
+ * 数字和文字同字号同颜色，扫一眼分不出哪个是重点，错误数混在中间根本看不见。
+ * 现在数字加粗、按语义描边（错误为红），与 `usage-platform-chip` 同一形制。
+ */
+function logStatChips(items) {
+  const parts = (items || []).map(item => {
+    const value = Number(item.value);
+    const shown = Number.isFinite(value) ? value.toLocaleString("zh-CN") : (item.value ?? "—");
+    return `<span class="logstat ${item.tone || ""}">
+      <em>${esc(item.label)}</em><b>${shown}</b></span>`;
+  });
+  return `<span class="logstat-row">${parts.join("")}</span>`;
 }
 
 /** 统计卡的默认数值格式：整数千分位，小数最多两位，非数字原样返回。 */
@@ -3361,6 +3548,363 @@ function consoleIcon(name) {
   return path ? `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>` : '';
 }
 
+/**
+ * 登录设备面板：多设备在线 + 踢下线 + 拉黑。
+ *
+ * 用户的原话：「允许多台设备登录，系统再做一个登录日志管理就行了，
+ * 可以踢下线、拉黑，表格记录 ip、最近登录时间等信息就好了」。
+ *
+ * 默认就是多设备在线；这里负责处置：
+ *   · 踢下线 —— 只废掉那台机器**当前这次**登录，它下次还能登
+ *   · 拉黑   —— 那台机器的**所有后续登录**都被拒（登录接口签发会话前就查）
+ */
+async function openSessionsPanel() {
+  openModal(`<h3 class="font-semibold text-lg mb-1">登录设备</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+      允许多台设备同时在线。<b>凭证不可搬运</b>：会话与设备标识绑定，
+      把 Cookie 复制到另一台机器也过不了校验。
+    </p>
+    <div id="sessionsBody"><p class="text-xs" style="color:var(--fg-subtle)">加载中…</p></div>
+    <p id="sessionsMsg" class="text-xs mt-2 mb-0" style="color:var(--brand)"></p>
+    <div class="flex flex-wrap justify-end gap-2 mt-3">
+      <button class="console-btn quiet" onclick="sessionsReload()">刷新</button>
+      <button class="console-btn danger-quiet" onclick="sessionsRevokeOthers()">踢掉其它设备</button>
+      <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+    </div>`, "max-w-2xl");
+  await sessionsReload();
+}
+
+async function sessionsReload() {
+  const host = $("#sessionsBody");
+  if (!host) return;
+  let data = {};
+  try {
+    const { ok, data: payload } = await safeJson(await api("/api/sessions"));
+    if (!ok) throw new Error((payload && payload.detail) || "读取失败");
+    data = payload || {};
+  } catch (error) {
+    host.innerHTML = `<p class="text-xs" style="color:var(--danger)">读取失败：${esc(String(error.message || error))}</p>`;
+    return;
+  }
+  const items = data.items || [];
+  const bans = data.bans || [];
+  const rows = items.map(it => {
+    const state = it.state === "active"
+      ? (it.current ? '<span class="badge badge-ok">本机</span>' : '<span class="badge badge-ok">在线</span>')
+      : it.state === "revoked"
+        ? '<span class="badge badge-warn">已踢下线</span>'
+        : '<span class="badge badge-warn">已过期</span>';
+    const seen = it.last_seen_at ? String(it.last_seen_at).replace("T", " ").slice(0, 19) : "—";
+    const created = it.created_at ? String(it.created_at).replace("T", " ").slice(0, 19) : "—";
+    const ops = it.state !== "active" ? "" : (it.current
+      ? '<span class="text-[11px]" style="color:var(--fg-subtle)">当前设备</span>'
+      : `<button class="console-btn quiet" onclick="sessionsRevoke(${jsv(it.sid)})">踢下线</button>
+         <button class="console-btn danger-quiet ml-1" onclick="sessionsBan(${jsv(it.sid)})">拉黑</button>`);
+    return `<tr>
+      <td>${esc(it.label || "未知设备")} ${state}</td>
+      <td class="text-xs">${esc(it.ip || "—")}</td>
+      <td class="text-xs">${esc(created)}</td>
+      <td class="text-xs">${esc(seen)}</td>
+      <td class="text-right">${ops}</td>
+    </tr>`;
+  }).join("");
+  const banRows = bans.length ? `<p class="text-xs mt-3 mb-1" style="color:var(--fg-muted)">已拉黑设备</p>
+    ${bans.map(b => `<div class="flex items-center justify-between text-xs py-1">
+      <span>${esc(b.label || "未知设备")} · ${esc(b.ip || "—")} · ${esc(b.reason || "")}</span>
+      <button class="console-btn quiet" onclick="sessionsUnban(${b.id})">解除</button>
+    </div>`).join("")}` : "";
+  host.innerHTML = `<table class="tbl w-full">
+    <thead><tr><th>设备</th><th>IP</th><th>登录时间</th><th>最近活动</th><th class="text-right">操作</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="text-xs">没有登录记录</td></tr>'}</tbody>
+  </table>${banRows}
+  <p class="text-[11px] mt-2 mb-0" style="color:var(--fg-subtle)">
+    当前 ${data.active || 0} 台在线${data.max_devices ? `（上限 ${data.max_devices}）` : ""}。
+  </p>`;
+}
+
+async function sessionsRevoke(sid) {
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/${encodeURIComponent(sid)}/revoke`, { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已踢下线";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "踢下线失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsRevokeOthers() {
+  if (!await uiConfirm({ message: "确认踢掉除本机外的全部登录？", title: "踢掉其它设备" })) return;
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api("/api/sessions/revoke-others", { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = `已踢下线 ${data.revoked || 0} 台设备`;
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "操作失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsBan(sid) {
+  if (!await uiConfirm({ kind: "warn", danger: false, title: "拉黑这台设备",
+    message: "拉黑后这台机器**所有后续登录都会被拒绝**（不只是当前这次）。\n可以在本面板的「已拉黑设备」里解除。", okText: "拉黑" })) return;
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/${encodeURIComponent(sid)}/ban`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "手动拉黑" }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已拉黑该设备";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "拉黑失败：" + String(error.message || error);
+  }
+}
+
+async function sessionsUnban(banId) {
+  const msg = $("#sessionsMsg");
+  try {
+    const { ok, data } = await safeJson(await api(`/api/sessions/ban/${banId}`, { method: "DELETE" }));
+    if (!ok) throw new Error((data && data.detail) || "操作失败");
+    if (msg) msg.textContent = "已解除拉黑";
+    await sessionsReload();
+  } catch (error) {
+    if (msg) msg.textContent = "解除失败：" + String(error.message || error);
+  }
+}
+
+/**
+ * Loomy 邀请码：单号绑定 / 单号兑换 / 平台面板（同步 + 默认码 + 批量）。
+ *
+ * ## 上游两条硬规则（实测 2026-11-09，用户确认）
+ *
+ * 1. **一个号只能兑换一次邀请码** —— 再绑会回 `200003 邀请码不存在`
+ *    （码本身没问题，是"这个号不能再绑"）。所以已激活的号显示"已激活"，
+ *    不要再去点绑定。
+ * 2. **邀请人上限 20 个** —— 超限后绑定请求照样回成功，但 `activated`
+ *    不会变 true。所以后端会**回读状态**，只有真生效才算成功；前端提示
+ *    也要把这两句话带上，否则用户会以为网关坏了。
+ */
+async function accInviteBind(id) {
+  const code = await uiPrompt({
+    title: "绑定邀请码",
+    message: "填入要绑定到这个账号的邀请码。\n\n注意：一个账号只能兑换一次邀请码；"
+      + "邀请人上限 20 个，超限时上游会「假成功」但不会生效。",
+    placeholder: "邀请码，例如 WK9JPU",
+    okText: "绑定",
+  });
+  if (!code) return;
+  try {
+    const r = await api(`/api/loomy/accounts/${id}/invite`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: String(code).trim() }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    if (data.ok) {
+      toast(`#${id} 已绑定邀请码 ${data.applied_code || data.code}`, "ok");
+    } else {
+      toast(`#${id} 未生效：${data.reason || "上游拒绝"}`, "err");
+    }
+    accReloadActive();
+  } catch (error) {
+    toast("绑定失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function accRedeemCode(id) {
+  const code = await uiPrompt({
+    title: "兑换码换积分",
+    message: "填入兑换码，给这个账号加积分。",
+    placeholder: "兑换码",
+    okText: "兑换",
+  });
+  if (!code) return;
+  try {
+    const r = await api(`/api/loomy/accounts/${id}/redeem`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: String(code).trim() }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    toast(data.ok
+      ? `#${id} 兑换成功，当前余额 ${fmtCredit(data.balance)}`
+      : `#${id} 兑换失败：${data.reason || "上游拒绝"}`, data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    toast("兑换失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/** 平台级邀请码面板：状态同步 / 默认码 / 批量绑定 / 批量兑换。 */
+async function loomyInvitePanel() {
+  let info = {};
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite"));
+    if (ok) info = data || {};
+  } catch (e) { /* 下面按空数据渲染 */ }
+  const codes = info.codes || {};
+  const codeRows = Object.keys(codes).length
+    ? Object.entries(codes).map(([code, n]) =>
+        `<span class="stat-chip">${esc(code)} × ${n}</span>`).join("")
+    : '<span class="text-xs" style="color:var(--fg-subtle)">还没有同步过</span>';
+  openModal(`<h3 class="font-semibold text-lg mb-1">邀请码 · Loomy</h3>
+    <p class="text-xs mb-3" style="color:var(--fg-subtle);line-height:1.75">
+      官方规则：<b>一个账号只能兑换一次邀请码</b>；<b>邀请人上限 20 个</b>。
+      超限时上游会返回成功但不会真正生效，所以这里以回读的
+      <code>activated</code> 为准。
+    </p>
+    <div class="flex flex-wrap gap-2 mb-3">${codeRows}</div>
+    <p class="text-xs mb-3" style="color:var(--fg-muted)">${esc(info.summary || "")}</p>
+    <div class="mb-3">
+      <label class="text-xs" style="color:var(--fg-muted)">默认邀请码（新入库的号自动绑它）</label>
+      <div class="flex gap-2 mt-1">
+        <input id="loomyDefaultCode" class="w-full border rounded-lg px-3 py-2 text-sm"
+               value="${esc(info.default_code || "")}" placeholder="例如 WK9JPU">
+        <button class="console-btn quiet shrink-0" onclick="loomySaveDefaultCode()">保存</button>
+      </div>
+    </div>
+    <p id="loomyInviteStatus" class="text-xs mb-2" style="color:var(--brand)"></p>
+    <div class="flex flex-wrap justify-end gap-2">
+      <button class="console-btn quiet" onclick="loomyInviteSync()">同步邀请状态</button>
+      <button class="console-btn quiet" onclick="loomyInviteBatch('bind')">批量绑定默认码</button>
+      <button class="console-btn quiet" onclick="loomyInviteBatch('redeem')">批量兑换码</button>
+      <button class="console-btn primary" onclick="loomyMutualInvite()">账号池互邀</button>
+      <button class="console-btn quiet" onclick="closeModal()">关闭</button>
+    </div>
+    <p class="text-[11px] mt-2" style="color:var(--fg-subtle);line-height:1.7">
+      互邀 = 轮换使用号池里各号自己的邀请码，去给「还没激活」的号兑换。
+      官方 20 人上限按<b>邀请人</b>算，所以换邀请人就能继续刷；执行有六条终止
+      条件（无号可兑 / 无码可用 / 次数上限 / 时间预算 / 邀请人上限 / 组合去重），
+      不会死循环。
+    </p>`, "max-w-lg");
+}
+
+async function loomySaveDefaultCode() {
+  const code = ($("#loomyDefaultCode")?.value || "").trim();
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "保存失败");
+    toast(code ? `默认邀请码已保存：${code}` : "默认邀请码已清除");
+  } catch (error) {
+    toast("保存失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function loomyInviteSync() {
+  const status = $("#loomyInviteStatus");
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在逐号同步（约 1 秒/个）…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/invite/sync", { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "同步失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "同步完成"; }
+    toast(data.summary || "同步完成");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("同步失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+async function loomyInviteBatch(kind) {
+  const status = $("#loomyInviteStatus");
+  const code = kind === "bind"
+    ? ($("#loomyDefaultCode")?.value || "").trim()
+    : await uiPrompt({ title: "批量兑换", message: "填兑换码，给所有启用账号各兑一次。",
+                      placeholder: "兑换码", okText: "开始兑换" });
+  if (kind === "bind" && !code) { toast("先填默认邀请码", "err"); return; }
+  if (!code) return;
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "批量执行中，请稍候…"; }
+  try {
+    const url = kind === "bind"
+      ? `/api/loomy/invite/bind?code=${encodeURIComponent(code)}`
+      : `/api/loomy/redeem?code=${encodeURIComponent(code)}`;
+    const { ok, data } = await safeJson(await api(url, { method: "POST" }));
+    if (!ok) throw new Error((data && data.detail) || "批量执行失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "完成"; }
+    toast(data.summary || "完成");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("批量执行失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/**
+ * 账号池互邀：轮换邀请人，把「还没激活」的号兑换掉。
+ *
+ * 先弹确认（这是批量写操作），确认后调 `/api/loomy/invite/mutual`；
+ * 后端自带六条终止条件，前端只负责把结果说清楚。
+ */
+async function loomyMutualInvite() {
+  const ok = await uiConfirm({
+    kind: "warn", danger: false,
+    title: "账号池互邀",
+    message: "将对号池里所有「未激活」的账号执行邀请码兑换：\n"
+      + "· 轮换使用各号自己的邀请码（官方每个邀请人上限 20 人）\n"
+      + "· 每个号只能兑换一次邀请码，已兑换的会自动跳过\n"
+      + "· 本次上限：60 次兑换 / 300 秒 / 20 个邀请人，超限即停\n\n"
+      + "确定开始吗？",
+    okText: "开始互邀",
+  });
+  if (!ok) return;
+  const status = $("#loomyInviteStatus");
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "互邀执行中，请稍候（最长 5 分钟）…"; }
+  try {
+    const { ok: httpOk, data } = await safeJson(await api(
+      "/api/loomy/invite/mutual?max_redeems=60&max_seconds=300&max_inviters=20",
+      { method: "POST" }));
+    if (!httpOk) throw new Error((data && data.detail) || "互邀失败");
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = data.summary || "完成"; }
+    toast(data.summary || "互邀完成", data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("互邀失败：" + (error && error.message ? error.message : error), "err");
+  }
+}
+
+/**
+ * 单账号任务（签到 / 新手任务 / 活跃对话）—— 账号行内菜单用。
+ *
+ * 这些任务原本只有「全池」入口（平台卡按钮 + 定时任务），想给某一个号补一次
+ * 签到就得跑整池：慢，而且几十个号同时签到是很明显的机器特征。
+ * 后端 `POST /api/accounts/{id}/task` 按账号归属平台分派，平台没实现时回
+ * `supported:false`，这里据此提示、不报错。
+ */
+async function accRunTask(id, task, label) {
+  const names = { checkin: "签到", onboarding: "新手任务", activity: "活跃对话" };
+  const name = label || names[task] || task;
+  try {
+    const r = await api(`/api/accounts/${id}/task`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (data && data.supported === false) {
+      toast(data.reason || "该平台没有这个单账号任务", "err");
+      return;
+    }
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    const summary = data.summary || (data.ok ? name + "完成" : name + "未完成");
+    toast(`${name}：#${id} ${summary}`, data.ok ? "ok" : "err");
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    toast(`${name}失败：` + (error && error.message ? error.message : error), "err");
+  }
+}
+
 function accountActionDescription(title) {
   const descriptions = {
     '成长任务':'查看任务进度，完成任务并领取奖励',
@@ -3372,7 +3916,10 @@ function accountActionDescription(title) {
     '刷新余额与到期快照':'同步最新余额及积分包到期信息',
     '导出登录态':'下载该账号凭据，供备份或重新导入',
     '启用/禁用':'控制该账号是否参与网关调度',
-    '删除':'从账号池移除该账号'
+    '删除':'从账号池移除该账号',
+    '签到（单号）':'只给这一个账号领今天的签到额度，不跑整池',
+    '新手任务（单号）':'只给这一个账号领一次性新手任务积分',
+    '活跃对话（单号）':'只给这一个账号发一条真实对话，维持账号画像'
   };
   return descriptions[title] || '';
 }
@@ -3868,6 +4415,34 @@ function tokenBadge(a) {
   return bits.map(b => `<span class="c-uid" style="color:${b.color};font-weight:600" data-tooltip="${esc(b.title)}" data-tooltip-description="${esc(detail)}">${esc(b.text)}</span>`).join(" ");
 }
 
+/**
+ * 单账号任务的操作项（签到 / 新手任务 / 活跃对话）—— 六个平台的账号行共用。
+ *
+ * 按账号**归属平台**决定摆哪几个按钮：后端没实现的平台点了会回
+ * `supported:false`，与其让人点了才知道，不如根本不摆出来。
+ *   checkin     非 WorkBuddy 平台都有（WorkBuddy 的签到只有全池任务）
+ *   onboarding  只有 Loomy（一次性 10000 分）
+ *   activity    只有 WPS 灵犀（「只签到不对话」会被判养号）
+ */
+function platformTaskOps(a) {
+  const storage = String(a.platform
+    || ((window.WBPlatform && window.WBPlatform.spec)
+        ? (window.WBPlatform.spec() || {}).storage_platform : "")
+    || "").toLowerCase();
+  if (!storage || storage === "workbuddy" || storage === "codebuddy") return [];
+  const ops = [[`accRunTask(${a.id},'checkin','签到')`, "fa-calendar-check",
+                "签到（单号）", "grow"]];
+  if (storage === "loomy") {
+    ops.push([`accRunTask(${a.id},'onboarding','新手任务')`, "fa-gift",
+              "新手任务（单号）", "grow"]);
+  }
+  if (storage === "wps-lingxi" || storage === "wps_lingxi") {
+    ops.push([`accRunTask(${a.id},'activity','活跃对话')`, "fa-comments",
+              "活跃对话（单号）", "grow"]);
+  }
+  return ops;
+}
+
 function accRow(a) {
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
   // 条目形状：[onclick, icon, tooltip, group]
@@ -3896,6 +4471,7 @@ function accRow(a) {
     [`injectAcc(${a.id})`, "fa-right-to-bracket", "注入本机客户端", "maintain"],
     [`WBReview.accountLimit(${a.id})`, "fa-sliders", "账号并发上限", "maintain"],
     ...commonAccountOps(a),
+    ...platformTaskOps(a),
   );
   // data-label 是给**窄屏卡片形态**用的字段名（见 CSS 里的移动端段落）：
   // 窄屏下表格变成卡片，靠 `td::before { content: attr(data-label) }`
@@ -3971,16 +4547,117 @@ function accListReload() {
   accReloadActive();
 }
 
+/**
+ * 入库 / 授权 / 签到之后，把**平台管理页所有面板**刷新一遍。
+ *
+ * 用户反馈：「平台管理这里入库之后底部卡片数据也要刷新一下」。
+ * 底部两张卡（`#platformOverview` 概览、`#platformBench` 速度榜）之前只在
+ * 切到这个 tab 时加载，入库后要切走再切回才更新 —— 看着像没成功。
+ *
+ * 一次性刷新四处：平台卡片的账号数、平台概览、速度榜、连接门禁。
+ * 单个失败不影响其它（用 try/catch 逐个包住）。
+ */
+function refreshPlatformSurfaces() {
+  try { window.WBPlatform && window.WBPlatform.refreshCounts && window.WBPlatform.refreshCounts(); } catch (e) { /* 计数失败不影响其它 */ }
+  try { if (typeof loadPlatformOverview === "function") loadPlatformOverview(); } catch (e) { /* ignore */ }
+  try { if (typeof loadPlatformBench === "function") loadPlatformBench(); } catch (e) { /* ignore */ }
+  try { if (typeof loadJoinGate === "function") loadJoinGate(); } catch (e) { /* ignore */ }
+}
+
 function accReloadActive() {
   const spec = (window.WBPlatform && window.WBPlatform.spec()) || {};
   const storage = String(spec.storage_platform || spec.id || "").toLowerCase();
-  if (storage === "loomy") return loadLoomyAccounts(spec);
-  if (storage === "codearts") return loadCodeArtsAccounts(spec);
-  if (storage === "minimax") return loadMinimaxAccounts(spec);
-  if (storage === "trae") return loadTraeAccounts(spec);
-  if (storage === "qoder") return loadQoderAccounts(spec);
-  return loadAccounts();
+  // 每次重载后刷新表头排序指示（切换平台/翻页后指示也不能丢）
+  const done = () => accMarkSort();
+  if (storage === "loomy") return Promise.resolve(loadLoomyAccounts(spec)).then(done);
+  if (storage === "codearts") return Promise.resolve(loadCodeArtsAccounts(spec)).then(done);
+  if (storage === "minimax") return Promise.resolve(loadMinimaxAccounts(spec)).then(done);
+  if (storage === "trae") return Promise.resolve(loadTraeAccounts(spec)).then(done);
+  if (storage === "qoder") return Promise.resolve(loadQoderAccounts(spec)).then(done);
+  return Promise.resolve(loadAccounts()).then(done);
 }
+
+/* ==========================================================================
+   账号池表头排序（全局，所有平台共用）
+   --------------------------------------------------------------------------
+   用户要求：「账号池表格全局支持表字段排序」。
+
+   为什么用**委托点击 + 按列 class 映射**，而不是给 5 个平台的表头模板
+   各加一遍 onclick：
+     · 五个平台（WorkBuddy / Trae / Qoder / Loomy / CodeArts / MiniMax）
+       各有一套 `<thead>` 模板，逐个改等于同一份逻辑抄五遍；
+     · 它们已经统一用 `.col-name` / `.col-status` / `.col-balance` /
+       `.col-created` 这套列 class，直接按 class 反查列名最省。
+   只开放**语义在各平台一致**的四列；`.col-extra` / `.col-expiry` 在不同
+   平台含义不同（有的是「资源包」、有的是「套餐」），不参与排序。
+   ========================================================================== */
+
+/** 列 class -> 排序字段（`<字段>_asc` / `<字段>_desc`）。 */
+const ACC_SORTABLE = {
+  "col-name": "name",
+  "col-status": "status",
+  "col-balance": "credits",
+  "col-created": "created",
+  "col-id": "id",
+};
+
+/** 当前排序列，如 `{field:"credits", dir:"desc"}`；未排序时返回 null。 */
+function accSortOf() {
+  const raw = String((window._accListState || {}).sort || "id_desc");
+  const hit = /^([a-z]+)_(asc|desc)$/.exec(raw);
+  if (!hit) return null;
+  const field = hit[1] === "balance" ? "credits" : hit[1];
+  return { field, dir: hit[2] };
+}
+
+/** 点表头：同列再点切方向，换列按「数值默认降序、文本默认升序」。 */
+function accSortBy(columnClass) {
+  const field = ACC_SORTABLE[columnClass];
+  if (!field) return;
+  const st = window._accListState || (window._accListState = {});
+  const cur = accSortOf();
+  const numeric = field === "credits" || field === "created" || field === "id";
+  let dir;
+  if (cur && cur.field === field) dir = cur.dir === "asc" ? "desc" : "asc";
+  else dir = numeric ? "desc" : "asc";
+  st.sort = field + "_" + dir;
+  st.page = 1;
+  // 下拉里没有的键要清掉，否则别人看下拉会以为「没排序」
+  const sel = $("#accSort");
+  if (sel && Array.from(sel.options || []).some(o => o.value === st.sort)) sel.value = st.sort;
+  accReloadActive();
+}
+
+/** 把排序指示器画到表头上（每次渲染后调用）。 */
+function accMarkSort() {
+  const table = document.querySelector("#accountTableWrap .acc-table");
+  if (!table) return;
+  const cur = accSortOf();
+  table.querySelectorAll("thead th").forEach(th => {
+    th.classList.remove("is-sort-asc", "is-sort-desc");
+    th.removeAttribute("aria-sort");
+    const col = Object.keys(ACC_SORTABLE).find(name => th.classList.contains(name));
+    if (!col) return;
+    th.classList.add("is-sortable");
+    if (!th.dataset.accSortBound) th.dataset.accSortBound = "1";
+    if (cur && ACC_SORTABLE[col] === cur.field) {
+      th.classList.add(cur.dir === "asc" ? "is-sort-asc" : "is-sort-desc");
+      th.setAttribute("aria-sort", cur.dir === "asc" ? "ascending" : "descending");
+    }
+  });
+}
+
+// 表头点击（委托）：整张账号表的 thead 都走这里，新平台自动生效
+document.addEventListener("click", event => {
+  const th = event.target.closest("#accountTableWrap thead th");
+  if (!th) return;
+  // 表头里的勾选框（全选）不触发排序
+  if (event.target.closest("input")) return;
+  const col = Object.keys(ACC_SORTABLE).find(name => th.classList.contains(name));
+  if (!col) return;
+  event.preventDefault();
+  accSortBy(col);
+});
 
 function accPageTo(p) {
   window._accListState.page = Math.max(1, parseInt(p, 10) || 1);
@@ -3995,6 +4672,112 @@ function accSelectedIds() {
 
 function accPickAllToggle(master) {
   document.querySelectorAll("#accBody .acc-pick").forEach(b => { b.checked = !!master.checked; });
+  accBulkSync();
+}
+
+/* ==========================================================================
+   账号池批量操作（勾选后出现操作条，全平台生效）
+   --------------------------------------------------------------------------
+   用户反馈：「账号池支持勾选，但勾上之后没有任何批量入口，想停用 20 个号
+   只能一个个点」。
+
+   这里只做**入口与交互**，真正的动作在 `POST /api/accounts/bulk`。
+   关键约定：
+     · 选择状态由 `#accBody .acc-pick` 决定，**跨平台允许**（不按当前平台过滤）；
+     · 操作条固定显示在表格上方，选中数实时更新；
+     · 危险动作（删除）必须二次确认，并说明「不可恢复」；
+     · 完成后刷新列表并清空选择，避免"删完还显示选中 N 个"。
+   ========================================================================== */
+
+const ACC_BULK_LABELS = {
+  enable: "批量启用", disable: "批量禁用", delete: "批量删除",
+  refresh: "批量刷新额度", check: "批量检测",
+};
+
+/** 同步操作条的显示与计数（勾选变化时调用）。 */
+function accBulkSync() {
+  const bar = document.getElementById("accBulkBar");
+  const count = document.getElementById("accBulkCount");
+  if (!bar) return;
+  const ids = accSelectedIds();
+  if (count) count.textContent = String(ids.length);
+  bar.hidden = ids.length === 0;
+  // 表头全选框跟随当前页状态（半选用 indeterminate）
+  const master = document.getElementById("accPickAll");
+  if (master) {
+    const boxes = [...document.querySelectorAll("#accBody .acc-pick")];
+    const checked = boxes.filter(b => b.checked).length;
+    master.checked = boxes.length > 0 && checked === boxes.length;
+    master.indeterminate = checked > 0 && checked < boxes.length;
+  }
+}
+
+function accBulkClear() {
+  document.querySelectorAll("#accBody .acc-pick").forEach(b => { b.checked = false; });
+  const master = document.getElementById("accPickAll");
+  if (master) { master.checked = false; master.indeterminate = false; }
+  accBulkSync();
+}
+
+/** 执行一次批量动作。 */
+async function accBulkRun(action) {
+  const ids = accSelectedIds();
+  if (!ids.length) { toast("先勾选账号", "err"); return; }
+  const label = ACC_BULK_LABELS[action] || action;
+  const danger = action === "delete";
+  const yes = await uiConfirm({
+    kind: danger ? "warn" : "info",
+    danger,
+    title: label,
+    message: danger
+      ? `确认删除 ${ids.length} 个账号？\n删除**不可恢复**（凭证、绑定、余额快照一并消失）。\n被 API Key 独占绑定的账号删除后，该 Key 会失去专属账号。`
+      : `对选中的 ${ids.length} 个账号执行「${label}」？\n动作对全部平台生效，不受当前平台筛选限制。`,
+    okText: label,
+  });
+  if (!yes) return;
+
+  const btn = event && event.target ? event.target.closest("button") : null;
+  const restore = btn ? btnBusy(btn, "执行中") : () => {};
+  try {
+    const r = await api("/api/accounts/bulk", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ids }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    const parts = [`${label}：影响 ${data.affected} 个`];
+    if (data.skipped && data.skipped.length) parts.push(`跳过 ${data.skipped.length} 条`);
+    if (data.errors && data.errors.length) parts.push(`失败 ${data.errors.length} 条`);
+    toast(parts.join(" · ") + (data.note ? " · " + data.note : ""),
+          (data.errors && data.errors.length) ? "err" : "ok");
+    if (data.errors && data.errors.length) console.warn("[acc-bulk] 失败明细", data.errors);
+    accBulkClear();
+    accReloadActive();
+  } catch (error) {
+    toast(label + "失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
+/** 导出勾选的账号（走已有的导出流程，只带选中的 id）。 */
+async function accBulkExport() {
+  const ids = accSelectedIds();
+  if (!ids.length) { toast("先勾选账号", "err"); return; }
+  try {
+    const r = await api("/api/accounts/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, format: "client" }),
+    });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    // 大号池走异步任务：接口返回 job_id，进度在「后台任务」里看
+    if (data.job_id) { toast("已提交导出任务，进度见「后台任务」", "ok"); return; }
+    const text = data.text || JSON.stringify(data.accounts || data, null, 2);
+    await downloadText(`miraihub-accounts-${exportStamp()}.json`, text, "application/json");
+  } catch (error) {
+    toast("导出选中失败：" + (error && error.message ? error.message : error), "err");
+  }
 }
 
 /** 给行 HTML 的 <tr> 后插入勾选列（不动各平台的行构造器）。 */
@@ -4038,8 +4821,11 @@ function accCreatedCell(a) {
 }
 
 function withPick(rowHtml, id) {
+  // `onchange` 而不是 `onclick`：键盘空格切换、程序化 `checked=` 都要算数，
+  // 否则批量操作条的计数只跟鼠标走。
   return String(rowHtml).replace(/<tr(\s[^>]*)?>/i,
-    m => `${m}<td><input type="checkbox" class="acc-pick" data-id="${id}"></td>`);
+    m => `${m}<td class="col-pick"><input type="checkbox" class="acc-pick"
+      data-id="${id}" onchange="accBulkSync()" aria-label="选择账号 #${id}"></td>`);
 }
 
 function pickAllTh() {
@@ -4218,6 +5004,7 @@ function traeRow(a) {
       [`traeTest(${a.id})`, "fa-heart-pulse", "连通性检查：token / 模型 / 真实对话 / 额度", "maintain"],
       [`traeClearCooling(${a.id})`, "fa-snowflake", "清除冷却与熔断", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4319,7 +5106,7 @@ async function loadQoderAccounts(platform) {
     const body = $("#accBody");
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 Qoder 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 Qoder 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -4397,6 +5184,7 @@ function qoderRow(a) {
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`qoderTest(${a.id})`, "fa-heart-pulse", "连通性检查：凭证 / 资料 / 模型 / 额度", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4424,7 +5212,7 @@ async function loadLoomyAccounts(platform) {
     const body = $("#accBody");
     if (body) {
       body.innerHTML = `<tr><td colspan="7"><div class="account-empty">
-        <strong>读取 Loomy 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 Loomy 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -4500,6 +5288,24 @@ function loomyRow(a) {
       : '<span class="badge badge-ok">已启用</span>';
   const phone = a.phone
     ? `<small style="color:var(--fg-muted)">${esc(a.phone)}</small>` : "";
+  // ---- 邀请码状态 ----
+  // 用户要求「账号池里把账号的邀请状态显示出来」。
+  // 三态必须分开，别把「还没同步」显示成「未激活」—— 那会让人以为号有问题：
+  //   known=false          → 未同步（点平台卡「同步邀请状态」后才有）
+  //   activated=true       → 已激活，并显示用的是哪个码
+  //   activated=false      → 已同步，但没绑过邀请码
+  const inv = a.invite || {};
+  let inviteCell;
+  if (!inv.known) {
+    inviteCell = `<small style="color:var(--fg-subtle)" data-tooltip="邀请状态未同步"
+      data-tooltip-description="这是本地快照。点平台卡或「同步邀请状态」后会逐个号查一次上游。">未同步</small>`;
+  } else if (inv.activated) {
+    inviteCell = `<span class="badge badge-ok" data-tooltip="已绑定邀请码"
+      data-tooltip-description="${esc(inv.code ? ("已激活：" + inv.code) : "已激活")}">${esc(inv.code || "已激活")}</span>`;
+  } else {
+    inviteCell = `<span class="badge badge-warn" data-tooltip="未绑定邀请码"
+      data-tooltip-description="这个号还没兑换过邀请码。注意：一个号只能兑换一次，且邀请人有 20 人上限。">未激活</span>`;
+  }
   const err = (a.last_err_msg && ok)
     ? `<small style="color:var(--danger)" data-tooltip="最近上游错误" data-tooltip-description="${esc(a.last_err_msg)}">${esc(String(a.last_err_msg).slice(0, 36))}</small>`
     : "";
@@ -4539,10 +5345,14 @@ function loomyRow(a) {
     <td class="tnum text-right" data-label="当日额度"
         style="color:var(--fg-muted)">${fmtCredit(a.daily_balance)}</td>
     <td class="text-xs text-right" data-label="登录态有效期">${sessionCell}</td>
+    <td class="text-xs" data-label="邀请码">${inviteCell}</td>
     ${accCreatedCell(a)}
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`loomyTest(${a.id})`, "fa-heart-pulse", "连通性检查", "maintain"],
+      [`accInviteBind(${a.id})`, "fa-ticket", "绑定邀请码", "grow"],
+      [`accRedeemCode(${a.id})`, "fa-gift", "兑换码换积分", "grow"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4595,7 +5405,7 @@ async function loadCodeArtsAccounts(platform) {
   if (!r.ok) {
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 CodeArts 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 CodeArts 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -4702,6 +5512,7 @@ function codeartsRow(a) {
     <td class="c-ops" data-label="操作">${accOpsHtml(a, [
       [`codeartsTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -4738,7 +5549,7 @@ async function loadMinimaxAccounts(platform) {
   if (!r.ok) {
     if (body) {
       body.innerHTML = `<tr><td colspan="8"><div class="account-empty">
-        <strong>读取 MiniMax 账号失败</strong>HTTP ${r.status}</div></td></tr>`;
+        <strong>读取 MiniMax 账号失败</strong>${statusText(r.status)}</div></td></tr>`;
     }
     return;
   }
@@ -4838,6 +5649,7 @@ function minimaxRow(a) {
       [`minimaxCheckin(${a.id})`, "fa-calendar-check", "立即签到", "grow"],
       [`minimaxTest(${a.id})`, "fa-heart-pulse", "分段连通性检查", "maintain"],
       ...commonAccountOps(a),
+    ...platformTaskOps(a),
     ])}</td>
   </tr>`;
 }
@@ -5032,6 +5844,13 @@ document.addEventListener("wb-platform-action", event => {
     if (action === "activity") {
       return platformActivity(spec, storage);
     }
+    // 新手任务（一次性大额积分）：Loomy 的 10000 分就靠这个领。
+    if (action === "onboarding") {
+      return platformOnboarding(spec, storage);
+    }
+    if (action === "invite") {
+      return loomyInvitePanel();
+    }
     if (action === "ban-recheck") {
       return platformBanRecheck(spec, storage);
     }
@@ -5140,7 +5959,7 @@ async function traeUsageDetail(spec) {
   const { ok, data } = await safeJson(r);
   if (!ok) {
     openModal(`<h3 class="font-semibold text-lg mb-2">用量明细</h3>
-      <p style="color:var(--danger)">读取失败：${esc((data && data.detail) || r.status)}</p>`);
+      <p style="color:var(--danger)">读取失败：${esc((data && data.detail) || statusText(r.status))}</p>`);
     return;
   }
 
@@ -5327,9 +6146,157 @@ async function platformSupportsAuth(storage) {
   return meta.auth_mode !== "local-session-only";
 }
 
+/**
+ * Loomy 授权：发送验证码。
+ *
+ * 后端 `POST /api/loomy/auth/sms` 调账号服务 `sendMsgCode`，返回 `msgid`。
+ * `msgid` 必须回传给下一步——上游用 `(phone, msgid, mcode)` 三件套校验，
+ * 少一个就报验证码错误（这是「码明明对却登不上」的唯一原因）。
+ */
+async function loomyAuthSend() {
+  const phone = ($("#loomyPhone")?.value || "").trim();
+  const status = $("#loomyAuthStatus");
+  if (!/^\d{6,}$/.test(phone)) {
+    toast("请填写手机号（纯数字）", "err");
+    return;
+  }
+  const btn = $("#loomySendBtn");
+  const restore = btn ? btnBusy(btn, "发送中") : () => {};
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在发送验证码…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/auth/sms", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "发送失败");
+    window._loomyMsgid = data.msgid || "";
+    if (status) {
+      status.style.color = "var(--brand)";
+      status.textContent = `验证码已发送，${data.expire || 300} 秒内有效`;
+    }
+    toast("验证码已发送");
+    const code = $("#loomyCode");
+    if (code) code.focus();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("发送验证码失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * Loomy 授权：验证码登录 → 入库。
+ *
+ * 后端逻辑：先 `checkCode`（老号）；报「未注册」且给了密码才走
+ * `register/phone/submit`。缺密码时返回 `need_password`，这里提示一次即可。
+ */
+async function loomyAuthVerify() {
+  const phone = ($("#loomyPhone")?.value || "").trim();
+  const code = ($("#loomyCode")?.value || "").trim();
+  const password = $("#loomyPwd")?.value || "";
+  const status = $("#loomyAuthStatus");
+  const hint = $("#loomyPwdHint");
+  if (!window._loomyMsgid) { toast("请先点「发送验证码」", "err"); return; }
+  if (!/^\d{4,8}$/.test(code)) { toast("请填写短信验证码", "err"); return; }
+
+  const btn = $("#loomyLoginBtn");
+  const restore = btn ? btnBusy(btn, "登录中") : () => {};
+  if (status) { status.style.color = "var(--brand)"; status.textContent = "正在校验…"; }
+  try {
+    const { ok, data } = await safeJson(await api("/api/loomy/auth/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, code, msgid: window._loomyMsgid, password }),
+    }));
+    if (!ok) throw new Error((data && data.detail) || "登录失败");
+    if (data.need_password) {
+      // 新号缺密码：留住 msgid，让用户补密码后直接再点一次（不重发短信）
+      if (status) { status.style.color = "var(--warn)"; status.textContent = data.reason || "新号需要先设一个密码"; }
+      if (hint) { hint.style.color = "var(--warn)"; hint.textContent = "（新号必填）"; }
+      const pwd = $("#loomyPwd");
+      if (pwd) pwd.focus();
+      toast("新号需要先设密码（同一个验证码还能用）", "err");
+      return;
+    }
+    if (status) { status.style.color = "var(--ok, #10b981)"; status.textContent = "登录成功，凭证已入库"; }
+    const extra = data.renewable ? "已存密码，可自动续期" : "未设密码，14 天后需重新收码";
+    // 同一手机号会**就地更新**已有账号（按 uid 幂等），必须说清楚是哪一条，
+    // 否则用户会以为「入库了但号池里没这条」。
+    const where = data.created ? "新账号已入库" : "已更新同一手机号的已有账号";
+    toast(`${where}：${data.phone || phone} #${data.account_id ?? "?"}（${extra}）`);
+    window._loomyMsgid = "";
+    closeModal();
+    loadAccounts();
+    accReloadActive();
+    refreshPlatformSurfaces();
+  } catch (error) {
+    if (status) { status.style.color = "var(--danger)"; status.textContent = String(error.message || error); }
+    toast("登录失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    restore();
+  }
+}
+
 async function platformBeginAuth(spec, storage) {
   const realm = (spec && spec.realm) || "cn";
   const id = String((spec && spec.id) || storage || "").toLowerCase();
+
+  // Loomy：**手机号 + 短信验证码**（与 WorkBuddy 的登录手感一致）。
+  //
+  // Loomy 没有设备授权/扫码换票，凭证只能来自它自己的账号服务：
+  //   /login/phone/sendMsgCode  → msgid
+  //   /login/phone/checkCode    → 老号直接拿 session
+  //   /register/phone/submit    → 新号建号（**这一刻才能设密码**）
+  //
+  // 关键：**没有密码的号 14 天后必然报废**（服务端没有 refresh、也没有
+  // 补设密码的接口）。所以新号必须让用户顺手设个密码，之后由保活任务
+  // 在剩余 <3 天时用密码自动重登。
+  if (id === "loomy") {
+    let msgid = "";
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · Loomy</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        用手机号收验证码登录。登录成功后凭证<b>直接入库</b>，不需要复制粘贴任何东西。
+      </p>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">手机号</label>
+        <div class="flex gap-2 mt-1">
+          <input id="loomyPhone" class="w-full border rounded-lg px-3 py-2 text-sm"
+                 inputmode="tel" autocomplete="tel" placeholder="11 位手机号">
+          <button type="button" id="loomySendBtn" class="console-btn quiet shrink-0"
+                  onclick="loomyAuthSend()">发送验证码</button>
+        </div>
+      </div>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">验证码</label>
+        <input id="loomyCode" class="w-full border rounded-lg px-3 py-2 text-sm mt-1"
+               inputmode="numeric" autocomplete="one-time-code" maxlength="8"
+               placeholder="短信里的 6 位数字">
+      </div>
+      <div class="mb-2">
+        <label class="text-xs" style="color:var(--fg-muted)">
+          登录密码<span id="loomyPwdHint" class="ml-1" style="color:var(--fg-subtle)">
+            （新号必填；老号可留空）</span>
+        </label>
+        <input id="loomyPwd" type="password" class="w-full border rounded-lg px-3 py-2 text-sm mt-1"
+               autocomplete="current-password" placeholder="设一个密码，用于 14 天到期后自动续期">
+        <p class="text-[11px] mt-1" style="color:var(--fg-subtle);line-height:1.6">
+          Loomy 没有 refresh 接口，也<b>不能给已有号补设密码</b>：新号必须在这里设，
+          否则这张 14 天的票到期就只能再收一次短信。
+        </p>
+      </div>
+      <p id="loomyAuthStatus" class="text-xs mb-2" style="color:var(--brand)"></p>
+      <p class="text-[11px] mb-2" style="color:var(--fg-subtle)">
+        网页登录地址：<a href="https://loomy.xunfei.cn/web/login" target="_blank"
+          rel="noopener" style="color:var(--brand);text-decoration:underline">loomy.xunfei.cn/web/login</a>
+        （同一个账号，网页端登录也可用来核对）
+      </p>
+      <div class="flex justify-end gap-2">
+        <button class="console-btn quiet" onclick="closeModal()">取消</button>
+        <button class="console-btn primary" id="loomyLoginBtn"
+                onclick="loomyAuthVerify()">登录并入库</button>
+      </div>`, "max-w-md");
+    return;
+  }
 
   // WPS 灵犀：没有设备码 / 扫码换票的公开协议 —— 客户端登录取的是
   // WPS SSO 的 `wps_sid` Cookie。做法与官方 Magpie 插件一致：
@@ -5927,7 +6894,7 @@ async function platformBeginAuth(spec, storage) {
       if (window.WBPlatform) window.WBPlatform.refreshCounts();
       setTimeout(() => closeModal(), 900);
     } else {
-      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || claim.status}`;
+      if (el) el.textContent = `保存失败：${(claimed.data && claimed.data.detail) || statusText(claim.status)}`;
     }
     return;
   }
@@ -6147,7 +7114,7 @@ async function platformActivity(spec, storage) {
   }
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`活跃失败：${(data && data.detail) || r.status}`, "err");
+    toast(`活跃失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -6178,7 +7145,7 @@ async function platformBanRecheck(spec, storage) {
   const r = await api(prefix + "/ban-recheck", { method: "POST" });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`复检失败：${(data && data.detail) || r.status}`, "err");
+    toast(`复检失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   const recovered = (data && data.recovered) || [];
@@ -6188,6 +7155,97 @@ async function platformBanRecheck(spec, storage) {
     <div class="flex justify-end mt-3"><button class="console-btn quiet" onclick="closeModal()">关闭</button></div>`,
     "max-w-xl");
   loadAccounts();
+}
+
+/**
+ * 新手任务（一次性大额积分）。
+ *
+ * Loomy 的 10000 分新手任务在客户端里是**默认 mock 后端**：界面显示
+ * 「已获得 10000 积分」也可能服务端一分没有。所以这里直接调网关接口，
+ * 由网关逐 key 调 `/onboarding/tasks/complete` 真正入账。
+ *
+ * 交互：先用 `dry_run=1` 看还有多少分没赚 → 用户确认 → 真正领取。
+ */
+async function platformOnboarding(spec, storage) {
+  const realm = (spec && spec.realm) || "";
+  const qs = realm ? `?realm=${encodeURIComponent(realm)}` : "";
+  const base = platformApiPrefix(spec, storage);
+  const label = esc((spec && spec.label) || storage);
+  const started = Date.now();
+  toast("正在读取新手任务进度…");
+  let preview;
+  try {
+    const r = await api(base + "/onboarding" + qs, { method: "GET" });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    preview = data;
+  } catch (error) {
+    toast("读取任务失败：" + (error && error.message ? error.message : error), "err");
+    return;
+  }
+  const rows = preview.accounts || [];
+  const missing = rows.reduce((sum, it) => sum + (it.missing_points || 0), 0);
+  // 任务清单按客户端三段分组显示中文名：内部 key（first_message 等）
+  // 对用户没有意义，也和客户端界面上的文案对不上。
+  const catalog = preview.catalog || [];
+  const taskList = (catalog.length
+    ? catalog.map(g => `<div class="onb-group">
+        <div class="onb-group-head"><span>${esc(g.group_label)}</span>
+          <b>+${g.group_points}</b></div>
+        <div class="stat-chips">${(g.tasks || []).map(t =>
+          `<span class="stat-chip"><span>${esc(t.label || t.key)}</span><b>+${t.points}</b></span>`
+        ).join("")}</div></div>`).join("")
+    : (preview.tasks || []).map(t =>
+        `<span class="stat-chip"><span>${esc(t.label || t.key)}</span><b>+${t.points}</b></span>`
+      ).join(""));
+  const table = rows.length ? `<div class="sentinel-table-wrap" style="max-height:260px">
+    <table class="tbl"><thead><tr><th>账号</th><th class="text-right">已获得</th>
+      <th class="text-right">未领取</th><th>还差的任务</th></tr></thead><tbody>
+      ${rows.map(it => `<tr>
+        <td>${esc(it.account || ("#" + it.account_id))}</td>
+        <td class="text-right tnum">${it.earned ?? 0}</td>
+        <td class="text-right tnum" style="color:${(it.missing_points || 0) ? "var(--ok,#10b981)" : "var(--fg-subtle)"}">${it.missing_points ?? 0}</td>
+        <td class="text-xs" style="color:var(--fg-subtle)">${esc((it.pending_labels || it.pending || []).join("、") || "已全部完成")}</td>
+      </tr>`).join("")}</tbody></table></div>`
+    : `<p class="sentinel-empty">没有启用账号</p>`;
+
+  const go = await uiConfirm({
+    kind: "info",
+    title: `新手任务 · ${label}`,
+    message: `共 ${rows.length} 个账号，还有 ${missing} 积分可领（任务合计 ${preview.total_points} 分/号）。\n`
+      + "这些任务在客户端里默认只记本地账、不进服务端，网关会直接调服务端逐个领取。\n"
+      + `一次跑完约需 ${Math.max(1, Math.round(rows.length * 0.6))} 秒。现在领取？`,
+    okText: "开始领取",
+  });
+  if (!go) { closeModal(); return; }
+
+  try {
+    const r = await api(base + "/onboarding" + qs, { method: "POST" });
+    const { ok, data } = await safeJson(r);
+    if (!ok) throw new Error((data && data.detail) || statusText(r.status));
+    const gained = data.gained || 0;
+    openModal(`<h3 class="font-semibold text-lg mb-1">新手任务 · ${label}</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-subtle)">
+        ${esc(data.summary || "")}</p>
+      <div class="stat-chips" style="margin:0 0 12px">
+        <span class="stat-chip"><span>本次新增</span><b>+${gained}</b></span>
+        <span class="stat-chip"><span>新完成号</span><b>${data.completed || 0}</b></span>
+        <span class="stat-chip"><span>本就完成</span><b>${data.already || 0}</b></span>
+        <span class="stat-chip${data.failed ? " is-warn" : ""}"><span>失败</span><b>${data.failed || 0}</b></span>
+      </div>
+      <p class="text-xs mb-2" style="color:var(--fg-subtle)">任务清单（每个 key 只能领一次）：</p>
+      <div class="stat-chips" style="margin-bottom:12px">${taskList}</div>
+      ${table}
+      <div class="flex justify-end mt-3 gap-2">
+        <button class="console-btn" onclick="closeModal()">关闭</button>
+        <button class="console-btn quiet" onclick="platformOnboarding(${jsv(storage)}, ${jsv(storage)})">再跑一次</button>
+      </div>`, "max-w-2xl");
+    loadAccounts();
+  } catch (error) {
+    toast("领取失败：" + (error && error.message ? error.message : error), "err");
+  } finally {
+    console.debug("[onboarding] 用时", Date.now() - started, "ms");
+  }
 }
 
 async function platformCheckin(spec, storage) {
@@ -6207,7 +7265,7 @@ async function platformCheckin(spec, storage) {
   }
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`签到失败：${(data && data.detail) || r.status}`, "err");
+    toast(`签到失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   if (data.supported === false) {
@@ -6301,7 +7359,7 @@ async function platformScanLocal(spec, storage) {
   const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`扫描失败：${(data && data.detail) || r.status}`, "err");
+    toast(`扫描失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   await showScanResult(data, spec, storage);
@@ -6403,7 +7461,7 @@ async function platformExportDownload(base, mode, storage) {
     });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
-      toast(`导出失败：${d.detail || r.status}`, "err");
+      toast(`导出失败：${d.detail || statusText(r.status)}`, "err");
       return;
     }
     // 后端返回的是 JSON（含 accounts 数组），这里落成文件而不是弹窗展示 ——
@@ -6461,7 +7519,7 @@ async function platformScanAll(btn) {
           });
           // safeJson 返回 {ok,status,data}，data 才是响应体
           const { ok, data: d } = await safeJson(r);
-          if (!ok) row.note = (d && d.detail) || ("HTTP " + r.status);
+          if (!ok) row.note = (d && d.detail) || statusText(r.status);
           else {
             row.imported = d.added || 0;
             row.skipped = d.skipped || 0;
@@ -6473,7 +7531,7 @@ async function platformScanAll(btn) {
           // 只报告发现数量，导入仍走「授权登录」。
           const r = await api("/api/qoder/scan-local", platformActionOptions(spec));
           const { ok, data: d } = await safeJson(r);
-          if (!ok) row.note = "扫描失败（HTTP " + r.status + "）";
+          if (!ok) row.note = "扫描失败：" + statusText(r.status);
           else {
             row.scanned = (d.items || []).length;
             row.note = row.scanned
@@ -6486,7 +7544,7 @@ async function platformScanAll(btn) {
           const prefix = platformApiPrefix(spec, storage);
           const r = await api(prefix + "/scan-local" + qs, platformActionOptions(spec));
           const { ok, data: d } = await safeJson(r);
-          if (!ok) { row.note = "扫描失败（HTTP " + r.status + "）"; continue; }
+          if (!ok) { row.note = "扫描失败：" + statusText(r.status); continue; }
           const items = d.items || [];
           row.scanned = items.length;
           if (!items.length) { row.note = "本机没有可读凭证"; continue; }
@@ -6499,7 +7557,7 @@ async function platformScanAll(btn) {
             body: JSON.stringify(uids.length ? { uids, all: false } : { all: true }),
           }));
           const { ok: ok2, data: d2 } = await safeJson(r2);
-          if (!ok2) row.note = "入库失败：" + ((d2 && d2.detail) || ("HTTP " + r2.status));
+          if (!ok2) row.note = "入库失败：" + ((d2 && d2.detail) || statusText(r2.status));
           else {
             row.imported = d2.imported || 0;
             row.skipped = d2.skipped || 0;
@@ -6586,7 +7644,7 @@ async function platformExportAllDownload(mode) {
     const r = await api("/api/platforms/export-all?mode=" + encodeURIComponent(mode)
       + (platform ? "&platform=" + encodeURIComponent(platform) : ""));
     const { ok, data: d } = await safeJson(r);
-    if (!ok) { toast("导出失败：" + ((d && d.detail) || r.status), "err"); return; }
+    if (!ok) { toast("导出失败：" + ((d && d.detail) || statusText(r.status)), "err"); return; }
     const platforms = (d && d.platforms) || {};
     const count = Object.values(platforms).reduce((s2, p2) => s2 + (p2.count || 0), 0);
     if (!count) { toast("该平台没有账号可导出", "err"); return; }
@@ -6664,7 +7722,7 @@ async function platformImportAllRun() {
       // /api/accounts/import-async 返回 job.snapshot()：有 job_id，没有 ok 字段
       const { ok, data: d } = await safeJson(r);
       if (!ok || !(d && d.job_id)) {
-        show(`平台 ${storage} 提交失败：` + ((d && d.detail) || ("HTTP " + r.status)));
+        show(`平台 ${storage} 提交失败：` + ((d && d.detail) || statusText(r.status)));
         continue;
       }
       jobs.push({ storage, job_id: d.job_id });
@@ -6716,7 +7774,7 @@ async function platformImportConfirm(spec, storage, uids) {
   }));
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`导入失败：${(data && data.detail) || r.status}`, "err");
+    toast(`导入失败：${(data && data.detail) || statusText(r.status)}`, "err");
     return;
   }
   if (data.imported > 0) {
@@ -6869,7 +7927,7 @@ async function platformRefreshAll(spec, storage) {
   const r = await api(base + qs);
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast(`刷新失败：读取账号列表失败（HTTP ${r.status}）`, "err");
+    toast(`刷新失败：读取账号列表失败，${statusText(r.status)}`, "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -7354,7 +8412,7 @@ async function refreshAcc(id){
     const reason = (err && err.message)
       || (typeof detail === 'object' && detail && detail.message)
       || (typeof detail === 'string' && detail)
-      || `HTTP ${r.status}`;
+      || statusText(r.status);
     toast(`刷新失败：${reason}`, 'err');
     // 有结构化上游证据才弹窗；否则只弹 toast（小浣熊这类用 error 字段，
     // 没有 upstream 明细，弹一个空窗只会更困惑）。
@@ -7411,8 +8469,56 @@ async function healthCheckAll() {
   await accountBatchAction(() => runJob(healthCheckOptions(
     '/api/accounts/health-check-batch', '账号池三项上游健康检查', _accData.length)));
 }
-async function toggleAcc(id,st){ await api("/api/accounts/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:st})}); loadAccounts(); }
-async function delAcc(id){ if(!await uiConfirm({message:"确认删除该账号？", title:"删除账号"}))return; const r=await api("/api/accounts/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"删除失败",r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
+/**
+ * 账号行操作的接口基址 —— **只有「刷新额度」需要按平台分流**。
+ *
+ * 分工（2026-11-09 实测确认）：
+ *   · `PATCH/DELETE /api/accounts/{id}` 是**纯数据库操作**（改名/状态/删除），
+ *     平台无关，所有平台共用；各平台自己的 PATCH/DELETE 反而只有 Trae /
+ *     MiniMax 实现过，统一走通用接口才不会 404。
+ *   · `POST /api/accounts/{id}/refresh` 会按 **WorkBuddy 的凭证结构**解析，
+ *     拿别的平台的号打过去就抛 `CredentialError: 账号凭证缺少 auth`。
+ *     所以刷新必须落到 `/api/<storage>/accounts/{id}/refresh`。
+ *
+ * 后端账号视图现在统一带 `platform`（storage 名），这里据此分流；
+ * 取不到就回落到当前平台。
+ */
+function accApiBase(id) {
+  const row = (_accData || []).find(item => item.id === id) || {};
+  let storage = String(row.platform || "").toLowerCase();
+  if (!storage) {
+    const spec = (window.WBPlatform && window.WBPlatform.spec && window.WBPlatform.spec()) || {};
+    storage = String(spec.storage_platform || spec.id || "").toLowerCase();
+  }
+  if (!storage || storage === "workbuddy" || storage === "codebuddy") return "/api/accounts";
+  return `/api/${storage}/accounts`;
+}
+
+async function toggleAcc(id, st) {
+  const r = await api(`/api/accounts/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: st }),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    toast("操作失败：" + (d.detail || statusText(r.status)), "err");
+    return;
+  }
+  toast(st === "active" ? "已启用" : "已禁用");
+  accReloadActive();
+  refreshPlatformSurfaces();
+}
+
+async function delAcc(id) {
+  if (!await uiConfirm({ message: "确认删除该账号？", title: "删除账号" })) return;
+  const r = await api(`/api/accounts/${id}`, { method: "DELETE" });
+  const d = r.ok ? {} : await r.json().catch(() => ({}));
+  toast(r.ok ? "已删除" : ("删除失败：" + (d.detail || statusText(r.status))), r.ok ? "ok" : "err");
+  if (r.ok) {
+    accReloadActive();
+    refreshPlatformSurfaces();
+  }
+}
 async function injectAcc(id){
   if(!await uiConfirm({kind:"warn", danger:false, title:"注入本机客户端",
       message:"确认把该账号注入到本机 WorkBuddy 客户端？\n会先自动备份当前活动登录态（*.bak-时间戳）。", okText:"确认注入"})) return;
@@ -7422,7 +8528,7 @@ async function injectAcc(id){
 
   let r = await post(false);
   let d = await r.json().catch(()=>({}));
-  if(!r.ok){ toast("注入失败: "+(d.detail||r.status), "err"); return; }
+  if(!r.ok){ toast("注入失败: "+(d.detail||statusText(r.status)), "err"); return; }
 
   // 客户端**把登录态放在内存里**，只改磁盘文件撑不过一次令牌刷新：
   // 实测注入后 2 分钟就被它整份重写回去。所以这里必须把「文件写了」
@@ -7436,7 +8542,7 @@ async function injectAcc(id){
     toast("正在重启客户端…");
     r = await post(true);
     d = await r.json().catch(()=>({}));
-    if(!r.ok){ toast("重启注入失败: "+(d.detail||r.status), "err"); return; }
+    if(!r.ok){ toast("重启注入失败: "+(d.detail||statusText(r.status)), "err"); return; }
   }
 
   if(d.verified) {
@@ -8264,7 +9370,7 @@ async function scanLocal(btn){
       return;
     }
     if (!r.ok) {
-      toast("扫描失败（HTTP " + r.status + "）" + (d && d.detail ? "：" + d.detail : ""), "err");
+      toast("扫描失败：" + statusText(r.status) + (d && d.detail ? "：" + d.detail : ""), "err");
       return;
     }
     if (!d.exists) { openModal(`<h3 class="font-bold mb-3">扫描本机账号</h3><p class="text-sm text-slate-500">未找到登录目录：<br><code class="text-xs">${esc(d.dir||"")}</code></p><div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`); return; }
@@ -9519,7 +10625,7 @@ async function downloadExportToken(token) {
   if (window.WBMobile?.saveText) {
     try {
       const r = await api(url, { method: "GET" });
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) throw new Error(statusText(r.status));
       const text = await r.text();
       await downloadText(`miraihub-accounts-${exportStamp()}.json`, text, "application/json");
     } catch (e) {
@@ -9558,7 +10664,7 @@ async function _fetchExport() {
     body: JSON.stringify(body)
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return null; }
+  if (!r.ok) { toast("导出失败：" + (d.detail || statusText(r.status)), "err"); return null; }
   if (!d.items || !d.items.length) { toast("没有可导出的账号", "err"); return null; }
   return d;
 }
@@ -9614,7 +10720,7 @@ async function exportAcc(id, name) {
   try {
     const r = await api(`/api/accounts/${id}/export?format=${window.WBMobile ? 'backup' : 'client'}`);
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { toast("导出失败：" + (d.detail || r.status), "err"); return; }
+    if (!r.ok) { toast("导出失败：" + (d.detail || statusText(r.status)), "err"); return; }
     const safe = String(name || d.name || d.uid || id).replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
     // WorkBuddy 系 = 加密 .info（可注入客户端）；其它平台 = backup 原文
     // （auth_json 原样，可直接再导入）——后端按账号平台决定，看响应里的 format。
@@ -10766,7 +11872,7 @@ async function modelConfigSave(id){
     body: JSON.stringify(body),
   });
   const { ok, data } = await safeJson(r);
-  if(!ok){ toast(`保存失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  if(!ok){ toast(`保存失败：${(data&&data.detail)||statusText(r.status)}`, "err"); return; }
   toast("已保存（只影响这一个模型）");
   closeModal();
   loadModels();
@@ -10779,7 +11885,7 @@ async function modelConfigReset(id){
     body: JSON.stringify({enabled: true, caps: {}, sort: 0}),
   });
   const { ok, data } = await safeJson(r);
-  if(!ok){ toast(`恢复失败：${(data&&data.detail)||r.status}`, "err"); return; }
+  if(!ok){ toast(`恢复失败：${(data&&data.detail)||statusText(r.status)}`, "err"); return; }
   toast("已恢复上游默认");
   closeModal();
   loadModels();
@@ -11951,7 +13057,7 @@ async function saveClientPathOverride(storage){
     const r = await api(`/api/client-paths/${encodeURIComponent(storage)}`,
       { method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ values }) });
-    if (!r.ok) { toast("保存失败：" + r.status, "err"); return; }
+    if (!r.ok) { toast("保存失败：" + statusText(r.status), "err"); return; }
     await api("/api/client-paths/refresh", { method: "POST" }).catch(() => {});
     toast("路径已保存，正在重新探测");
     await detectClient();
@@ -12072,7 +13178,7 @@ async function loadClientProfile(){
     // 这里明确提示，否则用户只会看到一个空白面板。
     if($("#clientHint")) $("#clientHint").innerHTML = r.status === 404
       ? `<span class="text-amber-600"><span class="wb-icon mr-1"><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>后端尚未加载客户端参数接口（HTTP 404）。请重启服务后刷新本页。</span>`
-      : `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+      : `<span class="text-red-500">加载失败：${statusText(r.status)}</span>`;
     return;
   }
   const d = await r.json(); _clientProfile = d;
@@ -12825,7 +13931,7 @@ async function saveGwSpread(checked) {
   });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast("保存失败：" + ((data && data.detail) || r.status), "err");
+    toast("保存失败：" + ((data && data.detail) || statusText(r.status)), "err");
     return;
   }
   toast(checked
@@ -12839,7 +13945,7 @@ async function detectAllClients() {
   const r = await api("/api/client-profile/detect-all", { method: "POST" });
   const { ok, data } = await safeJson(r);
   if (!ok) {
-    toast("探测失败：" + ((data && data.detail) || r.status), "err");
+    toast("探测失败：" + ((data && data.detail) || statusText(r.status)), "err");
     return;
   }
   const items = (data && data.items) || [];
@@ -12915,7 +14021,7 @@ async function detectClient(){
   const parsed = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (body) {
-      body.innerHTML = `<p style="color:var(--danger)">探测失败：${esc(parsed.detail || response.status)}</p>`;
+      body.innerHTML = `<p style="color:var(--danger)">探测失败：${esc(parsed.detail || statusText(response.status))}</p>`;
     }
     return;
   }
@@ -12974,7 +14080,7 @@ async function loadAppSource(){
     // 404 = 该功能被 ADMIN_DEV_TOOLS=0 关闭；整块隐藏，不给用户看死按钮
     if(r.status === 404){ $("#appSourceBlock")?.classList.add("hidden"); return; }
     if($("#appSourceStatus")) $("#appSourceStatus").innerHTML =
-      `<span class="text-red-500">加载失败（HTTP ${r.status}）</span>`;
+      `<span class="text-red-500">加载失败：${statusText(r.status)}</span>`;
     return;
   }
   const d = await r.json();
@@ -13192,6 +14298,28 @@ const TASK_LABELS = {
   run_growth_tasks: "自动做成长任务",
   run_growth_plan: "WorkBuddy 成长计划巡检",
   keepalive_tokens: "token 保活刷新",
+  ban_recheck: "风控封号复核与自动解封",
+  daily_activity: "每日活跃对话",
+  // ---- 各平台任务（原来这些一律回退成英文 task 名）----
+  loomy_onboarding: "新手任务领积分",
+  loomy_checkin: "每日签到",
+  loomy_keepalive: "会话保活",
+  trae_checkin: "每日签到",
+  trae_keepalive: "会话保活",
+  refresh_quota: "刷新额度",
+  qoder_checkin: "每日签到",
+  qoder_keepalive: "会话保活",
+  codearts_checkin: "每日签到",
+  codearts_keepalive: "会话保活",
+  raccoon_keepalive: "会话保活",
+  raccoon_expiry_sweep: "过期账号清理",
+  minimax_checkin: "每日签到",
+  minimax_keepalive: "会话保活",
+  minimax_refresh_quota: "刷新额度",
+  wps_lingxi_checkin: "每日签到",
+  wps_lingxi_keepalive: "会话保活",
+  wps_lingxi_activity: "每日活跃对话",
+  wps_lingxi_ban_recheck: "失效账号复检",
 };
 
 function scheduleResultSummary(s){
@@ -13485,7 +14613,7 @@ async function runSchedule(id){
     const r=await api("/api/schedules/"+id+"/run",{method:"POST"});
     const d=await r.json().catch(()=>({}));
     if(!r.ok){
-      toast("运行失败: "+(d.detail||r.status),"err");
+      toast("运行失败: "+(d.detail||statusText(r.status)),"err");
       return;
     }
     const result = d.result || {};
@@ -14565,7 +15693,13 @@ async function loadLogs(page, silent = false) {
   const stats = d.stats;
   if (revision === _logUsageRevision) _logUsageDirty = false;
   _logUsageAt = Date.now();
-  $('#logStats').textContent = stats ? `当前筛选 · 共 ${stats.total} 次 · 成功 ${stats.success} 次 · 错误 ${stats.error} 次` : silent ? '用量记录已实时更新 · 总数统计请点击查询' : '快速翻页未统计总数';
+  $('#logStats').innerHTML = stats
+    ? logStatChips([
+        { label: "共", value: stats.total, tone: "" },
+        { label: "成功", value: stats.success, tone: "is-ok" },
+        { label: "错误", value: stats.error, tone: stats.error ? "is-bad" : "" },
+      ])
+    : `<span class="logstat-plain">${silent ? "用量记录已实时更新 · 总数统计请点击查询" : "快速翻页未统计总数"}</span>`;
   if (_logPage === 1 && !silent) { loadLogSummary(); }
 
   const total = d.total;              // null = 本次未统计
@@ -14913,7 +16047,16 @@ async function loadLogSummary(silent = false) {
     if (usageRevision === _logUsageRevision) _logSummaryDirty = false;
     _logSummarySignature = filterSignature;
     _logSummaryAt = Date.now();
-    if (hint) hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests} · ${ovCredit(data.total_credits)} 积分${data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : ""}`;
+    if (hint) {
+      // 顶部摘要：对齐 new-api 使用日志的「用量 / RPM / TPM」。
+      // RPM/TPM 用后端给的窗口分钟数算，前端不自己猜窗口长度。
+      const mins = Math.max(1, Number(data.window_minutes) || 1);
+      const rpm = (Number(data.total_requests) || 0) / mins;
+      const tpm = (Number(data.total_tokens) || 0) / mins;
+      hint.textContent = `当前筛选 · ${data.account_count} 个账号 · 成功 ${data.ok_requests} / 错误 ${data.failed_requests}`
+        + ` · 用量 ${ovCredit(data.total_credits)} 积分 · RPM ${ovNum(rpm)} · TPM ${ovNum(tpm)}`
+        + (data.unattributed_requests ? ` · ${data.unattributed_requests} 次未记录账号 / 未选号` : "");
+    }
     if (!items.length) { box.innerHTML = `<div class="empty">该时间范围内没有账号产生请求。</div>`; return; }
     const maxC = Math.max(1, ...items.map(x => x.credits));
     box.innerHTML = `<table class="tbl" style="min-width:820px">
@@ -15894,7 +17037,7 @@ if (!_localConsoleShell) {
     }
     // 其它状态：先进应用，由各面板自己提示错误
     if (!_booted()) enterApp();
-    toast("部分数据加载失败（HTTP " + r.status + "），可稍后重试", "err");
+    toast("部分数据加载失败：" + statusText(r.status) + "，可稍后重试", "err");
   }).catch(e => {
     // 网络异常也不清 token，允许用户手动重试
     if (!_booted()) enterApp();

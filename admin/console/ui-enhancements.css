@@ -161,10 +161,14 @@ table {
   width:100%;
 }
 
+/* 表头**不吸顶**（2026-11-09）。
+ *
+ * 这里原先是一条裸元素选择器 `thead { position:sticky; top:0; z-index:10 }`。
+ * 它命中的是 `<thead>` 元素本身，而 console.css 里改的是 `.tbl thead th`
+ * —— 两个**不同元素**，所以删掉 th 上的 sticky 完全没用，表头照样浮着
+ * （keys / IP 管理页滚动时表头压住第一行数据就是这么来的）。
+ * 通用表格不吸顶：卡片是 `overflow:auto`，吸顶会让表头与列宽错位。 */
 thead {
-  position:sticky;
-  top:0;
-  z-index:10;
   background:var(--surface-2);
 }
 

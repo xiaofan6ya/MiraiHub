@@ -282,6 +282,67 @@ bad = call(model="deepseek-v4.1-flash")
 - [ ] 不可用的模型**不要**直接 `enabled=0`（别的账号可能开通），只标注
 - [ ] 平台能力（`supports_local_scan` 等）要如实声明，不支持就别暴露按钮
 - [ ] 「不支持扫描」的平台**必须**提供授权登录入口，否则账号无法添加
+- [ ] 声明平台的**自评等级** `rating`（见第八节）
+
+---
+
+## 八、平台自评等级 `rating`（控制台「平均级」徽标）
+
+平台卡右侧那个「夯 / 人上人 / npc / 拉完了」徽标，数据**由平台自己声明**，
+不写在前端。控制台的 `platform-tiers.js` 只留一份兜底表给没声明的平台。
+
+### 声明方式
+
+```python
+_register.register(PlatformSpec(
+    id=platform_id,
+    label="某平台",
+    ...
+    rating={
+        "tier": "hang",              # hang | elite | npc | bad
+        "reason": "免排队、速度快、每月还有免费模型。",   # 悬停展示的依据
+        # 可选：打分明细（现阶段前端不消费，先把契约留好）
+        "scores": {"speed": 5, "quota": 4, "stability": 5},
+    },
+    extra={"actions": [...]},
+))
+```
+
+档位语义（**四档，从高到低**）：
+
+| tier | 展示 | 含义 |
+|---|---|---|
+| `hang` | 夯 | 稳定、免排队、额度足 |
+| `elite` | 人上人 | 能用、量够，稳定性一般 |
+| `npc` | npc | 要排队 / 额度少 / 慢 |
+| `bad` | 拉完了 | 排队 + 额度少 + 极慢 |
+
+`/api/platforms` 会把 `rating` 原样下发（校验过的），前端优先用它；
+未知 tier 会被丢掉并回落到兜底表，**不会出现没样式的空徽标**。
+
+### 为什么放平台侧
+
+这是「网关对这个上游的真实体感」，只有平台实现最清楚：改价、改排队策略、
+换端点时，评价应该跟着代码一起改，而不是留在前端常量里慢慢过期。
+
+### 后续：按真实指标自动打分（现在人工填，非必须）
+
+`rating` 目前是人写的常量。等采集稳定后，可以让平台在 `install()` 里
+根据真实数据算出同一形状的 dict，**前端与 `/api/platforms` 契约一行都不用改**：
+
+```python
+def compute_rating(db) -> dict:
+    # 候选指标（都在 usage_logs 里现成可算）
+    #   · 成功率 = 成功行 / 总行（24h）
+    #   · 首字节 P50（ttfb_ms）
+    #   · 排队/冷却命中次数（cool_kind = 'quota' / 'cooling' 的行数）
+    #   · 每千 token 的积分消耗（credits / total_tokens）
+    ...
+    return {"tier": tier, "reason": reason, "scores": scores,
+            "source": "metrics"}
+```
+
+此时把 `source` 标成 `metrics`，控制台就能区分「人工评估」与「实测推断」。
 
 ---
 

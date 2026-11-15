@@ -49,6 +49,26 @@ PUBLIC = "raccoon"
 MAX_ATTEMPTS = 3
 
 
+def _cool_seconds(exc) -> int:
+    """按错误类别给冷却秒数（对齐 `qoder/gateway.py` 的 per-kind 约定）。
+
+    * `rate`：优先用上游 `retry after`，夹逼到
+      `[client._RATE_COOL_MIN_SECONDS, client._RATE_COOL_MAX_SECONDS]`；
+      解析不到回落 600（上游大多只给文案、不给秒数）。
+    * `auth` / `quota`：600（与改动前一致）。
+    * 其余：0 —— 交给换号重试，不冷却。
+    """
+    if exc.kind == "rate":
+        seconds = client.retry_after_seconds(exc.detail or exc.message)
+        if seconds is None:
+            return 600
+        return max(client._RATE_COOL_MIN_SECONDS,
+                   min(client._RATE_COOL_MAX_SECONDS, seconds))
+    if exc.kind in ("auth", "quota"):
+        return 600
+    return 0
+
+
 class _BadRequest(Exception):
     """请求体本身有问题（客户端错误），应由调用方转成 400。
 
@@ -302,7 +322,7 @@ def _attempt(db, request, key, body: dict, realm: str):
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "quota") else 0))
+                cool_seconds=_cool_seconds(exc))
             last_error = exc
             exclude.add(account.id)
             # 客户端参数错（400/422）与账号无关：换号必然同样失败，
@@ -487,7 +507,7 @@ async def _forward_stream(body: dict, request):
                 shared.note_failure(
                     db, account, kind=exc.kind, detail=exc.detail or exc.message,
                     status=exc.status, model=model, public_platform=PUBLIC,
-                    cool_seconds=(600 if exc.kind in ("auth", "quota") else 0))
+                    cool_seconds=_cool_seconds(exc))
                 last_error = exc
                 exclude.add(account.id)
             except Exception as exc:  # noqa: BLE001

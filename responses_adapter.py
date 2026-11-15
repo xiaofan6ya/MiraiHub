@@ -626,6 +626,20 @@ class ResponsesStreamConverter:
                 "output_tokens_details": {"reasoning_tokens": reasoning_tokens or 0},
                 "total_tokens": u.get("total_tokens", 0) or 0,
             }
+            # 积分（`credit` / `credits` / `cost`）一并带出。这三者在 Responses
+            # 协议里是未知字段，客户端会忽略，但网关自己的用量统计读的是它们。
+            # 以前这里只重建成 OpenAI 标准 usage，于是 `/v1/responses` 的请求
+            # 在用量里全都没有积分 —— 同一个模型走 `/v1/chat/completions` 有，
+            # 走 `/v1/responses` 就没有。上游给了才带，免费模型保持无积分。
+            try:
+                from upstream_compat import usage_credit_value
+
+                credit = usage_credit_value(u)
+            except Exception:  # noqa: BLE001
+                credit = None
+            if credit is not None:
+                for _k in ("credit", "credits", "cost"):
+                    usage[_k] = credit
 
         return {
             "id": self.resp_id,

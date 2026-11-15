@@ -93,6 +93,10 @@ def install() -> None:
             realm=realm,
             icon="raccoon",
             notes="小浣熊（xiaohuanxiong.com）：Bearer JWT，积分制；支持本机扫描 + 扫码授权 + 导入",
+            rating={
+                "tier": "elite",
+                "reason": "不算很稳定，时快时慢，但给的量还行、够用。",
+            },
             extra={
                 "task_runners": list(_task_runners().keys()),
                 # 契约词表内的动作：扫描本机 / 导入（文件或粘贴）/

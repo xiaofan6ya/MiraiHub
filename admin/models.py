@@ -1,8 +1,8 @@
 """ORM 模型：账号、API Key、用量日志。"""
 from datetime import datetime
 
-from sqlalchemy import (Boolean, Column, DateTime, Float, Index, Integer,
-                      String, Text)
+from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Float, Index,
+                      Integer, String, Text, UniqueConstraint)
 
 from admin.db import Base
 
@@ -85,6 +85,17 @@ class Account(Base):
     credits_snapshot = Column(Text, default="")
     #: 快照采集时间，用于展示「N 分钟前更新」并判断数据是否可信。
     credits_synced_at = Column(DateTime, nullable=True)
+    # ---- 上游封禁标记 ------------------------------------------------
+    #: 封禁类型。空串 = 未封；"11140" 等 = 上游返回的封禁业务码。
+    #: 与 status 分开保存的理由：status="disabled" 是「我主动停用」，
+    #: 封禁是「上游拒绝服务」—— 两者混用会让排障失去线索，也无法区分
+    #: 「这个号不可用」到底该不该申诉。
+    ban_kind = Column(String(32), default="")
+    #: 判定为封禁的时间
+    ban_at = Column(DateTime, nullable=True)
+    #: 上游原文摘要（截断），申诉时需要把这段提供给上游
+    ban_reason = Column(String(500), default="")
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -299,6 +310,80 @@ class UsageLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class UsageRollup(Base):
+    """`usage_logs` 的**小时级预聚合**（2026-11-12，2c2g 部署的查询加速层）。
+
+    ## 为什么必须有这张表
+
+    数据看板/模型广场要的都是「窗口内按模型、按平台、按小时」的统计。直接扫
+    `usage_logs` 时，30 天窗口在一台 2c2g 的机器上要 10 秒以上（本机 8.6s，
+    线上更慢），首屏根本打不开。而按小时预聚合之后，同样的窗口只需要读
+    `小时数 × 模型数` 行 —— 30 天 × 8 个模型 ≈ 5760 行，毫秒级。
+
+    ## 写入方式
+
+    每个请求在 `usage_logs` 落库后，由 `admin/rollup.py` 对
+    `(hour, platform, model)` 做一次原子 upsert（`ON DUPLICATE KEY UPDATE`）。
+    多一次单行写，换来统计页 100 倍提速 —— 对「2 核 2G 还要带看板」是正收益。
+
+    ## 口径
+
+    与 `usage_logs` 完全一致：`requests` 含失败，Token/积分/延迟只累计成功
+    （`error_kind in ('', 'success')`）。`*_sum/*_count` 用来还原平均值，
+    不能直接存 avg（跨小时/跨模型合并时会错）。
+    """
+
+    __tablename__ = "usage_rollups"
+    __table_args__ = (
+        # 一个「小时 × 平台 × 模型」只有一行：写入是 upsert，读取是范围扫描。
+        UniqueConstraint("hour", "platform", "model", name="ux_usage_rollups_bucket"),
+        # 看板按时间范围取全部行；模型广场按模型取最近 N 小时。
+        Index("ix_usage_rollups_hour", "hour"),
+        Index("ix_usage_rollups_model_hour", "model", "hour"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    hour = Column(DateTime, nullable=False)
+    platform = Column(String(24), nullable=False, default="")
+    model = Column(String(120), nullable=False, default="")
+    requests = Column(BigInteger, nullable=False, default=0)
+    successes = Column(BigInteger, nullable=False, default=0)
+    prompt_tokens = Column(BigInteger, nullable=False, default=0)
+    completion_tokens = Column(BigInteger, nullable=False, default=0)
+    total_tokens = Column(BigInteger, nullable=False, default=0)
+    cached_tokens = Column(BigInteger, nullable=False, default=0)
+    credits = Column(Float, nullable=False, default=0)
+    latency_sum = Column(BigInteger, nullable=False, default=0)
+    latency_count = Column(BigInteger, nullable=False, default=0)
+    ttfb_sum = Column(BigInteger, nullable=False, default=0)
+    ttfb_count = Column(BigInteger, nullable=False, default=0)
+    #: 单请求生成速度（t/s）的累加与计数（2026-11-12）。
+    #:
+    #: 为什么不能再用 `Σcompletion / Σlatency`：上游排队/重试会把少数请求的
+    #: 总耗时拉到十几分钟，平均值被它们拖垮（实测显示 42 t/s，而日志里每行
+    #: 都是 200+）。这里按**日志页同一口径**逐请求算完再平均：
+    #:   decode = latency − ttfb，0.3s ≤ decode 且 0 < tps ≤ 300 才计入。
+    tps_sum = Column(Float, nullable=False, default=0)
+    tps_count = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UsageRollupState(Base):
+    """预聚合的覆盖水位（单行，id 固定 1）。
+
+    `covered_from`…`covered_to` 是**半开区间**：`[covered_from, covered_to)` 内
+    的每个整点小时都已经从 `usage_logs` 回填过。读取时据此决定「这段走汇总表
+    还是走原表」，也是回填任务只补缺口、不重复扫全表的依据。
+    """
+
+    __tablename__ = "usage_rollup_state"
+
+    id = Column(Integer, primary_key=True)
+    covered_from = Column(DateTime, nullable=True)
+    covered_to = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class IPRequestBucket(Base):
     """Hourly ingress counters, including requests rejected before authentication."""
     __tablename__ = "ip_request_buckets"
@@ -484,6 +569,46 @@ class AdminSession(Base):
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
     revoked_reason = Column(String(48), default="")
+    #: 人类可读的设备标签（"Chrome / Windows"），登录时从 UA 解析。
+    #: 只用于登录管理界面显示，不参与任何校验。
+    device_label = Column(String(120), default="")
+    #: 最近一次活动 IP 的归属描述（注册地 / 内网），仅展示用。
+    ip_label = Column(String(120), default="")
+
+
+class AdminDeviceBan(Base):
+    """登录设备黑名单（「拉黑」）。
+
+    ## 为什么单独一张表，而不是在 `admin_sessions` 上加 `blocked`
+
+    会话是**一次登录**，设备是**一台机器**：踢下线只废掉当前这次登录，
+    拉黑要挡住这台机器**以后的所有登录**。两者的生命周期不同，混在一张表里
+    会出现「踢了又自动登回来」的困惑。
+
+    维度：
+      * `bind_hash` —— 设备标识 Cookie 的摘要（主键维度，必填）；
+      * `fp` —— 可选，前端上报的指纹补充维度。
+
+    匹配规则：`bind_hash` 命中即拒；`fp` 命中**且** `bind_hash` 为空的那种
+    手工拉黑记录也拒（用于「还没登录过、先拉黑指纹」的场景）。
+    """
+
+    __tablename__ = "admin_device_bans"
+    __table_args__ = (
+        Index("ix_admin_device_bans_active", "revoked_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #: 设备标识摘要（与 `admin_sessions.bind_hash` 同算法）。
+    bind_hash = Column(String(64), nullable=False, default="", index=True)
+    #: 补充指纹。
+    fp = Column(String(64), nullable=False, default="", index=True)
+    label = Column(String(120), default="")
+    ip = Column(String(64), default="")
+    reason = Column(String(200), default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    #: 解除拉黑的时间（NULL = 仍在黑名单里）。
+    revoked_at = Column(DateTime, nullable=True)
 
 
 class ClientIdentity(Base):

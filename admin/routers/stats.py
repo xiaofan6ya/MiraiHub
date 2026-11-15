@@ -8,6 +8,7 @@
   失败请求若也计进去会虚高消费；
 - 请求数则统计全部调用（含失败），用于反映真实负载。
 """
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -20,6 +21,8 @@ from admin.db import get_db
 from admin.models import Account, ApiKey, UsageLog
 from admin.platform import scope as platform_scope
 from admin.security import require_admin
+
+logger = logging.getLogger("admin.stats")
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -794,6 +797,728 @@ def _usage_filter_options_agg(db, days, start, end):
     ]
     return {"models": models, "use_cases": cases, "keys": keys,
             "accounts": accounts, "platforms": platforms}
+
+
+# ============================================================================
+# 数据看板（对齐 new-api「模型调用分析」一屏的口径）
+# ============================================================================
+#
+# 为什么单开一个接口而不是往 /api/stats/usage 里塞：
+#
+#   · `/usage` 是「使用记录」页的口径 —— 8 个分组聚合、按积分/请求数画环图，
+#     payload 已经不小；看板要的是**另几件事**：RPM/TPM、吞吐（t/s）、
+#     每个模型的成功率、按模型堆叠的时间序列、调用次数排行。
+#   · 两页的刷新节奏也不同：看板默认「今日 + 按小时」，切 tab 就重算；
+#     使用记录页常挂着 7 天/30 天窗口。
+#   合成一个接口的结果是两边都变慢、缓存键互相打架。
+#
+# 口径与 new-api 的对应关系（见 docs/STATS-MODULES.md）：
+#
+#   总数 / 总积分 / 总 Token / 缓存读取 / 平均 RPM / 平均 TPM
+#       -> summary.requests / credits / total_tokens / cached_tokens / rpm / tpm
+#   性能健康（成功率 / 平均延迟 / 吞吐）
+#       -> summary.success_rate / avg_latency_ms / throughput_tps
+#   消耗分布（按模型堆叠的柱/面积图）
+#       -> distribution.series（top N 模型 + 其他）
+#   调用趋势 / 调用次数分布 / 调用次数排行
+#       -> trend.series / trend.total / ranking
+#
+# 与 /usage 一致的两条铁律：
+#   1. 成功口径 = error_kind in ('', 'success')；Token/积分只算成功，
+#      请求数算全部（含失败），否则失败率会被人为抹平。
+#   2. 一次请求内所有聚合共用同一份 where，卡片与图表不会互相打架。
+
+_DASHBOARD_MAX_HOUR_BUCKETS = 24 * 7
+
+
+def _as_utc_naive(value):
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value and value.tzinfo else value
+
+
+def _bucket_expr(db: Session, granularity: str):
+    if db.get_bind().dialect.name == "sqlite":
+        fmt = "%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d"
+        return func.strftime(fmt, UsageLog.created_at)
+    fmt = "%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d"
+    return func.date_format(UsageLog.created_at, fmt)
+
+
+def _bucket_keys(start: datetime, end: datetime, granularity: str):
+    """把时间窗铺成连续桶：没有请求的那一小时也要留在横轴上。
+
+    不补空桶的图会「把 3 天的空白压成一条线」，看起来像服务一直很忙。
+    """
+    step = timedelta(hours=1) if granularity == "hour" else timedelta(days=1)
+    cursor = start.replace(minute=0, second=0, microsecond=0) if granularity == "hour" \
+        else start.replace(hour=0, minute=0, second=0, microsecond=0)
+    keys = []
+    while cursor <= end and len(keys) <= 4000:
+        keys.append(cursor.strftime("%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d"))
+        cursor += step
+    return keys
+
+
+@router.get("/dashboard")
+def dashboard_stats(
+    days: int = Query(default=1, ge=1, le=90),
+    granularity: str = "hour",
+    platform: str = "",
+    model: str = "",
+    top_models: int = Query(default=6, ge=1, le=12),
+    _: bool = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """数据看板：一屏拿齐 KPI / 性能健康 / 消耗分布 / 调用分析。
+
+    `days` 是**滚动窗口**（近 N 个 24 小时），与 `/usage` 的 `days` 一致。
+    小时粒度只在 7 天内有效：再长就自动降级成按天 —— 30 天 × 24 桶 = 720 根
+    柱子，前端画出来全是细线，没有信息量，还白白多扫一遍。
+    """
+    granularity = "day" if str(granularity).lower() == "day" else "hour"
+    if granularity == "hour" and days > 7:
+        granularity = "day"
+    platform = (platform or "").strip().lower()
+    if platform in ("all", "*"):
+        platform = ""
+    model = (model or "").strip()
+
+    key = _shared_cache_key("dashboard", (days, granularity, platform, model, top_models))
+    ttl = _stats_ttl_for_days(days)
+    return _shared_cached(
+        key,
+        lambda: _dashboard_agg(db, days, granularity, platform, model, top_models),
+        ttl,
+    )
+
+
+@router.get("/model-market")
+def model_market(hours: int = Query(default=24, ge=1, le=168),
+                 _: bool = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """模型广场：**每个模型一张卡**要的全部数字（参考 new-api 的模型广场）。
+
+    卡片上要的是「这东西现在能不能用、多少钱、快不快」。数据来源三处：
+
+      · 近 N 小时用量 —— 小时汇总表（`usage_rollups`），只读几行；
+      · 定价 —— `model_configs.credit_multiplier`（0 = 免费）；
+      · 可用性 —— 活跃账号数 − 该模型当前处于冷却的账号数。
+
+    返回按**归一后的模型**聚合（同一个模型在多平台是同一个模型，价格与可用性
+    分平台列在 `platforms` 里），前端据此画卡片/列表。
+    """
+    from admin import rollup as rollup_mod
+    from admin.model_alias import canonical_key, display_name
+
+    hours = max(1, min(int(hours or 24), 168))
+    end = datetime.utcnow()
+    start = end - timedelta(hours=hours)
+
+    def _compute():
+        labels = platform_labels(db)
+        model_labels = _model_display_map(db)
+        try:
+            rollup_mod.ensure_coverage(db, budget=0.4)
+            covered = rollup_mod.coverage(db)
+            rows = rollup_mod.window_rows(db, start, end, covered)
+            source = "rollup"
+        except Exception as exc:  # noqa: BLE001 - 汇总层故障时退回原表
+            logger.warning("模型广场读汇总表失败，降级原表：%s", exc)
+            covered = (None, None)
+            rows = rollup_mod.window_rows(db, start, end, covered)
+            source = "raw"
+
+        # 定价（同模型可能多个平台不同价，全部列出来）
+        from admin.models import ModelConfig
+
+        pricing: dict[str, list] = {}
+        for config in db.query(ModelConfig).filter(ModelConfig.enabled == 1).all():
+            mid = config.model_id or ""
+            key = canonical_key(mid, model_labels.get(mid) or "")
+            pricing.setdefault(key, []).append({
+                "platform": (config.platform or "").lower(),
+                "platform_label": labels.get((config.platform or "").lower())
+                                  or (config.platform or "未知平台"),
+                "model_id": mid,
+                "multiplier": float(config.credit_multiplier or 0),
+                "free": not config.credit_multiplier,
+            })
+
+        # 可用性：活跃账号 − 冷却中的账号（模型级冷却）
+        from admin.models import Account, AccountModelCooldown
+
+        active: dict[str, int] = {}
+        now = datetime.utcnow()
+        for platform, count in db.query(Account.platform, func.count(Account.id)).filter(
+                Account.status == "active",
+                or_(Account.cool_until.is_(None), Account.cool_until <= now)).group_by(
+                Account.platform).all():
+            active[(platform or "").lower()] = int(count or 0)
+        exhausted: dict[str, int] = {}
+        for model_name, count in db.query(
+                AccountModelCooldown.model, func.count(AccountModelCooldown.id)).filter(
+                AccountModelCooldown.until > now).group_by(
+                AccountModelCooldown.model).all():
+            exhausted[model_name or ""] = int(count or 0)
+
+        items: dict[str, dict] = {}
+        for (plat, mid), values in rows.items():
+            key = canonical_key(mid, model_labels.get(mid) or "")
+            entry = items.setdefault(key, {
+                "key": key,
+                "name": display_name(key, model_labels.get(mid) or mid or "未知模型"),
+                "requests": 0, "successes": 0, "tokens": 0, "credits": 0.0,
+                "latency_sum": 0, "latency_count": 0,
+                "ttfb_sum": 0, "ttfb_count": 0, "completion_tokens": 0,
+                "tps_sum": 0.0, "tps_count": 0,
+                "platforms": set(), "models": set(),
+            })
+            for name in ("requests", "successes", "tokens", "credits",
+                         "latency_sum", "latency_count", "ttfb_sum",
+                         "ttfb_count", "completion_tokens", "tps_sum", "tps_count"):
+                entry[name] += values.get("total_tokens" if name == "tokens" else name) or 0
+            entry["platforms"].add(plat)
+            entry["models"].add(mid)
+
+        # 已配置但窗口内没有流量的模型也要出现在广场里（显示「0 次调用」），
+# 否则用户会以为「这个模型没被收录」。
+        for key, prices in pricing.items():
+            if key in items:
+                continue
+            first = prices[0]["model_id"]
+            items[key] = {
+                "key": key,
+                "name": display_name(key, model_labels.get(first) or first or "未知模型"),
+                "requests": 0, "successes": 0, "tokens": 0, "credits": 0.0,
+                "latency_sum": 0, "latency_count": 0,
+                "ttfb_sum": 0, "ttfb_count": 0, "completion_tokens": 0,
+                "tps_sum": 0.0, "tps_count": 0,
+                "platforms": {item["platform"] for item in prices},
+                "models": {item["model_id"] for item in prices},
+            }
+
+        out = []
+        for key, entry in items.items():
+            req = int(entry["requests"])
+            ok = int(entry["successes"])
+            prices = pricing.get(key, [])
+            platforms = sorted(entry["platforms"])
+            capacity = sum(active.get(plat, 0) for plat in platforms) if platforms else 0
+            blocked = sum(exhausted.get(mid, 0) for mid in entry["models"])
+            out.append({
+                "key": key,
+                "name": entry["name"],
+                "platforms": platforms,
+                "platform_labels": [labels.get(plat) or plat or "未知平台" for plat in platforms],
+                "models": sorted(entry["models"]),
+                "requests": req,
+                "success_rate": round(ok / req, 4) if req else None,
+                "tokens": int(entry["tokens"]),
+                "credits": round(float(entry["credits"]), 4),
+                "avg_latency_ms": (int(round(entry["latency_sum"] / entry["latency_count"]))
+                                   if entry["latency_count"] else 0),
+                "avg_ttfb_ms": (int(round(entry["ttfb_sum"] / entry["ttfb_count"]))
+                                if entry["ttfb_count"] else 0),
+                "tps": (round(entry["tps_sum"] / entry["tps_count"], 2)
+                        if entry["tps_count"] else 0.0),
+                "pricing": prices,
+                "free": bool(prices) and all(item["free"] for item in prices),
+                "min_multiplier": min((item["multiplier"] for item in prices), default=0.0),
+                "active_accounts": capacity,
+                "exhausted_accounts": blocked,
+                "available": bool(prices) and (capacity - blocked > 0),
+            })
+
+        out.sort(key=lambda item: (-item["requests"], item["name"]))
+        return {
+            "window_hours": hours,
+            "start": start.isoformat() + "Z",
+            "end": end.isoformat() + "Z",
+            "source": source,
+            "items": out,
+            "total": len(out),
+            "available_models": sum(1 for item in out if item["available"]),
+        }
+
+    key = _shared_cache_key("model_market", (hours,))
+    return _shared_cached(key, _compute, ttl=30.0)
+
+
+def _dashboard_agg(db: Session, days: int, granularity: str, platform: str,
+                   model: str, top_models: int) -> dict:
+    """数据看板聚合入口：优先读小时级汇总表，异常时降级为原表扫描。
+
+    为什么要有这条降级路径：汇总表是「加速层」，它的写入/回填任何一环出问题，
+    都不能让看板变成白的。原表那条路慢，但永远是对的。
+    """
+    # 归一化放在这里而不是只放在路由上：测试/内部调用也走同一条口径，
+    # 免得出现「接口按天、直调按小时」两套完全不同的桶数。
+    if str(granularity).lower() != "day" and (days or 0) > 7:
+        granularity = "day"
+    elif str(granularity).lower() == "day":
+        granularity = "day"
+    else:
+        granularity = "hour"
+
+    from admin import rollup as rollup_mod
+
+    try:
+        # 同步补一小段缺口（最多 0.4 秒）：让首次请求就能用上汇总表。
+        # 更长的历史由 server 启动时的后台线程补齐，绝不阻塞请求。
+        rollup_mod.ensure_coverage(db, budget=0.4)
+        return _dashboard_from_rollup(db, days, granularity, platform, model, top_models)
+    except Exception as exc:  # noqa: BLE001 - 汇总层永远不能把看板带崩
+        logger.warning("汇总表读取失败，降级为原表聚合：%s", exc)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return _dashboard_from_raw(db, days, granularity, platform, model, top_models)
+
+
+def _dashboard_from_rollup(db: Session, days: int, granularity: str, platform: str,
+                           model: str, top_models: int) -> dict:
+    """汇总表版本：只读 `小时数 × 模型数` 行，30 天窗口也是毫秒级。"""
+    from admin import rollup as rollup_mod
+
+    labels = platform_labels(db)
+    model_labels = _model_display_map(db)
+    end = datetime.utcnow()
+    start = end - timedelta(days=max(1, days))
+    minutes = max(1.0, (end - start).total_seconds() / 60.0)
+
+    def _label_platform(value: str) -> str:
+        return labels.get((value or "").lower()) or (value or "未知平台")
+
+    def _label_model(value: str) -> str:
+        return model_labels.get(value or "") or (value or "未知模型")
+
+    fields = rollup_mod._SUM_FIELDS
+    covered = rollup_mod.coverage(db)
+    # 两段都让 SQL 先做聚合：汇总表原始行是「小时 × 平台 × 模型」，
+    # 30 天窗口两万多行，全拉到 Python 里反而更慢（2c2g 上实测翻倍）。
+    rows = rollup_mod.window_rows(db, start, end, covered,
+                                  platform=platform, model=model)
+
+    total = {name: 0 for name in fields}
+    by_model: dict[str, dict] = {}
+    by_platform: dict[str, dict] = {}
+    for (plat, mid), values in rows.items():
+        for name in fields:
+            total[name] += values.get(name) or 0
+        target = by_model.setdefault(mid, {
+            "values": {name: 0 for name in fields}, "platforms": set()})
+        for name in fields:
+            target["values"][name] += values.get(name) or 0
+        target["platforms"].add(plat)
+        slot = by_platform.setdefault(plat, {name: 0 for name in fields})
+        for name in fields:
+            slot[name] += values.get(name) or 0
+
+    def _avg(total_sum, count):
+        return int(round(total_sum / count)) if count else 0
+
+    def _tps(values):
+        """平均生成速度：逐请求 t/s 的算术平均（与日志页同一口径）。
+
+        旧实现用 `Σcompletion / Σlatency`，被少数排队/重试十几分钟的请求拖垮
+        （实测卡片 42 t/s、日志每行 200+）。没有有效样本时退回区间总吞吐。
+        """
+        count = values.get("tps_count") or 0
+        if count:
+            return round(float(values.get("tps_sum") or 0) / count, 2)
+        latency = values.get("latency_sum") or 0
+        if not latency:
+            return 0.0
+        return round(float(values.get("completion_tokens") or 0) * 1000.0 / latency, 2)
+
+    requests = int(total["requests"])
+    summary = {
+        "requests": requests,
+        "successes": int(total["successes"]),
+        "failures": max(0, requests - int(total["successes"])),
+        "success_rate": round(total["successes"] / requests, 4) if requests else None,
+        "credits": round(float(total["credits"]), 4),
+        "total_tokens": int(total["total_tokens"]),
+        "prompt_tokens": int(total["prompt_tokens"]),
+        "completion_tokens": int(total["completion_tokens"]),
+        "cached_tokens": int(total["cached_tokens"]),
+        "cache_hit_rate": (round(total["cached_tokens"] / total["prompt_tokens"], 4)
+                           if total["prompt_tokens"] else None),
+        "rpm": round(requests / minutes, 2),
+        "tpm": round(float(total["total_tokens"]) / minutes, 2),
+        "avg_latency_ms": _avg(total["latency_sum"], total["latency_count"]),
+        "avg_ttfb_ms": _avg(total["ttfb_sum"], total["ttfb_count"]),
+        "throughput_tps": _tps(total),
+        "window_minutes": int(minutes),
+    }
+
+    models = []
+    for mid, entry in by_model.items():
+        values = entry["values"]
+        req = int(values["requests"])
+        ok = int(values["successes"])
+        models.append({
+            "model": mid or "",
+            "label": _label_model(mid),
+            "platform": (sorted(entry["platforms"])[0] if len(entry["platforms"]) == 1 else ""),
+            "platforms": sorted(entry["platforms"]),
+            "requests": req,
+            "successes": ok,
+            "failures": max(0, req - ok),
+            "success_rate": round(ok / req, 4) if req else None,
+            "tokens": int(values["total_tokens"]),
+            "credits": round(float(values["credits"]), 4),
+            "avg_latency_ms": _avg(values["latency_sum"], values["latency_count"]),
+            "avg_ttfb_ms": _avg(values["ttfb_sum"], values["ttfb_count"]),
+            "tps": _tps(values),
+        })
+    models.sort(key=lambda item: item["requests"], reverse=True)
+
+    platforms = []
+    for value, values in by_platform.items():
+        req = int(values["requests"])
+        ok = int(values["successes"])
+        platforms.append({
+            "value": value,
+            "label": _label_platform(value),
+            "requests": req,
+            "success_rate": round(ok / req, 4) if req else None,
+            "tokens": int(values["total_tokens"]),
+            "credits": round(float(values["credits"]), 4),
+        })
+    platforms.sort(key=lambda item: item["requests"], reverse=True)
+
+    # ── 时间序列（按模型堆叠，Top N + 其他）──────────────────────────────
+    buckets = _bucket_keys(start, end, granularity)
+    index = {key: pos for pos, key in enumerate(buckets)}
+    per_model: dict[str, dict] = {}
+    total_requests = [0] * len(buckets)
+    for row in rollup_mod.window_series(db, start, end, granularity, covered,
+                                        platform=platform, model=model):
+        pos = index.get(row["bucket"])
+        if pos is None:
+            continue
+        mid = row["model"] or ""
+        entry = per_model.setdefault(mid, {
+            "name": _label_model(mid),
+            "requests": [0] * len(buckets),
+            "credits": [0.0] * len(buckets),
+            "tokens": [0] * len(buckets),
+        })
+        entry["requests"][pos] += int(row["requests"] or 0)
+        entry["credits"][pos] = round(entry["credits"][pos] + float(row["credits"] or 0), 4)
+        entry["tokens"][pos] += int(row["total_tokens"] or 0)
+        total_requests[pos] += int(row["requests"] or 0)
+
+    ordered = sorted(per_model.values(),
+                     key=lambda item: sum(item["credits"]) or sum(item["tokens"]),
+                     reverse=True)
+    head, tail = ordered[:top_models], ordered[top_models:]
+    distribution_series = []
+    for item in head:
+        metric = "credits" if sum(item["credits"]) else "tokens"
+        distribution_series.append({
+            "name": item["name"],
+            "metric": metric,
+            "values": [round(v, 4) for v in item["credits"]] if metric == "credits"
+                      else item["tokens"],
+        })
+    if tail:
+        use_credits = any(sum(item["credits"]) for item in tail)
+        merged = [0.0] * len(buckets)
+        for item in tail:
+            source = item["credits"] if (use_credits and sum(item["credits"])) else item["tokens"]
+            merged = [round(a + b, 4) for a, b in zip(merged, source)]
+        distribution_series.append({
+            "name": "其他 %d 个模型" % len(tail),
+            "metric": "credits" if use_credits else "tokens",
+            "values": merged,
+        })
+
+    ranking = []
+    for item in sorted(models, key=lambda row: row["requests"], reverse=True):
+        ranking.append({**item,
+                        "share": round(item["requests"] / requests, 4) if requests else 0.0})
+
+    return {
+        "window": {
+            "days": days,
+            "granularity": granularity,
+            "start": start.isoformat() + "Z",
+            "end": end.isoformat() + "Z",
+            "minutes": int(minutes),
+        },
+        "filters": {"platform": platform, "model": model},
+        "platform_label": _label_platform(platform) if platform else "全部平台",
+        "summary": summary,
+        "models": models,
+        "platforms": platforms,
+        "distribution": {"buckets": buckets, "series": distribution_series},
+        "trend": {
+            "buckets": buckets,
+            "total_requests": total_requests,
+            "series": [{"name": item["name"], "requests": item["requests"],
+                        "tokens": item["tokens"], "credits": item["credits"]}
+                       for item in head],
+        },
+        "ranking": ranking,
+        "errors": _error_breakdown(db, start, end, platform=platform, model=model),
+        "source": "rollup",
+    }
+
+
+def _error_breakdown(db: Session, start: datetime, end: datetime, **filters) -> list[dict]:
+    """失败分类。汇总表只存成功量，失败原因必须回原表取。
+
+    失败行远少于总行数，而且 `(error_kind, created_at)` 有索引，代价可以接受。
+    """
+    ok = UsageLog.error_kind.in_(_OK_KINDS)
+    query = db.query(UsageLog.error_kind, func.count(UsageLog.id)).filter(
+        UsageLog.created_at >= start, UsageLog.created_at <= end,
+        or_(UsageLog.error_kind.is_(None), ~UsageLog.error_kind.in_(_OK_KINDS)))
+    platform = (filters.get("platform") or "").strip().lower()
+    if platform:
+        query = query.filter(func.lower(UsageLog.platform) == platform)
+    model = (filters.get("model") or "").strip()
+    if model:
+        query = query.filter(UsageLog.model == model)
+    rows = query.group_by(UsageLog.error_kind).order_by(
+        func.count(UsageLog.id).desc()).limit(8).all()
+    return [{"kind": kind or "未分类", "count": int(count or 0)}
+            for kind, count in rows if count]
+
+
+def _dashboard_from_raw(db: Session, days: int, granularity: str, platform: str,
+                        model: str, top_models: int) -> dict:
+    labels = platform_labels(db)
+    model_labels = _model_display_map(db)
+
+    end = datetime.utcnow()
+    start = end - timedelta(days=max(1, days))
+    minutes = max(1.0, (end - start).total_seconds() / 60.0)
+
+    def _label_platform(value: str) -> str:
+        return labels.get((value or "").lower()) or (value or "未知平台")
+
+    def _label_model(value: str) -> str:
+        return model_labels.get(value or "") or (value or "未知模型")
+
+    filters = [UsageLog.created_at >= start, UsageLog.created_at <= end]
+    if platform:
+        _platform_filter(filters, db, platform, "")
+    if model:
+        filters.append(UsageLog.model == model)
+
+    ok = UsageLog.error_kind.in_(_OK_KINDS)
+
+    # ── 概览（KPI 行 + 性能健康）─────────────────────────────────────────
+    total_req = db.query(func.count(UsageLog.id)).filter(*filters).scalar() or 0
+    (ok_req, tok, ptok, ctok, cached, credits,
+     avg_latency, avg_ttfb, sum_latency) = (
+        db.query(
+            func.count(UsageLog.id),
+            func.coalesce(func.sum(UsageLog.total_tokens), 0),
+            func.coalesce(func.sum(UsageLog.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLog.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLog.cached_tokens), 0),
+            func.coalesce(func.sum(UsageLog.credits), 0.0),
+            func.avg(UsageLog.latency_ms),
+            func.avg(UsageLog.ttfb_ms),
+            func.coalesce(func.sum(UsageLog.latency_ms), 0),
+        ).filter(*filters, ok).one()
+    )
+    ok_req = int(ok_req or 0)
+    total_req = int(total_req or 0)
+    # 吞吐：生成阶段的 Token/秒，分母用 Σlatency 而不是「请求数 × 平均延迟」——
+    # 后者会被一两条超长请求平滑掉。
+    throughput = (float(ctok or 0) * 1000.0 / float(sum_latency)) if sum_latency else 0.0
+    summary = {
+        "requests": total_req,
+        "successes": ok_req,
+        "failures": max(0, total_req - ok_req),
+        "success_rate": round(ok_req / total_req, 4) if total_req else None,
+        "credits": round(float(credits or 0), 4),
+        "total_tokens": int(tok or 0),
+        "prompt_tokens": int(ptok or 0),
+        "completion_tokens": int(ctok or 0),
+        "cached_tokens": int(cached or 0),
+        "cache_hit_rate": (round(float(cached or 0) / float(ptok), 4)
+                           if ptok else None),
+        "rpm": round(total_req / minutes, 2),
+        "tpm": round(float(tok or 0) / minutes, 2),
+        "avg_latency_ms": int(avg_latency) if avg_latency else 0,
+        "avg_ttfb_ms": int(avg_ttfb) if avg_ttfb else 0,
+        "throughput_tps": round(throughput, 2),
+        "window_minutes": int(minutes),
+    }
+
+    # ── 按模型 / 平台（成功率必须含失败，所以用 case 汇总而不是 _ok_filter）──
+    model_rows = (
+        db.query(
+            UsageLog.model,
+            func.count(UsageLog.id),
+            func.sum(case((ok, 1), else_=0)),
+            func.sum(case((ok, UsageLog.total_tokens), else_=0)),
+            func.sum(case((ok, UsageLog.credits), else_=0.0)),
+            func.avg(case((ok, UsageLog.latency_ms), else_=None)),
+            func.avg(case((ok, UsageLog.ttfb_ms), else_=None)),
+            func.sum(case((ok, UsageLog.completion_tokens), else_=0)),
+            func.sum(case((ok, UsageLog.latency_ms), else_=0)),
+        )
+        .filter(*filters)
+        .group_by(UsageLog.model)
+        .order_by(func.count(UsageLog.id).desc())
+        .all()
+    )
+
+    models = []
+    for (mid, req, okn, tokens, cred, lat, ttfb, ctoks, latsum) in model_rows:
+        req = int(req or 0)
+        okn = int(okn or 0)
+        models.append({
+            "model": mid or "",
+            "label": _label_model(mid),
+            "requests": req,
+            "successes": okn,
+            "failures": max(0, req - okn),
+            "success_rate": round(okn / req, 4) if req else None,
+            "tokens": int(tokens or 0),
+            "credits": round(float(cred or 0), 4),
+            "avg_latency_ms": int(lat) if lat else 0,
+            "avg_ttfb_ms": int(ttfb) if ttfb else 0,
+            "tps": round(float(ctoks or 0) * 1000.0 / float(latsum), 2) if latsum else 0.0,
+        })
+
+    platform_rows = (
+        db.query(
+            UsageLog.platform,
+            func.count(UsageLog.id),
+            func.sum(case((ok, 1), else_=0)),
+            func.sum(case((ok, UsageLog.total_tokens), else_=0)),
+            func.sum(case((ok, UsageLog.credits), else_=0.0)),
+        )
+        .filter(*filters)
+        .group_by(UsageLog.platform)
+        .order_by(func.count(UsageLog.id).desc())
+        .all()
+    )
+    platforms = []
+    for (value, req, okn, tokens, cred) in platform_rows:
+        req = int(req or 0)
+        okn = int(okn or 0)
+        platforms.append({
+            "value": (value or "").lower(),
+            "label": _label_platform(value),
+            "requests": req,
+            "success_rate": round(okn / req, 4) if req else None,
+            "tokens": int(tokens or 0),
+            "credits": round(float(cred or 0), 4),
+        })
+
+    # ── 时间序列（按模型堆叠）────────────────────────────────────────────
+    bucket = _bucket_expr(db, granularity)
+    series_rows = (
+        db.query(
+            bucket.label("b"),
+            UsageLog.model,
+            func.sum(case((ok, 1), else_=0)),
+            func.sum(case((ok, UsageLog.credits), else_=0.0)),
+            func.sum(case((ok, UsageLog.total_tokens), else_=0)),
+        )
+        .filter(*filters)
+        .group_by("b", UsageLog.model)
+        .order_by("b")
+        .all()
+    )
+
+    buckets = _bucket_keys(start, end, granularity)
+    index = {key: pos for pos, key in enumerate(buckets)}
+    per_model: dict[str, dict] = {}
+    total_requests = [0] * len(buckets)
+    for (b, mid, req, cred, tokens) in series_rows:
+        pos = index.get(b)
+        if pos is None:
+            continue
+        mid = mid or ""
+        entry = per_model.get(mid)
+        if entry is None:
+            entry = per_model[mid] = {
+                "name": _label_model(mid),
+                "requests": [0] * len(buckets),
+                "credits": [0.0] * len(buckets),
+                "tokens": [0] * len(buckets),
+            }
+        entry["requests"][pos] += int(req or 0)
+        entry["credits"][pos] = round(entry["credits"][pos] + float(cred or 0), 4)
+        entry["tokens"][pos] += int(tokens or 0)
+        total_requests[pos] += int(req or 0)
+
+    # 堆叠图只画前 N 个模型，其余滚成「其他 N 个模型」——
+    # 20 个模型的图例在 1080p 上会占掉半屏，且每根柱子被切成细丝。
+    ordered = sorted(per_model.values(),
+                     key=lambda item: sum(item["credits"]) or sum(item["tokens"]),
+                     reverse=True)
+    head, tail = ordered[:top_models], ordered[top_models:]
+    distribution_series = [
+        {"name": item["name"], "values": item["credits"] or item["tokens"],
+         "metric": "credits" if sum(item["credits"]) else "tokens"}
+        for item in head
+    ]
+    if tail:
+        merged = [0.0] * len(buckets)
+        for item in tail:
+            values = item["credits"] if sum(item["credits"]) else item["tokens"]
+            merged = [round(a + b, 4) for a, b in zip(merged, values)]
+        distribution_series.append({"name": f"其他 {len(tail)} 个模型", "values": merged,
+                                    "metric": "credits" if any(merged) else "tokens"})
+
+    trend_series = [{"name": item["name"], "requests": item["requests"],
+                     "tokens": item["tokens"], "credits": item["credits"]}
+                    for item in head]
+
+    # ── 调用次数排行 ────────────────────────────────────────────────────
+    ranking = sorted(models, key=lambda item: item["requests"], reverse=True)
+    for item in ranking:
+        item["share"] = round(item["requests"] / total_req, 4) if total_req else 0.0
+
+    # ── 失败分类（风控/上游的入口）───────────────────────────────────────
+    error_rows = (
+        db.query(UsageLog.error_kind, func.count(UsageLog.id))
+        .filter(*filters,
+                or_(UsageLog.error_kind.is_(None), ~UsageLog.error_kind.in_(_OK_KINDS)))
+        .group_by(UsageLog.error_kind)
+        .order_by(func.count(UsageLog.id).desc())
+        .limit(8)
+        .all()
+    )
+    errors = [{"kind": kind or "未分类", "count": int(count or 0)}
+              for kind, count in error_rows if count]
+
+    return {
+        "window": {
+            "days": days,
+            "granularity": granularity,
+            "start": start.isoformat() + "Z",
+            "end": end.isoformat() + "Z",
+            "minutes": int(minutes),
+        },
+        "filters": {"platform": platform, "model": model},
+        "platform_label": _label_platform(platform) if platform else "全部平台",
+        "summary": summary,
+        "models": models,
+        "platforms": platforms,
+        "distribution": {
+            "buckets": buckets,
+            "series": distribution_series,
+        },
+        "trend": {
+            "buckets": buckets,
+            "total_requests": total_requests,
+            "series": trend_series,
+        },
+        "ranking": ranking,
+        "errors": errors,
+    }
 
 
 @router.get("/memory")

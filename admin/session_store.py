@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from admin.models import AdminSession
+from admin.models import AdminDeviceBan, AdminSession
 
 _logger = logging.getLogger("admin.session_store")
 
@@ -80,6 +80,14 @@ def new_sid() -> str:
 # 签发
 # ---------------------------------------------------------------------------
 
+def _revoke_row(db: Session, row: AdminSession, reason: str) -> None:
+    """吊销单条会话（不提交，由调用方决定事务边界）。"""
+    if row.revoked_at is not None:
+        return
+    row.revoked_at = datetime.utcnow()
+    row.revoked_reason = (reason or "revoked")[:48]
+
+
 def revoke_all(db: Session, subject: str, reason: str,
                except_sid: str | None = None) -> int:
     """吊销某账号的全部有效会话。返回吊销条数。
@@ -106,10 +114,34 @@ def revoke_all(db: Session, subject: str, reason: str,
 def create_session(db: Session, *, subject: str, token: str, ip: str = "",
                    user_agent: str = "", fingerprint: str = "",
                    device_id: str = "", ttl_seconds: int = 4 * 3600,
-                   single: bool = True, sid: str | None = None) -> AdminSession:
-    """新建一条会话；`single=True` 时先吊销该账号的全部旧会话。"""
+                   single: bool = True, sid: str | None = None,
+                   max_devices: int = 0, device_label: str = "") -> AdminSession:
+    """新建一条会话；`single=True` 时先吊销该账号的全部旧会话。
+
+    ## 多设备（2026-11-10）
+
+    `single=False` 时不再踢掉旧会话 —— 手机、平板、几台电脑可以同时在线。
+    「凭证不可共享」这件事由**设备绑定**保证（Cookie 拷到别的机器过不了
+    `bind_hash` 校验），不需要靠「只许一台设备」来实现。
+
+    `max_devices > 0` 时保留上限：超出就按 `last_seen_at` 从旧到新踢掉最老的
+    一条。防的是「同一账号被反复登录刷出几十条会话」，不是防多设备。
+    """
     if single:
         revoke_all(db, subject, "superseded_by_new_login")
+    elif max_devices > 0:
+        active = (db.query(AdminSession)
+                  .filter(AdminSession.subject == subject,
+                          AdminSession.revoked_at.is_(None),
+                          AdminSession.expires_at > datetime.utcnow())
+                  .order_by(AdminSession.last_seen_at.asc())
+                  .all())
+        # 给「这条新会话」留一个位置
+        overflow = len(active) - max_devices + 1
+        for row in active[:max(0, overflow)]:
+            _logger.info("设备数超上限，吊销最旧会话 sid=%s subject=%s",
+                         row.sid[:12], subject)
+            _revoke_row(db, row, "device_limit")
     now = datetime.utcnow()
     row = AdminSession(
         sid=sid or new_sid(),
@@ -122,11 +154,48 @@ def create_session(db: Session, *, subject: str, token: str, ip: str = "",
         created_at=now,
         last_seen_at=now,
         expires_at=now + timedelta(seconds=max(60, int(ttl_seconds))),
+        device_label=(device_label or describe_ua(user_agent))[:120],
     )
     db.add(row)
     db.commit()
     db.refresh(row)
     return row
+
+
+def describe_ua(user_agent: str) -> str:
+    """把 UA 压成「浏览器 / 系统」，给登录管理界面看。
+
+    不做精细解析：这里只需要「一眼认出是哪台机器」，
+    真正的设备身份由 `wb_device` Cookie 的摘要承担。
+    """
+    ua = str(user_agent or "")
+    if not ua:
+        return "未知设备"
+    low = ua.lower()
+    if "android" in low:
+        os_name = "Android"
+    elif "iphone" in low or "ipad" in low or "ios" in low:
+        os_name = "iOS"
+    elif "windows" in low:
+        os_name = "Windows"
+    elif "mac os" in low or "macintosh" in low:
+        os_name = "macOS"
+    elif "linux" in low:
+        os_name = "Linux"
+    else:
+        os_name = "其它"
+    for token, name in (("edg/", "Edge"), ("chrome/", "Chrome"),
+                        ("firefox/", "Firefox"), ("safari/", "Safari"),
+                        ("okhttp", "OkHttp"), ("python-requests", "脚本")):
+        if token in low:
+            browser = name
+            break
+    else:
+        browser = "未知浏览器"
+    # 安卓 WebView / 客户端外壳里常带 App 标识
+    if "miraihub" in low:
+        browser = "MiraiHub 客户端"
+    return "%s / %s" % (browser, os_name)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +287,129 @@ def active_session_of(db: Session, subject: str) -> AdminSession | None:
                     AdminSession.expires_at > datetime.utcnow())
             .order_by(AdminSession.id.desc())
             .first())
+
+
+# ---------------------------------------------------------------------------
+# 登录管理：设备列表 / 踢下线 / 拉黑
+# ---------------------------------------------------------------------------
+def list_sessions(db: Session, subject: str, *, current_sid: str = "",
+                  include_revoked: bool = False, limit: int = 50) -> list[dict]:
+    """登录设备一览（按最近活跃排序）。
+
+    `current_sid` 用来标出「就是你现在这台」，前端据此不给自己画踢人按钮。
+    """
+    now = datetime.utcnow()
+    q = db.query(AdminSession).filter(AdminSession.subject == subject)
+    if not include_revoked:
+        q = q.filter(AdminSession.revoked_at.is_(None))
+    rows = (q.order_by(AdminSession.last_seen_at.desc())
+            .limit(max(1, min(int(limit or 50), 200)))
+            .all())
+    out: list[dict] = []
+    for row in rows:
+        expired = row.expires_at is not None and row.expires_at <= now
+        if row.revoked_at is not None:
+            state = "revoked"
+        elif expired:
+            state = "expired"
+        else:
+            state = "active"
+        out.append({
+            "sid": row.sid,
+            "current": bool(current_sid) and row.sid == current_sid,
+            "state": state,
+            "label": row.device_label or "未知设备",
+            "ip": row.ip or "",
+            "fp": (row.fp or "")[:12],
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+            "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+            "revoked_reason": row.revoked_reason or "",
+        })
+    return out
+
+
+def revoke_others(db: Session, subject: str, keep_sid: str) -> int:
+    """踢掉除当前会话外的所有设备（"一键登出其它设备"）。"""
+    now = datetime.utcnow()
+    rows = (db.query(AdminSession)
+            .filter(AdminSession.subject == subject,
+                    AdminSession.revoked_at.is_(None),
+                    AdminSession.sid != keep_sid)
+            .all())
+    for row in rows:
+        row.revoked_at = now
+        row.revoked_reason = "kick_others"
+    if rows:
+        db.commit()
+        _logger.info("已踢下线 %d 台设备 subject=%s", len(rows), subject)
+    return len(rows)
+
+
+def ban_device(db: Session, *, bind_hash: str, fp: str = "", label: str = "",
+               ip: str = "", reason: str = "", subject: str = "") -> AdminDeviceBan:
+    """把一台设备拉黑，并立刻吊销它现有的会话。"""
+    row = (db.query(AdminDeviceBan)
+           .filter(AdminDeviceBan.bind_hash == bind_hash,
+                   AdminDeviceBan.revoked_at.is_(None))
+           .first())
+    if row is None:
+        row = AdminDeviceBan(bind_hash=bind_hash or "", fp=(fp or "")[:64],
+                             label=(label or "")[:120], ip=(ip or "")[:64],
+                             reason=(reason or "")[:200])
+        db.add(row)
+    else:
+        row.reason = (reason or row.reason or "")[:200]
+        row.revoked_at = None
+    # 该设备的现有会话立刻失效
+    if bind_hash:
+        live = (db.query(AdminSession)
+                .filter(AdminSession.bind_hash == bind_hash,
+                        AdminSession.revoked_at.is_(None))
+                .all())
+        for session in live:
+            _revoke_row(db, session, "device_banned")
+    db.commit()
+    db.refresh(row)
+    _logger.warning("设备已拉黑 subject=%s label=%s ip=%s", subject, label, ip)
+    return row
+
+
+def unban_device(db: Session, ban_id: int) -> bool:
+    row = db.query(AdminDeviceBan).filter(AdminDeviceBan.id == ban_id).first()
+    if row is None or row.revoked_at is not None:
+        return False
+    row.revoked_at = datetime.utcnow()
+    db.commit()
+    return True
+
+
+def banned_for(db: Session, *, bind_hash: str = "", fp: str = "") -> AdminDeviceBan | None:
+    """这台设备是否在黑名单里（登录前调用）。"""
+    q = db.query(AdminDeviceBan).filter(AdminDeviceBan.revoked_at.is_(None))
+    if bind_hash:
+        row = q.filter(AdminDeviceBan.bind_hash == bind_hash).first()
+        if row is not None:
+            return row
+    if fp:
+        row = q.filter(AdminDeviceBan.fp == fp).first()
+        if row is not None:
+            return row
+    return None
+
+
+def list_bans(db: Session, *, active_only: bool = True, limit: int = 100) -> list[dict]:
+    q = db.query(AdminDeviceBan)
+    if active_only:
+        q = q.filter(AdminDeviceBan.revoked_at.is_(None))
+    rows = q.order_by(AdminDeviceBan.created_at.desc()).limit(limit).all()
+    return [{
+        "id": row.id, "label": row.label or "未知设备", "ip": row.ip or "",
+        "fp": (row.fp or "")[:12], "reason": row.reason or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+    } for row in rows]
 
 
 def purge(db: Session) -> int:

@@ -30,6 +30,29 @@ router = APIRouter(prefix="/api/platforms", tags=["platforms"])
 CURRENT_KEY = "platform:current"
 
 
+def _rating_of(spec) -> dict:
+    """平台自评等级 → 规范化 dict（未知档位直接丢弃）。
+
+    只放行四个已知档位：写错档位（比如 `good`）时**不猜**，返回空 dict 让
+    前端回落到兜底表 —— 否则徽标会出现一个没样式的空壳。
+    """
+    raw = getattr(spec, "rating", None)
+    if not isinstance(raw, dict):
+        return {}
+    tier = str(raw.get("tier") or "").strip().lower()
+    if tier not in ("hang", "elite", "npc", "bad"):
+        return {}
+    return {
+        "tier": tier,
+        "reason": str(raw.get("reason") or "").strip()[:400],
+        # 打分明细（可选）：`{"speed": 4, "quota": 3, "stability": 5}` 之类。
+        # 现阶段人工填，将来由平台按真实指标算出；前端暂不消费，
+        # 但先透出来，免得以后为它再改一次契约。
+        "scores": raw.get("scores") if isinstance(raw.get("scores"), dict) else {},
+        "source": str(raw.get("source") or "platform"),
+    }
+
+
 def _serialize(spec) -> dict:
     return {
         "id": spec.id,
@@ -54,6 +77,9 @@ def _serialize(spec) -> dict:
         "realms": [{"key": r.key, "label": r.label, "default": r.default}
                    for r in spec.realms],
         "proxied": bool(spec.gateway),
+        # 平台自评等级（控制台「平均级」徽标）。平台没声明时给空 dict，
+        # 前端回落到 platform-tiers.js 的兜底表；两边都空就不显示徽标。
+        "rating": _rating_of(spec),
         "extra": spec.extra or {},
         # 该平台是否提供管理契约（账号池 / 任务 / 客户端探测 / 概览卡片）。
         # 前端据此决定要不要显示「管理」入口，避免点了 404。

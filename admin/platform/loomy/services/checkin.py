@@ -51,6 +51,52 @@ logger = logging.getLogger("admin.platform.loomy.checkin")
 PLATFORM = "loomy"
 
 
+def checkin_one(db: Session, account: Account) -> dict:
+    """**单个账号**签到（账号行内「签到」按钮用）。
+
+    批次版 `run_daily_checkin` 走线程池 + 私有 Session，适合全池；
+    这里只有一条号，直接在当前 Session 上跑，返回与批次行同构的结果，
+    前端两个入口共用一套渲染。
+    """
+    label = account.name or ("账号#%s" % account.id)
+    realm = loomy_accounts.realm_of(account)
+    try:
+        data = loomy_accounts.ensure_token(db, account)
+        result = client.first_login(
+            loomy_accounts.token_of(data), realm, account.id)
+    except client.UpstreamError as exc:
+        return {"account_id": account.id, "account": label, "ok": False,
+                "status": "error", "reason": exc.message[:160]}
+
+    payload = result.get("data") if isinstance(result.get("data"), dict) else {}
+    processed = bool(payload.get("alreadyProcessed"))
+    quota = {
+        "balance": int(payload.get("permanentBalance") or 0),
+        "daily_balance": int(payload.get("dailyBalance") or 0),
+        "available": int(payload.get("currentBalance") or 0),
+        "models": 0,
+    }
+    try:
+        loomy_accounts.apply_quota(account, quota)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+    return {
+        "account_id": account.id,
+        "account": label,
+        "ok": True,
+        "status": "already" if processed else "claimed",
+        "reason": "今日已领过" if processed else "签到成功",
+        "already_processed": processed,
+        "credit": (0 if processed else int(payload.get("dailyQuota") or 0)),
+        "daily_quota": int(payload.get("dailyQuota") or 0),
+        "current_balance": quota["available"],
+        "daily_balance": quota["daily_balance"],
+        "daily_consumed": int(payload.get("dailyConsumed") or 0),
+        "cycle_date": str(payload.get("dailyCycleDate") or ""),
+    }
+
+
 def run_daily_checkin(db: Session, schedule=None, realm: str = "cn") -> dict:
     """每日签到：给所有 active 账号调一次 first-login。
 
