@@ -97,6 +97,17 @@ def alias_to_upstream(name: str) -> tuple[str, str]:
             storage = str(spec.storage()).lower() if spec else ""
         except Exception:  # noqa: BLE001
             storage = ""
+    # **原生 id 优先**（2026-11-15 线上 404 的修法）。
+    #
+    # 平台已把「可读名」当作自己的 `model_configs.model_id` 时（腾讯 Marvis
+    # 就是：`deepseek-v4.1-flash`），**绝不能**再把名字改写成上游槽位名
+    # （`main-auto`）—— 改写后重定向层按清单校验归属，槽位名不在清单里，
+    # 直接判「不属于该平台」→ 404。槽位名由网关自己换算即可。
+    #
+    # 这一条对所有平台都安全：Qoder 的配置 id 是 `dfmodel`，`deepseek-flash`
+    # 不是原生 id，所以照旧走改写。
+    if storage and mr.is_native_model_id(storage, bare):
+        return "", ""
     for plat_storage, table in mr.MODEL_NAME_MAP.items():
         if storage and storage != plat_storage:
             continue

@@ -499,6 +499,71 @@ def _entry_targets(row: dict) -> list[tuple[str, str]]:
     return [(_realm_platform_id(storage, r), r) for r in realms]
 
 
+def is_native_model_id(storage: str, name: str, db=None) -> bool:
+    """这个名字是不是该平台 `model_configs` 里**已经存在的 model_id**。
+
+    ## 为什么需要它（2026-11-15 线上 404）
+
+    `alias_to_upstream()` 会把「可读名」改写成「上游缩写」
+    （`deepseek-flash-qoder` -> `dfmodel`）。但平台之间的约定**并不统一**：
+
+      * Qoder 的配置 id 是缩写（`dfmodel`），可读名只是展示 —— 必须改写；
+      * 腾讯 Marvis 的配置 id **就是可读名**（`deepseek-v4.1-flash`），
+        槽位名（`main-auto`）只在上游协议里用，由网关自己换算。
+
+    一律改写就会出问题：Marvis 收到 `deepseek-v4.1-flash-marvis`，
+    dispatch 先把名字改成 `main-auto`，紧接着按 `model_configs` 校验归属 ——
+    清单里只有 `deepseek-v4.1-flash`，`main-auto` 判成「不属于该平台」→ **404**。
+
+    判定只看原生 `model_id`（大小写不敏感），**不看 `readable`**：
+    若按可读名匹配，Qoder 的 `deepseek-flash` 会被误判成原生 id 而跳过改写，
+    结果把可读名发给上游 → 400。
+    """
+    target = str(name or "").strip().lower()
+    if not target:
+        return False
+    store = str(storage or "").strip().lower()
+    if not store:
+        return False
+    now = time.time()
+    cache = _native_cache
+    if (cache.get("at") and now - cache["at"] < _NATIVE_TTL):
+        return target in (cache.get("ids") or {}).get(store, set())
+    try:
+        # ⚠️ `ModelConfig` 在本模块是**函数内局部导入**的，模块顶层没有它 ——
+        # 这里必须自己导入一次，否则 NameError 会被下面的 except 吞掉，
+        # 整个函数永远返回 False（防护形同虚设，2026-11-15 本地自测发现）。
+        from admin.models import ModelConfig
+
+        own_db = db is None
+        if own_db:
+            from admin.db import SessionLocal
+
+            db = SessionLocal()
+        try:
+            rows = (db.query(ModelConfig.platform, ModelConfig.model_id).all())
+        finally:
+            if own_db:
+                db.close()
+    except Exception:  # noqa: BLE001 - 查不到就当「不是原生」（保持旧行为）
+        logger.warning("is_native_model_id 查询失败 storage=%s", storage, exc_info=True)
+        return False
+    ids: dict[str, set[str]] = {}
+    for platform, model_id in rows:
+        key = str(platform or "").lower()
+        value = str(model_id or "").strip().lower()
+        if key and value:
+            ids.setdefault(key, set()).add(value)
+    _native_cache.update({"at": now, "ids": ids})
+    return target in ids.get(store, set())
+
+
+#: `is_native_model_id` 的缓存（10 秒）。热路径每次请求都会问一遍，
+#: 而 `model_configs` 只在同步/编辑时才变。
+_NATIVE_TTL = 10.0
+_native_cache: dict = {"at": 0.0, "ids": {}}
+
+
 def _drop_retired_rows(rows):
     """过滤掉**平台已经从代码里删掉**的模型行。
 
@@ -721,6 +786,28 @@ def build_payload(db, *, aggregate_only: bool = False,
     return payload
 
 
+def _canonical_of(storage: str, name: str) -> str:
+    """问平台「这个名字规范成什么」（没有钩子返回空串）。
+
+    约定：平台包可提供 `core.endpoints.canonical_model_id(str) -> str`。
+    目前只有 Marvis 实现（槽位名 / 上游真实名 / 可读名 三者归一）。
+    别的平台没有这个钩子，返回空串 → 调用方退回原来的精确匹配，行为不变。
+    """
+    store = str(storage or "").strip().lower()
+    text = str(name or "").strip()
+    if not store or not text:
+        return ""
+    try:
+        mod = __import__("admin.platform.%s.core.endpoints" % store,
+                         fromlist=["canonical_model_id"])
+        fn = getattr(mod, "canonical_model_id", None)
+        if callable(fn):
+            return str(fn(text) or "")
+    except Exception:  # noqa: BLE001 - 平台没有这个钩子 / 导入失败
+        return ""
+    return ""
+
+
 def platform_of_model(name: str, db=None) -> str:
     """查一个模型名归属哪个平台（返回**平台 id**，查不到返回空串）。
 
@@ -730,6 +817,7 @@ def platform_of_model(name: str, db=None) -> str:
     匹配顺序：
       1. 精确命中某条 model_config 的 slug
       2. 命中缩写映射后的可读名
+      3. **平台自己认得的其它写法**（槽位名 / 上游真实名）
     """
     target = str(name or "").strip().lower()
     if not target:
@@ -753,7 +841,20 @@ def platform_of_model(name: str, db=None) -> str:
                 slugify_model_id(raw),
                 slugify_model_id(readable_model_id(storage, raw)),
             }
-            if target not in candidates:
+            # 平台自报的**规范名**（Marvis：槽位 `main-auto` 与上游真实名
+            # `deepseek-v4-1-flash-261017` 都归一到同一个槽位）。不加这一层，
+            # 客户端裸写 `main-auto`（早期文档里的调用名）会被判「不属于任何
+            # 平台」，落到默认平台后由主应用回 400（2026-11-15 线上实测）。
+            canon_target = _canonical_of(storage, target)
+            if canon_target:
+                canon_row = _canonical_of(storage, raw)
+                if canon_row and canon_target == canon_row:
+                    target_matched = True
+                else:
+                    target_matched = target in candidates
+            else:
+                target_matched = target in candidates
+            if not target_matched:
                 continue
             # 该 storage 有多个区时无法确定是哪个区 —— 交给后缀，
             # 这里只处理单区或默认区

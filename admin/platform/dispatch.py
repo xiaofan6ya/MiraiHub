@@ -611,6 +611,24 @@ def _model_id_for(db, storage: str, model: str) -> str:
         if normalized and normalized != model:
             exact = normalized
 
+    # 5) **槽位名 → 可读名**（2026-11-15 向后兼容）。
+    #
+    # Marvis 早期对外发的是槽位名（`main-auto`），不少客户端配置里留的就是它；
+    # 后来目录改成可读名后 `model_configs` 只存 `deepseek-v4.1-flash`，
+    # 槽位名就查不到了 —— 老配置会突然全 404。
+    #
+    # 这里按平台的「槽位 → 可读名」映射反查一次：映射结果确实是该平台的原生
+    # id 才改（`readable_model_id` 对别的平台是恒等，不会误伤）。
+    if not exact:
+        try:
+            from admin.platform import models_router as _mr
+
+            readable = _mr.readable_model_id(storage, model)
+            if readable and readable != model and _mr.is_native_model_id(storage, readable):
+                exact = readable
+        except Exception:  # noqa: BLE001 - 兜底失败就按原样
+            pass
+
     if not exact:
         return model
     return exact.split(":", 1)[0] if storage == "trae" else exact
