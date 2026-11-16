@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -366,11 +367,50 @@ def auth_submit(body: AuthSubmitIn, _: bool = Depends(require_admin),
     code = _extract_code(body.callback)
     if not code:
         raise HTTPException(400, detail="回调里没有 code=（请把整条回调地址复制回来）")
+    # **同一个 code 只许换一次**（2026-11-16）。
+    #
+    # 授权码是一次性的：换成功后再换一次，上游必然回 `-107 已过期或已被使用`。
+    # 前端有 focus / paste / 点按钮三个入口，历史上出现过同一串 code 被提交
+    # 两次的情况 —— 结果是「账号明明入库了，弹窗却报 -107」，用户以为失败又
+    # 重扫，越搞越乱。
+    #
+    # 这里在服务端兜底：同一个会话里已经成功换过、且这次又是一模一样的 code，
+    # 直接把那次成功的账号返回（`reused`），不打上游、不报错。
+    if session.get("status") == "done" and session.get("last_code") == code:
+        return {"ok": True, "account": session.get("account"), "reused": True}
     try:
         credential = client.exchange_code(
             code, session["login_type"], "cn",
             state=session.get("state") or "", guid=session["guid"])
     except client.UpstreamError as exc:
+        # -107 还有一个常见来源：用户**上一次其实已经成功了**，但前端没收到
+        # 响应（关弹窗/刷新），于是拿同一个 code 再交一次。这种情况不能只报
+        # 「已过期」，得先查库里是不是**刚刚**入库过。
+        #
+        # ⚠ 判据必须收紧：只看「session 开立之后 + 90 秒内创建/更新」的账号。
+        # 早期版本按「池里最后一个 active 号」返回，那会把完全无关的旧账号
+        # 当成这次的结果 —— 真正的失败被伪装成成功，比报错更坏。
+        if str(getattr(exc, "code", "")) == "-107":
+            try:
+                started = datetime.utcfromtimestamp(
+                    float(session.get("at") or 0))
+                cutoff = max(started, datetime.utcnow() - timedelta(seconds=90))
+                fresh = [a for a in marvis_accounts.accounts_for(db, "cn")
+                         if (getattr(a, "status", "") or "") == "active"
+                         and (getattr(a, "created_at", None) or datetime.min) >= cutoff
+                         or (getattr(a, "updated_at", None) or datetime.min) >= cutoff]
+                if fresh:
+                    view = marvis_accounts.public_view(fresh[-1])
+                    session.update({"status": "done", "account": view,
+                                    "last_code": code})
+                    logger.info(
+                        "Marvis -107 但 %.0f 秒内刚入库过 acc=%s，按已成功处理",
+                        (datetime.utcnow() - cutoff).total_seconds(),
+                        fresh[-1].id)
+                    return {"ok": True, "account": view, "reused": True,
+                            "note": "该 code 刚已被成功兑换过，已直接返回结果"}
+            except Exception:  # noqa: BLE001 - 抢救失败就按原错误报
+                logger.debug("Marvis -107 抢救查询失败", exc_info=True)
         session["status"] = "failed"
         session["error"] = exc.message
         raise HTTPException(400, detail={"message": exc.message,

@@ -6823,7 +6823,19 @@ async function platformBeginAuth(spec, storage) {
         if (callback === lastTried) return;
         if (!/code=/i.test(callback) && callback.length < 8) return;
       }
+      // ⚠ **防重必须在这里一并把 busy 算进去**（2026-11-16）。
+      //
+      // 授权码是一次性的：`focus`（自动读剪贴板）、`paste`、点「粘贴并入库」
+      // 三个入口会各自独立调一次本函数。原来只判 `if (busy) return` 在
+      // `lastTried = callback` **之前**，但 `lastTried` 的赋值也在靠后位置，
+      // 于是同一串 code 能被两次通过（第二次进来时 busy 已被第一次置 true 却
+      // 在 await 之间让出，时序上仍会重入），上游对第二次必然回 `-107 已过期
+      // 或已被使用` —— 而其实**第一次已经成功入库了**。
+      //
+      // 用户看到的结果就是：账号明明导进去了，弹窗却报「授权码已过期/已被使用」，
+      // 以为失败，又去重扫一遍，越搞越乱。
       if (busy) return;
+      if (callback === lastTried) return;
       busy = true;
       lastTried = callback;
       if (submitBtn) submitBtn.disabled = true;
@@ -6835,7 +6847,21 @@ async function platformBeginAuth(spec, storage) {
           body: JSON.stringify({ auth_id: authId, callback: callback }),
         }));
         if (!ok) {
-          const msg = (data && (data.detail || data.message)) || "提交失败";
+          // `data.detail` 可能是**对象**（FastAPI 的 `detail={"message","step"}`），
+          // 直接拼进字符串会渲染成 "[object Object]" —— 截图里那个报错就是
+          // 这么来的，用户只看到一串无意义的字符，完全不知道 -107 是什么。
+          // 这里统一抽成可读文本：对象取 message / error / msg，再兜底 JSON。
+          const detail = data && data.detail;
+          let msg;
+          if (typeof detail === "string") {
+            msg = detail;
+          } else if (detail && typeof detail === "object") {
+            msg = detail.message || detail.error || detail.msg
+              || JSON.stringify(detail);
+          } else {
+            msg = (data && (data.message || data.error)) || "提交失败";
+          }
+          if (typeof msg !== "string") msg = String(msg);
           if (el) el.textContent = "▸ " + msg;
           toast(msg, "err");
           if (submitBtn) submitBtn.disabled = false;

@@ -72,12 +72,46 @@ def _client_ip(request) -> str:
 
 
 def _fail(exc: client.UpstreamError) -> JSONResponse:
+    """把**上游账号侧**的失败翻译成客户端能看懂的错误。
+
+    ## 为什么不能把 401 原样透出去（2026-11-16 用户实测踩坑）
+
+    上游说 401 = 「**这个平台账号**的登录态没了」，需要重新扫码。
+    但 `401` 在 HTTP 语义里是「调用方没通过身份验证」，而所有 OpenAI 兼容
+    客户端（Cherry Studio / LobeChat / 桌面端…）看到 401 都会渲染成
+    **「API 密钥无效」** —— 于是用户去翻自己的 Key，而 Key 根本没问题，
+    真正要做的是回控制台重扫 Marvis 账号。
+
+    更糟的是「首次录入账号后的第一次调用」正好撞在这个窗口里：授权码换出
+    的票要等一次续签/钱包同步才算完全生效，第一次调用偶发 401，用户就被
+    指向了完全错误的方向。
+
+    ## 映射规则
+
+      · 账号登录态问题（`auth` / `credential_expired`）→ **503** + 明确文案，
+        503 在客户端里是「服务暂时不可用」，不会被当成 Key 错误；
+      · 其余保持 `exc.status`（402/429/5xx 本来就是上游语义，客户端认）。
+
+    真正的 Key 问题在 `shared.authenticate()` 里就 401 掉了（`invalid_api_key`
+    / `missing_api_key`），不会走到这里 —— 所以这里把 401 换掉不会掩盖真问题。
+    """
     status = exc.status or 502
     if status < 400 or status > 599:
         status = 502
+    code = exc.code or "upstream_error"
+    message = exc.message
+    if status == 401 or exc.kind == "auth" or code == "credential_expired":
+        status = 503
+        if "重新扫码" not in message and "授权登录" not in message:
+            message = ("Marvis 平台账号的登录态已失效（与你的 API Key 无关）："
+                       "请在控制台「授权登录」重新扫码。原始信息：%s" % message)
+        else:
+            message = ("%s —— 这是 Marvis 平台账号的问题，你的 API Key 是有效的。"
+                       % message)
     return JSONResponse(
-        {"error": {"type": exc.kind, "code": exc.code or "upstream_error",
-                   "message": exc.message}},
+        {"error": {"type": exc.kind, "code": code, "message": message,
+                   # 给客户端一个可读的提示位：明确「不是 Key 的问题」
+                   "upstream_account": status == 503}},
         status_code=status)
 
 
