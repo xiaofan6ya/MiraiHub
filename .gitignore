@@ -232,6 +232,7 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_keepalive_frames.py
 !tests/test_billing_slot_names.py
 !tests/test_marvis_auth_ux.py
+!tests/test_dispatch_generic_models.py
 !docs/RELEASE_NOTES_1.1.4.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
