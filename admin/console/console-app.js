@@ -7628,8 +7628,7 @@ async function marvisBeginAuth(spec) {
               确认后账号<b>自动入库</b> —— 不用复制任何地址，本机也不用装 Marvis 客户端。
             </p>
             <p class="m-0" style="color:var(--fg-subtle)">
-              这是服务端用本机浏览器打开的真实 QQ 授权页；二维码到期会自动重拍，
-              宝宝一直扫到成功为止就行。
+              这是服务端用本机浏览器打开的真实 QQ 授权页；二维码到期会自动重拍，扫到成功为止就行。
             </p>` : `
             <p class="m-0 mb-1"><b>用手机微信扫左边的码</b>（或点下面这条链接在浏览器登录）</p>
             <p class="m-0 mb-2" style="word-break:break-all">
