@@ -23,9 +23,83 @@ from . import endpoints
 logger = logging.getLogger("admin.platform.marvis.client")
 DEFAULT_TIMEOUT = 30.0
 
-#: 哪些 kind 要上报哨兵（区分「账号问题」与「实现问题」）
+#: 进程级共享 opener 的惰性缓存（见 `_opener()`）。
+_OPENER = None
+#: 不跟随重定向的 opener 缓存（换登录态那次请求专用，见 `_no_redirect_opener()`）。
+_NO_REDIRECT_OPENER = None
+
 SENTINEL_KINDS = frozenset({"auth", "quota_exceeded", "network",
                              "signature_invalid", "upstream_business"})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟随 3xx —— 换登录态要看 302 的 `Set-Cookie`，跟过去等于把凭证扔掉。"""
+
+    def redirect_request(self, *_args, **_kwargs):  # noqa: D401
+        return None
+
+
+def _opener():
+    """进程级共享的 urllib opener（**别用裸 `urllib.request.urlopen`**）。
+
+    ## 为什么（2026-11-16 全站无响应事故）
+
+    `urlopen()` 用的是默认 opener，`HTTPSConnection(context=None)` 会为
+    **每一条新连接**调 `ssl._create_default_https_context()` → 在 Windows 上
+    重扫系统证书库（`ssl._load_windows_store_certs`）。实测单次 3~13 秒，
+    而且每次连接都重来一遍 —— 期间单 worker 的事件循环完全停摆。
+
+    `admin.upstream_http.urllib_opener()` 把共享 SSL 上下文（系统库 + certifi）
+    建一次复用，并默认不走系统代理（加速器塞进注册表的代理会让 TLS 校验失败，
+    见 issue #5）。与 Loomy 等平台同一条链路，不再各写各的。
+    """
+    global _OPENER
+    if _OPENER is None:
+        from admin.upstream_http import urllib_opener
+
+        _OPENER = urllib_opener()
+    return _OPENER
+
+
+def _no_redirect_opener():
+    """同 `_opener()`，但不跟随重定向（`exchange_code` 专用）。
+
+    ## 为什么必须用「替换」而不是「追加」
+
+    `urllib.request.build_opener()` 会自动装上默认的 `HTTPRedirectHandler`。
+    之后再 `opener.add_handler(_NoRedirect())` 只是往链尾**追加**，
+    默认处理器仍在前头、先命中，302 照样被跟随 —— 表现就是请求被带到
+    落地页「登录成功」HTML，`Set-Cookie` 里的 token 丢掉，报
+    「登录接口没有下发 accesstoken」（2026-11-16 真机逐层排查确认）。
+
+    正确做法是把自定义 handler 作为 `build_opener()` 的**位置参数**传进去，
+    urllib 才会按「子类替换父类」把默认的顶替掉。
+
+    `admin.upstream_http.build_opener` 因此加了 `*extra_handlers` 形参；
+    这里做一次兼容判断：老版本没这个形参时，退回直接用标准库构造
+    （TLS 上下文仍从 `ssl_context()` 取，与其它请求一致）。
+    """
+    global _NO_REDIRECT_OPENER
+    if _NO_REDIRECT_OPENER is None:
+        import inspect
+
+        from admin import upstream_http
+
+        fn = upstream_http.build_opener
+        try:
+            accepts = "extra_handlers" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            _NO_REDIRECT_OPENER = fn(None, _NoRedirect())
+        else:
+            # 兜底：标准库构造，把 _NoRedirect 作为位置参数传入（关键所在）
+            _NO_REDIRECT_OPENER = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(
+                    context=upstream_http.ssl_context()),
+                _NoRedirect())
+    return _NO_REDIRECT_OPENER
+
 
 
 class UpstreamError(Exception):
@@ -107,7 +181,7 @@ def _request(url: str, *, method: str = "GET", body: dict | None = None,
     if data:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _opener().open(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace")
             return json.loads(text) if text.strip() else {}
     except urllib.error.HTTPError as exc:
@@ -200,7 +274,7 @@ def open_chat_stream(credential: dict, realm: str, body: dict, *,
     for key, value in endpoints.llm_headers(acct).items():
         req.add_header(str(key), str(value))
     try:
-        return urllib.request.urlopen(req, timeout=STREAM_TIMEOUT)
+        return _opener().open(req, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
         payload = ""
         try:
@@ -433,18 +507,13 @@ def exchange_code(code: str, login_type: str, realm: str = "cn", *,
         params["state"] = str(state)
     url = endpoints.oauth_url(realm) + "?" + urlencode(params)
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *_args, **_kwargs):  # noqa: D401
-            return None
-
-    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, method="GET")
     req.add_header("Accept",
                    "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
     req.add_header("User-Agent", endpoints.BROWSER_UA)
     req.add_header("Ual-Access-Guid", str(guid))
     try:
-        resp = opener.open(req, timeout=DEFAULT_TIMEOUT)
+        resp = _no_redirect_opener().open(req, timeout=DEFAULT_TIMEOUT)
     except urllib.error.HTTPError as exc:
         # 302 在 urllib 里会以 HTTPError 抛出 —— 这里正是要它的 Set-Cookie
         resp = exc
