@@ -90,17 +90,46 @@ def realm_of(account: Account) -> str:
     return (account.domain or "cn").strip() or "cn"
 
 
-#: 凭证有效期（秒）——**实测推断值，不是上游下发的**。
-#:
-#: 2026-11-15 实测：13:34 授权 → 15:44 上游回 `4100403 登录态过期/未登录`，
-#: 存活 2 小时 10 分；按 4 小时假设会晚 1 小时 50 分，不成立。所以取 2 小时，
-#: 并留 10 分钟余量提前提示（`TOKEN_TTL_SECONDS - TOKEN_WARN_SECONDS`）。
+#: 凭证有效期（秒）——**实测推断值，不是上游下发的**。按登录方式分档。
 #:
 #: 为什么是推断而不是读字段：QQ / 微信登录回调**不下发 `expires_in`**，
-#: `expires_at` 恒为 0。看不到真实值，只能按实测收敛一个保守值。
-TOKEN_TTL_SECONDS = 2 * 3600
+#: `expires_at` 恒为 0。看不到真实值，只能按实测收敛。
+#:
+#: ## 两个档位来源不同，别混为一谈
+#:
+#: · `WX` 2 小时：**我自己真机测的**。2026-11-15，13:34 授权 → 15:44 上游回
+#:   `4100403 登录态过期/未登录`，存活 2 小时 10 分；按 4 小时假设会晚 1 小时
+#:   50 分，不成立。取 2 小时并留 10 分钟预警余量。
+#: · `QC` 30 天：**依据 issue #41 报告人的实测**（QQ 授权 18:48 签发，4 小时
+#:   29 分后调用仍 200），我没条件自己复现 QQ 那条链路。这个值只是
+#:   「不会早于 30 天失效」的保守估计 —— 微信和 QQ 互联是两套授权体系，
+#:   把微信的 2 小时套到 QQ 上会让 QQ 号每 2 小时就被标注「该重登了」，
+#:   那是**误报**，比不提示更烦人。
+#:
+#: 若将来实测到更准的值，只改这张表即可（`token_ttl_seconds()` 是唯一读取点）。
+TOKEN_TTL_SECONDS = 2 * 3600          # 兼容旧引用：默认（微信）档
+TOKEN_TTL_BY_LOGIN = {
+    "WX": 2 * 3600,                   # 微信：实测 2 小时 10 分失效
+    "WXAPP": 2 * 3600,
+    "QC": 30 * 24 * 3600,             # QQ 互联：据报 4.5 小时后仍有效，按 30 天保守估
+}
 #: 提前多久开始提示「该重登了」。
 TOKEN_WARN_SECONDS = 10 * 60
+
+
+def login_type_of(data: dict) -> str:
+    """凭证里的登录方式（`WX` / `QC`）。历史数据可能是 `1`/`2`。"""
+    raw = str((data or {}).get("login_type") or "").strip().upper()
+    if raw in ("1", "QC", "QQ"):
+        return "QC"
+    if raw in ("2", "WX", "WXAPP"):
+        return "WX"
+    return raw or "WX"
+
+
+def token_ttl_seconds(data: dict) -> int:
+    """按登录方式取 TTL（唯一读取点，改档位只改表）。"""
+    return TOKEN_TTL_BY_LOGIN.get(login_type_of(data), TOKEN_TTL_SECONDS)
 
 
 def token_age_seconds(data: dict) -> int | None:
@@ -124,11 +153,13 @@ def token_expiry_hint(data: dict) -> dict:
       * `soon`     —— 剩余不足 `TOKEN_WARN_SECONDS`，该准备重登了；
       * `expired`  —— 已超过推断 TTL，大概率上游已判失效。
     """
+    ttl = token_ttl_seconds(data)
     age = token_age_seconds(data)
     if age is None:
         return {"state": "unknown", "age_seconds": None,
-                "remaining_seconds": None, "ttl_seconds": TOKEN_TTL_SECONDS}
-    remaining = TOKEN_TTL_SECONDS - age
+                "remaining_seconds": None, "ttl_seconds": ttl,
+                "login_type": login_type_of(data)}
+    remaining = ttl - age
     if remaining <= 0:
         state = "expired"
     elif remaining <= TOKEN_WARN_SECONDS:
@@ -137,7 +168,7 @@ def token_expiry_hint(data: dict) -> dict:
         state = "fresh"
     return {"state": state, "age_seconds": age,
             "remaining_seconds": max(0, remaining),
-            "ttl_seconds": TOKEN_TTL_SECONDS}
+            "ttl_seconds": ttl, "login_type": login_type_of(data)}
 
 
 def public_view(account: Account, *, quota: dict | None = None,

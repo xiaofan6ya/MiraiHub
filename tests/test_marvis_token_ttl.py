@@ -36,13 +36,53 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def test_ttl_constant() -> None:
-    print("\n== TTL 常量 ==")
-    # 实测 2 小时 10 分失效；取 2 小时 + 10 分钟预警余量
-    check("TTL 是 2 小时", macc.TOKEN_TTL_SECONDS == 7200,
+    print("\n== TTL 分档 ==")
+    # 微信档：我自己实测 2 小时 10 分失效（13:34 授权 → 15:44 401）
+    check("WX 档 2 小时",
+          macc.TOKEN_TTL_BY_LOGIN["WX"] == 7200, macc.TOKEN_TTL_BY_LOGIN["WX"])
+    check("WX 与默认档一致",
+          macc.TOKEN_TTL_SECONDS == macc.TOKEN_TTL_BY_LOGIN["WX"],
           macc.TOKEN_TTL_SECONDS)
+    # QQ 档：据 issue #41 报告人实测（4h29m 后仍有效），按 30 天保守估
+    check("QC 档 30 天",
+          macc.TOKEN_TTL_BY_LOGIN["QC"] == 30 * 24 * 3600,
+          macc.TOKEN_TTL_BY_LOGIN["QC"])
+    check("QC 档远长于 WX（不能把微信的 2h 套到 QQ 上）",
+          macc.TOKEN_TTL_BY_LOGIN["QC"] > macc.TOKEN_TTL_BY_LOGIN["WX"] * 100)
     check("预警提前 10 分钟", macc.TOKEN_WARN_SECONDS == 600,
           macc.TOKEN_WARN_SECONDS)
-    check("预警小于 TTL", macc.TOKEN_WARN_SECONDS < macc.TOKEN_TTL_SECONDS)
+    check("预警小于最短档",
+          macc.TOKEN_WARN_SECONDS < min(macc.TOKEN_TTL_BY_LOGIN.values()))
+
+
+def test_ttl_by_login_type() -> None:
+    print("\n== 按登录方式取 TTL ==")
+    check("login_type='WX' → 2h",
+          macc.token_ttl_seconds({"login_type": "WX"}) == 7200)
+    check("login_type='QC' → 30d",
+          macc.token_ttl_seconds({"login_type": "QC"}) == 30 * 24 * 3600)
+    # 历史数据里 login_type 存的是数字
+    check("login_type='2'（数字）按微信算",
+          macc.token_ttl_seconds({"login_type": "2"}) == 7200)
+    check("login_type='1'（数字）按 QQ 算",
+          macc.token_ttl_seconds({"login_type": "1"}) == 30 * 24 * 3600)
+    check("缺 login_type 默认微信档",
+          macc.token_ttl_seconds({}) == 7200)
+    check("login_type_of 归一 QC",
+          macc.login_type_of({"login_type": "qc"}) == "QC")
+    check("login_type_of 归一 WX",
+          macc.login_type_of({"login_type": "2"}) == "WX")
+
+
+def test_qc_not_falsely_warned() -> None:
+    print("\n== QQ 号不该被 2 小时档误报 ==")
+    now = int(time.time())
+    # 签发 3 小时：微信已过期，QQ 仍 fresh
+    qc = macc.token_expiry_hint({"issued_at": now - 3 * 3600, "login_type": "QC"})
+    wx = macc.token_expiry_hint({"issued_at": now - 3 * 3600, "login_type": "WX"})
+    check("QQ 3 小时后仍 fresh", qc["state"] == "fresh", qc)
+    check("微信 3 小时后已 expired", wx["state"] == "expired", wx)
+    check("hint 里带 login_type", qc.get("login_type") == "QC", qc)
 
 
 def test_age() -> None:
@@ -105,6 +145,8 @@ def test_error_mapping() -> None:
 
 if __name__ == "__main__":
     test_ttl_constant()
+    test_ttl_by_login_type()
+    test_qc_not_falsely_warned()
     test_age()
     test_hint_states()
     test_error_mapping()

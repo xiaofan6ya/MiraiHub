@@ -5,7 +5,7 @@
     host            https://yybadaccess.3g.qq.com
     模型网关        POST /v1/chat/completions      OpenAI 协议，SSE 流式
     令牌钱包        POST /v3/marvis_get_wallet     业务签名接口
-    续签            GET  /marvis_client_login/marvis_refresh_token
+    续签            POST /marvis_client_login/marvis_refresh_token        （见下）
     登录回调        GET  /marvis_client_login/marvis_oauth?login_type=&code=&state=
     QQ 授权         https://graph.qq.com/oauth2.0/authorize  (client_id=1903794758)
     微信授权        https://open.weixin.qq.com/connect/qrconnect (appid=wxb650708317d56f88)

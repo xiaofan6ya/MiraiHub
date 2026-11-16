@@ -950,6 +950,31 @@ def _billing_candidates(model: str) -> list[str]:
                 out.append(upstream)
     except Exception:  # noqa: BLE001
         pass
+    # 5) **槽位名 ↔ 可读名**（2026-11-16，issue #41）。
+    #
+    # Marvis 这类平台的「标识」有三层：上游槽位 `main-auto`、可读名
+    # `deepseek-v4.1-flash`、上游真实名 `deepseek-v4-1-flash-261017`。
+    # `usage_logs.model` 记的是**请求时的模型名**（网关换算前的槽位名），
+    # 而 `model_configs.model_id` 存的是可读名 —— 两边对不上，倍率查不到，
+    # `credits_for()` 一律返回 0，于是「今日消耗」恒为 0。
+    #
+    # `models_router.MODEL_NAME_MAP` 里早就维护了这张表，之前只是没在这里用。
+    # 双向都加：既覆盖「日志是槽位名」，也覆盖「日志是可读名、配置存槽位」。
+    try:
+        from admin.platform import models_router as _mr
+
+        for table in (_mr.MODEL_NAME_MAP or {}).values():
+            for slot, readable in (table or {}).items():
+                slot_low = str(slot or "").lower()
+                readable_low = str(readable or "").lower()
+                for item in list(out):
+                    low = item.lower()
+                    if low == slot_low and str(readable) not in out:
+                        out.append(str(readable))
+                    elif low == readable_low and str(slot) not in out:
+                        out.append(str(slot))
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -958,6 +983,20 @@ def credits_for(db: Session, storage: str, model: str, total_tokens: int) -> flo
 
     **模型名必须做候选匹配**，不能只按字面量精确查 —— 客户端发的是
     slug（可能带平台后缀 / 缩写已替换），库里存的是上游原始 id。
+
+    ## 全局兜底只认「没有平台归属」的历史行（2026-11-16）
+
+    原来第二段查询是「按 model_id 全局找一条」，本意是兼容早期没有
+    `platform` 列的旧数据。但它会**跨平台借用倍率**：同一个可读名
+    （`deepseek-v4.1-flash`）在 workbuddy 是 `0.11`、在 marvis 是 `-1`、
+    在 loomy 是 `2.0` —— 当前平台查不到时随手拿到别家的倍率，算出来的
+    消耗差一个数量级，甚至正负相反。
+
+    回填历史消耗时这个问题直接显形：marvis 的 958 条记录被按 workbuddy 的
+    0.11 算成了正数（应为按 token 计量的负数）。
+
+    现在兜底查询**只匹配 platform 为空 / NULL 的行**，不再跨平台借用。
+    查不到就返回 0（前端显示 0 是「未知」，比给个错的好）。
     """
     if not model:
         return 0.0
@@ -969,9 +1008,12 @@ def credits_for(db: Session, storage: str, model: str, total_tokens: int) -> flo
                            ModelConfig.platform == storage,
                            ModelConfig.enabled == 1).first())
             if row is None:
+                # 仅用于早期没有 platform 列的历史配置，**不跨平台借用**。
                 row = (db.query(ModelConfig)
                        .filter(ModelConfig.model_id == name,
-                               ModelConfig.enabled == 1).first())
+                               ModelConfig.enabled == 1,
+                               or_(ModelConfig.platform.is_(None),
+                                   ModelConfig.platform == "")).first())
             if row is None:
                 continue
             multiplier = float(row.credit_multiplier or 0)
@@ -1038,17 +1080,29 @@ def record_usage(db: Session, *, key_id: int, account_id: int, model: str,
     else:
         credits = credits_for(db, storage, model, total)
     try:
+        # **余额只能减少，不能因为 credits 是负数而反向增加**（2026-11-16）。
+        #
+        # `credits` 允许为负：倍率 `-1` 是「按 token 计量」的约定，
+        # `credits_for()` 会算出 `-tokens/1000`（Marvis 一次 -228 很常见）。
+        # 以前这里写 `balance_remain - int(credits)`，负负得正 ——
+        # 每跑一次请求，号上余额反而**多**了。`int(-0.08) == 0` 时看不出来，
+        # 数量级一大就显形（issue #41 实测 890 条负值记录）。
+        #
+        # 现按绝对值扣：符号只表达「计量方向」，扣减量永远是 |credits|。
+        spend = int(abs(credits)) if credits else 0
         if key_id:
+            # Key 侧同理：`credit_used` 是「已消耗」，负 credits 若直接累加
+            # 会把已用额度往回冲，Key 看起来越用越免费。
             db.query(ApiKey).filter(ApiKey.id == key_id).update(
-                {ApiKey.credit_used: ApiKey.credit_used + credits},
+                {ApiKey.credit_used: ApiKey.credit_used + abs(credits)},
                 synchronize_session=False)
         account = (db.query(Account).filter(Account.id == account_id)
                    .with_for_update().first() if account_id else None)
         if account is not None:
             account.last_used_at = datetime.utcnow()
-            if credits:
-                account.balance_remain = max(0, int(account.balance_remain or 0)
-                                             - int(credits))
+            if spend:
+                account.balance_remain = max(
+                    0, int(account.balance_remain or 0) - spend)
         log = UsageLog(api_key_id=key_id or 0, account_id=account_id or 0,
                        platform=_storage_platform(public_platform, storage),
                        model=model or "", credits=credits,

@@ -280,17 +280,73 @@ def list_models(_credential: dict | None = None, realm: str = "") -> list[dict]:
 
 
 def refresh_credentials(refresh_token: str, realm: str = "cn", *,
-                        account_id: int = 0) -> dict:
-    """续签。
+                        account_id: int = 0, credential: dict | None = None) -> dict:
+    """续签登录态。
 
-    上游是 `GET /marvis_client_login/marvis_refresh_token`，走**设备标识 +
-    登录态**而不是 OAuth 表单。实测需要原 access_token 与 guid 一起带上，
-    光有 refresh_token 换不出来 —— 所以这里接受整份凭证。
+    ## 接口事实（2026-11-16 真机复核，见 issue #41）
+
+    路径 `POST /marvis_client_login/marvis_refresh_token`（**POST，不是 GET**）：
+
+      · GET 该路径 → 恒 400 空体（不带签名头）或 200 + `-109`（带签名头）；
+      · POST 该路径 → 200 + 业务码，说明**方法确实是 POST**。
+        这一条是 issue #41 纠正对了的地方，此前的端点表和注释都写成了 GET。
+
+    ## 仍然没打通的部分（不要假装它能用）
+
+    参数该放哪儿**目前没有找到**。真机穷举过这些位置，全部回
+    `-109 RefreshToken missing required param (openid, guid, token)`：
+
+      · body：`{}` / `{openid,guid,token}` / `{openid,guid,refreshToken}` /
+        驼峰全量 userInfo / `{userInfo:{…}}` / `{data:{…}}` / 表单编码
+      · query：`?openid&guid&token`（带签名则 403，签名口径不适用于此路径）
+      · header：`openid/guid/token` 裸名、`Ual-Access-*` 全套（含 Guid）
+
+    也就是说 issue 里「POST 带完整 userInfo body 返回 `-107`」这条**未能复现**，
+    「`-109` 是漏了 `Ual-Access-Guid` 头」也不成立 —— 带着该头同样 `-109`。
+    `-107 RC_NO_AUTH_ERR` 的语义（凭证无效）本身合理，只是本机走不到那一步。
+
+    所以这里**不做假实现**：真的发出 POST，把上游原文带回给调用方；
+    只有拿到 `user_info` 才认为续签成功。失败时抛出可操作的错误，
+    而不是返回一份伪造的凭证。
     """
+    data = dict(credential or {})
+    openid = str(data.get("openid") or "").strip()
+    guid = str(data.get("guid") or "").strip()
+    token = str(data.get("access_token") or "").strip()
+    refresh = str(refresh_token or data.get("refresh_token") or "").strip()
+    if not (openid and guid and token):
+        raise UpstreamError(
+            "续签需要完整凭证（openid + guid + access_token），"
+            "只有 refresh_token 换不出来",
+            status=401, kind="auth")
+
+    body = json.dumps({
+        "openid": openid,
+        "guid": guid,
+        "token": token,
+        "refreshToken": refresh,
+        "loginType": endpoints.LOGIN_TYPE.get(
+            str(data.get("login_type") or "WX").upper(), "2"),
+    }, ensure_ascii=False, separators=(",", ":"))
+
+    headers = endpoints.business_headers({**data, "access_token": token},
+                                         query=body, method="POST")
+    headers["Ual-Access-Guid"] = guid
+
+    payload = _request(endpoints.refresh_url(realm), method="POST",
+                       raw_body=body, headers=headers, realm=realm,
+                       account_id=account_id)
+    inner = payload.get("user_info") if isinstance(payload, dict) else None
+    if isinstance(inner, dict) and (inner.get("openid") or inner.get("accessToken")
+                                    or inner.get("access_token")):
+        return inner
+    code = payload.get("code") if isinstance(payload, dict) else None
+    msg = str((payload or {}).get("msg") or "") if isinstance(payload, dict) else ""
     raise UpstreamError(
-        "Marvis 的续签需要完整凭证（openid + guid + access_token），"
-        "请通过导入刷新后的凭证或重新扫码登录",
-        status=401, kind="auth")
+        "Marvis 续签未成功（上游 code=%s %s）——该接口的参数约定尚未打通，"
+        "请重新扫码登录或导入刷新后的凭证" % (code, msg),
+        status=401, code=str(code or ""), kind="auth",
+        detail=json.dumps(payload, ensure_ascii=False)[:200])
 
 
 def exchange_code(code: str, login_type: str, realm: str = "cn", *,
