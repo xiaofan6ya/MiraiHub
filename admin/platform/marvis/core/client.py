@@ -454,11 +454,19 @@ def exchange_code(code: str, login_type: str, realm: str = "cn", *,
 
     cookies = _cookies_of(resp)
     body_text = ""
-    if getattr(resp, "status", 0) != 302:
-        try:
-            body_text = resp.read().decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
-            body_text = ""
+    # **302 也要尽量读一遍 body**（2026-11-16）。
+    #
+    # 原来写成 `if status != 302: read()`，理由是「302 没有 body」。但上游
+    # 有两种失败形态会夹在 302 里一起回来（带 JSON 错误码），不读就只剩
+    # 一个空 info → biz_code=0 → 直接掉到「没有下发 accesstoken」这个
+    # 什么也没说清楚的兜底分支。
+    #
+    # 读不到/不是 JSON 无害（下面 `json.loads` 失败就退化成空 info），
+    # 所以这里不设条件、统一尝试。
+    try:
+        body_text = resp.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - 302 的 body 可能不可读
+        body_text = ""
 
     info = {}
     if body_text.strip():
@@ -495,8 +503,10 @@ def exchange_code(code: str, login_type: str, realm: str = "cn", *,
             detail=body_text[:200])
     if biz_code == -107:
         raise UpstreamError(
-            "授权码已过期或已被使用（-107）：QQ / 微信的 code 只有几分钟有效期。"
-            "请重新扫码，拿到回调地址后立刻贴进来提交（别再刷新那个页面）。",
+            "授权码已过期或已被使用（-107）：QQ / 微信的 code 是一次性的、"
+            "只有几分钟有效期。常见原因是**这次授权其实已经成功过**，或者"
+            "你把同一条链接提交/打开过两次。请重新扫码，拿到回调后在 1 分钟内"
+            "提交一次；如果账号列表里已经多了这个号，说明上一次已经入库了。",
             status=400, code="-107", kind="auth",
             detail=body_text[:200])
     if biz_code not in (0, 200):
@@ -518,8 +528,14 @@ def exchange_code(code: str, login_type: str, realm: str = "cn", *,
                   or info.get("refreshToken") or cookies.get("refreshtoken")
                   or cookies.get("refresh_token") or "")
     if not access or not openid:
+        # 到这一步说明：既没有业务错误码，也没拿到 token。最可能是上游换了
+        # 响应形状，或者 302 的 Set-Cookie 没被读到。把「看到了什么」原样
+        # 带出来，否则用户只看到一句「没有下发」，排查无从下手。
+        seen = (body_text or "").strip()[:160] or "（空响应体）"
         raise UpstreamError(
-            "登录接口没有下发 accesstoken / openid",
+            "登录接口没有下发 accesstoken / openid。"
+            "这通常是授权码已被使用过（一次性的），或上游响应形状变了。"
+            "请重新扫码再试一次；仍然不行请把下面这段反馈：%s" % seen,
             kind="auth",
             detail=(body_text or str(cookies))[:200])
 
