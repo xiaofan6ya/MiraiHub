@@ -53,6 +53,37 @@ _MODEL_CODES = {404, 40401, 4023}
 #: `disabled`，而这其实是「换个入口取凭证」就能解决的事，禁用反而更难理解。
 _CONFIRM_CODES = {200901}
 
+#: 字符串业务码 → 额度不足。
+#:
+#: 小浣熊 LLM 网关是 **OpenAI 形态**，额度不足不用 402，而是：
+#:
+#:     HTTP 400
+#:     {"error": {"code": "insufficient_points",
+#:                "message": "积分余额不足，请充值后重试",
+#:                "type": "invalid_request_error"}}
+#:
+#: 三个特征各自都能让旧分类器漏判：
+#:   * `status=400`（不是 402）；
+#:   * `code` 是**字符串**，`_code_of()` 的 `int()` 转换失败 → None；
+#:   * 文案「积分余额不足」既不含「额度」，也不含连续子串「积分不足」
+#:     （中间隔着「余额」）。
+#:
+#: 漏判成 upstream 的代价不只是「这次请求失败」：
+#: `gateway._cool_seconds` 对 upstream 返回 0（不冷却），而
+#: `gateway._attempt` 对 400 + 非(auth/quota/rate) 会**立即 break**
+#: 不再换号 —— 于是同一个空号被反复选中、每次 400，整池看起来
+#: 「经常无法使用」（实测某账号 err_count 112/150 仍在被选中）。
+#:
+#: 所以这里按**明确额度语义**认，而不是把 400 一概归 quota：
+#: 参数错的 400 仍然走 upstream（见 `_classify` 的说明）。
+_QUOTA_STRING_CODES = {
+    "insufficient_points",
+    "insufficient_quota",
+    "insufficient_balance",
+    "quota_exceeded",
+    "no_quota",
+}
+
 
 def _confirm_hint() -> str:
     """`iam_confirm_required` 给人看的解释（两处错误分支共用）。"""
@@ -100,6 +131,50 @@ def _code_of(payload) -> int | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _code_string_of(payload) -> str | None:
+    """取上游的**字符串**业务码（如 `insufficient_points`）。
+
+    `_code_of()` 只产出整数码：字符串码在那里必然被 `int()` 丢掉 ——
+    而额度不足正是字符串码报出的，所以分类必须另有一条取字符串码的路。
+    归一成小写，避免 `Insufficient_Points` 这类大小写差异漏判。
+    """
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    if isinstance(err, dict):
+        value = err.get("code")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    for key in ("code", "biz_code", "errcode"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _raw_message_of(payload) -> str:
+    """取上游**原始**错误文案，专供 `_classify` 做语义判断。
+
+    ## 为什么单独取一份原文
+
+    `UpstreamError.message` 按安全约束必须是**不含上游原文的短句**
+    （形如 `raccoon#153 上游错误（HTTP 400）`）：它会回给 /v1 调用方、
+    落 `accounts.last_err_msg`、进哨兵。但那个短句里没有「积分余额不足」
+    这类语义，拿它做分类等于什么也没看。
+
+    所以分类只认这里返回的原文（`raw`），**原文不进响应体**；
+    需要落日志时另走 `_redact()` 的 `detail`。两者不能合并成一个字段。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    err = payload.get("error")
+    if isinstance(err, dict):
+        message = err.get("message")
+        if message:
+            return str(message)
+    return str(payload.get("message") or payload.get("msg") or "")
 
 
 class UpstreamError(Exception):
@@ -176,8 +251,37 @@ def retry_after_seconds(text) -> int | None:
     return int(value)
 
 
-def _classify(code: int | None, status: int, message: str) -> str:
+def _classify(code: int | None, status: int, message: str = "",
+              raw: str = "", code_str: str | None = None) -> str:
     """错误分类。
+
+    ## 三个入参的分工
+
+    * `code`：整数业务码（`402` / `40101` …），来自 `_code_of()`；
+    * `code_str`：**字符串**业务码（`insufficient_points` …），来自
+      `_code_string_of()` —— 额度不足正是字符串码，`_code_of()` 的
+      `int()` 转换会把它丢成 None，所以必须单独看；
+    * `raw`：上游**原始**错误文案。对外 `UpstreamError.message` 是
+      脱敏短句（`raccoon#153 上游错误（HTTP 400）`），里面没有语义可判；
+      分类只认 `raw`（缺省回落 `message`）。
+
+    ## 额度不足是 400 + 字符串码（2026-11 实测）
+
+    小浣熊 LLM 网关对余额耗尽返回：
+
+        HTTP 400
+        {"error":{"code":"insufficient_points",
+                  "message":"积分余额不足，请充值后重试",
+                  "type":"invalid_request_error"}}
+
+    status 不是 402、code 不是整数、文案里既没有「额度」也没有连续子串
+    「积分不足」（中间隔着「余额」）—— 这三条各自都能让旧分类器漏判。
+    漏判成 upstream 的代价不只是「这次失败」：`gateway._cool_seconds`
+    对 upstream 返回 0（账号不冷却），且 400 + 非(auth/quota/rate) 会
+    **立即 break 不换号** —— 空号被反复选中，整池看起来「经常无法使用」。
+
+    所以这里按**明确额度语义**认（字符串码集合 / 整数码 / 文案共现），
+    但**不**把 400 一概归 quota：参数错的 400 必须继续走 upstream。
 
     ## 为什么不能用子串匹配 `"token"`
 
@@ -194,24 +298,32 @@ def _classify(code: int | None, status: int, message: str) -> str:
 
     所以这里只认**明确的鉴权语义**，不用裸 `token` 子串。
     """
+    # 归一化在这里也做一次：抽取器已 lower，但 _classify 是可直接调用的
+    # 纯函数（测试与排障都这么用），不能假设调用方一定走 _code_string_of()。
+    if isinstance(code_str, str):
+        code_str = code_str.strip().lower()
     if code in _AUTH_CODES or status in (401, 403):
         return "auth"
     if code in _CONFIRM_CODES:
         return "confirm"
-    if code in _QUOTA_CODES or status == 402:
+    if code in _QUOTA_CODES or status == 402 or code_str in _QUOTA_STRING_CODES:
         return "quota"
     if code in _RATE_CODES or status == 429:
         return "rate"
     if code in _MODEL_CODES or status == 404:
         return "model"
-    text = str(message or "").lower()
+    blob = str(raw or message or "")
+    text = blob.lower()
     # 只认明确的鉴权措辞，不用裸 "token"
-    if ("登录已失效" in message or "未授权" in message
+    if ("登录已失效" in blob or "未授权" in blob
             or "unauthorized" in text or "invalid token" in text
             or "invalid_token" in text or "token expired" in text
             or "authentication" in text and "fail" in text):
         return "auth"
-    if ("额度" in message or "积分不足" in message or "quota" in text
+    if ("额度" in blob or "积分不足" in blob
+            or ("积分" in blob and "不足" in blob)
+            or "余额不足" in blob
+            or "quota" in text
             or ("insufficient" in text
                 and any(token in text for token in _QUOTA_CONTEXT_TOKENS))):
         return "quota"
@@ -219,7 +331,7 @@ def _classify(code: int | None, status: int, message: str) -> str:
             or ("retry after" in text
                 and ("limit" in text or "exceed" in text))):
         return "rate"
-    if "model" in text and ("not found" in text or "不存在" in message):
+    if "model" in text and ("not found" in text or "不存在" in blob):
         return "model"
     return "upstream"
 
@@ -238,7 +350,9 @@ def unwrap(payload, *, status: int = 200, context: str = ""):
     if code_int == 0:
         return payload.get("data")
     message = str(payload.get("message") or payload.get("msg") or "上游返回异常")
-    kind = _classify(code_int, status, message)
+    kind = _classify(code_int, status, message,
+                     raw=_raw_message_of(payload),
+                     code_str=_code_string_of(payload))
     # 上游 message 进 `detail`（已脱敏），响应侧只给固定的短句 ——
     # 见 `request_json` 里「message/detail 分离」的说明。
     #
@@ -317,21 +431,19 @@ def request_json(method: str, url: str, *, token: str, realm: str = "cn",
     except ValueError:
         raise UpstreamError(
             "%s 返回非 JSON（HTTP %d）" % (tag, status),
-            status=status, kind=_classify(None, status, text),
+            status=status, kind=_classify(None, status, raw=text),
             detail=_redact("%s %s -> %s" % (method, url, text))) from None
 
     logger.debug("%s %s %s %sms", tag, method, url, elapsed)
 
     # 先按状态码判类型，再拆信封：两者都要过。
     if status >= 400:
-        message = ""
-        if isinstance(payload, dict):
-            err = payload.get("error")
-            if isinstance(err, dict):
-                message = str(err.get("message") or "")
-            message = message or str(payload.get("message") or "")
+        # 分类看**上游原文**（raw）+ 字符串业务码；对外短句在下面单独拼。
+        # 上游额度不足是 400 + code="insufficient_points"，只传整数码会丢成 None。
+        raw = _raw_message_of(payload)
         code = _code_of(payload)
-        kind = _classify(code, status, message)
+        kind = _classify(code, status, raw=raw,
+                         code_str=_code_string_of(payload))
         # ⚠️ 这里**必须**再判一次 confirm：上游把 `iam_confirm_required`
         # 放在 HTTP 400 里，走的是这个分支（不是 `unwrap`）。
         # 只改 unwrap 的话，实测仍然拿到「上游错误（HTTP 400）」这种
@@ -490,15 +602,11 @@ def open_stream(url: str, *, token: str, realm: str = "cn", json_body=None,
         except ValueError:
             payload = {}
         code_int = _code_of(payload)
-        message = ""
-        if isinstance(payload, dict):
-            err = payload.get("error")
-            if isinstance(err, dict):
-                message = str(err.get("message") or "")
-            message = message or str(payload.get("message") or "")
+        raw = _raw_message_of(payload)
         raise UpstreamError("小浣熊流式上游错误（HTTP %d）" % status,
                             status=status,
-                            kind=_classify(code_int, status, message),
+                            kind=_classify(code_int, status, raw=raw,
+                                           code_str=_code_string_of(payload)),
                             code=code_int, payload=payload,
                             detail=_redact("%s -> HTTP %d %s" % (url, status, text)))
 
