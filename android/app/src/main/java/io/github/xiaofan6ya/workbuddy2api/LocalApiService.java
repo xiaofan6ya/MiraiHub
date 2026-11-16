@@ -123,7 +123,7 @@ public class LocalApiService extends Service {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), flags);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, LocalApiService.class).setAction("stop"), flags);
         Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
-        builder.setSmallIcon(R.drawable.notification_icon).setContentTitle("wb2api")
+        builder.setSmallIcon(R.drawable.notification_icon).setContentTitle("MiraiHub")
             .setContentText(text).setContentIntent(open).setOngoing(true)
             // 同一条通知原地更新：不响铃、不重复弹横幅、不显示时间戳。
             // 旧实现在每次状态变化时都像「新通知」，用户看到的就是「服务在反复重启」。
