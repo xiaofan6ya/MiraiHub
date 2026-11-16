@@ -124,6 +124,7 @@ android-signing/
 workbuddy_admin.db
 workbuddy_admin.db-shm
 workbuddy_admin.db-wal
+data/
 
 # Local credentials file
 登录密码.txt

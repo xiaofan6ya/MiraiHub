@@ -129,9 +129,27 @@ def _stable_window_start(start, days):
     every request a cache miss and defeated single-flight entirely. Rounding to
     the minute keeps the numbers honest while letting identical panel refreshes
     reuse one aggregation.
+
+    ## 返回类型统一是 `datetime`（或 None）
+
+    `start` 来自 query 串，是 **str**；老实现原样返回，于是 `log_summary`
+    里 `window_end - window_start` 直接抛
+    `TypeError: unsupported operand type(s) for -: 'datetime.datetime' and 'str'`
+    —— 只要带 `?start=...` 刷新日志页就 500。
+
+    这里统一解析成 naive UTC datetime：减法成立，缓存键也稳定（同一个 ISO
+    串每次解析结果一致）。解析失败仍返回原串，交给 `_build_filters` 按原
+    口径抛 400，错误行为不变。
     """
     if start:
-        return start
+        if not isinstance(start, str):
+            return start
+        try:
+            parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        except ValueError:
+            return start
+        return (parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                if parsed.tzinfo else parsed)
     if not days or days <= 0:
         return None
     window = datetime.utcnow() - timedelta(days=min(days, 3650))
@@ -1124,7 +1142,12 @@ def log_summary(
                 window_end = _dt.fromisoformat(str(end).replace("Z", "+00:00")).replace(tzinfo=None)
             except ValueError:
                 window_end = _dt.utcnow()
-        window_minutes = max(1, int((window_end - window_start).total_seconds() / 60))
+        # `window_start` 可能是 None（`days<=0` 且没给 start）或原串
+        # （时间格式非法，正常会在 `_build_filters` 里先抛 400）——
+        # 直接相减会 500，兜一个默认值。
+        window_minutes = 60
+        if isinstance(window_start, datetime):
+            window_minutes = max(1, int((window_end - window_start).total_seconds() / 60))
         return {"range_days": days,
                 "total_requests": sum(i["requests"] for i in items),
                 "ok_requests": sum(i["ok_requests"] for i in items),
