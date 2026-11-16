@@ -1017,7 +1017,13 @@ def credits_for(db: Session, storage: str, model: str, total_tokens: int) -> flo
             if row is None:
                 continue
             multiplier = float(row.credit_multiplier or 0)
-            if multiplier:
+            # **只有正倍率才是「倍率」**。`< 0` 是约定里的「无倍率概念」标记
+            # （见 `admin/routers/models.py` 的 `_get_free_models`：Loomy 这类
+            # 平台按 token 计量，不给倍率），不是负倍率。
+            # 原来只判 `if multiplier:`，负值一样过，于是每条请求都被乘以
+            # -1 → 产生负积分 → `credit_used += credits` 越用越小
+            # （实测某个 Key 被刷到 -106836，等于凭空涨额度）。
+            if multiplier > 0:
                 return total_tokens * multiplier / 1000.0 if total_tokens else 0.0
         return 0.0
     except Exception:  # noqa: BLE001

@@ -361,11 +361,27 @@ _PS_LIST_PROCS = (
 
 
 def _listener_pids(port: int) -> list[int]:
-    """返回监听指定端口的 pid 列表（Windows: netstat → CIM；Linux: ss）。"""
+    """返回监听指定端口的 pid 列表（Windows: netstat → CIM；macOS: lsof；Linux: ss）。"""
     if os.name == "nt":
         # netstat 最快且系统自带；解析不出来再退回 CIM（更准但慢）
         return _listener_pids_netstat(port) or _listener_pids_cim(port)
+    if sys.platform == "darwin":
+        # macOS 没有 ss（Linux 专用），用系统自带的 lsof
+        return _listener_pids_lsof(port)
     return _listener_pids_ss(port)
+
+
+def _listener_pids_lsof(port: int) -> list[int]:
+    """macOS：`lsof -t` 列出监听该端口的 pid。"""
+    out = _run_quiet(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], timeout=10.0)
+    pids: list[int] = []
+    for line in out.splitlines():
+        s = line.strip()
+        if s.isdigit():
+            pid = int(s)
+            if pid not in pids:
+                pids.append(pid)
+    return pids
 
 
 def _listener_pids_ss(port: int) -> list[int]:
@@ -427,6 +443,10 @@ def _listener_pids_cim(port: int) -> list[int]:
 def _cmdline_of(pid: int) -> str:
     """取某进程的命令行（取不到返回空串，不抛异常）。"""
     if os.name != "nt":
+        if sys.platform == "darwin":
+            # macOS 没有 /proc，用系统自带的 ps
+            return _run_quiet(
+                ["ps", "-ww", "-p", str(pid), "-o", "command="], timeout=10.0).strip()
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 return f.read().replace(b"\0", b" ").decode("utf-8", "ignore").strip()
@@ -630,12 +650,18 @@ def _ancestor_pids() -> set[int]:
         else:
             cur = os.getpid()
             for _ in range(64):
-                with open(f"/proc/{cur}/status", encoding="utf-8") as f:
-                    ppid = 0
-                    for line in f:
-                        if line.startswith("PPid:"):
-                            ppid = int(line.split()[1])
-                            break
+                if sys.platform == "darwin":
+                    # macOS 没有 /proc，用 ps 取父 pid
+                    raw = _run_quiet(
+                        ["ps", "-o", "ppid=", "-p", str(cur)], timeout=5.0).strip()
+                    ppid = int(raw) if raw.isdigit() else 0
+                else:
+                    with open(f"/proc/{cur}/status", encoding="utf-8") as f:
+                        ppid = 0
+                        for line in f:
+                            if line.startswith("PPid:"):
+                                ppid = int(line.split()[1])
+                                break
                 if not ppid or ppid in out or ppid == cur:
                     break
                 out.add(ppid)

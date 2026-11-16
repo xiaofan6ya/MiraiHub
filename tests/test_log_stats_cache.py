@@ -132,9 +132,26 @@ class StableWindowTests(unittest.TestCase):
         self.assertEqual(first.second, 0)
         self.assertEqual(first.microsecond, 0)
 
-    def test_explicit_start_is_untouched(self):
-        explicit = '2026-10-01T00:00:00Z'
-        self.assertEqual(logs._stable_window_start(explicit, 1), explicit)
+    def test_explicit_start_is_parsed_to_datetime(self):
+        """显式 start 统一解析成 naive UTC datetime。
+
+        老实现原样返回 str，`log_summary` 里 `window_end - window_start`
+        直接抛 TypeError（带 ?start= 刷新日志页就 500）。
+        """
+        from datetime import datetime as _dt
+
+        parsed = logs._stable_window_start('2026-10-01T00:00:00Z', 1)
+        self.assertIsInstance(parsed, _dt)
+        self.assertEqual(parsed, _dt(2026, 10, 1))
+
+        # 无时区的写法同样解析成 datetime
+        naive = logs._stable_window_start('2026-10-01T00:00:00', 1)
+        self.assertIsInstance(naive, _dt)
+        self.assertEqual(naive, _dt(2026, 10, 1))
+
+        # 解析失败仍返回原串，交给 _build_filters 按原口径抛 400
+        bad = logs._stable_window_start('not-a-date', 1)
+        self.assertEqual(bad, 'not-a-date')
 
     def test_unlimited_range_has_no_window(self):
         self.assertIsNone(logs._stable_window_start(None, 0))

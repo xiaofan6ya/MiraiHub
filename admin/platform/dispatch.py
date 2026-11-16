@@ -217,6 +217,69 @@ def _is_disabled(platform_id: str, disabled: set[str]) -> bool:
     return bool(storage) and storage in disabled
 
 
+def _storage_of(platform_id: str) -> str:
+    """平台 id -> 落库平台（`trae-cn` -> `trae`，`workbuddy` -> `workbuddy`）。
+
+    判断「这是不是同一个平台」必须比落库平台：`trae-cn` 与 `trae-intl` 是
+    两个对外 id、一份账号池，拿 id 比会把「绑了 trae 的 Key」误判成不匹配。
+    """
+    spec = registry.get(str(platform_id or "").lower())
+    if spec is not None:
+        return str(spec.storage()).lower()
+    return str(platform_id or "").strip().lower()
+
+
+class _KeyView:
+    """判「改道可行性」用的 Key 视图：**去掉独占平台约束**，其余照旧。
+
+    ## 为什么要脱掉 platform
+
+    `scope_accounts` 在 Key 绑了平台时会再加一条 `Account.platform = 该平台`，
+    于是「判断 loomy 能不能服务这个模型」永远得到 False —— 改道判断就此失去
+    意义，Key 绑了 workbuddy 就连 loomy 专属模型也调不动了（线上在用）。
+
+    `account_id` / `account_ids` **保留**：独占账号是用户对「用哪些号」的
+    硬约束，改道也不能借用别的号。
+    """
+
+    __slots__ = ("id", "account_id", "account_ids", "platform", "group_id", "aggregate")
+
+    def __init__(self, key):
+        self.id = int(getattr(key, "id", 0) or 0)
+        self.account_id = getattr(key, "account_id", None)
+        self.account_ids = getattr(key, "account_ids", "") or ""
+        self.platform = ""
+        self.group_id = int(getattr(key, "group_id", 0) or 0)
+        self.aggregate = bool(getattr(key, "aggregate", True))
+
+
+class _ReroutedKey:
+    """改道**执行**时的 Key 视图：只脱掉 `platform`，其余属性全部委托。
+
+    ## 为什么只有判可行还不够
+
+    `_KeyView` 只影响改道前的候选判断。改道确认后，请求由**目标平台网关**
+    执行，而网关选号（`shared.select_account` -> `scope_accounts`）拿的是
+    **真实 Key**：Key 绑了 workbuddy，就再加一条 `Account.platform='workbuddy'`，
+    与目标平台的 `Account.platform='loomy'` 交集为空 —— 必然选不到号，
+    改道 100% 落成 503「没有可用账号」。
+
+    改道本身就是「用户想要的平台做不了这个模型」的兜底，平台绑定约束在
+    改道场景下必须豁免；**独占账号 / 分组 / 额度 / 状态照旧**，网关里其余
+    读 Key 的地方（配额、日志归属、trae 的 realm 推断）拿到的值不变。
+    """
+
+    __slots__ = ("_key", "platform")
+
+    def __init__(self, key):
+        self._key = key
+        self.platform = ""
+
+    def __getattr__(self, name):
+        # 只在 `_key` 上缺属性时才走到这里（platform 在 __slots__ 里）。
+        return getattr(self._key, name)
+
+
 def _aggregate_enabled(key) -> bool:
     return bool(getattr(key, "aggregate", True)) if key is not None else False
 
@@ -874,6 +937,96 @@ def _platform_paused(platform: str) -> bool:
         return False
 
 
+def _storage_has_model(db, storage: str, model: str) -> bool:
+    """该落库平台的**已启用**清单里有没有这个模型（认原生 id 与归一 key）。"""
+    from admin.model_alias import canonical_key, model_display
+    from admin.models import ModelConfig
+
+    text = str(model or "").strip().lower()
+    if not text:
+        return False
+    alias = canonical_key(text)
+    rows = (db.query(ModelConfig.model_id, ModelConfig.upstream_metadata)
+            .filter(ModelConfig.platform == storage,
+                    ModelConfig.enabled == 1).all())
+    for model_id, metadata in rows:
+        mid = str(model_id or "")
+        if mid.lower() == text:
+            return True
+        if alias and canonical_key(mid, model_display(metadata)) == alias:
+            return True
+    return False
+
+
+def _reroute_target(db, model: str, key, disabled: set[str] | None = None) -> tuple[str, str, str] | None:
+    """模型不属于「用户想要的平台」时，返回该改道到的 `(平台id, realm, 依据)`。
+
+    返回 `None` = **不该改道**，保持当前选路结果（默认平台 / Key 绑定平台）。
+
+    ## 为什么不是「查归属，查到就改道」（旧实现，线上事故）
+
+    `platform_of_model()` **只取第一条**同名 `model_configs`：
+    `deepseek-v4.1-flash` 在 trae(id=9) / workbuddy(57) / loomy(72) 都登记了，
+    第一条是 trae，于是每条请求都被它抢去 trae —— Key 绑定的平台、显式
+    `X-Platform`、平台禁用开关全部形同虚设（实测独占 workbuddy 的 Key
+    两天内 trae 785 次 / workbuddy 52 次）。
+
+    现在的判定顺序：
+
+        1. 想要的平台（Key 绑定平台，否则默认平台）在这个模型的候选里
+           -> 不改道（候选 = 有号 + 未冷却 + 健康）；
+        2. 不在候选里、但有别的平台能做 -> 改道到该平台；
+        3. 归一 key 匹配不上（如 raccoon 的 `sn-xxx-1017` 展示名与 id 不同）
+           -> 退回按归属反查，**但仍然只在想要的平台根本没有这个模型时**才改道。
+
+    禁用与网关实现由调用方/本函数最后一道 `_spec_with_gateway` 保证。
+    """
+    text = str(model or "").strip()
+    if not text:
+        return None
+    bound = str(getattr(key, "platform", "") or "").strip() if key is not None else ""
+    want = _storage_of(bound or registry.DEFAULT_PLATFORM)
+    disabled = disabled or set()
+
+    candidates = _candidates_for_model(db, text, _KeyView(key) if key is not None else None)
+    if candidates:
+        if any(_storage_of(pid) == want for pid, _realm, _mapped in candidates):
+            return None
+        for pid, realm, _mapped in candidates:
+            if _is_disabled(pid, disabled):
+                continue
+            spec = _spec_with_gateway(pid, realm)
+            if spec is None:
+                continue
+            try:
+                if getattr(_module_of(spec), "dispatch", None) is None:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            return str(getattr(spec, "id", "") or pid), realm, "候选里没有想要的平台"
+        return None
+
+    # 归一 key 对不上：先确认想要的平台确实没有这个模型，再按归属反查。
+    if _storage_has_model(db, want, text):
+        return None
+    from admin.platform import models_router
+
+    owner = models_router.platform_of_model(text, db)
+    if not owner or _storage_of(owner) == want:
+        return None
+    if _is_disabled(owner, disabled):
+        return None
+    spec = _spec_with_gateway(owner, "")
+    if spec is None:
+        return None
+    try:
+        if getattr(_module_of(spec), "dispatch", None) is None:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return str(getattr(spec, "id", "") or owner), str(getattr(spec, "realm", "") or ""), "归属反查"
+
+
 def _platform_for_model(model: str, key) -> tuple[str, str, str] | None:
     try:
         with _db() as db:
@@ -1334,34 +1487,51 @@ class PlatformDispatchMiddleware:
         # 这里就把这个耦合切断。
         explicit_platform = bool(suffix_platform)
 
-        # **兜底 1：模型名能还原成某平台的模型时，强制走该平台网关。**
+        # **兜底 1（收敛版）：模型确实不属于「用户想要的平台」时才改道。**
         #
         # 场景：客户端发 `deepseek-flash-qoder`，但后缀解析失败
         # （名字拼错平台、或用了不含后缀的可读名如 `deepseek-flash`），
-        # 于是落到默认平台 → 主应用白名单里没有 → 400。
-        # 这里反查一次：归属明确就改道，不让主应用插手。
-        if not explicit_platform and body:
+        # 于是落到当前平台 → 主应用白名单里没有 → 400。
+        # 这里反查一次：确实做不了才改道，不让主应用插手。
+        #
+        # ## 旧实现为什么让「独占 workbuddy 的 Key」全部打到 trae
+        #
+        # 它用 `platform_of_model()` 判断归属，而那个函数**只取第一条**同名
+        # `model_configs`。`deepseek-v4.1-flash` 在 trae(id=9) / workbuddy(57) /
+        # loomy(72) 都有登记，第一条是 trae —— 于是每条请求都被改道到 trae：
+        # Key 绑定的平台、显式 `X-Platform` 头、平台禁用开关全部被绕过。
+        # 实测：独占 workbuddy 的 Key 两天内 trae 785 次 / workbuddy 52 次；
+        # trae-cn 已在「平台网关」里禁用，却仍在承载全部流量。
+        #
+        # 现在改成和「按模型选路」同一套候选判断（有号 + 健康 + 未暂停），
+        # 并加三道闸门：
+        #   1. 显式 `X-Platform` 头：用户已表态，一个字节都不改；
+        #   2. 用户想要的平台（Key 绑定平台，否则默认平台）**能服务**这个模型
+        #      -> 不动。这就是「绑了 workbuddy 就该走 workbuddy」；
+        #   3. 改道目标必须**没被禁用**且**有网关实现**。
+        if not explicit_platform and body and not _explicit_selector(request):
             try:
-                from admin.platform import models_router as _mr
-
                 _m = _model_of_body(body)
                 if _m:
+                    _dis0 = _disabled_platforms()
                     with _db() as _rdb:
-                        _owner = _mr.platform_of_model(_m, _rdb)
-                    if _owner and _owner != registry.DEFAULT_PLATFORM:
-                        _spec_o = registry.get(_owner)
-                        if _spec_o is not None:
-                            try:
-                                _mod_o = _module_of(_spec_o)
-                                if getattr(_mod_o, "dispatch", None) is not None:
-                                    platform_id = _owner
-                                    explicit_platform = True
-                                    suffix_platform = _owner
-                                    logger.info(
-                                        "dispatch 兜底改道 | model=%r -> platform=%r",
-                                        _m, _owner)
-                            except Exception:  # noqa: BLE001
-                                pass
+                        _target = _reroute_target(_rdb, _m, _key_of(request), _dis0)
+                    if _target is not None:
+                        platform_id, realm = _target[0], _target[1] or realm
+                        explicit_platform = True
+                        suffix_platform = platform_id
+                        # **改道后换掉 scope 里的 Key 缓存**：目标平台网关
+                        # 选号走 `shared.key_row`（读 `_wb_api_key`），换成
+                        # platform 已脱空的 `_ReroutedKey`，否则 `scope_accounts`
+                        # 的 `Account.platform = Key绑定平台` 会把账号池锁回
+                        # 原平台 —— 改道判定成功、执行必然 503。
+                        # 独占账号 / 分组 / 额度全部保留（见 _ReroutedKey）。
+                        _real_key = _key_of(request)
+                        if _real_key is not None and str(
+                                getattr(_real_key, "platform", "") or "").strip():
+                            scope["_wb_api_key"] = _ReroutedKey(_real_key)
+                        logger.info("dispatch 兜底改道 | model=%r -> platform=%r (%s)",
+                                    _m, platform_id, _target[2])
             except Exception:  # noqa: BLE001
                 logger.debug("兜底改道失败", exc_info=True)
         # 默认平台**本身没有独立网关实现**（它就是主应用），
