@@ -6749,8 +6749,12 @@ async function platformBeginAuth(spec, storage) {
          border:1px solid var(--border);border-radius:8px;padding:8px 10px">
         <b>授权后页面显示 <code>{"code":-109,"msg":"RC_PARAMS_INVALID"}</code> 是正常的</b>，
         不是失败：那一步是浏览器直接打开回调页，缺我们自己要带的设备标识。
-        <b>授权码没有被消耗</b>，照常复制地址栏回来提交即可。
-        QQ / 微信的授权码只有几分钟有效期，<b>拿到后请立刻提交</b>，否则会变成「已过期（-107）」。
+        看到这个页面就说明<b>授权已经成功</b>，直接复制地址栏那条地址提交。
+        <br>
+        ⚠ <b>一个授权码只能用一次</b>（提交过一次、无论成功失败都作废）。
+        如果提交后报「已过期或已被使用（-107）」，说明这个 code 已经用掉了 ——
+        <b>重新扫码拿新的</b>，不要反复提交同一条。输入框会在提交后自动清空。
+        QQ / 微信的 code 只有几分钟有效期，<b>拿到后请立刻提交</b>。
       </p>
       <div class="flex gap-2 mb-3">
         <button type="button" data-mv="QC" class="console-btn primary">QQ 登录</button>
@@ -6864,17 +6868,38 @@ async function platformBeginAuth(spec, storage) {
           if (typeof msg !== "string") msg = String(msg);
           if (el) el.textContent = "▸ " + msg;
           toast(msg, "err");
+          // **失败后清空输入框**（2026-11-16 用户实测指出）。
+          //
+          // 授权码一次性：这个 code 已经废了，留在框里的话用户下次
+          // 一点「提交并入库」还是拿它去打，必然又是 -107 —— 表现就是
+          // 「怎么老是弹这个错」，而真正该做的是重扫拿新 code。
+          //
+          // 清空 + 把焦点交回去，顺手读一次剪贴板（用户通常已经复制好
+          // 新的回调了）。`lastTried` 也要清，否则新 code 恰好等于旧串
+          // 时会被防重挡掉。
+          if (cbInput) cbInput.value = "";
+          lastTried = "";
+          if (cbInput) {
+            try { cbInput.focus(); } catch (e) { /* 忽略 */ }
+          }
           if (submitBtn) submitBtn.disabled = false;
           busy = false;
           return;
         }
         stopPoll();
         toast("已入库：" + ((data && data.account && (data.account.name || data.account.uid)) || "Marvis 账号"));
+        // 成功同样清空：code 已消耗，留着只会在下次误提交时刷 -107。
+        if (cbInput) cbInput.value = "";
+        lastTried = "";
         closeModal();
         loadAccounts();
         if (window.WBPlatform) window.WBPlatform.refreshCounts();
       } catch (e) {
         if (el) el.textContent = "▸ 提交失败：" + (e && e.message ? e.message : e);
+        // 网络层失败也清空：这个 code 的状态未知，重试同一串很可能撞 -107，
+        // 让用户拿新的更稳。
+        if (cbInput) cbInput.value = "";
+        lastTried = "";
         if (submitBtn) submitBtn.disabled = false;
         busy = false;
       }
