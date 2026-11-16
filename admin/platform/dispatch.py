@@ -164,7 +164,11 @@ def resolve(request: Request) -> tuple[str, str]:
         if picked:
             return picked[0], picked[1]
 
-    if _spread_unbound():
+    # 通用路由名（`auto` 等）不走「无头分摊」：它没有模型归属，
+    # 分摊到哪个平台就等于让那个平台自己解释 `auto` —— 有的平台认、
+    # 有的平台直接 404。这类请求固定落默认平台，由主应用的自动选模型
+    # 接住，行为才可预期（issue #38）。
+    if _spread_unbound() and not (model and model.strip().lower() in _GENERIC_MODEL_NAMES):
         picked = _strategy_pick()
         if picked and not _is_disabled(picked[0], disabled):
             return picked
@@ -984,6 +988,14 @@ def _reroute_target(db, model: str, key, disabled: set[str] | None = None) -> tu
     text = str(model or "").strip()
     if not text:
         return None
+    # **通用路由名没有「归属平台」**（2026-11-16，issue #38）。
+    # `auto` / `default` / `chat` 这类名字是「让网关自己挑模型」，
+    # 每个平台都可以各自实现，`model_configs` 里谁登记了它纯属偶然。
+    # 旧逻辑按 `platform_of_model()` 做归属反查，于是 `auto` 被抢到唯一
+    # 登记了 auto 行的平台（线上是 Qoder），而上游并不认这个词 —— 表现
+    # 就是「开聚合 + 用 auto → 恒 HTTP 404」，且用户完全看不出落在哪。
+    if text.lower() in _GENERIC_MODEL_NAMES:
+        return None
     bound = str(getattr(key, "platform", "") or "").strip() if key is not None else ""
     want = _storage_of(bound or registry.DEFAULT_PLATFORM)
     disabled = disabled or set()
@@ -1028,6 +1040,10 @@ def _reroute_target(db, model: str, key, disabled: set[str] | None = None) -> tu
 
 
 def _platform_for_model(model: str, key) -> tuple[str, str, str] | None:
+    # 通用路由名不参与「按模型选平台」：`auto` 落在谁身上都该由那个平台
+    # 自己解释（默认平台由主应用的自动选模型接住）。见 `_reroute_target`。
+    if str(model or "").strip().lower() in _GENERIC_MODEL_NAMES:
+        return None
     try:
         with _db() as db:
             candidates = _candidates_for_model(db, model, key)
