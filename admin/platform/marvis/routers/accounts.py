@@ -246,20 +246,76 @@ def usage(limit: int = 50, _: bool = Depends(require_admin),
 
 
 # ---------------------------------------------------------------------------
-# 扫码登录（QQ / 微信）
+# 扫码登录
 # ---------------------------------------------------------------------------
-# 流程（与 QQ / 微信 OAuth 的固有形态一致，不能省步骤）：
+# 两条链路，按登录方式分开（2026-11-16）：
+#
+#   QQ   —— **免客户端**（`POST /auth/begin` + `GET /auth/poll`）：
+#           服务端拉起本机 headless 浏览器打开真实授权页，把二维码区域截图给
+#           用户扫，再用 DevTools 协议把 `marvis_oauth?code=…` 拦下来自动入库。
+#           用户不用复制任何地址，机器上也不用装 Marvis 客户端。
+#           为什么不能自己拼 ptlogin 轮询、协议细节与实测记录见
+#           `services/webauth.py` 的模块 docstring。
+#
+#   微信 —— 只能走老链路（`/auth/start` + `/auth/submit`）：
+#           该 appid 不是开放平台网站应用（`jslogin` 实测回 `code=400`），
+#           服务端拿不到扫码 uuid，只能让用户在授权页里登录、把回调地址交回来。
+#
+# 老链路（微信，以及 QQ 扫码失败时的兜底）：
 #
 #   1. POST /auth/start      生成 authorize_url（+ 二维码），用户去那边登录
 #   2. 用户在浏览器里登完，被重定向到 marvis_oauth?login_type=..&code=..
 #      —— 这个地址在浏览器里打不开（它是上游 API），所以要用户**复制回来**
 #   3. POST /auth/submit     把回调地址（或裸 code）交回来，服务端换登录态入库
 #   4. GET  /auth/poll       拿最终结果（控制台轮询这条，与灵犀一致）
-#
-# 为什么不自己把浏览器流程自动化：QQ / 微信的登录页有滑块与设备校验，
-# 在服务端无头浏览器里跑成功率极低，而且要把用户密码交给网关 —— 不做。
 _AUTH_SESSIONS: dict[str, dict] = {}
 _AUTH_TTL = 15 * 60
+
+
+class AuthBeginIn(BaseModel):
+    login_type: str = "QC"
+    guid: str = ""
+
+
+@router.post("/auth/begin")
+def auth_begin(body: AuthBeginIn | None = None,
+               _: bool = Depends(require_admin)):
+    """建一个**免客户端**扫码会话：服务端拉起浏览器打开真实 QQ 授权页。
+
+    返回 `auth_id` + 同源截图地址；前端轮询 `/auth/poll`，扫完自动入库。
+
+    ⚠ 这个接口**不等截图**就返回：拉起浏览器 + 渲染授权页要十几秒，同步等
+    会让前端 fetch 超时、页面显示裂图（实测）。图好了由 `shot_version`
+    带出来，前端据此换 `<img>` 的 src。
+    """
+    from admin.platform.marvis.services import webauth
+
+    kind = ((body.login_type if body else "QC") or "QC").upper()
+    if kind != "QC":
+        raise HTTPException(
+            400, detail="免客户端扫码只支持 QQ；微信请用 /auth/start 走授权页流程")
+    try:
+        return webauth.begin(kind, (body.guid if body else "") or "")
+    except RuntimeError as exc:
+        raise HTTPException(502, detail="浏览器授权不可用：%s" % exc) from exc
+
+
+@router.get("/auth/qr.png")
+def auth_qr_png(auth_id: str = "", _: bool = Depends(require_admin)):
+    """免客户端扫码会话的二维码（授权页里二维码区域的截图）。
+
+    它是**截图**而不是本地渲染的二维码：这一版的码由 QQ 在浏览器里下发，
+    服务端拿不到内容，只能把显示出来的那块裁下来。
+    """
+    from admin.platform.marvis.services import webauth
+    from fastapi.responses import Response
+
+    try:
+        png = webauth.qr_png(auth_id)
+    except KeyError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 def _gc_auth() -> None:
@@ -483,10 +539,24 @@ def auth_submit(body: AuthSubmitIn, _: bool = Depends(require_admin),
 
 
 @router.get("/auth/poll")
-def auth_poll(auth_id: str = "", _: bool = Depends(require_admin)):
-    """轮询扫码结果（控制台按灵犀的同一套约定调用）。"""
+def auth_poll(auth_id: str = "", _: bool = Depends(require_admin),
+              db: Session = Depends(get_db)):
+    """轮询扫码结果（控制台按灵犀的同一套约定调用）。
+
+    两种会话共用一个入口：
+      · `marvis-qr-…`（`/auth/begin` 建的）→ 免客户端扫码，浏览器自己走完授权，
+        **成功即入库**，返回 `status=done` + 账号 + `shot_version`；
+      · 其它（`/auth/start` 建的）→ 老链路，等 `/auth/submit` 把回调交回来。
+    """
     if not auth_id:
         raise HTTPException(400, detail="需要 auth_id")
+    from admin.platform.marvis.services import webauth
+
+    if webauth.session_exists(auth_id):
+        result = webauth.poll(db, auth_id)
+        result["auth_id"] = auth_id
+        return result
+
     session = _AUTH_SESSIONS.get(auth_id)
     if session is None:
         raise HTTPException(404, detail="扫码会话不存在或已过期")
@@ -500,6 +570,9 @@ def auth_poll(auth_id: str = "", _: bool = Depends(require_admin)):
 @router.post("/auth/cancel")
 def auth_cancel(auth_id: str = "", _: bool = Depends(require_admin)):
     if auth_id:
+        from admin.platform.marvis.services import webauth
+
+        webauth.cancel(auth_id)
         _AUTH_SESSIONS.pop(auth_id, None)
     return {"ok": True}
 
