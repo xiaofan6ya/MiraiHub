@@ -466,6 +466,20 @@ def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
     account.cool_until = None
     account.cool_kind = ""
     account.last_err_msg = ""
+    # **重新授权 = 这是一个全新可用的号**（2026-11-16 用户实测踩坑）。
+    #
+    # 只清 `cool_until` 是不够的：额度类失败会把号写进 `degrade_until`
+    # （默认 30 分钟）、风控类会写 `breaker_until`、被判死会打 `refresh_dead`。
+    # 这三样只要还挂着，选号照样跳过它 —— 用户重新扫码成功后仍然 503
+    # 「账号都在冷却或排队中」，而他明明刚授权完。
+    #
+    # 语义上这些都是「针对**旧凭证**的判断」，新凭证到手就该全部作废。
+    account.degrade_until = None
+    account.breaker_until = None
+    account.err_count = 0
+    for flag in ("refresh_dead", "dead", "session_dead"):
+        if hasattr(account, flag):
+            setattr(account, flag, 0)
     db.commit()
     db.refresh(account)
     return account, created

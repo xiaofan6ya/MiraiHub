@@ -165,7 +165,7 @@ def drop_session(sid: str) -> None:
 # ---------------------------------------------------------------------------
 class _Adapter:
     __slots__ = ("spec", "begin", "poll", "cancel", "sms_send", "sms_verify",
-                 "select")
+                 "select", "submit")
 
     def __init__(self, mod):
         self.spec = getattr(mod, "spec", {})
@@ -175,12 +175,15 @@ class _Adapter:
         self.sms_send: Callable = getattr(mod, "sms_send", None)
         self.sms_verify: Callable = getattr(mod, "sms_verify", None)
         self.select: Callable = getattr(mod, "select", None)
+        #: 「扫码后把回调地址贴回来」的平台（Marvis）专用；其余平台没有这个方法。
+        self.submit: Callable = getattr(mod, "submit", None)
 
 
 def _load_adapters() -> dict[str, _Adapter]:
     out: dict[str, _Adapter] = {}
     #: 豆包已从网关整体移除（2026-11-15），公开入口也不再提供它的注册。
-    for name in ("workbuddy", "loomy", "raccoon", "minimax"):
+    #: marvis（腾讯 Marvis）2026-11-16 接入：扫码 + 粘贴回调，与控制台同源。
+    for name in ("workbuddy", "loomy", "raccoon", "minimax", "marvis"):
         try:
             mod = __import__("admin.platform.%s.public_auth" % name,
                              fromlist=["spec"])
@@ -201,7 +204,7 @@ WORKBUDDY_SPEC = {"id": "workbuddy", "label": "WorkBuddy", "modes": ["sms"],
 
 #: 每平台默认开放（管理页可单独关掉某一个）
 DEFAULT_PLATFORM_FLAGS = {"workbuddy": True, "loomy": True,
-                          "raccoon": True, "minimax": True}
+                          "raccoon": True, "minimax": True, "marvis": True}
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +393,13 @@ class CancelIn(BaseModel):
     session: str = ""
 
 
+class SubmitIn(BaseModel):
+    """「扫码后把回调地址贴回来」的提交体（Marvis）。"""
+
+    session: str = ""
+    callback: str = ""     # 回调地址 / 裸 code
+
+
 # ---------------------------------------------------------------------------
 # 端点
 # ---------------------------------------------------------------------------
@@ -446,6 +456,37 @@ def open_poll(platform: str, session: str, request: Request, db: Session = Depen
         return {"ok": True, "status": "pending"}
     if result.get("status") == "done":
         drop_session(str(session or ""))
+        _audit("done", platform, ip)
+    return {"ok": True, **result}
+
+
+@router.post("/{platform}/submit")
+def open_submit(platform: str, body: SubmitIn, request: Request,
+                db: Session = Depends(get_db)):
+    """提交回调地址换登录态（Marvis 这类「扫码后把回调贴回来」的平台专用）。
+
+    与轮询分支的区别：`poll` 是服务端替用户去问上游「授权完了吗」，
+    而这个平台拿不到那种可轮询的凭据 —— 换票必须用浏览器地址栏那条回调
+    里的一次性 `code`，只能由用户贴回来。所以单独给一条提交入口。
+    """
+    ip = _client_ip(request)
+    if not _rate_hit("submit", ip):
+        raise _fail_plain(429)
+    ad = _adapter_of(platform)
+    if getattr(ad, "submit", None) is None:
+        raise _fail_plain(404)
+    info = get_session(str(body.session or ""), platform, ip)
+    try:
+        result = ad.submit(str(body.session or ""), str(body.callback or ""),
+                           db, info)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        _audit("submit_error", platform, ip)
+        logger.debug("公开入口 submit 异常 platform=%s", platform, exc_info=True)
+        return {"ok": True, "status": "failed", "error": "提交失败，请重试"}
+    if result.get("status") == "done":
+        drop_session(str(body.session or ""))
         _audit("done", platform, ip)
     return {"ok": True, **result}
 
@@ -690,3 +731,4 @@ def open_admin_tickets(request: Request, db: Session = Depends(get_db),
                           0, int((r.expires_at - datetime.utcnow()).total_seconds()))})
     return {"ok": True, "open": _jg.is_open(db), "epoch": epoch,
             "count": len(items), "tickets": items[:50]}
+
