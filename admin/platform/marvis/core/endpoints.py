@@ -365,6 +365,48 @@ def business_headers(acct: dict, *, query: str, method: str = "GET") -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 续签请求体
+# ---------------------------------------------------------------------------
+#: 续签 body 里 `loginType` 的取值：**恒为字面量 `"Marvis"`**。
+#:
+#: 它不是 `Ual-Access-Login-Type`（那个是 QC→"1" / WX→"2"）。写成 "2" 会回
+#: `{"code":-109,"msg":"RefreshToken missing required param (openid, guid, token)"}`
+#: —— 「参数明明都给了却说缺参数」的真因就在这一层（2026-11-16 依 magpie
+#: 客户端实现复核，见 `refresh_body` docstring）。
+REFRESH_LOGIN_TYPE = "Marvis"
+
+
+def refresh_body(acct: dict) -> str:
+    """续签请求体 —— **原样字符串**，签名对象就是这串字节。
+
+    ## 形状是打通的唯一关键（一次嵌套都不能少）
+
+        {"userInfo":{"openId":"…","refreshToken":"…","accessToken":"…",
+                     "loginType":"Marvis"}}
+
+    ## 为什么以前一直 -109
+
+    上游读参数的路径是 `body.userInfo.{openId,refreshToken,accessToken}`：
+
+      · 少一层 `userInfo` 嵌套 → 读不到；
+      · 字段名写 `openid`（全小写）→ 读不到（要 `openId`）；
+      · `loginType` 写成 `"1"` / `"2"`（登录方式码）→ 读不到（要 `"Marvis"`）。
+
+    三种都回同一句 `RefreshToken missing required param (openid, guid, token)`，
+    所以从错误文案反推参数位置永远推不出来 —— 必须照客户端自己的形状发。
+    """
+    payload = {
+        "userInfo": {
+            "openId": str(acct.get("openid") or ""),
+            "refreshToken": str(acct.get("refresh_token") or ""),
+            "accessToken": str(acct.get("access_token") or ""),
+            "loginType": REFRESH_LOGIN_TYPE,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def authorize_url(login_type: str = "QC", guid: str = "", state: str = "") -> str:
     """生成授权页地址（用户在浏览器里登 QQ / 微信，拿到 code）。
 

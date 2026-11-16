@@ -84,17 +84,23 @@ class MarvisAccountOps:
             Account.id == int(account_id), Account.platform == "marvis").first()
         if account is None:
             raise ValueError("账号不存在")
-        return marvis_accounts.sync_quota(db, account)
+        # 先续签再读钱包：微信票只活 2 小时，只刷额度不续签的话，用户点了
+        # 「刷新」看到的仍是「已过期」，下一次转发照样 401。
+        stage: dict = {"ok": False, "detail": ""}
+        try:
+            marvis_accounts.ensure_token(db, account, force=True)
+            stage = {"ok": True, "detail": "续签成功"}
+        except client.UpstreamError as exc:
+            # 续签失败不阻断读钱包：旧票可能还能读（钱包腿与模型腿的判定不同）
+            stage = {"ok": False, "detail": exc.message[:160],
+                     "code": str(exc.code or ""), "kind": exc.kind}
+        wallet = marvis_accounts.sync_quota(db, account)
+        hint = marvis_accounts.token_expiry_hint(
+            marvis_accounts.credentials_of(account))
+        return {**wallet, "refresh": stage, "token_expiry": hint}
 
     def keepalive(self, db):
-        ok, failed = 0, []
-        for account in marvis_accounts.accounts_for(db, self.realm):
-            try:
-                marvis_accounts.ensure_token(db, account)
-                ok += 1
-            except client.UpstreamError as exc:
-                failed.append({"account_id": account.id, "error": exc.message[:120]})
-        return {"ok": not failed, "refreshed": ok, "failed": failed}
+        return _run_keepalive(db, realm=self.realm)
 
     def checkin(self, db):
         """签到。**不支持就明确返回 supported=False。**"""
@@ -221,13 +227,15 @@ class MarvisGateway:
         return MarvisAccountOps(self.realm)
 
     def task_runners(self) -> dict:
-        """本平台的定时任务：额度同步。
+        """本平台的定时任务：额度同步 + 续签保活。
 
-        Marvis 没有签到 / 保活的概念 —— 额度是**令牌钱包**，每天按自然日重置，
-        不需要「领」。唯一值得定时做的是把钱包读回来，否则卡片上的数字会一直
-        停在最后一次手工刷新时的值。
+        Marvis 没有签到（额度是**令牌钱包**，每天按自然日重置，不需要「领」），
+        但**有**续签：微信登录的 access_token 实测只活 2 小时 10 分。
+        `marvis_keepalive` 就是每个周期把临期号（< 15 分钟）用 refresh_token
+        换一次新有效期 —— 不跑它，扫码授权完过两小时账号必然掉线。
         """
-        return {"marvis_refresh_quota": _run_refresh_quota}
+        return {"marvis_refresh_quota": _run_refresh_quota,
+                "marvis_keepalive": _run_keepalive}
 
     def client_probe(self) -> ClientProbe:
         return MarvisClientProbe(self.realm)
@@ -295,6 +303,61 @@ def _local_ledger(db, realm: str, days: int) -> dict:
     return {"days": days, "items": items,
             "totals": {"requests": sum(i["requests"] for i in items),
                        "total_tokens": sum(i["total_tokens"] for i in items)}}
+
+
+def _run_keepalive(db, schedule=None, realm: str = "") -> dict:
+    """定时任务：把临期凭证续掉（`refresh_token` → 新有效期）。
+
+    ## 为什么必须有这个任务
+
+    微信登录的 access_token 实测只活 **2 小时 10 分**（QQ 是 30 天量级）。
+    上游 `POST /marvis_client_login/marvis_refresh_token` 能续，但**得有人去调**：
+    只靠「正好有请求进来时顺手续」（`ensure_token`）的话，夜里空闲两小时号就掉了。
+
+    ## 只续临期的
+
+    窗口是 `services.accounts.REFRESH_AHEAD_SECONDS`（15 分钟）。全量续签等于
+    把一次性的 refresh_token 无谓轮换几十遍，还会跟客户端互踢登录态。
+    """
+    from admin.platform.shared import run_account_batch
+
+    rows = [a for a in marvis_accounts.accounts_for(db, realm)
+            if (getattr(a, "status", "") or "") == "active"]
+    if not rows:
+        return {"ok": True, "accounts": 0, "renewed": 0, "skipped": 0,
+                "failed": 0, "note": "没有启用账号"}
+
+    targets: list[int] = []
+    skipped = 0
+    for account in rows:
+        if marvis_accounts.needs_refresh(marvis_accounts.credentials_of(account)):
+            targets.append(int(account.id or 0))
+        else:
+            skipped += 1
+    if not targets:
+        return {"ok": True, "accounts": len(rows), "renewed": 0,
+                "skipped": skipped, "failed": 0,
+                "summary": "没有临期凭证（%d 个都不在续签窗口内）" % len(rows)}
+
+    results: list[dict] = []
+
+    def worker(session, account) -> dict:
+        try:
+            marvis_accounts.ensure_token(session, account, force=True)
+            return {"id": account.id, "ok": True}
+        except Exception as exc:        # noqa: BLE001 - 单号失败不影响别人
+            return {"id": account.id, "ok": False, "error": str(exc)[:120]}
+
+    for item in run_account_batch(targets, worker, label="marvis-keepalive"):
+        if item:
+            results.append(item)
+
+    renewed = sum(1 for item in results if item.get("ok"))
+    failed = len(results) - renewed
+    return {"ok": failed == 0, "accounts": len(rows), "renewed": renewed,
+            "skipped": skipped, "failed": failed, "items": results[:50],
+            "summary": "续签 %d 个 · 跳过 %d 个（未临期）· 失败 %d 个"
+                       % (renewed, skipped, failed)}
 
 
 def _run_refresh_quota(db, schedule=None) -> dict:

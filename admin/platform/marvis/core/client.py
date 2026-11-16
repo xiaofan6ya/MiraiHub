@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 
@@ -279,74 +280,136 @@ def list_models(_credential: dict | None = None, realm: str = "") -> list[dict]:
     return out
 
 
-def refresh_credentials(refresh_token: str, realm: str = "cn", *,
-                        account_id: int = 0, credential: dict | None = None) -> dict:
-    """续签登录态。
+#: 续签失败时「登录态真的死了」的业务码。
+#:
+#: · `-107 RC_NO_AUTH_ERR` —— 凭证无效；
+#: · `-101` —— 未授权（同类）；
+#: · `-114` —— 上游把 OAuth 的报错原样回给你，实测形状是
+#:   `code:-114, msg:callback({"error":100036,"error_description":"invalid refresh token"})`。
+#:   参数形状对、只是这张 refresh_token 已经不能用了（被客户端轮换掉、或过期）。
+#:
+#: 除了这几个，其余（`-109` 参数、`-7` 签名、`-5` 缺头）都是**本端**的问题 ——
+#: 把它们也当成 auth 失败会把好账号标成「需要重新登录」，比不续签更糟。
+FATAL_REFRESH_CODES = frozenset({-107, -101, -114})
 
-    ## 接口事实（2026-11-16 真机复核，见 issue #41）
+#: `msg` 里出现这些片段同样判死（上游有时把 OAuth 原文塞进 msg 而不改 code）。
+FATAL_REFRESH_HINTS = ("invalid refresh token", "refresh token expired",
+                       "refresh_token invalid")
 
-    路径 `POST /marvis_client_login/marvis_refresh_token`（**POST，不是 GET**）：
 
-      · GET 该路径 → 恒 400 空体（不带签名头）或 200 + `-109`（带签名头）；
-      · POST 该路径 → 200 + 业务码，说明**方法确实是 POST**。
-        这一条是 issue #41 纠正对了的地方，此前的端点表和注释都写成了 GET。
+def _expires_in_seconds(info: dict) -> int:
+    """取续签下发的有效期秒数 —— **数字与数字字符串都收**。
 
-    ## 仍然没打通的部分（不要假装它能用）
+    上游给的是字符串（微信实测 `"7200"`），只认 number 会让 `expires_at`
+    恒为 0，下一次就又要走「按推断 TTL 算」那条腿，面板上的到期时间永远是猜的。
+    """
+    for key in ("expires_in", "expiresIn", "access_token_expire_time"):
+        raw = info.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            seconds = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if seconds > 1e9:      # 已经是绝对时间戳，交给 expires_at 那条腿
+            return 0
+        if seconds > 0:
+            return seconds
+    return 0
 
-    参数该放哪儿**目前没有找到**。真机穷举过这些位置，全部回
-    `-109 RefreshToken missing required param (openid, guid, token)`：
 
-      · body：`{}` / `{openid,guid,token}` / `{openid,guid,refreshToken}` /
-        驼峰全量 userInfo / `{userInfo:{…}}` / `{data:{…}}` / 表单编码
-      · query：`?openid&guid&token`（带签名则 403，签名口径不适用于此路径）
-      · header：`openid/guid/token` 裸名、`Ual-Access-*` 全套（含 Guid）
+def refresh_credentials(refresh_token: str = "", realm: str = "cn", *,
+                        account_id: int = 0,
+                        credential: dict | None = None) -> dict:
+    """续签登录态 —— `POST /marvis_client_login/marvis_refresh_token`。
 
-    也就是说 issue 里「POST 带完整 userInfo body 返回 `-107`」这条**未能复现**，
-    「`-109` 是漏了 `Ual-Access-Guid` 头」也不成立 —— 带着该头同样 `-109`。
-    `-107 RC_NO_AUTH_ERR` 的语义（凭证无效）本身合理，只是本机走不到那一步。
+    ## 请求形状（这一层嵌套就是全部关键，见 `endpoints.refresh_body`）
 
-    所以这里**不做假实现**：真的发出 POST，把上游原文带回给调用方；
-    只有拿到 `user_info` 才认为续签成功。失败时抛出可操作的错误，
-    而不是返回一份伪造的凭证。
+        {"userInfo":{"openId":"…","refreshToken":"…","accessToken":"…",
+                     "loginType":"Marvis"}}
+
+    签名口径与 `/v3/*` 相同（签名对象是 **body 原文**），`Ual-Access-Guid` 必带。
+    上游读的是 `body.userInfo.{openId,refreshToken,accessToken}`：少一层嵌套、
+    字段写成 `openid`、或把 `loginType` 填成登录方式码（"1"/"2"），一律回
+    `-109 RefreshToken missing required param (openid, guid, token)` —— 所以
+    从错误文案反推参数位置永远推不出来（issue #41 的穷举都卡在这一步）。
+
+    ## 响应语义
+
+        {"code":0,"msg":"RC_SUCCESS",
+         "user_info":{"access_token":"…","refresh_token":"…","expires_in":"7200"}}
+
+      · `access_token` **不变** —— 续签只重置有效期，不要指望换出新票面；
+      · `refresh_token` 可能回**空串**（微信实测如此）：空串 = 这次没给新值，
+        必须回落旧值，否则下一次续签直接没票可用；
+      · `expires_in` 是**字符串**，见 `_expires_in_seconds()`；
+      · `-107 / -101` 才是登录态真死，`-109` 一类是本端问题（`FATAL_REFRESH_CODES`）。
     """
     data = dict(credential or {})
-    openid = str(data.get("openid") or "").strip()
+    if refresh_token and not data.get("refresh_token"):
+        data["refresh_token"] = refresh_token
+
+    openid = str(data.get("openid") or data.get("openId") or "").strip()
     guid = str(data.get("guid") or "").strip()
-    token = str(data.get("access_token") or "").strip()
-    refresh = str(refresh_token or data.get("refresh_token") or "").strip()
-    if not (openid and guid and token):
+    token = str(data.get("access_token") or data.get("accessToken") or "").strip()
+    refresh = str(data.get("refresh_token") or data.get("refreshToken") or "").strip()
+    if not (openid and token and refresh):
         raise UpstreamError(
-            "续签需要完整凭证（openid + guid + access_token），"
-            "只有 refresh_token 换不出来",
-            status=401, kind="auth")
+            "续签需要 openid + access_token + refresh_token，缺一换不出来："
+            "请在控制台「授权登录」重新扫码（QQ / 微信）",
+            status=401, code="credential_incomplete", kind="auth")
 
-    body = json.dumps({
-        "openid": openid,
-        "guid": guid,
-        "token": token,
-        "refreshToken": refresh,
-        "loginType": endpoints.LOGIN_TYPE.get(
-            str(data.get("login_type") or "WX").upper(), "2"),
-    }, ensure_ascii=False, separators=(",", ":"))
-
-    headers = endpoints.business_headers({**data, "access_token": token},
-                                         query=body, method="POST")
+    acct = {"openid": openid, "access_token": token, "refresh_token": refresh,
+            "guid": guid,
+            "login_type": str(data.get("login_type") or data.get("loginType") or "1")}
+    # 签名对象是**实际发出的那串字节**：先序列化，再拿同一串去做签名头。
+    body = endpoints.refresh_body(acct)
+    headers = endpoints.business_headers(acct, query=body, method="POST")
+    # business_headers 已含该头；显式再写一遍是为了让「guid 到底带没带」这件事
+    # 在代码里看得见（issue #41 曾把它当成 -109 的根因，值相同不影响签名）。
     headers["Ual-Access-Guid"] = guid
 
     payload = _request(endpoints.refresh_url(realm), method="POST",
                        raw_body=body, headers=headers, realm=realm,
                        account_id=account_id)
-    inner = payload.get("user_info") if isinstance(payload, dict) else None
-    if isinstance(inner, dict) and (inner.get("openid") or inner.get("accessToken")
-                                    or inner.get("access_token")):
-        return inner
-    code = payload.get("code") if isinstance(payload, dict) else None
+
+    code = None
+    inner = None
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        inner = payload.get("user_info") or payload.get("userInfo")
+
+    if code in (0, "0") and isinstance(inner, dict):
+        new_access = str(inner.get("access_token") or inner.get("accesstoken")
+                         or inner.get("accessToken") or token)
+        # 空串回落旧值 —— 「这次没给」不等于「清空」
+        new_refresh = str(inner.get("refresh_token") or inner.get("refreshtoken")
+                          or inner.get("refreshToken") or "") or refresh
+        seconds = _expires_in_seconds(inner)
+        return {
+            "access_token": new_access,
+            "refresh_token": new_refresh,
+            "expires_in": seconds,
+            "expires_at": int(time.time()) + seconds if seconds else 0,
+            "login_type": acct["login_type"],
+            "openid": str(inner.get("openid") or inner.get("openId") or openid),
+            "nickname": str(inner.get("nick_name") or inner.get("nickname") or ""),
+            "avatar": str(inner.get("head_img_url") or ""),
+            "raw": payload,
+        }
+
     msg = str((payload or {}).get("msg") or "") if isinstance(payload, dict) else ""
+    blob = msg.lower()
+    fatal = (code in FATAL_REFRESH_CODES
+             or any(hint in blob for hint in FATAL_REFRESH_HINTS))
     raise UpstreamError(
-        "Marvis 续签未成功（上游 code=%s %s）——该接口的参数约定尚未打通，"
-        "请重新扫码登录或导入刷新后的凭证" % (code, msg),
-        status=401, code=str(code or ""), kind="auth",
-        detail=json.dumps(payload, ensure_ascii=False)[:200])
+        "Marvis 续签被上游拒绝（code=%s %s）%s"
+        % (code, msg,
+           "：这张 refresh_token 已经不能用了，请重新扫码登录（QQ / 微信）"
+           if fatal else "——这是本端参数/签名问题，账号本身没坏"),
+        status=401, code=str(code or ""),
+        kind=("auth" if fatal else "refresh_rejected"),
+        detail=json.dumps(payload, ensure_ascii=False)[:300])
 
 
 def exchange_code(code: str, login_type: str, realm: str = "cn", *,

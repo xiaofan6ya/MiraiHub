@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -147,18 +148,45 @@ def token_age_seconds(data: dict) -> int | None:
 def token_expiry_hint(data: dict) -> dict:
     """凭证时效提示（给控制台账号卡与错误信息共用）。
 
+    ## 两个数据源，优先用真的那个
+
+    · `expires_at`  —— 续签接口下发的绝对到期时间（**真值**，微信实测 7200s）；
+    · `issued_at + TTL` —— 老凭证没有 `expires_at` 时的推断值（见 `TOKEN_TTL_BY_LOGIN`）。
+
+    以前只有推断那条腿，所以「续签成功」也推进不了这个数字 —— 面板会一直
+    停在登录时的 2 小时档上，用户看到的是「已过期却还能用」。有真值就必须优先。
+
     `state`：
-      * `unknown`  —— 老凭证没有 `issued_at`（无法判断，不吓用户）；
+      * `unknown`  —— 两个数据源都没有（不吓用户）；
       * `fresh`    —— 还早；
       * `soon`     —— 剩余不足 `TOKEN_WARN_SECONDS`，该准备重登了；
-      * `expired`  —— 已超过推断 TTL，大概率上游已判失效。
+      * `expired`  —— 已过期，大概率上游已判失效。
     """
     ttl = token_ttl_seconds(data)
+    expires = expires_at_of(data)
+    if expires:
+        remaining = expires - int(time.time())
+        age = None
+        if remaining <= 0:
+            state = "expired"
+        elif remaining <= TOKEN_WARN_SECONDS:
+            state = "soon"
+        else:
+            state = "fresh"
+        return {"state": state, "age_seconds": age,
+                "remaining_seconds": max(0, remaining),
+                "expires_at": expires, "source": "upstream",
+                "ttl_seconds": ttl, "login_type": login_type_of(data),
+                "refreshable": _refreshable_of(data),
+                "needs_relogin": bool((data or {}).get("refresh_dead"))}
+
     age = token_age_seconds(data)
     if age is None:
         return {"state": "unknown", "age_seconds": None,
-                "remaining_seconds": None, "ttl_seconds": ttl,
-                "login_type": login_type_of(data)}
+                "remaining_seconds": None, "expires_at": 0, "source": "unknown",
+                "ttl_seconds": ttl, "login_type": login_type_of(data),
+                "refreshable": _refreshable_of(data),
+                "needs_relogin": bool((data or {}).get("refresh_dead"))}
     remaining = ttl - age
     if remaining <= 0:
         state = "expired"
@@ -168,7 +196,159 @@ def token_expiry_hint(data: dict) -> dict:
         state = "fresh"
     return {"state": state, "age_seconds": age,
             "remaining_seconds": max(0, remaining),
-            "ttl_seconds": ttl, "login_type": login_type_of(data)}
+            "expires_at": 0, "source": "inferred",
+            "ttl_seconds": ttl, "login_type": login_type_of(data),
+            "refreshable": _refreshable_of(data),
+                "needs_relogin": bool((data or {}).get("refresh_dead"))}
+
+
+# ---------------------------------------------------------------------------
+# 续签（2026-11-16 打通：`POST /marvis_client_login/marvis_refresh_token`）
+# ---------------------------------------------------------------------------
+#: 提前多久开始续签（秒）。取 15 分钟：比微信档的 2 小时短得多，
+#: 既不会每次转发都去打一次续签接口，又能在真过期前把票换好。
+REFRESH_AHEAD_SECONDS = 15 * 60
+
+#: 续签失败后的退避（秒）。失败一次就每个请求再试一遍，等于拿号去撞上游；
+#: 10 分钟内只认上一次的结果，到期再试。
+REFRESH_FAIL_BACKOFF = 10 * 60
+
+#: 同账号续签串行锁（进程内）。
+#:
+#: 为什么必须串行：`refresh_token` 是**一次性轮换**票 —— 同号并发两次续签，
+#: 后拿到的那份会把先拿到的打掉，两边都失效。锁按 `account.id` 分，
+#: 不同账号之间不互相排队。
+_REFRESH_LOCKS: dict[int, threading.Lock] = {}
+_REFRESH_LOCKS_GUARD = threading.Lock()
+
+
+def _refresh_lock(account_id: int) -> threading.Lock:
+    with _REFRESH_LOCKS_GUARD:
+        lock = _REFRESH_LOCKS.get(int(account_id))
+        if lock is None:
+            lock = threading.Lock()
+            _REFRESH_LOCKS[int(account_id)] = lock
+        return lock
+
+
+def refresh_token_of(data: dict) -> str:
+    return str((data or {}).get("refresh_token")
+               or (data or {}).get("refreshToken") or "")
+
+
+def _refreshable_of(data: dict) -> bool:
+    """这份凭证还能不能靠续签续命（有票，且没被判死）。"""
+    return bool(refresh_token_of(data)) and not (data or {}).get("refresh_dead")
+
+
+def expires_at_of(data: dict) -> int:
+    """凭证的绝对到期时间（秒）。毫秒值自动降级成秒 —— 上游两种都给过。"""
+    raw = (data or {}).get("expires_at") or (data or {}).get("expiresAt")
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+    if value > 10 ** 12:          # 毫秒
+        value //= 1000
+    return max(0, value)
+
+
+def needs_refresh(data: dict, *, now: int | None = None) -> bool:
+    """这份凭证该不该续签。
+
+    没有 `refresh_token` 的一律 False —— 那种号只能重新扫码，白打接口没用。
+    上次续签被判死（`refresh_dead`）的也不再试，直到重新导入凭证。
+    """
+    if not refresh_token_of(data):
+        return False
+    if (data or {}).get("refresh_dead"):
+        return False
+    ts = int(time.time()) if now is None else int(now)
+    expires = expires_at_of(data)
+    if expires:
+        return ts >= expires - REFRESH_AHEAD_SECONDS
+    age = token_age_seconds(data)
+    if age is None:
+        # 不知道什么时候签的（老凭证没记 issued_at）：先续一次，续完就有 expires_at。
+        return True
+    return age >= token_ttl_seconds(data) - REFRESH_AHEAD_SECONDS
+
+
+def _refresh_backoff_active(data: dict) -> bool:
+    try:
+        failed_at = int((data or {}).get("refresh_failed_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return failed_at > 0 and (int(time.time()) - failed_at) < REFRESH_FAIL_BACKOFF
+
+
+def refresh_account(db: Session, account: Account) -> dict:
+    """用 `refresh_token` 换一次新有效期，并写回 `auth_json`。
+
+    返回 `{"ok", "reason", "fatal", "error", "expires_at"}`，**不抛**：
+    转发链路不能因为续签失败就断掉 —— 旧票可能还能用，真死了让上游 401 说话。
+
+    `fatal=True` 表示上游明确说凭证无效（`-107 / -101`）；其余失败（`-109`
+    参数、`-7` 签名）是本端问题，**不把账号标死**。
+    """
+    account_id = int(account.id or 0)
+    with _refresh_lock(account_id):
+        try:
+            db.refresh(account)     # 锁内二次读：并发里前一个可能刚续过
+        except Exception:           # noqa: BLE001 - 非 session 对象 / 已过期
+            pass
+        data = credentials_of(account)
+        try:
+            grant = client.refresh_credentials(
+                "", realm_of(account), account_id=account_id, credential=data)
+        except client.UpstreamError as exc:
+            data["refresh_failed_at"] = int(time.time())
+            data["refresh_err"] = exc.message[:200]
+            if exc.kind == "auth":
+                # 上游明确说这张 refresh_token 不能用了 —— 别再每轮打一次接口，
+                # 标死等重新扫码（导入新凭证时 `_upsert` 会整份覆盖，标记自然清）。
+                data["refresh_dead"] = 1
+            account.auth_json = json.dumps(data, ensure_ascii=False)
+            account.last_err_at = datetime.utcnow()
+            account.last_err_msg = exc.message[:240]
+            db.commit()
+            logger.info("Marvis 续签失败 acc=%s kind=%s：%s",
+                        account_id, exc.kind, exc.message[:160])
+            return {"ok": False, "reason": exc.message[:200],
+                    "fatal": exc.kind == "auth", "error": exc, "expires_at": 0}
+        except Exception as exc:    # noqa: BLE001 - 续签不能把转发打挂
+            data["refresh_failed_at"] = int(time.time())
+            data["refresh_err"] = str(exc)[:200]
+            account.auth_json = json.dumps(data, ensure_ascii=False)
+            db.commit()
+            logger.warning("Marvis 续签异常 acc=%s", account_id, exc_info=True)
+            return {"ok": False, "reason": str(exc)[:200], "fatal": False,
+                    "error": exc, "expires_at": 0}
+
+        fresh = dict(data)
+        fresh["access_token"] = grant["access_token"]
+        if grant.get("refresh_token"):
+            # 空串不覆盖 —— 空串是「这次没给新值」
+            fresh["refresh_token"] = grant["refresh_token"]
+        if grant.get("expires_at"):
+            fresh["expires_at"] = int(grant["expires_at"])
+        fresh["issued_at"] = int(time.time())
+        if grant.get("nickname"):
+            fresh["nickname"] = grant["nickname"]
+        if grant.get("avatar"):
+            fresh["avatar"] = grant["avatar"]
+        fresh.pop("refresh_failed_at", None)
+        fresh.pop("refresh_err", None)
+        fresh.pop("refresh_dead", None)
+        account.auth_json = json.dumps(fresh, ensure_ascii=False)
+        account.last_err_at = None
+        account.last_err_msg = ""
+        db.commit()
+        logger.info("Marvis 续签成功 acc=%s expires_in=%ss",
+                    account_id, grant.get("expires_in") or 0)
+        return {"ok": True, "reason": "", "fatal": False, "error": None,
+                "expires_at": int(fresh.get("expires_at") or 0),
+                "expires_in": int(grant.get("expires_in") or 0)}
 
 
 def public_view(account: Account, *, quota: dict | None = None,
@@ -421,30 +601,53 @@ def _as_int(value):
         return None
 
 
-def ensure_token(db: Session, account: Account) -> dict:
-    """取一份可用凭证。
+def ensure_token(db: Session, account: Account, *, force: bool = False) -> dict:
+    """取一份可用凭证 —— **临期会先续签**（`refresh_token` 换新有效期）。
 
-    Marvis 没有独立的 refresh 接口（续签要整份凭证），所以这里只做**完整性**
-    校验：缺 openid / access_token / guid 的直接判失效，让上层换号或重新扫码，
-    而不是发一个注定 -109 的请求出去。
+    ## 为什么在这里续而不是等 401
+
+    微信登录的 access_token 实测只活 **2 小时 10 分**（QQ 是 30 天量级）。
+    不续签的话，扫码授权完过两小时，转发链路就必然撞一次
+    `4100403 登录态过期` —— 用户看到的是「刚登的号又掉了」。
+    续签窗口见 `REFRESH_AHEAD_SECONDS`（15 分钟），失败退避见
+    `REFRESH_FAIL_BACKOFF`。
+
+    ## 失败语义
+
+    · `force=False`（转发链路 / 定时保活）：续签失败只记日志和 `last_err_msg`，
+      **继续用旧票** —— 旧票可能还能用，真死了让上游 401 说话；
+    · `force=True`（用户点「刷新」）：失败就把上游原文抛上去，让用户看见。
+
+    `fatal=True` 的失败（`-107 / -101`，凭证无效）说明只能重新扫码，
+    调用方可据此提示重登。
     """
     data = credentials_of(account)
     if not openid_of(data) or not token_of(data):
         raise client.UpstreamError(
             "账号凭证不完整（缺 openid / access_token），请重新扫码登录",
             status=401, kind="auth")
-    # 凭证按推断 TTL 已过期：**提前**给出可操作的提示，而不是发一个注定 401
-    # 的请求再报「登录态过期」。仍然放行（只是提示）—— 推断值可能偏保守，
-    # 真让上游判死才有说服力；这里只把话说清楚。
-    hint = token_expiry_hint(data)
-    if hint["state"] == "expired":
-        logger.info("Marvis 凭证已超推断 TTL（%ss）acc=%s，本次仍尝试调用",
-                    hint["age_seconds"], account.id)
     if not guid_of(data):
         # 历史数据可能没 guid：补一个并写回，否则这份凭证永远换不出登录态。
         data["guid"] = str(uuid.uuid4())
         account.auth_json = json.dumps(data, ensure_ascii=False)
         db.commit()
+
+    if force or needs_refresh(data):
+        if force or not _refresh_backoff_active(data):
+            result = refresh_account(db, account)
+            if result.get("ok"):
+                data = credentials_of(account)
+            elif force:
+                raise result["error"]
+            else:
+                logger.info("Marvis 续签未成功 acc=%s，本次沿用旧票：%s",
+                            account.id, result.get("reason"))
+
+    hint = token_expiry_hint(data)
+    if hint["state"] == "expired":
+        # 推断值可能偏保守（尤其 QQ 档），只提示不拦 —— 真让上游判死才有说服力。
+        logger.info("Marvis 凭证已判过期（source=%s）acc=%s，本次仍尝试调用",
+                    hint.get("source"), account.id)
     return data
 
 

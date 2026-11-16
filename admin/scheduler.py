@@ -2061,6 +2061,9 @@ _TASK_SCHEDULE_META = {
     "run_growth_tasks": ("自动成长任务", 1440),
     "run_growth_plan": ("成长计划", 240),
     "keepalive_tokens": ("令牌保活", 360),
+    # Marvis 的微信登录态只活约 2 小时，不能等 `*_keepalive` 后缀的 360 分钟兜底
+    # —— 那等于「掉线两小时后才补一枪」。30 分钟一轮 + 15 分钟续签窗口刚好接得上。
+    "marvis_keepalive": ("续签保活", 30),
     "ban_recheck": ("风控封号复核", 30),
     "daily_activity": ("每日活跃对话", 1440),
     # WPS 灵犀：签到/保活走默认后缀规则，这里只补两条语义不同的。

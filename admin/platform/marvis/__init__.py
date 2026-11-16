@@ -38,10 +38,15 @@ REALM_IDS = {"cn": "marvis"}
 
 
 def _task_runners() -> dict:
-    """本平台支持的定时任务：额度同步（令牌钱包每天重置）。"""
+    """本平台支持的定时任务：额度同步 + 续签保活。
+
+    `marvis_keepalive` 是**必需**的：微信登录的 access_token 只活约 2 小时，
+    没有这个任务，扫码授权完过两小时账号必然掉线（见 issue #41）。
+    """
     from admin.platform.marvis import platform_gateway as _pg
 
-    return {"marvis_refresh_quota": _pg._run_refresh_quota}
+    return {"marvis_refresh_quota": _pg._run_refresh_quota,
+            "marvis_keepalive": _pg._run_keepalive}
 
 
 def install() -> None:
@@ -74,11 +79,13 @@ def install() -> None:
             rating={
                 "tier": "npc",
                 "reason": "令牌钱包制、量给得很足（每号每日 1000 万计费 token），"
-                          "但登录态只有约 2 小时，过期要重新扫码；不扫本机。",
+                          "微信登录态只有约 2 小时（QQ 30 天量级），"
+                          "已由 marvis_keepalive 定时用 refresh_token 自动续签；不扫本机。",
             },
             notes="腾讯 Marvis（应用宝 AI 助手）：OpenAI 协议上游，"
                   "Ual-Access 头鉴权；令牌钱包制（每号每日 1000 万计费 token，"
-                  "缓存免费、输入输出五折）；支持扫码登录 + 凭证导入",
+                  "缓存免费、输入输出五折）；支持扫码登录 + 凭证导入，"
+                  "登录态由 marvis_keepalive 定时续签",
             extra={
                 "task_runners": list(_task_runners().keys()),
                 "actions": ["import", "export", "begin-auth", "refresh-quota"],

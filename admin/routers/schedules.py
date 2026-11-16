@@ -76,6 +76,7 @@ _TASK_FALLBACK_LABEL = {
     "qoder_keepalive": "会话保活",
     "loomy_keepalive": "会话保活",
     "raccoon_keepalive": "会话保活（续期临期 JWT）",
+    "marvis_keepalive": "会话保活（续期临期登录态）",
     "raccoon_expiry_sweep": "过期清扫（标记失效账号）",
     "codearts_checkin": "签到领取权益（CodeArts）",
     "codearts_keepalive": "会话保活（续期 STS 临时凭证）",
