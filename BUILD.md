@@ -63,4 +63,29 @@ Get-ChildItem dist\android\*.apk.sha256 | Get-Content
 
 版本与仓库信息由 desktop/version.json 提供。按部署验证、双端构建与产物验证、公告、提交与标签、正式 Release 的顺序完成发布。正式 Release 应包含 EXE、APK 及两个 SHA256 文件；Windows 和 Android 必须分别匹配正确平台包。
 
+### 免交互推送（凭据）
+
+推送和合并 PR 都不需要弹窗、不需要选账号。凭据有四处冗余，任一处可用即可：
+
+| 位置 | 内容 |
+|---|---|
+| 用户环境变量 `GH_TOKEN` / `GITHUB_TOKEN` | fine-grained PAT（**User** 作用域，新开终端即生效）|
+| `~/.dsh/github-token` | 同一 token，`github-triage` / `miraihub-release` 两个 skill 优先读它 |
+| Windows 凭据管理器 | 目标 `git:https://github.com`，用户名 `x-access-token` |
+| `git config credential.https://github.com.helper` | **空值一行** + `wincred` |
+
+`helper` 的**空值那一行不能删**：它把 system/global 里的 `manager`（Git Credential Manager）从 `github.com` 的助手列表里摘掉。删了就会重新弹「选择账号」窗口。
+
+推之前先确认「不弹窗也能拿到凭据」：
+
+```powershell
+$env:GIT_TERMINAL_PROMPT="0"; $env:GCM_INTERACTIVE="never"
+"protocol=https`nhost=github.com`n`n" | git credential fill   # 应直接返回 username=x-access-token 与 password
+git push origin main                                          # 凭据自动取，不再粘 token
+```
+
+`gh` 优先读 `GH_TOKEN`，其次 keyring；`gh auth status` 里 keyring 那条报 invalid 属正常，不影响。
+
+**token 不写进仓库任何文件**：仓库是 public，明文 fine-grained PAT 会被 GitHub secret scanning 直接吊销。要换机器就照上面四处重新落一次，别提交。
+
 公开公告位于 `docs/RELEASE_NOTES_版本号.md`。不要发布内部分析、协议研究、取证资料、私有配置、凭据、签名或构建日志。公开范围见 [迁移约定](docs/PUBLICATION.md)。
