@@ -283,6 +283,19 @@ async def _flush_ip_activity():
 
 @app.on_event("startup")
 async def _start_upstream_connections():
+    # 让「默认 HTTPS 上下文」复用共享信任库，并在后台线程里预建它。
+    #
+    # 不做的话：`http.client` 的每条新连接都会 `create_default_context()`，
+    # 在 Windows 上等于**重扫一遍系统证书库**（实测单次 3~13 秒），
+    # 而平台客户端（marvis / qoder / trae …）用的是同步 `urllib`，
+    # 这一步就发生在一单 worker 的事件循环线程上 —— 2026-11-16 的
+    # 「全站无响应」现场：栈停在 `ssl._load_windows_store_certs` 与 `ssl.read`。
+    try:
+        from admin import upstream_http
+        upstream_http.install_ssl_defaults()
+        upstream_http.warm_ssl_context()
+    except Exception:  # noqa: BLE001 - 预热失败不影响启动（只是首连慢）
+        logger.exception("SSL 上下文准备失败（不影响启动）")
     # Own the embedded runtime's pool; recreate it after a service restart.
     if os.getenv("WORKBUDDY_ANDROID") == "1":
         from admin import upstream_http
@@ -291,6 +304,37 @@ async def _start_upstream_connections():
     # `_startup` 之前，此刻 init_db 还没跑，首次启动（尤其是全新安装的 APK）
     # 必然撞上 `no such table: system_settings`，覆盖值要等到下次重启才生效。
     # 套用动作已挪到 `_startup` 里 init_db 之后，见 `_apply_runtime_overrides`。
+
+
+@app.on_event("startup")
+async def _tune_blocking_executor():
+    """放大默认线程池 —— 平台网关的同步上游调用全靠它。
+
+    `asyncio.to_thread` / `loop.run_in_executor(None, …)` 走默认执行器，默认
+    `max_workers = min(32, cpu+4)`（4 核机器只有 8）。而**流式转发会长期占用
+    线程**：每块数据都要在 worker 里阻塞 `resp.read()` 等上游吐字，SSE 可以等
+    几百秒。8 条并发流就能把默认池占满，此后鉴权 / 选号 / 记账 / IP 落库全部
+    排队 —— 事件循环是活的，但什么也推进不了，从外面看仍是「服务卡住」。
+
+    放大到 64（可用 `ADMIN_BLOCKING_THREADS` 覆盖）：正常并发规模下两边的活
+    不会再互相饿死。
+    """
+    try:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        raw = (os.getenv("ADMIN_BLOCKING_THREADS", "") or "").strip()
+        try:
+            workers = int(raw) if raw else 64
+        except ValueError:
+            workers = 64
+        workers = max(16, min(256, workers))
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=workers,
+                               thread_name_prefix="wb-blocking"))
+        logger.info("默认线程池 %d 线程（同步上游调用不再互相排队）", workers)
+    except Exception:  # noqa: BLE001 - 调不动就不调，不能影响启动
+        logger.exception("默认线程池调整失败（不影响启动）")
 
 
 @app.on_event("shutdown")

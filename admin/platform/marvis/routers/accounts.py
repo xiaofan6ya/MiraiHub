@@ -362,8 +362,18 @@ def auth_submit(body: AuthSubmitIn, _: bool = Depends(require_admin),
     session = _AUTH_SESSIONS.get(body.auth_id)
     if session is None:
         raise HTTPException(404, detail="扫码会话不存在或已过期，请重新开始")
-    if session.get("status") == "done":
-        return {"ok": True, "account": session.get("account"), "reused": True}
+    # ⚠ **不要在这里按 `status == done` 无脑返回 reused**（2026-11-16）。
+    #
+    # 原来这里有一句：
+    #     if session.get("status") == "done":
+    #         return {"ok": True, "account": ..., "reused": True}
+    # 它的本意是「同一会话重复提交就复用结果」，但副作用很坏：只要这个会话
+    # 成功过一次，**之后提交任何 code 都会被直接判成功**，连上游都不打。
+    # 用户重扫后拿新 code 进来，看到的还是上一次的账号 —— 而真正的失败
+    # （新 code 无效 / 过期 / 串了会话）被彻底吞掉。
+    #
+    # 正确做法是下面那条**精确**判断：只有「同一会话 + 同一个 code」才复用
+    # （见 `last_code`）。不同 code 一律真的去兑换。
     code = _extract_code(body.callback)
     if not code:
         raise HTTPException(400, detail="回调里没有 code=（请把整条回调地址复制回来）")
@@ -395,21 +405,57 @@ def auth_submit(body: AuthSubmitIn, _: bool = Depends(require_admin),
                 started = datetime.utcfromtimestamp(
                     float(session.get("at") or 0))
                 cutoff = max(started, datetime.utcnow() - timedelta(seconds=90))
+
+                def _recent(a) -> bool:
+                    """这个号是不是**刚刚**新建或刚更新过。
+
+                    ⚠ 括号必须写清：`A and B or C` 在 Python 里是
+                    `(A and B) or C`，会把「任意近期更新过的号」都算进来 ——
+                    一个正在跑业务的旧号每几秒就更新一次 `updated_at`，
+                    于是任何 code 都会被判成「已经成功过」，把真正的失败
+                    伪装成成功（2026-11-16 实测踩到）。
+                    """
+                    if (getattr(a, "status", "") or "") != "active":
+                        return False
+                    created = getattr(a, "created_at", None) or datetime.min
+                    updated = getattr(a, "updated_at", None) or datetime.min
+                    return created >= cutoff or updated >= cutoff
+
                 fresh = [a for a in marvis_accounts.accounts_for(db, "cn")
-                         if (getattr(a, "status", "") or "") == "active"
-                         and (getattr(a, "created_at", None) or datetime.min) >= cutoff
-                         or (getattr(a, "updated_at", None) or datetime.min) >= cutoff]
+                         if _recent(a)]
                 if fresh:
-                    view = marvis_accounts.public_view(fresh[-1])
-                    session.update({"status": "done", "account": view,
-                                    "last_code": code})
+                    # ⚠ **不返回成功**（2026-11-16 二次修正）。
+                    #
+                    # 原来这里 return ok=True + reused=True，本意是「上次其实
+                    # 成功了，别让用户再扫一遍」。但代价是：只要 90 秒内有任何
+                    # 账号更新过（跑业务的号每几秒就更新一次 `updated_at`），
+                    # **任意失效 code 都会被伪装成成功** —— 用户以为换号成功了，
+                    # 实际根本没换。这比报错坏得多。
+                    #
+                    # 现在只把「可能已经成功」这个信息**附在错误里**，让用户
+                    # 自己去账号列表确认，绝不代替判断。
                     logger.info(
-                        "Marvis -107 但 %.0f 秒内刚入库过 acc=%s，按已成功处理",
+                        "Marvis -107 且 %.0f 秒内有号更新过 acc=%s（仅提示，不判成功）",
                         (datetime.utcnow() - cutoff).total_seconds(),
                         fresh[-1].id)
-                    return {"ok": True, "account": view, "reused": True,
-                            "note": "该 code 刚已被成功兑换过，已直接返回结果"}
-            except Exception:  # noqa: BLE001 - 抢救失败就按原错误报
+                    raise HTTPException(
+                        400,
+                        detail={
+                            "message": exc.message,
+                            "step": "exchange",
+                            "hint": "注意：账号池里刚有账号变动（%s）。"
+                                    "如果那是你上一次授权的号，说明上次已经"
+                                    "成功入库，直接去列表确认即可；否则请重新"
+                                    "扫码。" % (fresh[-1].name or fresh[-1].id),
+                        }) from exc
+            except HTTPException:
+                # ⚠ **必须单独放行**：`HTTPException` 继承自 `Exception`，
+                # 上面那个 `except Exception` 会把它当成「抢救查询失败」吞掉，
+                # 于是带 hint 的 400 变成下面那句不带 hint 的通用 400 ——
+                # 排查时看到的现象就是「明明有 hint 分支，用户却拿不到」
+                # （2026-11-16 自测踩到）。
+                raise
+            except Exception:  # noqa: BLE001 - 抢救查询失败就按原错误报
                 logger.debug("Marvis -107 抢救查询失败", exc_info=True)
         session["status"] = "failed"
         session["error"] = exc.message
@@ -427,7 +473,12 @@ def auth_submit(body: AuthSubmitIn, _: bool = Depends(require_admin),
     except Exception:  # noqa: BLE001
         logger.debug("登录后额度同步失败", exc_info=True)
     view = marvis_accounts.public_view(account)
-    session.update({"status": "done", "account": view, "error": ""})
+    # **记下这次真正兑换成功的 code**：前端有 focus / paste / 点按钮三个入口，
+    # 同一串 code 有可能被提交两次（第二次上游必然回 -107）。记下来之后，
+    # 上面那条幂等判断就能把第二次直接返回上次结果，而不是报一个会吓到用户的
+    # 「授权码已过期」。只有真兑换成功才写，抢救分支绝不写。
+    session.update({"status": "done", "account": view, "error": "",
+                    "last_code": code})
     return {"ok": True, "created": created, "account": view}
 
 

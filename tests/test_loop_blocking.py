@@ -137,6 +137,121 @@ class LoopNotBlockedTests(unittest.TestCase):
         self.assertIn("total_ms", stats)
 
 
+class MarvisLoopTests(unittest.TestCase):
+    """Marvis 网关（2026-11-16 事故）：`urlopen` 不能跑在事件循环上。
+
+    现场栈两条，同源：
+
+        http/client.py getresponse → ssl.read                  （13.5 秒）
+        urllib/request.py https_open → ssl._load_windows_store_certs （13.3 秒）
+
+    第一条：`chat_completions` 里同步调 `_attempt`（选号 + `urlopen` 等响应头）。
+    第二条：裸 `urlopen` 给每条新连接重建默认 SSL 上下文，Windows 上要重扫
+    证书库。单 worker 的 uvicorn 被钉住 → 控制台 / 导入 / 全部 /v1 一起无响应。
+    """
+
+    @staticmethod
+    def _request(payload: dict):
+        class _Req:
+            headers = {}
+            query_params = {}
+            client = _FakeClient()
+
+            async def json(self):
+                return payload
+
+        return _Req()
+
+    def test_chat_completions_offloads_upstream(self):
+        """非流式：鉴权 + 选号 + 建连必须离开事件循环。"""
+        from admin.platform.marvis import gateway as mgw
+
+        def slow_acquire(request, body, realm, *, stream):
+            time.sleep(SLOW)
+            return (object(), {"choices": [{"message": {"content": "ok"}}]},
+                    object(), time.perf_counter())
+
+        async def noop_bill(*_a, **_kw):
+            return None
+
+        with mock.patch.object(mgw, "_validate_model", lambda body: "main-auto"), \
+                mock.patch.object(mgw, "_acquire", slow_acquire), \
+                mock.patch.object(mgw, "_bill_async", noop_bill):
+            drift = _measure_drift(
+                lambda: mgw.chat_completions(
+                    self._request({"model": "deepseek-v4.1-flash",
+                                   "messages": [{"role": "user", "content": "hi"}]})))
+        self.assertLess(
+            drift, DRIFT_BUDGET,
+            "Marvis 非流式把事件循环钉住 %.2fs —— 同步 urlopen 又回到主线程了" % drift)
+
+    def test_stream_open_offloads_upstream(self):
+        """流式：`urlopen` 等响应头同样不能占住事件循环。"""
+        from admin.platform.marvis import gateway as mgw
+
+        class _Resp:
+            def read(self, _size=-1):
+                return b""
+
+            def close(self):
+                return None
+
+        def slow_acquire(request, body, realm, *, stream):
+            self.assertTrue(stream, "流式请求必须走 stream=True 的建连分支")
+            time.sleep(SLOW)
+            return object(), _Resp(), object(), time.perf_counter()
+
+        async def noop_bill(*_a, **_kw):
+            return None
+
+        with mock.patch.object(mgw, "_validate_model", lambda body: "main-auto"), \
+                mock.patch.object(mgw, "_acquire", slow_acquire), \
+                mock.patch.object(mgw, "_bill_async", noop_bill):
+            drift = _measure_drift(
+                lambda: mgw.chat_completions(
+                    self._request({"model": "deepseek-v4.1-flash", "stream": True,
+                                   "messages": [{"role": "user", "content": "hi"}]})))
+        self.assertLess(
+            drift, DRIFT_BUDGET,
+            "Marvis 流式建连阻塞了事件循环 %.2fs" % drift)
+
+    def test_count_tokens_is_callable(self):
+        """`dispatch()` 会调 `count_tokens()` —— 它以前是接在 return 后的死代码。"""
+        from admin.platform.marvis import gateway as mgw
+
+        self.assertTrue(callable(getattr(mgw, "count_tokens", None)),
+                        "count_tokens 不存在，/v1/messages/count_tokens 会 NameError")
+
+
+class SslContextReuseTests(unittest.TestCase):
+    """默认 HTTPS 上下文必须共享，否则每条新连接都要重扫 Windows 证书库。"""
+
+    ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+    def test_default_https_context_is_shared(self):
+        import ssl
+
+        from admin import upstream_http
+
+        fake = object()
+        with mock.patch.object(upstream_http, "_ssl_context", fake), \
+                mock.patch.object(upstream_http, "_SSL_DEFAULT_INSTALLED", False):
+            self.assertTrue(upstream_http.install_ssl_defaults())
+            first = ssl._create_default_https_context()
+            second = ssl._create_default_https_context()
+        self.assertIs(first, fake, "默认上下文必须来自共享的 ssl_context()")
+        self.assertIs(first, second,
+                      "两次新建连接拿到两个上下文 —— 等于每次重扫系统证书库")
+
+    def test_marvis_client_uses_shared_opener(self):
+        """静态检查：Marvis 客户端不许再出现裸 `urllib.request.urlopen(`。"""
+        source = (self.ROOT / "admin" / "platform" / "marvis" / "core"
+                  / "client.py").read_text(encoding="utf-8")
+        self.assertNotIn("urllib.request.urlopen(", source,
+                         "裸 urlopen 会给每条连接重建 SSL 上下文（3~13 秒/次）")
+        self.assertIn("_opener()", source)
+
+
 class LoopWatchTests(unittest.TestCase):
     """探针本身要能报出「谁把主线程占了」，否则下次还得装 py-spy。"""
 

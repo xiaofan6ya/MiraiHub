@@ -208,7 +208,10 @@ async def _forward(body: dict, request) -> JSONResponse:
     try:
         key = shared.authenticate(db, request, platform=_public(request))
         try:
-            result, account, started = _attempt(db, request, key, body, realm)
+            # 选号 + 建连 + 读完整响应全程同步：留在事件循环上就是
+            # 2026-11-16 那种「一次上游卡顿，全站停摆」，必须进工作线程。
+            result, account, started = await asyncio.to_thread(
+                _attempt, db, request, key, body, realm)
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:

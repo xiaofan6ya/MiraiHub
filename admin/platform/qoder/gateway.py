@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -356,8 +357,10 @@ async def chat_completions(request):
     try:
         key = _auth(db, request)
         try:
-            plan, account = _attempt(db, request, key, body, realm=realm,
-                                     model_hint=str(body.get("model") or ""))
+            # 非流式要把整个响应读干，也是同步阻塞 —— 同样离开事件循环。
+            plan, account = await asyncio.to_thread(
+                _attempt, db, request, key, body, realm=realm,
+                model_hint=str(body.get("model") or ""))
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:
@@ -366,7 +369,7 @@ async def chat_completions(request):
         if not stream:
             started = time.perf_counter()
             try:
-                result = qoder_chat.collect_openai(plan)
+                result = await asyncio.to_thread(qoder_chat.collect_openai, plan)
             except client.UpstreamError as exc:
                 shared.release(account)
                 shared.note_failure(
@@ -453,8 +456,12 @@ async def messages(request):
     try:
         key = _auth(db, request)
         try:
-            plan, account = _attempt(db, request, key, normalized, realm=realm,
-                                     model_hint=str(body.get("model") or ""))
+            # 选号 + 拉目录 + 组包都是**同步阻塞**（DB + 上游 HTTP）。
+            # 留在事件循环上就是 2026-11-16 那种「一次上游卡顿，全站停摆」，
+            # 必须丢进工作线程（见 marvis/gateway.py 的同一处修复）。
+            plan, account = await asyncio.to_thread(
+                _attempt, db, request, key, normalized, realm=realm,
+                model_hint=str(body.get("model") or ""))
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:
@@ -464,7 +471,7 @@ async def messages(request):
 
         if not body.get("stream"):
             try:
-                result = qoder_chat.collect_openai(plan)
+                result = await asyncio.to_thread(qoder_chat.collect_openai, plan)
             except client.UpstreamError as exc:
                 shared.release(account)
                 shared.note_failure(
@@ -528,8 +535,12 @@ async def responses(request):
     try:
         key = _auth(db, request)
         try:
-            plan, account = _attempt(db, request, key, normalized, realm=realm,
-                                     model_hint=str(body.get("model") or ""))
+            # 选号 + 拉目录 + 组包都是**同步阻塞**（DB + 上游 HTTP）。
+            # 留在事件循环上就是 2026-11-16 那种「一次上游卡顿，全站停摆」，
+            # 必须丢进工作线程（见 marvis/gateway.py 的同一处修复）。
+            plan, account = await asyncio.to_thread(
+                _attempt, db, request, key, normalized, realm=realm,
+                model_hint=str(body.get("model") or ""))
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:
@@ -539,7 +550,7 @@ async def responses(request):
 
         if not body.get("stream"):
             try:
-                result = qoder_chat.collect_openai(plan)
+                result = await asyncio.to_thread(qoder_chat.collect_openai, plan)
             except client.UpstreamError as exc:
                 shared.release(account)
                 shared.note_failure(

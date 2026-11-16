@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import certifi
 import httpx
+import httpcore  # `_prepare_upload` 的 trace 里要按 httpcore 的网络/超时异常分类
 from admin import request_metrics, upstream_dispatch
 
 _ssl_context = None
@@ -36,19 +37,35 @@ def upstream_trust_env() -> bool:
 import urllib.request  # noqa: E402  (延迟导入，仅给 urllib 系平台复用)
 
 
-def build_opener(trust_env: bool | None = None):
+def build_opener(trust_env: bool | None = None, *extra_handlers):
     """构造带「系统+ certifi 信任库」且默认**不走系统代理**的 urllib opener。
 
     平台模块（`admin/platform/<name>/`）的上游调用走 `urllib.request` 而非 httpx，
     同样要躲开加速器做的 TLS 中间人（issue #5）。
 
     `trust_env=None` 时按 `upstream_trust_env()` 决定要不要读系统代理。
+
+    ## `extra_handlers`：必须在这里传，不能在返回后 `add_handler`
+
+    `urllib.request.build_opener()` 会把默认处理器（含 `HTTPRedirectHandler`）
+    一并装进去。之后再 `opener.add_handler(X)` 只是**追加**，同一个 302
+    默认处理器先命中就先处理 —— 于是「禁止跟随重定向」这类覆盖根本不生效。
+
+    只有把自定义 handler 作为 `build_opener()` 的位置参数传进去，urllib 才会
+    用「子类替换父类」的规则把它顶替掉默认处理器。
+
+    2026-11-16 真机踩到：Marvis 换登录态时上游回 302 + Set-Cookie（token 在
+    cookie 里），`_NoRedirect` 是用 `add_handler` 加的、没顶替默认处理器，
+    请求照样被跟随到落地页「登录成功」HTML，cookie 丢掉，报
+    「登录接口没有下发 accesstoken」。
     """
     if trust_env is None:
         trust_env = upstream_trust_env()
     handlers = [urllib.request.HTTPSHandler(context=ssl_context())]
     if not trust_env:
         handlers.append(urllib.request.ProxyHandler({}))
+    for handler in extra_handlers:
+        handlers.append(handler)
     return urllib.request.build_opener(*handlers)
 
 
@@ -90,6 +107,9 @@ class _UploadStream(httpx.AsyncByteStream):
 
 _ssl_lock = threading.Lock()
 
+#: `install_ssl_defaults()` 是否已经接管过默认上下文（幂等标记）。
+_SSL_DEFAULT_INSTALLED = False
+
 
 def ssl_context():
     """上游 TLS 信任库 = **系统证书库 + certifi**。
@@ -115,6 +135,82 @@ def ssl_context():
                     pass
             _ssl_context = ctx
         return _ssl_context
+
+
+def warm_ssl_context() -> bool:
+    """在**后台线程**里预建共享 SSL 上下文；返回是否真的起了预热线程。
+
+    ## 为什么必须预热
+
+    `ssl_context()` 里那句 `create_default_context()` 在 Windows 上会
+    `load_default_certs()` → `_load_windows_store_certs()`，把系统 ROOT / CA
+    证书库整个枚举一遍。这台机器实测单次 **3~13 秒**（Personal 存储里有几百张
+    证书，且 USB-Key 驱动会让枚举更慢）。
+
+    放在请求路径上就是「点一下全站卡住十几秒」；放在启动的后台线程里，
+    只影响启动本身，等客户端连上来时上下文早就建好了。
+    """
+    if _ssl_context is not None:
+        return False
+
+    def _warm() -> None:
+        try:
+            ssl_context()
+            _logger.info("共享 SSL 上下文预热完成（系统证书库 + certifi）")
+        except Exception:  # noqa: BLE001 - 预热失败不影响启动，请求时还会再试
+            _logger.warning("共享 SSL 上下文预热失败（首连可能变慢）",
+                            exc_info=True)
+
+    threading.Thread(target=_warm, name="ssl-warm", daemon=True).start()
+    return True
+
+
+def install_ssl_defaults() -> bool:
+    """让**所有**没显式传 `context` 的 HTTPS 连接复用 `ssl_context()`。
+
+    ## 事故现场（2026-11-16）
+
+    `admin.loop_watch` 抓到的主线程栈有两条，其实是同一件事：
+
+        ssl.py _load_windows_store_certs  ← 13.3 秒
+        ssl.py read                      ← 13.5 秒
+
+    第一条是 `http.client.HTTPSConnection.__init__`：`context=None` 时它调
+    `ssl._create_default_https_context()`，**每次新连接都新建一个默认上下文**，
+    于是 Windows 证书库被反复枚举。
+
+    第二条是平台客户端用 `urllib.request.urlopen()` 同步等上游响应 ——
+    单 worker 的 uvicorn 事件循环被钉住，控制台、导入、/v1 全部无响应。
+
+    ## 补丁做了什么
+
+    把「默认 HTTPS 上下文」换成共享的 `ssl_context()`（系统库 + certifi，
+    建一次缓存）。于是：
+
+      * 新连接不再重扫证书库（13 秒 → 0）；
+      * 信任库口径统一（不会「这个平台认系统证书、那个平台只认 certifi」）。
+
+    只改**默认**上下文：显式传 `context=` / `verify=` 的调用方（httpx、
+    `build_opener()`）完全不受影响。
+    """
+    global _SSL_DEFAULT_INSTALLED
+    original = getattr(ssl, "_create_default_https_context", None)
+    if original is None:            # 非 CPython / 被裁剪的解释器：不需要补
+        return False
+    with _ssl_lock:
+        if _SSL_DEFAULT_INSTALLED:
+            return False
+
+        def _shared_default(*args, **kwargs):
+            try:
+                return ssl_context()
+            except Exception:       # noqa: BLE001 - 建不出来就退回标准行为
+                return original(*args, **kwargs)
+
+        ssl._create_default_https_context = _shared_default  # type: ignore[attr-defined]
+        _SSL_DEFAULT_INSTALLED = True
+    _logger.info("已接管默认 HTTPS 上下文：新连接复用共享信任库（不再重扫系统证书库）")
+    return True
 
 
 class _BorrowedTransport(httpx.AsyncBaseTransport):

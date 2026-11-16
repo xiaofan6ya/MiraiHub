@@ -130,8 +130,16 @@ def test_no_redirect_present() -> None:
            ).read_text(encoding="utf-8")
     start = src.index("def exchange_code")
     body = src[start:start + 6000]
-    check("定义了不跟随的 handler", "_NoRedirect" in body)
-    check("真的用它 build_opener", "build_opener(_NoRedirect)" in body)
+    # handler 可能在模块级（共享 opener 的性能优化）也可能在函数内，
+    # 关键是 exchange_code **必须用一个不跟随重定向的 opener**。
+    check("存在不跟随重定向的 handler",
+          "_NoRedirect" in src, "文件里没有 _NoRedirect")
+    check("exchange_code 用的是不跟随的 opener",
+          "_no_redirect_opener()" in body or "build_opener(_NoRedirect)" in body,
+          "exchange_code 里没用到不跟随 opener")
+    check("没有退回默认 opener（会跟随）",
+          "urllib.request.urlopen(req" not in body,
+          "用了裸 urlopen，会跟随重定向")
 
 
 def test_error_messages() -> None:
