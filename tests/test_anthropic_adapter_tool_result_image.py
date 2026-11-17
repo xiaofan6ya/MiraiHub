@@ -28,6 +28,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from anthropic_adapter import anthropic_request_to_chat  # noqa: E402
+from desensitize import desensitize_body  # noqa: E402
+from upstream_compat import normalize_harness_body  # noqa: E402
 
 # 1x1 PNG
 PNG_B64 = base64.b64encode(
@@ -184,6 +186,128 @@ class ToolResultImageAdapterTests(unittest.TestCase):
         self.assertEqual(last["content"][0]["type"], "image_url",
                          "说明被插到了图片前面，部分上游会因此读不到图")
         self.assertEqual(last["content"][-1]["type"], "text")
+
+    def test_single_tool_result_multiple_images_numbered_sequentially(self):
+        """单个 tool_result 含多张图时，占位符必须按 #1/#2/#3 连续递增，不能全标成 #1。"""
+        body = {
+            "model": "m", "max_tokens": 64, "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "A", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "B", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "A",
+                     "content": [IMAGE_BLOCK, IMAGE_BLOCK]},
+                    {"type": "tool_result", "tool_use_id": "B",
+                     "content": [IMAGE_BLOCK]}]},
+            ]}
+        msgs = anthropic_request_to_chat(body)["messages"]
+        tools = [m for m in msgs if m.get("role") == "tool"]
+        self.assertEqual(tools[0]["content"], "[图片 #1][图片 #2]")
+        self.assertEqual(tools[1]["content"], "[图片 #3]")
+        last = msgs[-1]
+        self.assertEqual(len(_image_urls(last)), 3)
+        self.assertIn("#1..#3", last["content"][-1]["text"])
+
+    def test_mixed_invalid_and_valid_images_in_single_tool_result(self):
+        """同一 tool_result 混有非法图和合法图时，只为合法图生成占位符。"""
+        bad = {"type": "image",
+               "source": {"type": "base64", "media_type": "text/plain",
+                          "data": "zzz"}}
+        msgs = self._convert([bad, IMAGE_BLOCK])
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        self.assertEqual(tool_msg["content"], "[图片 #1]")
+        user_msg = msgs[-1]
+        self.assertEqual(len(_image_urls(user_msg)), 1)
+
+    def test_top_level_image_combined_with_tool_result_images(self):
+        """同一条 user 消息既有顶层图又有工具图时，工具图排在前面且与 #1..#N 一一对应。"""
+        img_top = {"type": "image", "source": {"type": "url", "url": "https://example.com/top.png"}}
+        img_1 = {"type": "image", "source": {"type": "url", "url": "https://example.com/t1.png"}}
+        img_2 = {"type": "image", "source": {"type": "url", "url": "https://example.com/t2.png"}}
+        body = {
+            "model": "m", "max_tokens": 64, "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "A", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "B", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    img_top,
+                    {"type": "tool_result", "tool_use_id": "A", "content": [img_1]},
+                    {"type": "tool_result", "tool_use_id": "B", "content": [img_2]},
+                    {"type": "text", "text": "对比"}]},
+            ]}
+        msgs = anthropic_request_to_chat(body)["messages"]
+        last = msgs[-1]
+        urls = _image_urls(last)
+        self.assertEqual(urls, [
+            "https://example.com/t1.png",
+            "https://example.com/t2.png",
+            "https://example.com/top.png",
+        ])
+        self.assertIn("前 2 张图片", last["content"][-1]["text"])
+        self.assertIn("其后为用户附带图片", last["content"][-1]["text"])
+
+    def test_tool_result_only_without_user_text(self):
+        """user 消息仅含 tool_result(image)、无任何 text 块时，不生成空 text 块。"""
+        body = {
+            "model": "m", "max_tokens": 64, "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "A", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "A", "content": [IMAGE_BLOCK]}]},
+            ]}
+        msgs = anthropic_request_to_chat(body)["messages"]
+        last = msgs[-1]
+        self.assertEqual(last["role"], "user")
+        self.assertEqual(len(last["content"]), 1)
+        self.assertEqual(last["content"][0]["type"], "image_url")
+
+    def test_empty_or_none_text_and_harness_reminder_pipeline(self):
+        """空/None 文本、前置与未闭合 <system-reminder> 经过兼容+脱敏链路后不丢图、不丢说明、不崩溃。"""
+        body = {
+            "model": "m", "max_tokens": 64, "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "A", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "B", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": None},
+                    {"type": "text", "text": ""},
+                    {"type": "text", "text": "<system-reminder>pre</system-reminder>"},
+                    {"type": "tool_result", "tool_use_id": "A", "content": [IMAGE_BLOCK]},
+                    {"type": "tool_result", "tool_use_id": "B", "content": [IMAGE_BLOCK]},
+                    {"type": "text", "text": "<system-reminder>unclosed"}]},
+            ]}
+        chat_body = anthropic_request_to_chat(body)
+        normalize_harness_body(chat_body)
+        chat_body = desensitize_body(
+            chat_body,
+            roles=("system", "developer"),
+            desensitize_harness_user=True,
+            desensitize_tools=True,
+            compact_harness=True,
+        )
+        last = chat_body["messages"][-1]
+        self.assertEqual(last["content"][0]["type"], "image_url")
+        self.assertEqual(last["content"][1]["type"], "image_url")
+        texts = [p["text"] for p in last["content"] if p.get("type") == "text"]
+        self.assertTrue(all(t != "" for t in texts))
+        self.assertTrue(any("共 2 张图片" in t for t in texts))
+
+    def test_error_tool_result_and_whitespace_tool_use_id(self):
+        """is_error=True 仍保留图；空白 tool_use_id 应被丢弃。"""
+        body = {
+            "model": "m", "max_tokens": 64, "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "A", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "   ", "content": [IMAGE_BLOCK]},
+                    {"type": "tool_result", "tool_use_id": "A", "is_error": True,
+                     "content": [{"type": "text", "text": "partial "}, IMAGE_BLOCK]}]},
+            ]}
+        msgs = anthropic_request_to_chat(body)["messages"]
+        tools = [m for m in msgs if m.get("role") == "tool"]
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["content"], "Error: partial [图片 #1]")
+        self.assertEqual(len(_image_urls(msgs[-1])), 1)
 
 
 if __name__ == "__main__":

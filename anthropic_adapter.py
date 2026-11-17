@@ -261,21 +261,24 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
     # 绝不能 insert 到最前——否则会切断配对，上游报 11148。
     if role == "user":
         tool_msgs: list[dict] = []
-        content_parts: list[dict] = []
-        has_images = False
+        top_parts: list[dict] = []
+        top_image_count = 0
         hoisted_images: list[dict] = []
         for block in blocks:
             if not isinstance(block, dict):
                 continue
             bt = block.get("type", "")
             if bt == "text":
-                content_parts.append({"type": "text", "text": block.get("text", "")})
+                text_val = block.get("text") or ""
+                if text_val:
+                    top_parts.append({"type": "text", "text": text_val})
             elif bt == "image":
-                content_parts.append(_image_block_to_chat_part(block))
-                has_images = True
+                top_parts.append(_image_block_to_chat_part(block))
+                top_image_count += 1
             elif bt == "tool_result":
                 # tool_result → 独立的 tool 消息（必须紧随 assistant.tool_calls）
-                tc_id = block.get("tool_use_id") or ""
+                raw_tc_id = block.get("tool_use_id")
+                tc_id = raw_tc_id.strip() if isinstance(raw_tc_id, str) else ""
                 if not tc_id:
                     # 空 id 无法与 tool_use 配对，上送必触发 11148；直接丢弃
                     _logger.debug("drop tool_result with empty tool_use_id")
@@ -284,30 +287,41 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                 # role="tool" 只接受字符串 content，图片塞不进去，只能提升到
                 # 紧随其后的 user 消息顶层——语义等价于 Anthropic 的
                 # tool_result 内嵌 image。少了这步，模型只看到一串 base64。
-                tool_images = _tool_result_images(block.get("content"))
-                # 占位符带序号，让模型能把「第 N 张」对应回是哪个工具返回的：
-                # 并行 Read 时一张 user 消息里会堆多张图，纯 `[图片]` 无法区分。
-                label = f"[图片 #{len(hoisted_images) + 1}]" if tool_images else ""
-                output = _tool_result_to_text(
-                    block.get("content", ""),
-                    image_placeholder=label if tool_images else None)
+                # 一次遍历同时提取图片和按实际合法图片递增编号的 `[图片 #N]` 占位，
+                # 保证单 tool_result 多图或混合非法图时编号与提升结果严格 1:1 对应。
+                output, tool_images = _extract_tool_result_content(
+                    block.get("content"), start_index=len(hoisted_images) + 1)
                 if block.get("is_error"):
                     output = f"Error: {output}" if output else "Error: tool execution failed"
                 tool_msgs.append({"role": "tool", "tool_call_id": tc_id, "content": output})
                 if tool_images:
                     hoisted_images.extend(tool_images)
-                    content_parts.extend(tool_images)
-                    has_images = True
+
         result = list(tool_msgs)
+        # 提升的工具图片放在用户附带内容之前，既保证「image 先于 text」（部分上游
+        # 对 text 先于 image 敏感，包括 `<system-reminder>` 在 tool_result 之前的情形），
+        # 也确保 [图片 #1..#N] 严格对应 user.content 的前 N 张图。
+        content_parts = [*hoisted_images, *top_parts] if hoisted_images else top_parts
+        has_images = bool(hoisted_images or top_image_count)
         if content_parts:
-            # 多张图时补一句顺序说明，避免模型臆测对应关系。说明必须挂在
-            # 末尾的文本上（而不是插到最前），否则会把 image_url 挤到它后面，
-            # 部分上游对「text 先于 image」的顺序敏感。
+            # 多张工具图时补一句顺序说明，避免模型臆测对应关系。说明挂在末尾，
+            # 且遇到含 harness 运行时标签的文本块时单独追加新 text 块，防止脱敏截断。
             if len(hoisted_images) > 1:
-                note = ("（共 %d 张图片，按工具返回顺序排列，依次对应上面的 [图片 #1..#%d]）"
-                        % (len(hoisted_images), len(hoisted_images)))
-                if content_parts[-1].get("type") == "text":
-                    content_parts[-1]["text"] = (content_parts[-1].get("text") or "") + note
+                if top_image_count:
+                    note = ("（前 %d 张图片按工具返回顺序排列，依次对应上面的 [图片 #1..#%d]，"
+                            "其后为用户附带图片）"
+                            % (len(hoisted_images), len(hoisted_images)))
+                else:
+                    note = ("（共 %d 张图片，按工具返回顺序排列，依次对应上面的 [图片 #1..#%d]）"
+                            % (len(hoisted_images), len(hoisted_images)))
+                last_part = content_parts[-1]
+                last_text = last_part.get("text") if last_part.get("type") == "text" else None
+                if (isinstance(last_text, str)
+                        and not any(tag in last_text for tag in (
+                            "<system-reminder>", "<environment_context>",
+                            "<permissions instructions>", "<skills_instructions>",
+                            "<plugins_instructions>", "## MCP Server Instructions"))):
+                    last_part["text"] = last_text + note
                 else:
                     content_parts.append({"type": "text", "text": note})
             content = content_parts if has_images else "".join(
@@ -350,69 +364,63 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
     return [{"role": role, "content": text}] if text else []
 
 
-def _tool_result_images(output) -> list[dict]:
-    """从 Anthropic `tool_result.content` 里取出 image 块 → OpenAI image_url 块。
+def _extract_tool_result_content(
+    output, *, start_index: int = 1, fixed_placeholder: str | None = None,
+    number_images: bool = True,
+) -> tuple[str, list[dict]]:
+    """一次遍历解析 Anthropic `tool_result.content`，返回 `(纯文本, image_url 列表)`。
 
-    `_tool_result_to_text()` 会把 image 块降级成截断的 JSON 字符串，
-    模型因此只能「看到」一段 base64 而读不出图像。真正的像素必须走
-    `image_url` 分支，而 `role="tool"` 又只接受字符串 content，
-    所以只能由调用方提升到紧随其后的 user 消息顶层。
-
-    非法 source（缺 data、media_type 不是 image/*）直接跳过，
-    宁可丢图也不能让整条请求 400。
-    """
-    out: list[dict] = []
-    if not isinstance(output, list):
-        return out
-    for b in output:
-        if not isinstance(b, dict) or b.get("type") != "image":
-            continue
-        try:
-            out.append(_image_block_to_chat_part(b))
-        except ValueError as e:
-            _logger.debug("skip invalid tool_result image: %s", e)
-    return out
-
-
-def _tool_result_to_text(output, image_placeholder=None) -> str:
-    """把 Anthropic tool_result.content 转成纯文本。
-
-    - str → 原样
-    - list → 拼接 text 块；image 块由 `_tool_result_images()` 提升到
-      user 消息顶层，这里只留一句可读占位，不再把 base64 塞进上下文
-    - 其它/None → 空串
-
-    `image_placeholder` 控制 image 块在文本里留下的字面量：
-    - `None`（默认）→ 完全不留，用于图片无法提升（source 非法被跳过）的情形，
-      避免模型以为「有一张图被省略了」而去猜；
-    - 字符串 → 用它作为占位，例如 `[图片 #2]`，让并行工具调用时模型仍能
-      把每张图对应回是哪个工具返回的。
+    - 合法的 image 块转为 OpenAI `image_url`，`number_images=True` 时按顺序写入
+      `[图片 #N]` 占位（从 `start_index` 起递增）；
+    - 非法 source（缺 data、media_type 不是 image/*）直接跳过，既不抛 400
+      也不留占位符，避免模型误以为还有图片。
     """
     if output is None:
-        return ""
+        return "", []
     if isinstance(output, str):
-        return output
+        return output, []
     if not isinstance(output, list):
-        return str(output)
+        return str(output), []
+
     parts: list[str] = []
+    images: list[dict] = []
     for b in output:
         if not isinstance(b, dict):
             parts.append(str(b))
             continue
         btype = b.get("type")
         if btype == "text":
-            parts.append(b.get("text", "") or "")
+            parts.append(b.get("text") or "")
         elif btype == "image":
-            # 图片本体走 image_url 通道（见 _tool_result_images），
-            # 文本里只留占位，避免几千字符的 base64 灌进上下文。
-            if image_placeholder:
-                parts.append(str(image_placeholder))
+            try:
+                img_part = _image_block_to_chat_part(b)
+            except ValueError as e:
+                _logger.debug("skip invalid tool_result image: %s", e)
+                continue
+            images.append(img_part)
+            if number_images:
+                parts.append(f"[图片 #{start_index + len(images) - 1}]")
+            elif fixed_placeholder:
+                parts.append(str(fixed_placeholder))
         else:
             try:
                 parts.append(json.dumps(b, ensure_ascii=False)[:500])
             except Exception:
                 parts.append(f"<{btype or 'block'}>")
-    return "".join(parts)
+    return "".join(parts), images
+
+
+def _tool_result_images(output) -> list[dict]:
+    """从 Anthropic `tool_result.content` 里取出合法 image 块 → OpenAI image_url 块。"""
+    _, images = _extract_tool_result_content(output, number_images=False)
+    return images
+
+
+def _tool_result_to_text(output, image_placeholder=None) -> str:
+    """把 Anthropic tool_result.content 转成纯文本（image 块按需替换为占位符）。"""
+    text, _ = _extract_tool_result_content(
+        output, fixed_placeholder=image_placeholder, number_images=False)
+    return text
 
 
 def _extract_blocks_text(blocks: list) -> str:
@@ -420,7 +428,7 @@ def _extract_blocks_text(blocks: list) -> str:
     parts = []
     for block in blocks:
         if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text", ""))
+            parts.append(block.get("text") or "")
     return "".join(parts)
 
 
