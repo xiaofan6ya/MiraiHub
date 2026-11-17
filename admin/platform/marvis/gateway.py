@@ -389,9 +389,41 @@ def _prepare_body(body: dict, slot: str) -> dict:
     return out
 
 
+def _sticky_key_for(body: dict) -> str:
+    """会话键：`marvis|<会话标识>`。
+
+    带平台前缀是必须的 —— `session_key_for()` 在各平台算法相同，
+    不带前缀会让「同时打 marvis 和 loomy 的同一段对话」共用一条绑定，
+    换平台就命中不上（更糟：命中到别的平台的 uid）。
+    """
+    try:
+        from admin.pool import session_key_for
+
+        key = session_key_for(body)
+    except Exception:  # noqa: BLE001 - 算不出来就退化成「不粘」
+        return ""
+    return ("marvis|" + key) if key else ""
+
+
+def _bind_sticky(sticky_key: str, account) -> None:
+    """成功后把这个会话绑到该号，后续同会话优先回到它。"""
+    if not sticky_key or account is None:
+        return
+    uid = str(getattr(account, "uid", "") or "")
+    if not uid:
+        return
+    try:
+        from admin.pool import POOL
+
+        POOL.sticky.bind(sticky_key, uid)
+    except Exception:  # noqa: BLE001 - 粘性只是优化，不能影响主链路
+        pass
+
+
 def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
     """选号 + 租约 + 调上游。换号语义与其它平台一致。"""
     model = str(body.get("model") or "")
+    sticky_key = _sticky_key_for(body)
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
     for _ in range(MAX_ATTEMPTS):
@@ -404,7 +436,8 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
         # 否则新导入的号会被全部误杀。
         account = shared.select_account(
             db, storage=STORAGE, realm=realm, key=key,
-            model=model, exclude_ids=exclude, min_balance=0)
+            model=model, exclude_ids=exclude, min_balance=0,
+            sticky_key=sticky_key)
         if account is None:
             break
         if not shared.lease(account):
@@ -416,11 +449,13 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             if stream:
                 resp = client.open_chat_stream(
                     data, realm, body, account_id=int(account.id or 0))
+                _bind_sticky(sticky_key, account)
                 return resp, account, started
             result = client.chat_completions(
                 data, realm, body, account_id=int(account.id or 0))
             shared.note_success(account)
             shared.release(account)
+            _bind_sticky(sticky_key, account)
             return result, account, started
         except client.UpstreamError as exc:
             shared.release(account)

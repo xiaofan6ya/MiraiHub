@@ -237,3 +237,4 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
 !tests/test_marvis_input_cleared.py
+!tests/test_marvis_sticky.py
