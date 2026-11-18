@@ -29,6 +29,15 @@
         · 每个字段都参与摘要
         · busiid 不参与运算（只是服务端路由标识）
 
+## 三条签名路径，按优先级
+
+    0. **纯 Python 本地 mint**（2026-11-18 #55）：配了 `MARVIS_QIMEI36`
+       （36 个 hex = 18 字节设备串）就在进程内生成，不需要 DLL、不需要
+       Wine 侧车。算法见 `core/uskey_local.py`，协议见 `USKEY_PROTOCOL.md`。
+       想强制回旧路径做对照，设 `MARVIS_USKEY_FORCE_SIDECAR=1`。
+    1. **本地 DLL**：Windows 上 ctypes 加载 `vendor/beacon/beacon_wrapper.dll`；
+    2. **远程侧车**：非 Windows（线上 Linux）时 POST `MARVIS_USKEY_SERVICE`。
+
 ## 失败降级
 
     DLL 缺失 / 加载失败 / 平台不是 Windows / 调用返回负值
@@ -116,7 +125,7 @@ class _Beacon:
     """Beacon SDK 的一次性加载器（线程安全，失败后不再重试）。"""
 
     __slots__ = ("_fn", "_lib", "_dll_path", "_loaded", "_error", "_lock",
-                 "_ok", "_remote")
+                 "_ok", "_remote", "_local", "_device")
 
     def __init__(self) -> None:
         self._fn: Callable | None = None
@@ -127,6 +136,8 @@ class _Beacon:
         self._error = ""
         self._lock = threading.Lock()
         self._remote = None
+        self._local = False
+        self._device = ""
 
     # ------------------------------------------------------------------
     def _find_dll(self) -> str:
@@ -156,6 +167,10 @@ class _Beacon:
                 return self._ok
 
             self._loaded = True
+
+            # 0) 纯 Python 本地 mint：只要给了设备串就成立，不需要任何原生组件。
+            if self._try_local():
+                return True
 
             if platform.system() != "Windows":
                 # 非 Windows 上先试远程签名服务。这是线上（Linux）的正路。
@@ -238,6 +253,13 @@ class _Beacon:
         if not self.load():
             raise RuntimeError(self._error or "签名器未就绪")
 
+        # 纯 Python 本地 mint：与 DLL 同一条 bus_info 口径，只是不再跨进程。
+        # 失败照常抛，由上层决定回侧车还是 fail-closed —— 这里不吞异常。
+        if self._local:
+            from .uskey_local import mint_uskey
+
+            return mint_uskey(self._device, bus_info)
+
         # 远程模式：把活交给 wine 里跑的签名服务
         if self._remote is not None:
             return self._remote.sign(busiid, bus_info)
@@ -255,6 +277,43 @@ class _Beacon:
         if not text:
             raise RuntimeError("beacon_get_uskey 返回空")
         return text
+
+    # ------------------------------------------------------------------
+    def _try_local(self) -> bool:
+        """配置了设备串就切到纯 Python 本地 mint —— 不依赖 DLL / Wine 侧车。
+
+        `MARVIS_QIMEI36` 是部署方显式提供的设备串（36 hex = 18 字节），
+        本模块**不生成、不猜、不给默认值**；没配就走原来的 DLL / 侧车路径，
+        行为与引入本地 mint 之前完全一致。
+
+        想强制走旧路径做对照（排障 / 灰度回退）：
+            MARVIS_USKEY_FORCE_SIDECAR=1
+        """
+        if os.environ.get("MARVIS_USKEY_FORCE_SIDECAR") == "1":
+            return False
+        try:
+            from . import uskey as _uskey
+
+            device = _uskey.qimei36()   # 未配置 / 格式不对会抛 = 不启用，不是故障
+        except Exception:               # noqa: BLE001
+            return False
+
+        try:
+            from .uskey_local import mint_uskey
+
+            # 和 DLL 的自检同口径：先签一枚看能不能跑通，跑不通就回落旧路径。
+            mint_uskey(device, "marvisAgentTag=main")
+        except Exception as exc:        # noqa: BLE001 - 代码异常不能拖垮签名链路
+            log.warning("纯 Python uskey 本地签名自检失败，回落 DLL / 侧车：%s", exc)
+            return False
+
+        self._local = True
+        self._device = device
+        self._ok = True
+        self._dll_path = "uskey_local"
+        log.info("Marvis uskey 走纯 Python 本地签名"
+                 "（MARVIS_QIMEI36 已配置，不需要 DLL / Wine 侧车）")
+        return True
 
     # ------------------------------------------------------------------
     def _try_remote(self) -> bool:
@@ -283,6 +342,11 @@ class _Beacon:
     @property
     def dll_path(self) -> str:
         return self._dll_path
+
+    @property
+    def is_local(self) -> bool:
+        """当前是不是纯 Python 本地 mint（不碰 DLL / 侧车）。"""
+        return self.load() and self._local
 
     @property
     def error(self) -> str:
@@ -365,10 +429,17 @@ def uskey(*, openid: str = "", busiid: str = "7800255",
 def status() -> dict:
     """给控制台 / 自检用的状态快照。"""
     ok = _beacon.available
+    if not ok:
+        mode = "random-fallback"
+    elif _beacon.is_local:
+        mode = "local"
+    else:
+        mode = "sdk"
     return {
         "available": ok,
         "dll": _beacon.dll_path,
         "error": "" if ok else _beacon.error,
         "bytes": USKEY_BYTES,
-        "mode": "sdk" if ok else "random-fallback",
+        "mode": mode,
+        "local": _beacon.is_local,
     }

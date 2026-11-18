@@ -122,7 +122,8 @@ def _validate(payload: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise SidecarError("侧车返回的 uskey 不是合法 base64") from exc
     if len(raw) < USKEY_MIN_BYTES:
-        raise SidecarError("侧车返回的 uskey 太短（%d 字节 < %d；uskeyLen=%d qimei36=%s）" % (len(raw), USKEY_MIN_BYTES, len(uskey), qimei36[:8]))
+        raise SidecarError("侧车返回的 uskey 太短（%d 字节 < %d；uskeyLen=%d）"
+                           % (len(raw), USKEY_MIN_BYTES, len(uskey)))
     if not uskey.startswith(USKEY_HEAD):
         # 不硬失败：magic 变了说明 SDK 换了版本，记一笔就够。
         logger.warning("uskey 头不是预期的 %s：前 8 字符 %s",
