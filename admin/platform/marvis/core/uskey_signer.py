@@ -51,6 +51,31 @@ log = logging.getLogger(__name__)
 #: uskey 的字节长度。上游按长度校验格式，必须是 376。
 USKEY_BYTES = 376
 
+
+class SignerUnavailable(RuntimeError):
+    """签名器不可用，且调用方要求 **fail-closed**（不许用随机字节顶替）。
+
+    ## 为什么需要这个异常（fail-closed 的理由）
+
+    DLL 缺失时旧行为是「随机填充 376 字节」，看上去网关还活着，实际后果：
+
+      · 上游一定回 `4100404 请求被风控拦截`；
+      · `_attempt()` 会把这个 4100404 记成**当前账号**的失败并挂冷却 ——
+        一个环境问题（少两个 DLL）被写成「账号被风控」，用户去换号、重扫码、
+        换 Key，全是无效动作；
+      · 连撞几个号，整池进入风控冷却，网关自己开始回 `503 accounts_cooling`，
+        真正的故障点（签名器没起来）被彻底掩盖。
+
+    fail-closed 的做法是：**签不出来就别发请求**，把原因直说。宁可一条请求
+    明确失败，也不要拿随机指纹去污染账号池。
+    """
+
+    def __init__(self, message: str, *, detail: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+
+
 #: DLL 候选路径，按顺序找第一个存在的。
 #:
 #: 只用 `vendor/beacon/` 自带的副本 —— 这是「免客户端」的落地形态：
@@ -293,13 +318,26 @@ def build_bus_info(*, openid: str, conversation_id: str = "",
 def uskey(*, openid: str = "", busiid: str = "7800255",
           conversation_id: str = "", response_id: str = "",
           scene: str = "", model: str = "", nonce: str = "",
-          agent_tag: str = "", bus_info: str = "") -> str:
+          agent_tag: str = "", bus_info: str = "",
+          allow_fallback: bool = True) -> str:
     """签一个 uskey（base64 文本，504 字符 / 376 字节）。
 
     `bus_info` 给了就直接用它（缓存层已经拼好，避免重复拼导致字段顺序漂移）；
     没给就按其余参数现场拼。
 
-    DLL 可用 → 真签名；不可用 → 随机填充，保证网关继续跑。
+    ## 两种失败策略，由 `allow_fallback` 决定
+
+      · `allow_fallback=True`（默认，旧行为）：DLL 不可用 → 随机填充 376 字节。
+        返回串永远非空，调用方无从分辨「真签」和「随机」。**业务主路径不要用**：
+        随机指纹会被上游判 4100404，并把这个结果记到当前账号头上（见
+        `SignerUnavailable` 的说明）。
+
+      · `allow_fallback=False`（fail-closed）：签不出来抛 `SignerUnavailable`。
+        `endpoints.uskey_identity()` 走的是这条，与 `MARVIS_USKEY_FAIL_CLOSED`
+        开关（默认开启）配合。
+
+    保留 `True` 作为默认值，是给探针 / 历史对比脚本用的 ——
+    它们需要「无论环境怎样都能拿到一串东西」来复现旧结论。
     """
     if not bus_info:
         bus_info = build_bus_info(
@@ -315,6 +353,10 @@ def uskey(*, openid: str = "", busiid: str = "7800255",
     try:
         return _beacon.sign(busiid, bus_info)
     except Exception as exc:  # noqa: BLE001
+        if not allow_fallback:
+            raise SignerUnavailable(
+                "Marvis 客户端指纹签名不可用：%s" % (exc or "签名器未就绪"),
+                detail=str(exc)[:300]) from exc
         # 降级不能静默：第一次失败已经 warning 过，这里只在 debug 留痕
         log.debug("uskey 真签名失败，退回随机填充：%s", exc)
         return base64.b64encode(os.urandom(USKEY_BYTES)).decode("ascii")

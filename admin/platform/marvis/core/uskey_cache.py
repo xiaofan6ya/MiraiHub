@@ -37,9 +37,12 @@
 """
 from __future__ import annotations
 
+import atexit
+import collections
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -81,14 +84,103 @@ def _read_all() -> dict:
 
 
 def _write_all(data: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
-        tmp = _CACHE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, _CACHE_PATH)
-    except OSError as exc:
-        log.warning("uskey 缓存写入失败（不影响本次使用）：%s", exc)
+    with _IO_LOCK:
+        try:
+            os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+            tmp = _CACHE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, _CACHE_PATH)
+        except OSError as exc:
+            log.warning("uskey 缓存写入失败（不影响本次使用）：%s", exc)
+
+
+# ----------------------------------------------------------------------
+# 观测写盘：**移出请求路径**
+# ----------------------------------------------------------------------
+# 历史背景：这份文件只是「签名历史」，用来诊断签名是否正常、耗时多少，
+# 它**不参与任何请求决策**（`_CACHE_TRUST_SECONDS = 0`，永不回读复用）。
+# 但它是每条请求都写的，而且写一次要做「全量 JSON 读 → 全量 JSON 写 →
+# os.replace」，还带一把进程内没有的锁 —— 三处代价：
+#
+#   1. **请求路径上的同步 IO**：签名 <1ms，落盘却要 1~5ms（磁盘忙时更久），
+#      而这一切都发生在 `asyncio.to_thread` 的工作线程里，占着线程池的名额；
+#   2. **写放大**：并发 N 条请求就是 N 次全量重写，高 QPS 下磁盘成了瓶颈；
+#   3. **互相覆盖**：`_read_all()` 到 `os.replace()` 之间没有互斥，
+#      两个请求同时写，后写的会把先写的那条**整条丢掉**；临时文件名还相同
+#      （`uskey_cache.json.tmp`），多发时还会撞出「文件不存在」的 OSError。
+#
+# 现在改成：请求线程只做一次 O(1) 的入队，由后台守护线程合并落盘。
+# 丢一条诊断记录没有任何影响（`invalidate()` / 探针用的 `save()` 仍是同步写，
+# 语义需要立即生效的地方不受影响）。
+_PENDING: "collections.deque[dict]" = collections.deque(maxlen=512)
+_PENDING_LOCK = threading.Lock()
+_IO_LOCK = threading.RLock()
+
+#: 后台合并落盘的间隔（秒）。诊断用途，不需要实时。
+_FLUSH_INTERVAL = 2.0
+
+_flusher: threading.Thread | None = None
+_flusher_lock = threading.Lock()
+
+
+def _flusher_loop() -> None:
+    while True:
+        time.sleep(_FLUSH_INTERVAL)
+        try:
+            flush_pending()
+        except Exception:  # noqa: BLE001 - 观测线程绝不因为异常退出
+            log.debug("uskey 缓存后台落盘失败", exc_info=True)
+
+
+def _ensure_flusher() -> None:
+    global _flusher
+    if _flusher is not None:
+        return
+    with _flusher_lock:
+        if _flusher is not None:
+            return
+        thread = threading.Thread(target=_flusher_loop,
+                                  name="marvis-uskey-cache-flush",
+                                  daemon=True)
+        thread.start()
+        _flusher = thread
+        atexit.register(flush_pending)
+
+
+def record(*, model: str, openid: str, uskey: str, nonce: str,
+           conversation_id: str, response_id: str, bus_info: str,
+           client_version: str = "") -> dict:
+    """**请求路径专用**：把一条签名历史丢进队列就返回（不碰磁盘）。
+
+    与 `save()` 的区别只有一个：不立即落盘。条目内容完全相同，
+    所以 `peek()` / `status()` 稍后看到的东西和以前一样。
+    队列满了（512 条）会丢最旧的 —— 那是「落盘速度跟不上 QPS」的信号，
+    丢诊断数据比阻塞请求正确。
+    """
+    entry = _entry(model=model, openid=openid, uskey=uskey, nonce=nonce,
+                   conversation_id=conversation_id, response_id=response_id,
+                   bus_info=bus_info, client_version=client_version)
+    with _PENDING_LOCK:
+        _PENDING.append(entry)
+    _ensure_flusher()
+    return entry
+
+
+def flush_pending() -> int:
+    """把队列里的条目合并成**一次**写盘。返回落盘条数。"""
+    with _PENDING_LOCK:
+        if not _PENDING:
+            return 0
+        batch = list(_PENDING)
+        _PENDING.clear()
+
+    data = _read_all()
+    for entry in batch:
+        data["entries"][_bucket(entry.get("model", ""),
+                                entry.get("openid", ""))] = entry
+    _write_all(data)
+    return len(batch)
 
 
 def load(model: str, openid: str = "") -> dict | None:
@@ -126,11 +218,11 @@ def peek(model: str, openid: str = "") -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def save(*, model: str, openid: str, uskey: str, nonce: str,
-         conversation_id: str, response_id: str, bus_info: str,
-         client_version: str = "") -> dict:
-    """记一条签名历史（**仅供观测/诊断**，不会被当作可用票复用）。"""
-    entry = {
+def _entry(*, model: str, openid: str, uskey: str, nonce: str,
+           conversation_id: str, response_id: str, bus_info: str,
+           client_version: str = "") -> dict:
+    """组一条签名历史条目（纯内存，不落盘）。"""
+    return {
         "model": model,
         "openid": openid,
         "uskey": uskey,
@@ -143,6 +235,20 @@ def save(*, model: str, openid: str, uskey: str, nonce: str,
         "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "hits": 0,
     }
+
+
+def save(*, model: str, openid: str, uskey: str, nonce: str,
+         conversation_id: str, response_id: str, bus_info: str,
+         client_version: str = "") -> dict:
+    """记一条签名历史并**立即落盘**（探针 / 维护工具用，业务请求路径走 `record()`）。
+
+    以前 `get_or_create()` 调的就是这个函数 —— 于是每条业务请求都在
+    请求线程里做一次全量 JSON 重写。现在业务路径改成 `record()`（入队），
+    这个同步版本留给「写完马上就要读」的场景（探针、控制台手动触发）。
+    """
+    entry = _entry(model=model, openid=openid, uskey=uskey, nonce=nonce,
+                   conversation_id=conversation_id, response_id=response_id,
+                   bus_info=bus_info, client_version=client_version)
     data = _read_all()
     data["entries"][_bucket(model, openid)] = entry
     _write_all(data)
@@ -233,7 +339,10 @@ def get_or_create(*, model: str, openid: str, sign_fn,
         return None
 
     # 存一份只为诊断（看签名是否正常、耗时多少），**不会被读回去复用**。
-    save(model=model, openid=openid, uskey=uskey, nonce=nonce,
-         conversation_id=conversation_id, response_id=response_id,
-         bus_info=bus_info, client_version=client_version)
+    #
+    # ⚠ 这里用 `record()` 而不是 `save()`：入队即返回，请求线程不再做磁盘 IO。
+    # 这份历史的唯一用途是「事后看签名长什么样」，晚 2 秒落盘没有任何损失。
+    record(model=model, openid=openid, uskey=uskey, nonce=nonce,
+           conversation_id=conversation_id, response_id=response_id,
+           bus_info=bus_info, client_version=client_version)
     return uskey, nonce, conversation_id, response_id

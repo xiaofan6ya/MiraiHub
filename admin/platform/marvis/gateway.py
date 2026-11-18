@@ -115,6 +115,35 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
     code = exc.code or "upstream_error"
     message = exc.message
     # ------------------------------------------------------------------
+    # 签名器不可用（fail-closed）—— **请求根本没发出去**
+    # ------------------------------------------------------------------
+    #
+    # 这一类必须排在最前面：它不是上游给的结论，是网关自己拒的。
+    # 用 503 而不是 4xx/5xx 的原因：这是「本机环境没配好」，不是客户端的错，
+    # 客户端会按 Retry-After 退避重试，也不会误渲染成「API 密钥无效」。
+    #
+    # `upstream_account: False` 很关键 —— 上层任何 failover / 号池调度逻辑
+    # 看到这个字段就不该再换号（换号也签不出来）。
+    if exc.kind == "signer_unavailable":
+        detail = (exc.detail or "").strip()
+        return JSONResponse(
+            {"error": {
+                "type": "signature_unavailable",
+                "code": "signer_unavailable",
+                "message": (
+                    "Marvis 客户端指纹签名器不可用，网关已按 fail-closed 拒绝本次"
+                    "请求（请求一个字节都没发给上游）。这与你的 API Key、"
+                    "Marvis 账号状态都无关，换号 / 重扫码 / 换 Key 都不会好。"
+                    "处理方式：① Windows 上确认 beacon_wrapper.dll（含依赖）在位、"
+                    "能加载，控制台 marvis 状态里 uskey.mode 应为 sdk；"
+                    "② Linux 上起 wine 签名服务并配置 MARVIS_USKEY_SERVICE；"
+                    "③ 临时确需放行（会撞 4100404 并污染账号池）可设 "
+                    "MARVIS_USKEY_FAIL_CLOSED=0，仅限排查用。"
+                    + ("诊断：%s" % detail[:300] if detail else "")),
+                "upstream_account": False}},
+            status_code=503,
+            headers={"Retry-After": "30"})
+    # ------------------------------------------------------------------
     # 内容风控（4100406）单独处理 —— 这是**请求内容**的问题
     # ------------------------------------------------------------------
     #
@@ -1046,6 +1075,18 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             return result, account, started
         except client.UpstreamError as exc:
             shared.release(account)
+            # 签名器不可用（fail-closed）：**请求根本没发出去**。
+            #
+            # 换号必然也签不出来（签名器是进程级/环境级的东西，与账号无关），
+            # 所以这里必须立刻停、且**不** note_failure —— 否则环境问题会被
+            # 写成「这三个号都被风控」，用户去换号重扫码，全是白费。
+            if exc.kind == "signer_unavailable":
+                last_error = exc
+                logger.error(
+                    "Marvis 签名器不可用，fail-closed 拒绝（不换号、不记账号失败，"
+                    "与账号无关）| acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:200])
+                break
             # 内容风控（4100406）：**请求正文**命中上游黑名单。
             # 换号毫无用处 —— 同一个号、别的号都拦这条提示词；而且换号会把
             # 好号一个个写成「有错误记录」，用户会以为号坏了。
@@ -1245,22 +1286,253 @@ def _acquire(request, body: dict, realm: str, *, stream: bool):
         db.close()
 
 
+#: 一次从上游读多少字节。
+#:
+#: 配 `read1()` 用，**不是**配 `read()` —— 见 `_iter_upstream()`。
+_STREAM_CHUNK = 65536
+
+
 async def _iter_upstream(resp):
     """把同步 `HTTPResponse` 的 read 挪到工作线程，避免卡住事件循环。
 
     用 `asyncio.to_thread`（而不是裸 `run_in_executor`）：它会带上当前
     contextvars，`request_metrics` / 实时面板那套按请求隔离的上下文才不会丢。
+
+    ## 为什么是 `read1()` 而不是 `read()`（首字延迟）
+
+    `HTTPResponse.read(n)` 底层是 `BufferedReader.read(n)` —— 它会**一直读到凑满
+    n 字节或 EOF** 才返回。SSE 的帧又小又慢（一个 token 十几字节、几十毫秒一个），
+    于是「攒满 8KB 才吐一次」变成常态：客户端看到的是**先卡一秒、再一次性刷一屏**，
+    而不是逐字出。流式体验被这一行吃掉了大半，且越慢的模型越明显。
+
+    `HTTPResponse.read1(n)` 只做**一次**底层读取，有多少给多少（chunked /
+    `Content-Length` 的解码它都自己处理，语义安全），所以：
+
+      · 上游吐一帧 → 这里立刻拿到并转发（真正的逐帧流式）；
+      · `n` 可以放大到 64KB 而**不会**引入等待（读不到就返回，不会等满），
+        顺带把 `to_thread` 的线程切换次数从「每 8KB 一次」降到「有多少读多少」。
+
+    兜底：极老的 Python 或自定义 `resp` 没有 `read1` 时退回 `read`，行为与以前一致。
     """
+    read = getattr(resp, "read1", None) or resp.read
     while True:
-        chunk = await asyncio.to_thread(resp.read, 8192)
+        chunk = await asyncio.to_thread(read, _STREAM_CHUNK)
         if not chunk:
             break
         yield chunk
 
 
+def _inband_error(obj: dict) -> str:
+    """识别「HTTP 200 + 流内错误帧」的那一类失败，返回错误描述（正常帧返回空串）。
+
+    ## 为什么需要（对齐 FIXED-BUGS 五·补51 / REQUEST-BODY-CONTRACT §5）
+
+    上游有一部分失败**不走状态码**：HTTP 200、`Content-Type: text/event-stream`
+    照旧，但流里只有一条错误帧、没有 `choices`：
+
+        data: {"error":{"code":3000101,"message":"...非法参数..."}}
+
+    `client._classify()` 只看得到 200，所以整条链路按成功处理：错误帧被原样
+    当正文透传给客户端、`finally` 里 `note_success()`、用量日志记一笔正常
+    调用。现场表现是「网关全绿、客户端一直重试」—— 因为客户端拿到的是一个
+    没有任何 `finish_reason` 的流，SDK 会判定流被截断并按退避重试。
+
+    判据刻意收得很窄：**有 `choices` 就不当错误**（正常帧里也可能带 `error`
+    字段的网关扩展），只有「没 `choices` + 有错误键」才算。
+    """
+    if not isinstance(obj, dict):
+        return ""
+    if obj.get("choices"):
+        return ""
+    err = obj.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("msg") or err.get("detail") or ""
+        code = err.get("code") or err.get("error_code") or ""
+        return ("%s%s" % ("%s " % code if code else "", msg)).strip() or "stream error"
+    if isinstance(err, str) and err.strip():
+        return err.strip()
+    if obj.get("error_code") or obj.get("error_msg"):
+        return ("%s %s" % (obj.get("error_code") or "",
+                           obj.get("error_msg") or "")).strip()
+    return ""
+
+
+def _terminal_frame(model: str) -> bytes:
+    """补一帧终止帧：`finish_reason=stop` + `[DONE]`。
+
+    流「有头无尾」是客户端无限重试的根因 —— OpenAI SDK 靠 `finish_reason`
+    判定，裸 SSE 客户端靠 `[DONE]`，两个都要给。上游出错帧、提前 EOF、
+    被截断时都补上：让客户端**正常收尾**，原因由前面那条错误帧自己说明，
+    而不是让它以为连接掉了、换个号再来一遍。
+    """
+    frame = {"id": "chatcmpl-gateway", "object": "chat.completion.chunk",
+             "created": int(time.time()), "model": model,
+             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+    try:
+        body = json.dumps(frame, ensure_ascii=False).encode("utf-8")
+    except Exception:  # noqa: BLE001 - 兜底：手写字面量，绝不让收尾失败
+        body = b'{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
+    # ⚠ `data: ` 前缀不能省：SSE 只认 `data:` / `event:` / `id:` / `retry:` 四种
+    # 字段行，裸 JSON 行会被解析器**直接丢弃** —— 那样补出来的终止帧里只剩
+    # `[DONE]` 生效，`finish_reason` 那一帧等于没发（客户端仍然判定流被截断）。
+    return b"data: " + body + b"\n\ndata: [DONE]\n\n"
+
+
+def _scan_stream(pending: bytes, chunk: bytes, state: dict) -> bytes:
+    """扫描 SSE 字节流，抽取 `usage` / `finish_reason` / 流内错误。
+
+    返回「还没凑成整行的尾巴」，由调用方在下一个 chunk 前拼回去 —— 一帧
+    被 TCP 切成两半是常态，按 chunk 独立解析会漏掉恰好被切开的那条错误帧
+    或 usage 帧。只做**只读**解析，转发的字节一个都不改。
+    """
+    if not isinstance(chunk, (bytes, bytearray)):
+        return pending
+    data = (pending or b"") + bytes(chunk)
+    lines = data.split(b"\n")
+    pending = lines.pop()
+    # 上游若长时间不发换行，尾巴会无限增长；超过 1MB 说明不是正常 SSE，
+    # 直接丢弃（解析已经不可能靠拼行救回），只保留末尾供下次重试。
+    if len(pending) > 1_048_576:
+        pending = pending[-65536:]
+    for line in lines:
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload:
+            continue
+        if payload == b"[DONE]":
+            state["done"] = True
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:  # noqa: BLE001 - 非 JSON 帧不属于我们的观测范围
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("usage"), dict):
+            state["usage"] = obj["usage"]
+        choices = obj.get("choices")
+        if isinstance(choices, list):
+            for item in choices:
+                if isinstance(item, dict) and item.get("finish_reason"):
+                    state["finish"] = True
+        elif not state.get("error"):
+            state["error"] = _inband_error(obj)
+    return pending
+
+
 def _usage_of(result: dict) -> dict:
     usage = result.get("usage") if isinstance(result, dict) else None
     return usage if isinstance(usage, dict) else {}
+
+
+#: 流读到一半上游断开（socket reset / read timeout）时补发的 error 帧。
+#:
+#: `_terminal_frame()` 只保证「流有结尾」，不说原因；断流时上游并没有发过任何
+#: 错误帧，客户端看到的就是一个干净的 stop —— 所以这里先补一帧 error 把原因
+#: 说清楚，再让调用方补终止帧。只出现在异常路径上，正常流一个字节都不改。
+_STREAM_BROKEN_FRAME = ("data: %s\n\n" % json.dumps(
+    {"error": {"type": "upstream_stream_broken",
+               "code": "stream_broken",
+               "message": "Marvis 上游流在中途断开（读超时或连接被重置），"
+                          "已收到的内容保持有效，请重试本轮"}},
+    ensure_ascii=False)).encode()
+
+
+# ---------------------------------------------------------------------------
+# 空闲心跳（对齐 loomy / codearts / qoder / raccoon / trae / minimax 的做法）
+# ---------------------------------------------------------------------------
+#
+# ## 为什么 marvis 原来没有、现在必须有
+#
+# 其余六个平台在把流交给 `StreamingResponse` 之前都套了一层
+# `bridge.with_pings(...)`，只有 marvis 是**原始字节直通**。直通本身没错
+# （上游就是 OpenAI 协议，改字节反而有风险），但少了一层「我来保证链路活着」：
+#
+#   · DeepSeek-V4.1 这类模型**先流式思考 5~10 秒**才吐正文，这段时间上游
+#     一个字节都不发（loomy 的实测记录：ttfb 9.33s / latency 9.49s）；
+#   · 客户端（Cherry Studio / LobeChat / Claude Code / DSH）按 idle 超时判
+#     「流死了」并掐断，中间层（CF / nginx / 反代）也会按读超时断链。
+#
+# 结果就是「明明在思考，界面上卡住不动，然后连接断了」。
+#
+# `bridge.CHAT_PING` 是**合法的空增量 data 帧**，不是 SSE 注释帧 ——
+# 注释帧不产生事件、不重置客户端 idle 计时器，等于没发（bridge 顶部有实测）。
+#
+# ## 为什么不用现成的 `bridge.with_pings`
+#
+# 那是**同步**迭代器版本（读线程 + queue），而 marvis 的 generator 是 async
+# 的（读已经在 `asyncio.to_thread` 里）。这里用 `asyncio.wait` 而**不是**
+# `asyncio.wait_for`：超时不取消内层 `__anext__()` 的 task，只是先吐一帧心跳
+# 再接着等同一个 task —— 始终只有一个读线程，不会踩到 bridge 顶部注释里那个
+# 「取消后重起线程并发消费同一条流、行被撕碎」的坑。
+#
+# ## 为什么不给 `/v1/responses` 加
+#
+# Responses 流的事件带 `sequence_number`，客户端按它排序去重。
+# `bridge.RESPONSES_PING` 目前的 `sequence_number` 固定为 0（bridge 自己标注
+# 「占位形状、没有调用方」），插进流中间可能与真实事件序号冲突 —— 宁可不发，
+# 也不能让 Codex 这类严格校验的客户端报序号错。
+
+_KEEPALIVE_ENV = "MIRAIHUB_MARVIS_KEEPALIVE"
+_KEEPALIVE_OFF = frozenset({"0", "false", "off", "no"})
+
+
+def _keepalive_enabled() -> bool:
+    """心跳开关，默认开；`MIRAIHUB_MARVIS_KEEPALIVE=0` 整体关掉。
+
+    留开关的理由与内容改写（`SANITIZE_TENCENT_ENV`）一致：这是**往客户的流里
+    插入我们自己造的帧**，出问题必须能一键退回原样透传，而不是改代码。
+    """
+    return (os.getenv(_KEEPALIVE_ENV) or "").strip().lower() not in _KEEPALIVE_OFF
+
+
+async def _with_keepalive(source, *, interval: float, ping: bytes):
+    """给 async 生成器加空闲心跳：`interval` 秒没新块就发一帧 `ping`。
+
+    超时**不取消**内层那次读取（见上），只把心跳先吐出去。
+    """
+    iterator = source.__aiter__()
+    pending: "asyncio.Future | None" = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(iterator.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield ping
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                return
+            finally:
+                pending = None
+            yield chunk
+    finally:
+        # 客户端断开 / 上层取消：把还挂着的读任务收掉，别让它悬着
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except BaseException:  # noqa: BLE001 - 取消与收尾异常都不外抛
+                pass
+
+
+def _wrap_keepalive(response, ping: bytes):
+    """给 `StreamingResponse` 套一层空闲心跳；其它响应原样返回。"""
+    if not _keepalive_enabled() or not isinstance(response, StreamingResponse):
+        return response
+    body = getattr(response, "body_iterator", None)
+    if body is None:
+        return response
+    from admin.platform import protocol_bridge as bridge
+
+    return StreamingResponse(
+        _with_keepalive(body, interval=bridge.PING_INTERVAL_S, ping=ping),
+        status_code=response.status_code,
+        headers=dict(response.headers))
 
 
 async def chat_completions(request: Request):
@@ -1274,7 +1546,12 @@ async def chat_completions(request: Request):
                                        "code": exc.code}},
                             status_code=404 if exc.code == "model_not_found" else 400)
 
-    upstream_body = _prepare_body(body, slot)
+    # `_prepare_body` 是**纯 CPU**：7 条内容风控正则 + 首行身份改写 + 角色归一。
+    # 实测 DSH 这种 60KB 级 system prompt 要 **2.1ms**，200KB 的历史要 **7.0ms**，
+    # 而它原来直接跑在事件循环线程上、在首字节之前 —— 单 worker 下并发几十路
+    # 就是几百毫秒的串行排队（与 2026-11-16 那类事故同一形状，只是不联网）。
+    # 一次 `to_thread` 往返约 50μs，换掉这段完全划算。
+    upstream_body = await asyncio.to_thread(_prepare_body, body, slot)
     # 记账用可读名（`deepseek-v4.1-flash`），**不是**槽位名（`main-auto`）。
     # 详见 `_billing_model`：这一列是控制台所有模型维度的唯一数据源。
     billed_model = _billing_model(slot)
@@ -1292,55 +1569,101 @@ async def chat_completions(request: Request):
 
     if not wants_stream:
         usage = _usage_of(resp)
+        # 非流式同样可能是「HTTP 200 + 错误体」：`_classify()` 只能按状态码判，
+        # 这类拒绝会一路被当成成功记账。原样把上游 body 交给调用方（不改语义），
+        # 但记账要标成失败，否则面板上看不出真实成功率。
+        nonstream_error = _inband_error(resp if isinstance(resp, dict) else {})
+        if nonstream_error:
+            client.note_sentinel(realm, int(getattr(account, "id", 0) or 0),
+                                 "upstream_business", code="body_error",
+                                 status=200, detail=nonstream_error)
+            logger.warning("Marvis 非流式错误体（HTTP 200）| acc=%s | %s",
+                           account.id, nonstream_error[:200])
         await _bill_async(key, account, billed_model, usage, request=request,
-                          started=started)
+                          started=started,
+                          error=("upstream_business" if nonstream_error else ""))
         return JSONResponse(resp)
 
     async def generator():
         stats = {"ttfb_ms": 0, "total_ms": 0}
-        usage: dict = {}
+        # `state` 由 `_scan_stream` 增量填充：usage / finish / done / error。
+        state: dict = {}
         first_at = None
         began = time.perf_counter()
-        buffer = b""
+        pending = b""
         try:
             async for chunk in _iter_upstream(resp):
                 if first_at is None:
                     first_at = time.perf_counter()
-                    stats["ttfb_ms"] = int((first_at - started) * 1000)
+                    # 亚毫秒首块取整会得到 0，而 0 在 `_bill` 里表示「没测到」，
+                    # 会被兜底成整条流的 latency —— 等于把 4ms 的 TTFB 记成
+                    # 800ms。下限钉在 1。
+                    stats["ttfb_ms"] = max(1, int((first_at - started) * 1000))
                 yield chunk
-                # 顺手把最后一个 usage 帧记下来 —— 不需要改动转发的字节
-                buffer += chunk
-                if b'"usage"' in buffer:
-                    for line in buffer.split(b"\n"):
-                        line = line.strip()
-                        if not line.startswith(b"data:"):
-                            continue
-                        payload = line[5:].strip()
-                        if payload in (b"", b"[DONE]"):
-                            continue
-                        try:
-                            obj = json.loads(payload)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
-                            usage = obj["usage"]
-                    # 只保留尾部，避免 buffer 无限增长
-                    buffer = buffer[-8192:]
+                # 只读旁路：解析 usage / finish_reason / 流内错误。
+                # **转发的字节一个都不改**，只记账与收尾需要这些信息。
+                pending = _scan_stream(pending, chunk, state)
+            # 上游既没给 `finish_reason` 也没给 `[DONE]`（错误帧 / 提前 EOF /
+            # 被截断）→ 补终止帧。不补的话客户端判定流被截断，按退避无限重试，
+            # 而网关这边一条日志都没有（FIXED-BUGS 五·补51）。
+            if not (state.get("finish") or state.get("done")):
+                logger.warning(
+                    "Marvis 流缺终止帧，已补发 | acc=%s | %s",
+                    account.id,
+                    "流内错误" if state.get("error") else "提前 EOF")
+                yield _terminal_frame(billed_model)
+        except Exception as exc:  # noqa: BLE001
+            # 上游读超时 / 连接被重置。`_iter_upstream` 抛的是 urllib / socket 的
+            # 原始异常（`open_chat_stream()` 早就返回了 resp，之后的读不再包装）。
+            # 不接住的话这条协程带异常结束：客户端只看到连接断，而 `finally` 里
+            # `state` 没有 error → `note_success()` 会把这次失败记成成功。
+            # `CancelledError` 是 BaseException，客户端主动断开不会被这里吞掉。
+            previous = str(state.get("error") or "")
+            state["error"] = ("%s（读中断：%s）" % (previous, type(exc).__name__)
+                              if previous else
+                              "%s: %s" % (type(exc).__name__, str(exc)[:160]))
+            logger.warning("Marvis 上游流中断 | acc=%s | %s: %s",
+                           account.id, type(exc).__name__, str(exc)[:160])
+            yield _STREAM_BROKEN_FRAME
+            # 再补终止帧：客户端不会因为「没有 finish_reason」而按退避重试
+            yield _terminal_frame(billed_model)
         finally:
             stats["total_ms"] = int((time.perf_counter() - began) * 1000)
             client.close_stream(resp)
-            # 流正常读完才算这个号「用成功过」—— 失败的情况下 note_success
-            # 会把刚才 note_failure 记的失败计数清零，等于把坏号洗白。
-            shared.note_success(account)
+            usage = state.get("usage") if isinstance(state.get("usage"), dict) else {}
+            error = str(state.get("error") or "")
+            if error:
+                # 流内错误 = 上游明确拒绝。三件事分开做：
+                #   · 不 `note_success()` —— 否则把刚被拒的号记成「成功过」，
+                #     失败计数清零，坏号永远洗不白也筛不掉；
+                #   · 也不 `note_failure()` —— 这一层分不清「号坏了」还是
+                #     「这个请求参数它不认」，后者换号 100% 无效，误记会把
+                #     一池好号挨个打上失败记录；
+                #   · 上哨兵 + 记账 error_kind —— 让「网关全绿、客户端重试」
+                #     这种静默故障在控制台可见，而不是等用户来报。
+                client.note_sentinel(realm, int(getattr(account, "id", 0) or 0),
+                                     "upstream_business", code="stream_error",
+                                     status=200, detail=error)
+                logger.warning("Marvis 流内错误（HTTP 200，已补终止帧）| acc=%s | %s",
+                               account.id, error[:200])
+            else:
+                shared.note_success(account)
             shared.release(account)
             # 记账是同步 DB 写，必须离开事件循环（客户端断开时也不会丢账，
             # 见 `_bill_async` 里的 shield）。
             await _bill_async(key, account, billed_model, usage, request=request,
-                              started=started, stats=stats)
+                              started=started, stats=stats,
+                              error=("upstream_business" if error else ""))
 
-    return StreamingResponse(generator(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    # 空闲心跳（见 `_with_keepalive`）：上游慢思考时几十秒无字节，
+    # 没有这一层客户端会按 idle 超时把流掐断。
+    from admin.platform import protocol_bridge as bridge
+
+    return _wrap_keepalive(
+        StreamingResponse(generator(), media_type="text/event-stream",
+                          headers={"Cache-Control": "no-cache",
+                                   "X-Accel-Buffering": "no"}),
+        bridge.CHAT_PING)
 
 
 def _anthropic_to_openai(body: dict) -> dict:
@@ -1453,8 +1776,14 @@ async def _run_normalized(request: Request, normalized: dict, *, protocol: str):
         if getattr(response, "status_code", 200) >= 400:
             return response                     # 错误原样返回（已是 JSON）
         if isinstance(response, StreamingResponse):
-            return bridge.anthropic_stream_relay(_Inner(response), model,
-                                                 prefix="marvis")
+            # 心跳要在**中继输出这一侧**再加一层：内层注入的 chat 形态空增量
+            # 帧会被中继吞掉（它没有 content / tool_calls，中继不产出事件），
+            # 客户端依然一字节都看不到。这里用 Anthropic 官方 `ping` 事件 ——
+            # SDK 会触发 message 上的 ping 回调，语义正确。
+            return _wrap_keepalive(
+                bridge.anthropic_stream_relay(_Inner(response), model,
+                                              prefix="marvis"),
+                bridge.ANTHROPIC_PING)
         # 非流式：JSONResponse.body 是已序列化的 bytes
         result = json.loads(response.body.decode("utf-8"))
         return JSONResponse(bridge.openai_to_anthropic(result, model))
