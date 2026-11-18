@@ -18,6 +18,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from . import endpoints
 
@@ -162,6 +163,41 @@ def session_id_for(account_id: int, body: dict, *, prefix: str = "",
         return ""
 
 
+def conversation_id_for(account_id: int, body: dict) -> str:
+    """`Marvis-Conversation-ID` 的取值：**稳定派生**，形状仍按 UUID。
+
+    派生规则见 `session_id_for()`（`sha256(平台 | 账号 | 会话键)`），这里只
+    多做一件事：把 32 位十六进制重新排成 `8-4-4-4-12` 的 UUID 形状。
+
+    为什么还要管形状 —— 上游看到的 `Marvis-Conversation-ID` 一直是
+    `str(uuid4())`（36 字符带连字符）。改成裸 hex 虽然同样是「不随机」，
+    但等于换了一种从未在真机上验证过的 id 形状，没必要为一个纯外观问题
+    去赌风控。形状保持不变、取值变成确定性，风险最小。
+
+    ## 为什么必须改（对齐 INTEGRATION-CHECKLIST §八 / FIXED-BUGS 五·补47）
+
+    改造前这条链路是：
+
+        `open_chat_stream()` → `llm_headers(acct, model=...)`
+            → `uskey_identity()` → `uskey_cache.get_or_create()`
+                → `conversation_id or str(uuid4())`   ← 每请求一个新会话
+
+    后果是双份的，而且都看不见：
+
+      · 上游前缀缓存按会话算 —— 每条请求都是「全新对话」，系统提示、工具
+        定义、历史消息全部重算，首字更慢、费用更高，控制台命中率永远 0；
+      · 一个号在几分钟里「新建」几十个会话，是上游风控里最典型的脚本形状。
+
+    `response_id` **不在这里派生**：它是每次上游调用的去重键，必须每次唯一
+    （见 `INTEGRATION-CHECKLIST` 那张表 —— 会话级稳定、请求级唯一，别搞反）。
+    """
+    raw = session_id_for(account_id, body, size=32)
+    if len(raw) < 32:
+        return ""          # 派生失败 → 交给 `uskey_cache` 的老路径兜底
+    return "%s-%s-%s-%s-%s" % (raw[0:8], raw[8:12], raw[12:16],
+                               raw[16:20], raw[20:32])
+
+
 def _request(url: str, *, method: str = "GET", body: dict | None = None,
              raw_body: str | None = None,
              headers: dict | None = None, timeout: float = DEFAULT_TIMEOUT,
@@ -281,8 +317,18 @@ def open_chat_stream(credential: dict, realm: str, body: dict, *,
     # 现场表现很像「出口被风控」：凭证钱包接口正常、换号无效、换 Key 无效，
     # 因为被拦的根本不是账号，是这条请求的身份自证。
     chat_model = str(body.get("model") or "")
+    # 会话级 id：同账号 + 同对话恒定（`conversation_id_for`）；请求级 id：
+    # 每次上游调用唯一（去重键，复用会少记账）。
+    #
+    # 两个值必须**一起**交给 `llm_headers()`：它内部只调一次 `uskey_identity()`
+    # 并签出 uskey，让 bus_info 与这两个请求头取自同一份身份 —— 缺一个就会
+    # 退回随机生成，uskey 与头对不上直接 403 4100404（见 2026-11-18 事故）。
+    conversation_id = conversation_id_for(account_id, body)
+    response_id = uuid.uuid4().hex
     try:
-        headers = endpoints.llm_headers(acct, model=chat_model)
+        headers = endpoints.llm_headers(acct, model=chat_model,
+                                        conversation_id=conversation_id,
+                                        response_id=response_id)
     except endpoints.SignerUnavailable as exc:
         # fail-closed：签名器不可用时**一个字节都不往上游发**。
         #
