@@ -114,6 +114,94 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
         status = 502
     code = exc.code or "upstream_error"
     message = exc.message
+    # ------------------------------------------------------------------
+    # 内容风控（4100406）单独处理 —— 这是**请求内容**的问题
+    # ------------------------------------------------------------------
+    #
+    # 为什么必须换掉状态码（2026-11-17 用户实测）：
+    #
+    #   上游 403 传到 Claude Code / Codex 会被渲染成 **「API 密钥无效」**，
+    #   于是用户去翻 Key、去重扫码、去换号 —— 三个方向全是错的：
+    #   Key 是好的、号是好的、登录态也是好的，是**提示词首行命中黑名单**。
+    #
+    #   400 + `content_filter` 是 OpenAI 语义里「请求内容不被接受」的标准表达，
+    #   客户端会原样显示 message，不会误导。也不给 `upstream_account`
+    #   （它不是账号问题，别让上层去 failover 换号）。
+    if exc.kind == "content_block":
+        detail = (exc.detail or "").strip()
+        return JSONResponse(
+            {"error": {
+                "type": "content_filter",
+                "code": "content_blocked",
+                "message": (
+                    "上游内容风控拦截：系统提示词首行命中腾讯黑名单"
+                    "（与你的 API Key、Marvis 账号都无关，换号也没用）。"
+                    "网关已尝试把首行 `You are` 改写成 `You're` 仍被拦，"
+                    "说明命中的是别的形态，请把原始提示词首行发维护者。"
+                    + ("上游原文：%s" % detail[:300] if detail else "")),
+                "upstream_account": False}},
+            status_code=400)
+    # ------------------------------------------------------------------
+    # 设备 / IP 风控（4100404）—— 与内容风控**完全不同**的一类
+    # ------------------------------------------------------------------
+    #
+    # ## 为什么必须单独一个分支（2026-11-17 用户实测）
+    #
+    # 它以前跟内容风控共用一条路径，后果是把「平台侧封禁」说成了「提示词问题」，
+    # 用户按前者的提示去改提示词，怎么改都没用 —— 因为**连最简请求都过不了**：
+    #
+    #     {"model":"main-auto","messages":[{"role":"user","content":"hi"}]}
+    #     -> 403 {"code":4100404,"msg":"客户端通用错误:请求被风控拦截"}
+    #
+    # 四个号全部如此，而**同一份凭证的钱包接口 `/v3/marvis_get_wallet` 回 200**
+    # （余额正常）—— 说明凭证没过期，是模型网关这一侧的身份判定被拒。
+    #
+    # ## 2026-11-18 更正：根因不是 IP，是两个空头
+    #
+    # 旧结论写的是「出口 IP / 设备画像被风控，只能换 IP 或等」——**那是错的**。
+    # 当时全部实验都用随机 uskey，几个变量搅在一起，分不出是谁在起作用。
+    #
+    # 三组单变量对照（同一账号、同一凭证、同一出口）：
+    #
+    #     scene=preload_summary + 空 conv/rid + 真签 uskey -> 403 4100404
+    #     scene=agent_chat      + 空 conv/rid + 真签 uskey -> 403 4100404
+    #     scene=agent_chat      + 有 conv/rid + 真签 uskey -> 200 ✅
+    #
+    # 另一组（证 uskey 也必须真签）：
+    #
+    #     真签 uskey -> 无 403
+    #     随机 uskey -> 403 4100404
+    #
+    # ⇒ 真正被查的是三样：**uskey 必须是 Beacon SDK 真签**、
+    #    **`Marvis-Conversation-ID` 非空**、**`Marvis-Response-ID` 非空**。
+    #    IP 从头到尾没参与 —— 换出口只是碰巧碰到别的变量变了，属于误判。
+    #
+    # 现在这三样都在 `endpoints.llm_headers()` 里兜住了（缺省自动生成 id、
+    # uskey 走 `uskey_signer`），所以这条分支正常不该再命中。
+    # 真命中时的文案仍然保留「别改提示词、别重扫码、别换 Key」——
+    # 那三条确实没用，只是再加一条：先确认签名器和 id 有没有被绕过。
+    if exc.kind == "risk_control":
+        detail = (exc.detail or "").strip()
+        return JSONResponse(
+            {"error": {
+                "type": "upstream_risk_control",
+                "code": "risk_control",
+                "message": (
+                    "腾讯 Marvis 回 4100404「请求被风控拦截」。"
+                    "这不是提示词内容的问题（改提示词没用），也不是账号登录态问题"
+                    "（凭证钱包接口仍然正常）。上游查的是客户端身份三件套："
+                    "uskey 是否为 Beacon SDK 真签、Marvis-Conversation-ID 是否非空、"
+                    "Marvis-Response-ID 是否非空。"
+                    "处理方式：① 确认网关发的是真签 uskey（本机会加载 "
+                    "beacon_wrapper.dll，缺失时会导致随机填充降级）"
+                    "② 换号 / 重扫码 / 换 Key 都不起作用，不要在这些方向浪费时间"
+                    "③ 确实三项都正常仍被拦，再考虑换出口 IP。"
+                    + ("上游原文：%s" % detail[:200] if detail else "")),
+                # 平台侧问题，但不是「换个号就好」的那种账号问题
+                "upstream_account": False}},
+            # 429 语义最贴切：客户端会按 Retry-After 退避，而不是当成 Key 错误
+            status_code=429,
+            headers={"Retry-After": "600"})
     if status == 401 or exc.kind == "auth" or code == "credential_expired":
         status = 503
         if "重新扫码" not in message and "授权登录" not in message:
@@ -122,6 +210,31 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
         else:
             message = ("%s —— 这是 Marvis 平台账号的问题，你的 API Key 是有效的。"
                        % message)
+    elif status == 400:
+        # 参数类 400 必须带出**上游原文**。以前只有一句「模型网关失败（HTTP 400）」，
+        # 客户端 / 控制台 / 日志三处都看不出是哪个字段踩的 —— 2026-11-17 排查
+        # `response_format: json_object` 时正是卡在这一句上，只能逐个字段手试。
+        # 上游现在回的是 `{"code":3000101,"msg":"invalid parameter"}`，原样带上。
+        upstream = (exc.detail or "").strip()
+        # 上下文超限：重试都失败说明这次真的装不下（路由到哪个后端都小）。
+        # 这时**不能**说「模型网关失败」—— 用户会以为服务坏了，一直重试。
+        # 要说清楚是「这轮对话太长」，并给出唯一有效的动作。
+        if _is_context_overflow(exc):
+            message = ("这轮对话的上下文太长，Marvis 上游装不下（与你的 API Key、"
+                       "账号额度都无关）。已自动重发 %d 次仍未通过，说明不是"
+                       "临时路由问题。请新建一个对话继续，或让客户端清理历史后重试。"
+                       % _MAX_CTX_RETRIES)
+            if upstream:
+                message = "%s；上游原文：%s" % (message, upstream[:200])
+            return JSONResponse(
+                {"error": {"type": "context_too_long",
+                           "code": "context_length_exceeded",
+                           "message": message,
+                           "upstream_account": False}},
+                status_code=400)
+        if upstream:
+            message = "%s；上游原文：%s" % (message, upstream[:300])
+        # 参数错误不是账号问题，别让客户端以为是号池挂了
     return JSONResponse(
         {"error": {"type": exc.kind, "code": code, "message": message,
                    # 给客户端一个可读的提示位：明确「不是 Key 的问题」
@@ -160,7 +273,13 @@ def _validate_model(body: dict) -> str:
 
 def _bill(key, account, model, usage, *, request, started=None, error="",
           stats: dict | None = None):
-    """落一条 usage_logs。**绝不抛**（记账失败不能影响转发）。"""
+    """落一条 usage_logs。**绝不抛**（记账失败不能影响转发）。
+
+    ⚠ `model` 必须是**可读名**（`deepseek-v4.1-flash`），不是上游槽位名
+    （`main-auto`）—— 见 `_billing_model` 的说明。这一列是控制台
+    「使用记录 / 用量统计 / 模型筛选」的唯一数据源，写成槽位名会让
+    `model_configs` 的表全部对不上，前端只能原样显示 `main-auto`。
+    """
     try:
         from admin.db import SessionLocal
 
@@ -189,6 +308,43 @@ def _bill(key, account, model, usage, *, request, started=None, error="",
                 reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("Marvis 记账失败")
+
+
+def _billing_model(slot: str) -> str:
+    """记账用的模型名：上游槽位 → **对外可读名**。
+
+    ## 为什么这一列不能存槽位名（2026-11-17 用户实测反馈）
+
+    控制台的「使用记录 / 用量统计 / 模型下拉筛选」都是拿 `usage_logs.model`
+    去 `model_configs.model_id` 里查展示名的。而 Marvis 侧：
+
+        model_configs 登记的 model_id   → deepseek-v4.1-flash
+        usage_logs      记的 model      → main-auto（上游槽位）
+
+    两列永远对不上，前端查不到展示名就退回原样输出，于是整张表显示
+    `main-auto`、下面还挂一行「思考：默认 / 未记录」—— 用户看到的既不是
+    自己请求的 `deepseek-v4.1-flash-marvis`，也认不出这到底是什么模型。
+
+    ## 为什么不改 model_configs 去存槽位名
+
+    反过来更糟：`model_configs` 是模型目录的**对外身份**，槽位名是上游实现
+    细节。改成 `main-auto` 会让 `/v1/models` 重新暴露槽位名、dispatch 的
+    跨平台归一也要跟着改（`readable_model_id` 存在的全部理由就是这件事）。
+
+    ## 所以：落库时就写可读名
+
+    `endpoints.readable_model_id()` 查不到时原样返回，对没有槽位映射的平台
+    是恒等变换，不会误伤。
+
+    不写平台后缀（`-marvis`）：`usage_logs.platform` 已经单列了平台，
+    再拼进 model 会让同一模型在统计里裂成两条，也会让筛选下拉出现
+    `deepseek-v4.1-flash` 与 `deepseek-v4.1-flash-marvis` 两个选项。
+    """
+    try:
+        readable = endpoints.readable_model_id(slot)
+    except Exception:  # noqa: BLE001 - 映射失败就记原始值，不能挡住记账
+        return str(slot or "")
+    return str(readable or slot or "")
 
 
 async def _bill_async(*args, **kwargs) -> None:
@@ -255,11 +411,51 @@ async def _bill_async(*args, **kwargs) -> None:
 #
 # 本实现**不**给任何一条加行首锚定：改写范围宁可略宽 —— 漏改一处就是整轮
 # 403，多改一处只是语义等价的措辞变化（与客户端插件同一取舍）。
+#
+# ## 2026-11-17 实测修正：上面这套「逐句替换」不成立
+#
+# 逐句对上游做 A/B（四个号、`yybadaccess.3g.qq.com`，每条只改系统提示词）：
+#
+#     规则2 原文  "You are Claude Code, Anthropic's official CLI for Claude."   -> 403
+#     规则2 替换  "You are Claude Code, Anthropic's CLI for Claude"             -> 403
+#     规则4 原文  "You are an AI coding agent, powered by the DeepSeek Harness" -> 200
+#     规则4 替换  "You are an AI coding assistant, powered by a large language
+#                  model"                                                      -> 403
+#
+# 两个结论，都与直觉相反：
+#
+#   1. **替换值本身也被拦** —— 逐句换措辞只是换一个同样命中的句子，等于白改；
+#      规则 2 从上线起就没生效过。
+#   2. **规则 4 会主动制造 403** —— 它的原文本来是放行的，改写后反而被拦。
+#      这条规则每命中一次，就是把一条本来正常的请求改成失败。
+#
+# 命中形态实测（同一批账号）：
+#
+#     "You are Claude Code."                403     "# You are Claude Code."      200
+#     "  You are Claude Code."（前导空格）   403     "- You are Claude Code."      200
+#     "\nYou are Claude Code."（前导换行）   403     "Preamble.\nYou are ..."      200
+#     "you are claude code."（全小写）       403     "You are not Claude Code."    200
+#     "You are Codex."                      403     "You're Claude Code."         200
+#     "You are a Claude agent"              403     user 角色带同一句             200
+#
+# ⇒ 上游匹配的是**第一条非空行**（前导空白会跳过）、**大小写不敏感**、
+#   形态是 `You are <产品名>`；加一个 `#` / `-` 前缀能绕过，但那是把正文改成
+#   标题，不可取。`You are` → `You're` 是唯一既等价又通过的改法。
+#
+# 所以现在分两层：
+#   · 上面 7 条**只保留确实需要的**，替换值一律改成 `You're` 形态（不再自造新句）；
+#   · 新增 `_rewrite_identity_line()` 作为**兜底**：首行只要是 `You are ` 就改写。
+#     它覆盖 Claude Code、Codex 以及以后新增的任何客户端身份句 —— 不再需要
+#     每次客户端升级就来补一条规则。
 
 #: 改写开关（默认开）：设为 0 / false / off / no 时**完全跳过**改写，请求原样
 #: 发上游。这是「替用户改写内容」的行为，必须能一键退回原样透传。
 SANITIZE_TENCENT_ENV = "MIRAIHUB_MARVIS_SANITIZE_TENCENT"
 _SANITIZE_OFF_VALUES = frozenset({"0", "false", "off", "no"})
+
+#: 参与改写内容风控的角色。`developer` 是 OpenAI 新规范里的 system 等价物，
+#: Codex 的身份句就放在 developer 段 —— 漏掉它等于 Codex 全量 403。
+_SANITIZE_ROLES = frozenset({"system", "developer"})
 
 
 def _tencent_sanitize_enabled() -> bool:
@@ -277,28 +473,41 @@ _TENCENT_FINGERPRINT_RULES = (
     (re.compile(re.escape("Main branch (you will usually use this for PRs)"), re.I),
      "Main branch (PRs usually go here)"),
     # 2. Claude Code 身份句。**行首锚定**；刻意不带尾句点，一条覆盖两种常量形态。
+    #
+    #    ⚠ 替换值必须是 `You're` 形态：以前写成 "You are Claude Code,
+    #    Anthropic's CLI for Claude" —— 仍然 `You are` 开头，实测依旧 403，
+    #    等于这条规则从上线起就是空转（2026-11-17 实测）。
     (re.compile(re.escape("You are Claude Code, Anthropic's official CLI for Claude"), re.I),
-     "You are Claude Code, Anthropic's CLI for Claude"),
+     "You're Claude Code, Anthropic's CLI for Claude"),
     # 3. Claude Code 反馈句（每轮必带的固定段落）。位置无关。
     #    find 必须写整句（含 URL）：上游认逐字符，砍掉半句等于静默空跑。
     (re.compile(re.escape("To give feedback, users should report the issue at "
                           "https://github.com/anthropics/claude-code/issues"), re.I),
      "To give feedback, users should report the issue at the project issue tracker"),
-    # 4. DSH 身份首句（**行首锚定**；本条就是 4100406 的触发串）。
-    #    用插件登记的 findRegex：容忍空白归一（\s+）以及 `an AI agent` /
-    #    `an AI coding agent`、`powered by` / `powered by the` 等形态漂移。
+    # 4. DSH 身份首句（**行首锚定**）。
+    #
+    #    ⚠ **原文实测是放行的**（`You are an AI coding agent, powered by the
+    #    DeepSeek Harness` -> 200），而旧替换值
+    #    `You are an AI coding assistant, powered by a large language model`
+    #    **反而是 403** —— 也就是说这条规则以前每命中一次，就在把一条正常
+    #    请求改成失败（2026-11-17 实测）。保留规则但换成 `You're` 形态，
+    #    从此它只是同义改写、不再是陷阱。
     (re.compile(r"You\s+are\s+an?\s+AI\s+(?:coding\s+)?agent\s*,?\s*powered\s+by\s+"
                 r"(?:the\s+)?DeepSeek\s+Harness", re.I),
-     "You are an AI coding assistant, powered by a large language model"),
+     "You're an AI coding agent, powered by the DeepSeek Harness"),
     # 5. DSH Web 运行面的开头两句。位置无关。
     #    触发串**跨句边界**（前半句、后半句各自都放行），find 必须是前两句的
     #    并集；砍半 = 静默空跑。改写只去掉品牌串，其余逐字不动。
+    #
+    #    替换值同样用 `You're` 开头：这条改写完若仍以 `You are` 起句，兜底的
+    #    首行改写会再动它一次（两次改写本身无害，但「一条规则一次改写」
+    #    更好对账，也让前缀缓存的计算可预测）。
     (re.compile(re.escape(
         'You are interacting with the user through the DeepSeek Harness Web GUI '
         'whose URL the runtime context names. When the user refers to "this page", '
         '"this GUI", or "this app" without naming another target, they mean this GUI.'),
         re.I),
-     'You are interacting with the user through the harness Web GUI '
+     "You're interacting with the user through the harness Web GUI "
      'whose URL the runtime context names. When the user refers to "this page", '
      '"this GUI", or "this app" without naming another target, they mean this GUI.'),
     # 6. DSH 的 `@` 文件引用说明句。位置无关，同样跨句边界。
@@ -313,6 +522,58 @@ _TENCENT_FINGERPRINT_RULES = (
     (re.compile(re.escape("x-anthropic-billing-header"), re.I),
      "x-client-billing-header"),
 )
+
+
+#: 首行身份句：`<缩进>You are<空白>...`，大小写不敏感。
+#:
+#: 只锚 `^`＋缩进，**不锚整句** —— 上游拦的是「`You are` + 产品名」这个宽形态，
+#: 不是某一句原文。锚整句的后果就是客户端一改措辞（Claude Code 从
+#: `Anthropic's official CLI for Claude` 改成 `Claude Agent SDK`）就失效。
+_IDENTITY_LINE = re.compile(r"^([ \t]*)you([ \t]+)are([ \t]+)", re.I)
+
+
+def _youre(match: re.Match) -> str:
+    """把命中的 `You are ` 换成 `You're `，保留缩进、空白与大小写形态。
+
+    大小写要**跟着原样走**：全大写句子里混一个 `You're` 会让模型读到风格
+    突变的提示词；`YOU ARE` 要变 `YOU'RE`，`you are` 要变 `you're`。
+    """
+    lead, gap, tail = match.group(1), match.group(2), match.group(3)
+    word = match.group(0)[len(lead):len(lead) + 3]      # 原句里的 "You"
+    if word.isupper():
+        replacement = "YOU'RE"
+    elif word[:1].isupper():
+        replacement = "You're"
+    else:
+        replacement = "you're"
+    return lead + replacement + tail
+
+
+def _rewrite_identity_line(text: str) -> tuple[str, int]:
+    """改写**第一条非空行**开头的 `You are `，返回 `(文本, 是否命中)`。
+
+    ## 为什么只改第一行
+
+    上游只检查第一条非空行（实测见上方规则表的对照数据）：
+    `Preamble.\\nYou are Claude Code.` 是 200，而同样的句子放在第一行就是 403。
+    改第一行就够，改更多行只会无谓地动到用户的提示词正文。
+
+    ## 为什么前导空行要跳过
+
+    `"\\nYou are Claude Code."` 实测仍是 403 —— 上游会跳过前导空白再匹配。
+    只认 `text.startswith("You are")` 会漏掉这种形态。
+    """
+    if not text:
+        return text, 0
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue                     # 前导空行：上游也会跳过，继续往下找
+        if _IDENTITY_LINE.match(line) is None:
+            return text, 0               # 首条非空行不是身份句 → 整段不动
+        lines[index] = _IDENTITY_LINE.sub(_youre, line, count=1)
+        return "\n".join(lines), 1
+    return text, 0
 
 
 def rewrite_tencent_fingerprints(text: str) -> tuple[str, int]:
@@ -332,11 +593,103 @@ def rewrite_tencent_fingerprints(text: str) -> tuple[str, int]:
             continue
         out = pattern.sub(replacement, out)
         hits += 1
-    return out, hits
+    # 兜底：首行身份句。放在具体规则**之后** —— 上面某些规则也会重写首行
+    # （规则 4 会把 `You are an AI ...` 换成 `You're ...`），先跑兜底的话
+    # 就看不到它们的结果了。
+    out, identity_hits = _rewrite_identity_line(out)
+    return out, hits + identity_hits
+
+
+def _flatten_content(content) -> str | None:
+    """把 OpenAI 多段 content 数组压成纯文本。压不出文本时返回 `None`。
+
+    ## 为什么必须压（2026-11-18 实测）
+
+        上游接受：content 是字符串
+        上游接受：role=system + content 多段数组（text 段）
+        上游拒绝：role=developer + content 多段数组  -> 400 3000101
+        上游拒绝：content 里带 image_url              -> 400 3000101
+
+    也就是说「数组」本身不一定非法，但一旦和 `developer` 或图片段组合就整条
+    400。上游不告诉你是哪个字段，只回 `invalid parameter`，所以这里直接把
+    三种形态统一成最保守的「纯字符串」——Marvis 是纯文本模型，本来也吃不下
+    图片，`image_url` 段保留只会让整条请求失败。
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for seg in content:
+        if not isinstance(seg, dict):
+            if isinstance(seg, str):
+                parts.append(seg)
+            continue
+        kind = str(seg.get("type") or "")
+        if kind in ("text", "input_text") or not kind:
+            text = seg.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            continue
+        # image_url / input_image / audio / file —— 上游不支持，丢弃
+    return "\n".join(parts) if parts else ""
+
+
+def _normalize_roles(messages: list) -> tuple[list, bool]:
+    """把 `developer` 归一成 `system`，并压平多段 content。
+
+    ## `developer` 为什么必须改（2026-11-18 实测）
+
+        role=developer + content 字符串 -> 200
+        role=developer + content 数组   -> 400 3000101
+        role=system    + content 数组   -> 200
+
+    `developer` 在 OpenAI 新规范里就是 `system`，但上游只对 `system` 放过
+    数组形态；发 `developer` 等于走进一条它没覆盖的分支。DSH / Codex 这类
+    客户端第一条就是 `developer`，且正文常常是多段数组 —— 于是它们的请求
+    100% 400，而手工 curl 一条 `role=user` 却是 200，非常容易被误判成
+    「网关不稳定」。
+
+    归一成 `system` 后语义不变，两个分支都能过。
+    """
+    changed = False
+    out: list = []
+    for message in messages:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        role = str(message.get("role") or "")
+        content = message.get("content")
+
+        new_content = content
+        if isinstance(content, list):
+            flat = _flatten_content(content)
+            if flat is not None and flat != content:
+                new_content = flat
+
+        if role == "developer" or new_content is not content:
+            out.append(dict(message,
+                            role=("system" if role == "developer" else role),
+                            content=new_content))
+            changed = True
+        else:
+            out.append(message)
+    return (out if changed else messages), changed
 
 
 def _sanitize_messages(messages: list) -> tuple[list, int]:
-    """对**每一条 system 消息**的 `content` 做指纹改写，其余角色原样不动。
+    """对**每一条 system / developer 消息**做指纹改写，其余角色原样不动。
+
+    ## 为什么 `developer` 也必须改（2026-11-17 实测）
+
+    OpenAI 新规范里 `developer` 就是 `system`，Codex 的身份句正是放在
+    `input[0]`（role=`developer`）里。以前这里只认 `role == "system"`，
+    于是 Codex 的请求**完全没被改写**，直连上游验证：
+
+        system    + "You are a coding agent running in the Codex CLI ..." -> 403
+        developer + 同一句                                                -> 403
+
+    两个角色上游都会查，所以两个都必须在改写范围内。
 
     为什么不是只改 `messages[0]`：非首位 system 同样会被上游拦，只改第一条
     等于留一条随时会踩的路径。
@@ -350,7 +703,7 @@ def _sanitize_messages(messages: list) -> tuple[list, int]:
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
-        if str(message.get("role") or "") != "system":
+        if str(message.get("role") or "") not in _SANITIZE_ROLES:
             continue
         content = message.get("content")
         if not isinstance(content, str):
@@ -364,10 +717,230 @@ def _sanitize_messages(messages: list) -> tuple[list, int]:
     return (out if changed else messages), hits
 
 
+# ---------------------------------------------------------------------------
+# `response_format` 归一（修 400 / 3000101）
+# ---------------------------------------------------------------------------
+#
+# ## 现象
+#
+# 客户端带 `response_format: {"type": "json_object"}` 时，请求被上游判成
+# **非法参数**，整条 400：
+#
+#     HTTP 400 {"code":3000101,"msg":"invalid parameter"}
+#
+# 这个 400 到客户端只剩一句「模型网关失败（HTTP 400）」，看不出是哪个字段
+# 踩的 —— 2026-11-17 排查时正是卡在这里：账号 active、凭证刚续签、钱包接口
+# 正常、换号也没用，因为问题根本不在账号侧。
+#
+# ## 实测边界（2026-11-17，四个号逐个直连 `yybadaccess.3g.qq.com` 复核）
+#
+#     {"type": "text"}                                  -> 200
+#     {"type": "json_schema", "json_schema": {...}}     -> 200
+#     {"type": "json_object"}                           -> 400 3000101
+#
+# 也就是说上游只实现了 `text` 与 `json_schema` 两种，`json_object` 这个
+# OpenAI 经典模式**没实现**，且不认就直接报参数非法。
+#
+# ## 等价表达
+#
+# `json_object` 的语义是「这次回答必须是合法 JSON 对象」，不约束字段。
+# 用 `additionalProperties: true` 的宽松 object schema 表达完全等价 ——
+# 只约束形状、不约束键，模型照样必须吐 JSON：
+#
+#     改写后实测输出：{"name": "Elena Marchetti", "age": 34}
+
+#: 上游真正实现了的 `response_format.type`。
+_RESPONSE_FORMAT_OK = frozenset({"text", "json_schema"})
+
+#: `json_object` 的等价物：不约束字段、只约束「是一个 JSON 对象」。
+_JSON_OBJECT_AS_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "json_object",
+        "schema": {"type": "object", "additionalProperties": True},
+        "strict": False,
+    },
+}
+
+
+def _normalize_response_format(value) -> tuple[dict | None, str]:
+    """把 `response_format` 归一成上游认的形状，返回 `(新值, 说明)`。
+
+    新值为 `None` 表示「翻译不了，这个字段整个摘掉」：宁可少一个 JSON 约束，
+    也不要整条请求 400 —— 客户端拿到出字总比拿到一句无用的参数错误强。
+    """
+    if not isinstance(value, dict):
+        return None, "不是 dict，已摘除"
+    kind = str(value.get("type") or "").strip().lower()
+    if kind in _RESPONSE_FORMAT_OK:
+        return value, ""
+    if kind == "json_object":
+        return dict(_JSON_OBJECT_AS_SCHEMA), (
+            "json_object → json_schema（上游未实现 json_object）")
+    return None, "未知 type=%r，已摘除" % kind
+
+
+#: 上游回 `3000101 invalid parameter` 时按顺序剥掉的可选字段。
+#:
+#: 网关对 OpenAI 扩展字段是**原样透传**的（那是客户端的自由），代价是上游
+#: 一旦不认就整条 400。上游又不告诉你是哪个字段，只回一句 `invalid parameter`。
+#: 所以留一条降级路径：撞上 3000101 就按这张表逐个摘，摘掉后能过就照常出字。
+#: 顺序是「最可能被误加 → 最不可能」：`response_format` 已在前置归一里处理，
+#: 剩下的按客户端常见溢出来排。
+_DEGRADE_FIELDS = (
+    "response_format",
+    "max_completion_tokens",
+    "parallel_tool_calls",
+    "reasoning_effort",
+    "stream_options",
+    "metadata",
+    "service_tier",
+    "store",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "n",
+    "modalities",
+    "seed",
+    "user",
+    "top_k",
+    "repetition_penalty",
+    "prompt_cache_key",
+    "session_id",
+    # 工具相关放最后：剥掉它们会让模型不再调工具，能出字但功能降级，
+    # 所以宁可先试完前面那些纯装饰字段。
+    "tool_choice",
+    "tools",
+    "functions",
+)
+
+
+def _degrade_body(body: dict, dropped: set[str]) -> dict | None:
+    """按 `_DEGRADE_FIELDS` 摘掉**一个**还没摘过的字段，返回新 body。
+
+    没有可摘的字段时返回 `None`（说明这条请求已经没什么可退的了）。
+    `dropped` 由调用方持有，保证同一个字段不会反复摘、也不会无限重试。
+    """
+    for field in _DEGRADE_FIELDS:
+        if field in body and field not in dropped:
+            dropped.add(field)
+            out = dict(body)
+            out.pop(field, None)
+            return out
+    return None
+
+
+# ======================================================================
+# 上下文超限重试（400 / 413 + 3000100）
+# ======================================================================
+#
+# ## 为什么是「原样重试」而不是「裁剪上下文」
+#
+# 我第一版写的是「按比例删掉最老的消息」，这是**错的**：
+#
+#     用户的对话历史就是任务本身。删一半 = 模型看不到前面的约束、
+#     工具结果、已确认的决策 —— 它不会「少看几轮」，它会**把任务做错**。
+#     一个悄悄做错的任务，比一条明确的报错糟糕得多。
+#
+# 正确做法是重试，理由是 `main-auto` 这个槽位是**自动路由**：
+#
+#     同一个模型名，上游每次派到哪个后端是它自己决定的。实测同一段
+#     40 万字符的历史，一次落到 `deepseek-v4-1-flash-261017`（装不下），
+#     另一次落到 `default`（装得下）。
+#
+# 所以超限不等于「内容真的太大」，也可能「这次运气不好路由到小窗口」。
+# **重发一次，让上游重新选路**，能过就过；过不了再如实报错。
+#
+# ## 为什么不换号
+#
+# 上下文长度是请求本身的属性，换号发也一样长。换号只会把好号
+# 一个个写成失败记录。所以不 note_failure、不进 exclude。
+
+#: 上游表达「上下文超限」的各种措辞。
+#:
+#: 不同后端说法不一样，换个路由后端就换一套措辞。全部按小写子串匹配，
+#: 判据取「够具体、不会误伤」的短语 —— 不能只匹配 `token`，否则把
+#: `invalid token` 这类参数错也吃进来。
+_CONTEXT_OVERFLOW_WORDS = (
+    "max input token",
+    "maximum context length",
+    "context length exceeded",
+    "context_length_exceeded",
+    "input is too long",
+    "prompt is too long",
+    "too many tokens",
+    "exceeds the maximum",
+    "3000100",
+)
+
+#: 上下文超限时**原样重发**几次。
+#:
+#: 每次重发都是一次重新路由的机会。给到 4 次是因为实测一次失败后
+#: 下一次就换到能装下的后端了；再多只是在慢请求上浪费时间。
+_MAX_CTX_RETRIES = 4
+
+#: 重试之间的间隔。不纯粹是退避 —— 上游的路由决策带一点时间相关性，
+#: 间隔一两秒能显著提高「换一个后端」的概率。
+_CTX_RETRY_GAP = 1.2
+
+
+def _is_context_overflow(exc: "client.UpstreamError") -> bool:
+    """这条错误是不是「上下文太长，这次那个后端装不下」。
+
+    必须在 `_is_param_error` **之前**判断：`3000100` 和 `3000101` 前缀相同，
+    但一是内容长度、一是字段不认，处理方式完全相反。
+    """
+    if int(exc.status or 0) not in (400, 413, 422):
+        return False
+    blob = ("%s %s" % (exc.detail or "", exc.message or "")).lower()
+    return any(word in blob for word in _CONTEXT_OVERFLOW_WORDS)
+
+
+
+
+def _normalize_token_limit(out: dict) -> None:
+    """把 `max_completion_tokens` 并进 `max_tokens`（上游只认后者）。
+
+    ## 为什么不能像别的可选字段那样直接摘
+
+    `max_completion_tokens` 是 `max_tokens` 的 **OpenAI 新别名**，语义完全
+    相同 —— 不是「多余的装饰」，摘掉就等于**放开输出长度**：模型会一路写到
+    上游自己的上限，慢、贵，而且客户端拿到的长度和它要求的对不上。
+
+    ## 实测（2026-11-17，上游 `yybadaccess.3g.qq.com`）
+
+        {"max_completion_tokens": 16}                    -> 400 3000101
+        {"max_tokens": 16}                               -> 200
+
+    两个都带时上游照样回 400（它只认 `max_tokens`，多一个不认识的键就不给过），
+    所以这里**合并后只留 `max_tokens`**，以更保守的那个值为准：两个都给了就取
+    小的 —— 宁可比客户端要的短，也不要比它要的长（长度超了客户端会截断，
+    短了只是少写几个字，不会破坏协议）。
+    """
+    if "max_completion_tokens" not in out:
+        return
+    alias = out.pop("max_completion_tokens")
+    try:
+        limit = int(alias)
+    except (TypeError, ValueError):
+        return
+    if limit <= 0:
+        return
+    current = out.get("max_tokens")
+    try:
+        current = int(current)
+    except (TypeError, ValueError):
+        current = 0
+    out["max_tokens"] = min(current, limit) if current > 0 else limit
+
+
 def _prepare_body(body: dict, slot: str) -> dict:
     """把下游请求整理成上游能接受的样子。
 
     · `model` 换成槽位名；
+    · `response_format` 归一（`json_object` → 等价 `json_schema`，见上）；
+    · `max_completion_tokens` 并进 `max_tokens`（上游只认后者，见
+      `_normalize_token_limit`）；
     · 流式时补 `stream_options.include_usage` —— 少了它上游不返回 usage 帧，
       这张卡片和用量统计就永远是 0；
     · **system 正文过一遍腾讯内容风控指纹改写**（`4100406` 的修法，表见上）。
@@ -376,12 +949,28 @@ def _prepare_body(body: dict, slot: str) -> dict:
     """
     out = dict(body)
     out["model"] = slot
+    _normalize_token_limit(out)
     messages = out.get("messages")
     if isinstance(messages, list):
+        # 先做角色 / content 形态归一，再做内容风控改写。
+        #
+        # 顺序不能反：`developer` + 数组 content 会被上游判 400，而改写函数
+        # 只处理字符串 content —— 先归一才能保证该改的都改到。
+        messages, roles_changed = _normalize_roles(messages)
+        if roles_changed:
+            logger.debug("Marvis 消息归一 | developer->system / content 压平")
         out["messages"], hits = _sanitize_messages(messages)
         if hits:
             # 只记命中条数，**不记原文**：system 里可能带用户的 prompt / 路径 / 密钥。
             logger.info("Marvis 内容风控指纹改写 | rules_hit=%d", hits)
+    if "response_format" in out:
+        shape, note = _normalize_response_format(out["response_format"])
+        if note:
+            logger.info("Marvis response_format 归一 | %s", note)
+        if shape is None:
+            out.pop("response_format", None)
+        else:
+            out["response_format"] = shape
     if out.get("stream"):
         opts = dict(out.get("stream_options") or {})
         opts["include_usage"] = True
@@ -389,44 +978,45 @@ def _prepare_body(body: dict, slot: str) -> dict:
     return out
 
 
-def _sticky_key_for(body: dict) -> str:
-    """会话键：`marvis|<会话标识>`。
+def _is_param_error(exc: client.UpstreamError) -> bool:
+    """这条 400 是不是「参数不被上游接受」（而不是账号 / 额度 / 风控）。
 
-    带平台前缀是必须的 —— `session_key_for()` 在各平台算法相同，
-    不带前缀会让「同时打 marvis 和 loomy 的同一段对话」共用一条绑定，
-    换平台就命中不上（更糟：命中到别的平台的 uid）。
+    判据取上游原文：`3000101 invalid parameter`。只有这一类**换号无用、降级
+    有效** —— 换号只会把好号一个个撞成「有错误记录」，而降级能真出字。
     """
-    try:
-        from admin.pool import session_key_for
-
-        key = session_key_for(body)
-    except Exception:  # noqa: BLE001 - 算不出来就退化成「不粘」
-        return ""
-    return ("marvis|" + key) if key else ""
-
-
-def _bind_sticky(sticky_key: str, account) -> None:
-    """成功后把这个会话绑到该号，后续同会话优先回到它。"""
-    if not sticky_key or account is None:
-        return
-    uid = str(getattr(account, "uid", "") or "")
-    if not uid:
-        return
-    try:
-        from admin.pool import POOL
-
-        POOL.sticky.bind(sticky_key, uid)
-    except Exception:  # noqa: BLE001 - 粘性只是优化，不能影响主链路
-        pass
+    if int(exc.status or 0) not in (400, 422):
+        return False
+    blob = ("%s %s" % (exc.detail or "", exc.message or "")).lower()
+    return "3000101" in blob or "invalid parameter" in blob
 
 
 def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
-    """选号 + 租约 + 调上游。换号语义与其它平台一致。"""
+    """选号 + 租约 + 调上游。换号语义与其它平台一致。
+
+    ## 参数类 400 走降级，不记账号失败
+
+    上游回 `3000101 invalid parameter` 时，**这个号是好的**、凭证是好的，
+    只是请求里某个字段它不认。以前这里直接 `note_failure` + `break`：
+    号上留下 `last_err_msg = invalid parameter`、`err_count` +1，用户看到
+    「号有错」，而真正要动的是请求体。现在：
+
+      1. 先按 `_DEGRADE_FIELDS` 摘一个字段，**同号重试**；
+      2. 摘到能过就出字（并把摘掉的字段记进日志）；
+      3. 实在摘不干净，才按原样抛给上层，且**不污染账号**。
+    """
     model = str(body.get("model") or "")
-    sticky_key = _sticky_key_for(body)
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
-    for _ in range(MAX_ATTEMPTS):
+    dropped: set[str] = set()
+    # `MAX_ATTEMPTS` 数的是「换了几个号」；参数降级是**同一个号上的同一条
+    # 请求**，单独记数，否则「三次机会」会被降级重试吃光。
+    attempts = 0
+    param_retries = 0
+    # 上下文超限的重试计数。和参数降级分开，因为失败原因正交：
+    # 一条请求既可能字段不被认（3000101），也可能这次路由到的后端装不下（3000100）。
+    ctx_retries = 0
+    while attempts < MAX_ATTEMPTS:
+        attempts += 1
         # `min_balance=0` = 只要余额 > 0 的号。
         #
         # Marvis 是令牌钱包制：额度用完的号凭证**是好的**，但每次调用都会被上游
@@ -436,8 +1026,7 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
         # 否则新导入的号会被全部误杀。
         account = shared.select_account(
             db, storage=STORAGE, realm=realm, key=key,
-            model=model, exclude_ids=exclude, min_balance=0,
-            sticky_key=sticky_key)
+            model=model, exclude_ids=exclude, min_balance=0)
         if account is None:
             break
         if not shared.lease(account):
@@ -449,16 +1038,101 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             if stream:
                 resp = client.open_chat_stream(
                     data, realm, body, account_id=int(account.id or 0))
-                _bind_sticky(sticky_key, account)
                 return resp, account, started
             result = client.chat_completions(
                 data, realm, body, account_id=int(account.id or 0))
             shared.note_success(account)
             shared.release(account)
-            _bind_sticky(sticky_key, account)
             return result, account, started
         except client.UpstreamError as exc:
             shared.release(account)
+            # 内容风控（4100406）：**请求正文**命中上游黑名单。
+            # 换号毫无用处 —— 同一个号、别的号都拦这条提示词；而且换号会把
+            # 好号一个个写成「有错误记录」，用户会以为号坏了。
+            # 所以：不 note_failure、不进 exclude、立刻停。
+            if exc.kind == "content_block":
+                last_error = exc
+                logger.warning(
+                    "Marvis 内容风控拦截（换号无效，不记账号失败）| acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:200])
+                break
+            # 上下文超限（400/413 + 3000100）：**原样重发**，靠重新路由过关。
+            #
+            # 为什么不裁消息：对话历史就是任务本身。删掉一半，模型不会
+            # 「少看几轮」，它会看不到前面的约束和已确认的决策，**把任务做错**。
+            # 一个悄悄做错的任务，比一条明确的报错糟糕得多。
+            #
+            # 为什么原样重发有可能过：`main-auto` 是自动路由槽位，同一个模型名
+            # 每次派到哪个后端由上游决定。实测同一段 40 万字符的历史，
+            # 一次落到装不下的后端（3000100），下一次落到装得下的后端（200）。
+            #
+            # 为什么不换号：内容长度是请求本身的属性，换号发也一样长，
+            # 只会把好号挨个写成失败记录。所以不 note_failure、不进 exclude。
+            if _is_context_overflow(exc):
+                if ctx_retries < _MAX_CTX_RETRIES:
+                    ctx_retries += 1
+                    logger.warning(
+                        "Marvis 上下文超限（本次路由的后端装不下），"
+                        "原样重发第 %d/%d 次以重新路由 | acc=%s | 消息 %d 条 | %s",
+                        ctx_retries, _MAX_CTX_RETRIES, account.id,
+                        len(body.get("messages") or []),
+                        (exc.detail or exc.message or "")[:160])
+                    last_error = exc
+                    # 同号重试：不换号、不记失败、不动 body
+                    attempts -= 1
+                    time.sleep(_CTX_RETRY_GAP)
+                    continue
+                last_error = exc
+                logger.warning(
+                    "Marvis 上下文超限，重发 %d 次仍装不下 | acc=%s | 消息 %d 条 | %s",
+                    _MAX_CTX_RETRIES, account.id,
+                    len(body.get("messages") or []),
+                    (exc.detail or exc.message or "")[:300])
+                break
+            # 参数类 400：换号没用、也不该记在号上。先降级重试。
+            #
+            # 上限单独计数（`param_retries`），不吃 `MAX_ATTEMPTS` 的换号预算；
+            # 且每次只摘一个字段，摘到能过就出字 —— 见 `_DEGRADE_FIELDS`。
+            if _is_param_error(exc):
+                degraded = _degrade_body(body, dropped)
+                if degraded is not None and param_retries < len(_DEGRADE_FIELDS):
+                    param_retries += 1
+                    logger.warning(
+                        "Marvis 参数被上游拒绝，摘掉 %s 后重试 | acc=%s | %s",
+                        sorted(dropped), account.id,
+                        (exc.detail or exc.message or "")[:180])
+                    body = degraded
+                    last_error = exc
+                    # 同号重试：不进 exclude、不 note_failure
+                    attempts -= 1
+                    continue
+                last_error = exc
+                logger.warning(
+                    "Marvis 参数被上游拒绝且无可降级字段 | acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:300])
+                break
+            # 设备 / IP 风控（4100404）：**立刻停，不换号**。
+            #
+            # 以前这里会继续换号（`risk_control` 不在 break 的名单里），后果是
+            # 一条请求把池子里所有号依次撞一遍、每个号吃 600 秒冷却 ——
+            # 4 个号撞满就是 10 分钟**全池冷却**，接下来哪怕风控已经解除，
+            # 网关自己也回 `503 accounts_cooling` 把请求挡在门外
+            # （2026-11-17 用户实测：09:23 撞完，09:24 起全 503）。
+            #
+            # 风控是**出口侧**的判定，所有号共用同一个出口，换号 100% 无效。
+            # 所以：只记当前号一次失败、立刻停，把真实原因交给 `_fail` 说清楚。
+            # 冷却也给短一些（60 秒）—— 它的作用只是让后续请求别继续砸墙，
+            # 不需要 600 秒那么久，因为 `_fail` 已经把"别重试"告诉了客户端。
+            if exc.kind == "risk_control":
+                shared.note_failure(
+                    db, account, kind=exc.kind, detail=exc.detail or exc.message,
+                    status=exc.status, model=model, public_platform=PUBLIC,
+                    cool_seconds=60)
+                last_error = exc
+                logger.warning(
+                    "Marvis 出口被风控（4100404，换号无效，立刻停止）| acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:200])
+                break
             # 401 是「登录态过期」而不是「配置错了」—— 文案要能直接指导操作。
             # Marvis 的 token 实测只活约 2 小时（见 `TOKEN_TTL_SECONDS`），
             # 说「请检查凭证」只会让用户去翻配置，而答案是重新扫码。
@@ -501,14 +1175,36 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
         alive = [r for r in rows if (getattr(r, "status", "") or "") == "active"]
         expired = [r for r in alive
                    if "过期" in str(getattr(r, "last_err_msg", "") or "")]
+        # 冷却中的号里，有多少是被**风控**挂起来的（`cool_kind`）。
+        #
+        # 为什么必须区分：这两种"冷却"对用户的含义完全相反 ——
+        #   · 普通冷却：忙 / 刚失败，等几十秒就好，`Retry-After: 3` 是对的；
+        #   · 风控冷却：出口被平台拦了，等 3 秒没用，重试只会延长封禁。
+        # 以前统一回「都在冷却或排队中，请稍后重试」，用户就一直重试，
+        # 一边重试一边看它继续失败（2026-11-17 用户实测踩到）。
+        risk_cooling = [r for r in alive
+                        if str(getattr(r, "cool_kind", "") or "") == "risk_control"]
+        risk_ids = [r.id for r in risk_cooling]
     except Exception:  # noqa: BLE001
-        alive, expired = [], []
+        alive, expired, risk_cooling, risk_ids = [], [], [], []
     if alive and len(expired) == len(alive):
         raise shared.PlatformRejected(
             503, "Marvis 账号登录态已全部过期，请在控制台「授权登录」重新扫码"
                  "（access_token 由上游按天轮换，过期后只能重登）",
             kind="server_error", code="credential_expired",
             headers={"Retry-After": "5"})
+    if risk_cooling and len(risk_cooling) == len(alive):
+        # 全池都在风控冷却里 —— 这是 17:24 那次 503 的真实原因，
+        # 而不是「排队中」。文案要能直接指到「出口风控」这个动作上。
+        raise shared.PlatformRejected(
+            429,
+            "腾讯 Marvis 对当前出口做了风控拦截（4100404），全部 %d 个账号都在冷却中"
+            "（账号 id：%s）。这不是账号或 API Key 的问题：凭证钱包接口正常，"
+            "换号 / 重扫码 / 换 Key 都无效。请停止重试（重试会延长风控窗口），"
+            "等风控过去或换出口 IP 后再试。"
+            % (len(risk_cooling), "、".join(str(i) for i in risk_ids[:8])),
+            kind="upstream_risk_control", code="risk_control_cooling",
+            headers={"Retry-After": "600"})
     if alive:
         raise shared.PlatformRejected(
             503, "Marvis 账号都在冷却或排队中，请稍后重试",
@@ -579,6 +1275,9 @@ async def chat_completions(request: Request):
                             status_code=404 if exc.code == "model_not_found" else 400)
 
     upstream_body = _prepare_body(body, slot)
+    # 记账用可读名（`deepseek-v4.1-flash`），**不是**槽位名（`main-auto`）。
+    # 详见 `_billing_model`：这一列是控制台所有模型维度的唯一数据源。
+    billed_model = _billing_model(slot)
     wants_stream = bool(body.get("stream"))
 
     try:
@@ -593,7 +1292,7 @@ async def chat_completions(request: Request):
 
     if not wants_stream:
         usage = _usage_of(resp)
-        await _bill_async(key, account, slot, usage, request=request,
+        await _bill_async(key, account, billed_model, usage, request=request,
                           started=started)
         return JSONResponse(resp)
 
@@ -636,7 +1335,7 @@ async def chat_completions(request: Request):
             shared.release(account)
             # 记账是同步 DB 写，必须离开事件循环（客户端断开时也不会丢账，
             # 见 `_bill_async` 里的 shield）。
-            await _bill_async(key, account, slot, usage, request=request,
+            await _bill_async(key, account, billed_model, usage, request=request,
                               started=started, stats=stats)
 
     return StreamingResponse(generator(), media_type="text/event-stream",

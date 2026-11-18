@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -271,8 +272,44 @@ def open_chat_stream(credential: dict, realm: str, body: dict, *,
     url = endpoints.chat_url(realm)
     data = json.dumps(body, ensure_ascii=False).encode()
     req = urllib.request.Request(url, data=data, method="POST")
-    for key, value in endpoints.llm_headers(acct).items():
+    # ⚠ 必须把 body 里的 model 带进签名头。
+    #
+    # `llm_headers()` 会把 model 写进 uskey 的 bus_info，服务端用 nonce 复核
+    # 这个指纹。以前这里调成 `llm_headers(acct)`，model 取默认空串，而 body
+    # 里发的是真实模型名 —— 两边对不上，上游直接判非法客户端回 4100404。
+    #
+    # 现场表现很像「出口被风控」：凭证钱包接口正常、换号无效、换 Key 无效，
+    # 因为被拦的根本不是账号，是这条请求的身份自证。
+    chat_model = str(body.get("model") or "")
+    headers = endpoints.llm_headers(acct, model=chat_model)
+    for key, value in headers.items():
         req.add_header(str(key), str(value))
+
+    # 排障开关：设 MARVIS_DEBUG_HEADERS=1 时把这次请求的关键字段打出来。
+    #
+    # 为什么需要它：同一账号、同一 uskey、同一分钟，
+    # 网关 200 而外部脚本 403 —— 只有比对「网关究竟发了什么」才能定因。
+    # 只打 uskey 前 16 字符和长度，不打完整 token。
+    if (os.getenv("MARVIS_DEBUG_HEADERS") or "").strip() in ("1", "true", "yes"):
+        ext = headers.get("Ual-Access-MarvisExt") or ""
+        try:
+            parsed = json.loads(ext)
+        except Exception:  # noqa: BLE001
+            parsed = {}
+        logger.info(
+            "marvis 请求 | model=%r scene=%r agent=%r conv=%r rid=%r "
+            "uskey=%s(%d) nonce=%s clientVer=%s ua=%r",
+            chat_model,
+            headers.get("Marvis-Scene"),
+            headers.get("Marvis-AgentTag"),
+            headers.get("Marvis-Conversation-ID"),
+            headers.get("Marvis-Response-ID"),
+            str(parsed.get("uskey", ""))[:16],
+            len(str(parsed.get("uskey", ""))),
+            str(parsed.get("nonce", ""))[:8],
+            parsed.get("clientVersion"),
+            headers.get("User-Agent"),
+        )
     try:
         return _opener().open(req, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as exc:
@@ -305,10 +342,25 @@ def close_stream(resp) -> None:
 def _classify(status: int, text: str) -> str:
     """把上游错误归成一类 —— 上层据此决定冷却 / 禁用 / 换号。
 
-    ⚠ 风控（403 + 4100404）与登录失效（401）必须分开：前者是**设备/IP**
-    的问题，换号没用还会把好号一起打挂；后者才是账号问题。
+    ## 三个 403 必须分开（2026-11-17 实测）
+
+        {"code":4100404,...}  设备 / IP 被风控  → risk_control
+        {"code":4100406,"msg":"非法请求"}  提示词内容命中黑名单 → content_block
+        其余 403              签名或参数问题   → signature_invalid
+
+    `4100406` 以前掉进 `signature_invalid`，后果是**换号语义完全错**：
+    上层对非 risk/auth 的 403 会继续换号（`_attempt` 里不 break），
+    于是同一条被拦的提示词把三个好号依次撞一遍、每个号 `note_failure`
+    记一次失败 —— 用户看到的是「号全坏了」，而号一个都没坏，
+    真正要改的是这次请求的提示词。
+
+    内容风控是**请求侧**的问题：换号、冷却、等保活全都没用，只能改内容。
     """
     blob = (text or "").lower()
+    # 内容风控：`4100406 非法请求`。必须排在 `risk`/`风控` 判断之前 ——
+    # 上游文案里也可能出现「风控」字样，先判具体业务码才不会被抢走。
+    if "4100406" in blob or "非法请求" in blob:
+        return "content_block"
     if "4100404" in blob or "risk" in blob or "风控" in blob:
         return "risk_control"
     if status == 401:

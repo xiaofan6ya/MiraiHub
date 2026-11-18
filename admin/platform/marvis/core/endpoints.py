@@ -30,10 +30,22 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import random
 import time
 import uuid
+
+from . import uskey_cache
+from . import uskey_signer
+
+log = logging.getLogger(__name__)
+
+#: 缓存层默认按哪个 model 建条目（调用方没给 model 时用）。
+#:
+#: 必须与 `MODEL_TABLE` 里的槽位名一致 —— uskey 的 bus_info 签了 model，
+#: 换个名字就是另一份签名，缓存分桶也就跟着变。
+_DEFAULT_SIGN_MODEL = "deepseek-v4-pro-external"
 
 PLATFORM = "marvis"
 
@@ -54,6 +66,13 @@ ACCESS_KEY = "fpzkeTlcGLVP37qiOWd29MyaOqaJYxMi"
 #: 业务 id，随每个 /v3/* 请求走 `Ual-Access-Businessid`
 BUSINESS_ID = "marvis_client"
 
+#: uskey 签名用的 busiid。
+#:
+#: ⚠ 与 `BUSINESS_ID` 不是一回事：`beacon_get_uskey` 的 busiid 参数
+#: 有 9 字节上限（实测 —— 超过 9 字符会让输出从 376 变 392 字节，
+#: 服务端按长度校验会判非法）。正版客户端传的是短数字串。
+USKEY_BUSIID = "7800255"
+
 #: 两个 OAuth 应用的 app id
 QQ_APP_ID = "1903794758"
 WX_APP_ID = "wxb650708317d56f88"
@@ -68,8 +87,39 @@ BROWSER_UA = (
     "Electron/44.7.0 Safari/537.36"
 )
 
-#: 客户端版本，随 `Ual-Access-MarvisExt` 上报
-CLIENT_VERSION = "1.60.3300.765"
+#: 客户端版本，随 `Ual-Access-MarvisExt` 上报。
+#:
+#: ## 为什么是常量、不探测本机客户端（2026-11-18）
+#:
+#: 上游会拿它和另外几个指纹交叉校验，报一个不存在的版本等于自曝伪造。
+#: 但「去本机客户端目录读版本」这件事本身就是一条**对客户端的依赖**：
+#: 网关要能脱离 Marvis 客户端独立跑（换机器、扔服务器、客户端卸载），
+#: 那些场景下 `E:\Marvis\Application\*` 根本不存在。
+#:
+#: 所以取值顺序是：
+#:     1. 环境变量 `MARVIS_CLIENT_VERSION` —— 上游改了版本要求时改这个，
+#:        不用动代码，也不用装客户端；
+#:     2. 下面这个常量 —— 与客户端 1.60.3400.35 同源，实测被上游接受。
+#:
+#: ⚠ 不要改回「扫描安装目录」。那会让网关在干净机器上探不到版本、
+#:    退化成一个可能已失效的兜底值，故障点还藏在客户端装没装上。
+CLIENT_VERSION_FALLBACK = "1.60.3400.35"
+
+
+def _detect_client_version() -> str:
+    """取上报用的版本号 —— **只认环境变量和常量，不碰客户端目录**。
+
+    历史：这个函数一度去扫 `E:\\Marvis\\Application\\*` 和注册表求最新版本。
+    在装了客户端的机器上跑得挺好，但它把「网关能不能工作」和「客户端在哪」
+    绑在了一起 —— 挪机器就失效。既然目标是不依赖客户端，探测就必须去掉。
+    """
+    override = (os.getenv("MARVIS_CLIENT_VERSION") or "").strip()
+    if override:
+        return override
+    return CLIENT_VERSION_FALLBACK
+
+
+CLIENT_VERSION = _detect_client_version()
 
 #: 登录方式 → `Ual-Access-Login-Type`
 LOGIN_TYPE = {"QC": "1", "WX": "2", "WXAPP": "2"}
@@ -274,25 +324,137 @@ def models_catalog(realm: str = "") -> list[dict]:
 USKEY_BYTES = 376
 
 
-def uskey_of(_business_id: str = BUSINESS_ID) -> str:
-    """现签一个 uskey。
+def uskey_of(*, openid: str = "", busiid: str = USKEY_BUSIID,
+             conversation_id: str = "", response_id: str = "",
+             scene: str = "", model: str = "", nonce: str = "",
+             agent_tag: str = "") -> str:
+    """现签一个 uskey —— 直调本机 Beacon SDK，与正版客户端同源。
 
-    Marvis 客户端用自带 Beacon SDK 签真值；这里按上游格式本地生成
-    （376 字节的 base64）。实测本地值可以通过模型网关的格式校验。
+    走 `uskey_signer`：DLL 在就用 `beacon_get_uskey` 真签，
+    不在就退回 376 字节随机填充（网关不断链，只在日志留 WARNING）。
+
+    ⚠ `busiid` 必须 ≤ 9 字符，否则输出会多 16 字节。
     """
-    return base64.b64encode(os.urandom(USKEY_BYTES)).decode("ascii")
+    return uskey_signer.uskey(
+        openid=openid,
+        busiid=busiid[:9],
+        conversation_id=conversation_id,
+        response_id=response_id,
+        scene=scene,
+        model=model,
+        nonce=nonce,
+        agent_tag=agent_tag,
+    )
 
 
-def marvis_ext(acct: dict) -> str:
-    """`Ual-Access-MarvisExt` 的值 —— 紧凑 JSON，**不能有空格**（服务端按原文比对）。"""
+def uskey_status() -> dict:
+    """uskey 签名器的状态（给控制台/自检看是真签还是降级）。"""
+    return uskey_signer.status()
+
+
+def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
+                   conversation_id: str = "", response_id: str = "",
+                   model: str = "", busiid: str = USKEY_BUSIID) -> dict:
+    """本次请求要用的**整组身份四件套** —— uskey / nonce / conv / rid。
+
+    ## 为什么必须打包返回（2026-11-18 事故）
+
+    改造前的样子是：`marvis_ext()` 内部读缓存拿到 (uskey, nonce, conv, rid)，
+    用这一组签出 uskey；而 `llm_headers()` 那边**自己**又生成了新的
+    conv/rid 放进请求头。
+
+    结果：uskey 的 bus_info 里写的是 A 组 id，请求头带的是 B 组 id。
+    上游拿 nonce 复核时对不上 —— 直接 403 4100404。
+    现场表现就是「网关好好的突然全部 429 风控」，而且改提示词、
+    换账号、换 Key 全都没用，因为坏的是身份自证本身。
+
+    实测证据（probe_uskey_validation.py 组 E）：
+        旧 uskey 配新 nonce  ->  403
+    uskey 和 nonce/conv/rid 是一个不可拆的原子组。
+
+    所以现在只有一个入口产出这组值，谁要发请求就整组拿走，
+    不允许任何调用方自己再造一半。
+    """
+    openid = str(acct.get("openid") or "")
+    version = str(acct.get("client_version") or CLIENT_VERSION)
+    sign_model = model or _DEFAULT_SIGN_MODEL
+
+    def _sign(bus_info: str) -> str:
+        """只返回**真签**结果；签不出来返回空串。
+
+        ## 为什么不能直接用 `uskey_signer.uskey()`
+
+        那个函数在 DLL 缺失时会返回 376 字节随机填充 —— 这是为了「网关不断链」
+        做的降级，但它会把**随机值**当成功结果交出去。
+
+        随机值写进历史文件后，诊断时会误以为「签过了」，
+        排查时容易往错误方向找。所以这里只认真签结果。
+        """
+        if not uskey_signer._beacon.available:  # noqa: SLF001
+            log.warning("beacon 不可用，本次无法真签 uskey")
+            return ""
+        try:
+            return uskey_signer._beacon.sign(busiid, bus_info)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("uskey 真签失败：%s", exc)
+            return ""
+
+    signed = uskey_cache.get_or_create(
+        model=sign_model,
+        openid=openid,
+        sign_fn=_sign,
+        scene=scene or "agent_chat",
+        agent_tag=agent_tag or "main",
+        conversation_id=conversation_id,
+        response_id=response_id,
+        client_version=version,
+    )
+
+    if signed is not None:
+        uskey, nonce, cid, rid = signed
+        return {"uskey": uskey, "nonce": nonce,
+                "conversation_id": cid, "response_id": rid,
+                "client_version": version, "cached": False}
+
+    # beacon 不可用 —— 降级为随机填充（会被上游拒，但至少暴露问题）
+    nonce = str(uuid.uuid4())
+    cid = conversation_id or str(uuid.uuid4())
+    rid = response_id or uuid.uuid4().hex
+    uskey = uskey_of(
+        openid=openid, busiid=busiid, conversation_id=cid, response_id=rid,
+        scene=scene, model=model, nonce=nonce, agent_tag=agent_tag,
+    )
+    return {"uskey": uskey, "nonce": nonce,
+            "conversation_id": cid, "response_id": rid,
+            "client_version": version, "cached": False}
+
+
+def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
+               conversation_id: str = "", response_id: str = "",
+               model: str = "", busiid: str = USKEY_BUSIID,
+               identity: dict | None = None) -> str:
+    """`Ual-Access-MarvisExt` 的值 —— 紧凑 JSON，**不能有空格**（服务端按原文比对）。
+
+    `identity` 给了就直接用（调用方已经拿过整组四件套，避免重复签）；
+    没给就现取一份。
+
+    ⚠ 请求头里的 `Marvis-Conversation-ID` / `Marvis-Response-ID` 必须
+    取自**同一个 identity**，否则 uskey 与头对不上会 403 —— 见
+    `uskey_identity()` 的说明。
+    """
+    ident = identity or uskey_identity(
+        acct, scene=scene, agent_tag=agent_tag,
+        conversation_id=conversation_id, response_id=response_id,
+        model=model, busiid=busiid,
+    )
     payload = {
         "osVersion": "Windows-10-10.0.26200",
         "guid": str(acct.get("guid") or ""),
-        "uskey": uskey_of(),
-        "nonce": str(uuid.uuid4()),
+        "uskey": ident["uskey"],
+        "nonce": ident["nonce"],
         "reqScene": 1,
         "taskType": "user",
-        "clientVersion": str(acct.get("client_version") or CLIENT_VERSION),
+        "clientVersion": ident["client_version"],
         "isIoa": False,
     }
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
@@ -301,14 +463,44 @@ def marvis_ext(acct: dict) -> str:
 # ---------------------------------------------------------------------------
 # 鉴权头
 # ---------------------------------------------------------------------------
-def llm_headers(acct: dict, *, scene: str = "preload_summary",
-                agent_tag: str = "auto_discovery",
-                conversation_id: str = "", response_id: str = "") -> dict:
+def llm_headers(acct: dict, *, scene: str = "agent_chat",
+                agent_tag: str = "main",
+                conversation_id: str = "", response_id: str = "",
+                model: str = "") -> dict:
     """模型网关请求头（`/v1/chat/completions`）。
 
     ⚠ 不要签名、不要 Authorization 真实 token —— 这里 `Bearer placeholder`
     是 Marvis agent 自己的写法，鉴权靠 `Ual-Access-*` 那几个头。
+
+    ## 默认值为什么是 agent_chat / main（2026-11-18 三组对照实测）
+
+        网关旧默认 scene=preload_summary + 空 conv/rid  -> 403 4100404
+        scene=agent_chat + agent_tag=main + 空 conv/rid -> 403 4100404
+        scene=agent_chat + agent_tag=main + 有 conv/rid -> 200 ✅
+
+    → **`Marvis-Conversation-ID` 与 `Marvis-Response-ID` 不能为空**，
+      上游把空 id 当非法客户端直接判风控。
+
+    ## ⚠ conv/rid 必须与 uskey 同源（2026-11-18 事故修复）
+
+    改造前这里是「缺省时自己生成一对」：
+
+        conversation_id = conversation_id or str(uuid.uuid4())
+        response_id = response_id or uuid.uuid4().hex
+
+    但 `marvis_ext()` 内部读缓存拿到的是**另一组** id 并签进了 uskey。
+    于是请求头带 A 组 id、uskey 里写 B 组 id —— 上游复核时对不上，
+    直接 403 4100404。
+
+    现在先调 `uskey_identity()` 拿整组四件套，uskey 和这两个头
+    取自同一份，物理上不可能再错位。
     """
+    ident = uskey_identity(
+        acct, scene=scene, agent_tag=agent_tag,
+        conversation_id=conversation_id, response_id=response_id, model=model,
+    )
+    conversation_id = ident["conversation_id"]
+    response_id = ident["response_id"]
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -332,7 +524,7 @@ def llm_headers(acct: dict, *, scene: str = "preload_summary",
         "Marvis-Scene": scene,
         "Marvis-Protocol-Version": "1000",
         "X-Device-GUID": str(acct.get("guid") or ""),
-        "Ual-Access-MarvisExt": marvis_ext(acct),
+        "Ual-Access-MarvisExt": marvis_ext(acct, identity=ident),
     }
 
 

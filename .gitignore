@@ -1,4 +1,4 @@
-# ===== 依赖（不要上传） =====
+﻿# ===== 依赖（不要上传） =====
 .venv/
 venv/
 env/
@@ -172,7 +172,6 @@ tests/
 tests/*
 !tests/test_android_signing.py
 !tests/test_anthropic_tool_result_image.py
-!tests/test_anthropic_adapter_tool_result_image.py
 !tests/test_marvis_content_fingerprint.py
 !tests/test_raccoon_quota_classification.py
 !tests/test_platform_rating.py
@@ -238,4 +237,63 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
 !tests/test_marvis_input_cleared.py
-!tests/test_marvis_sticky.py
+
+# ===== Marvis uskey 免客户端方案（2026-11-18）=====
+# 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不出 uskey，
+# 网关只能降级随机填充，上游必回 4100404）。两个 DLL 合计约 4.6 MB。
+!vendor/beacon/*.dll
+# 签名缓存是运行时产物，每台机器不同，不入库
+vendor/beacon/uskey_cache.json
+vendor/beacon/uskey_cache.json.bak
+vendor/beacon/_backup/
+
+# 逆向过程产物：抓包、内存镜像、反汇编清单，体积大且不可复现，不入库
+*.mitm
+*.pcap
+*.raw
+uskey_callgraph*.json
+
+# gateway 的历代手工备份（改代码前的快照，不入库）
+admin/platform/marvis/gateway.py.bak-*
+
+# tools/ 目录：只放行与「跑起来」直接相关的脚本，
+# 逆向分析脚本（probe_* / hook_* / find_* / disasm_* 等）留在本地。
+tools/*
+!tools/uskey_sign_service.py
+!tools/sync_vendor_dll.py
+!tools/set_safe_context_limits.py
+!tools/inspect_model_configs.py
+!tools/deploy_check.sh
+!tools/ctl.sh
+!tools/install_systemd.sh
+!tools/status.sh
+!tools/deploy_ctx_retry.sh
+!tools/deploy_safe_limits.sh
+
+# 这两份文档说明「怎么部署」「算法为什么没破」，属于交付物，放行
+!docs/uskey-wine-deploy.md
+!docs/uskey-reverse-report.md
+
+# ===== 生产环境运维脚本：含服务器路径 / 服务名，不入公开仓库 =====
+# 这些脚本是为特定部署环境写的（GW=/www/wwwroot/workbuddy2api、
+# systemctl -u workbuddy2api），换一台机器就失效，属于环境特定物。
+# 留在本地即可；仓库只保留与机器无关的 uskey_sign_service.py 和
+# sync_vendor_dll.py。
+tools/ctl.sh
+tools/status.sh
+tools/deploy_check.sh
+tools/deploy_ctx_retry.sh
+tools/deploy_ctx_overflow.sh
+tools/deploy_safe_limits.sh
+tools/deploy_gateway.sh
+tools/install_systemd.sh
+tools/final_verify.sh
+tools/acceptance.sh
+tools/check_online_health.sh
+tools/verify_gateway.sh
+tools/test_upstream.sh
+tools/inspect_model_configs.py
+tools/set_safe_context_limits.py
+
+# 服务器地址一律不进仓库
+112.124.*
