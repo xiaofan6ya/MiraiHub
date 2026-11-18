@@ -1322,6 +1322,103 @@ async def _iter_upstream(resp):
         yield chunk
 
 
+def _inband_error(obj: dict) -> str:
+    """识别「HTTP 200 + 流内错误帧」的那一类失败，返回错误描述（正常帧返回空串）。
+
+    ## 为什么需要（对齐 FIXED-BUGS 五·补51 / REQUEST-BODY-CONTRACT §5）
+
+    上游有一部分失败**不走状态码**：HTTP 200、`Content-Type: text/event-stream`
+    照旧，但流里只有一条错误帧、没有 `choices`：
+
+        data: {"error":{"code":3000101,"message":"...非法参数..."}}
+
+    `client._classify()` 只看得到 200，所以整条链路按成功处理：错误帧被原样
+    当正文透传给客户端、`finally` 里 `note_success()`、用量日志记一笔正常
+    调用。现场表现是「网关全绿、客户端一直重试」—— 因为客户端拿到的是一个
+    没有任何 `finish_reason` 的流，SDK 会判定流被截断并按退避重试。
+
+    判据刻意收得很窄：**有 `choices` 就不当错误**（正常帧里也可能带 `error`
+    字段的网关扩展），只有「没 `choices` + 有错误键」才算。
+    """
+    if not isinstance(obj, dict):
+        return ""
+    if obj.get("choices"):
+        return ""
+    err = obj.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("msg") or err.get("detail") or ""
+        code = err.get("code") or err.get("error_code") or ""
+        return ("%s%s" % ("%s " % code if code else "", msg)).strip() or "stream error"
+    if isinstance(err, str) and err.strip():
+        return err.strip()
+    if obj.get("error_code") or obj.get("error_msg"):
+        return ("%s %s" % (obj.get("error_code") or "",
+                           obj.get("error_msg") or "")).strip()
+    return ""
+
+
+def _terminal_frame(model: str) -> bytes:
+    """补一帧终止帧：`finish_reason=stop` + `[DONE]`。
+
+    流「有头无尾」是客户端无限重试的根因 —— OpenAI SDK 靠 `finish_reason`
+    判定，裸 SSE 客户端靠 `[DONE]`，两个都要给。上游出错帧、提前 EOF、
+    被截断时都补上：让客户端**正常收尾**，原因由前面那条错误帧自己说明，
+    而不是让它以为连接掉了、换个号再来一遍。
+    """
+    frame = {"id": "chatcmpl-gateway", "object": "chat.completion.chunk",
+             "created": int(time.time()), "model": model,
+             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+    try:
+        body = json.dumps(frame, ensure_ascii=False).encode("utf-8")
+    except Exception:  # noqa: BLE001 - 兜底：手写字面量，绝不让收尾失败
+        body = b'{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
+    return body + b"\n\ndata: [DONE]\n\n"
+
+
+def _scan_stream(pending: bytes, chunk: bytes, state: dict) -> bytes:
+    """扫描 SSE 字节流，抽取 `usage` / `finish_reason` / 流内错误。
+
+    返回「还没凑成整行的尾巴」，由调用方在下一个 chunk 前拼回去 —— 一帧
+    被 TCP 切成两半是常态，按 chunk 独立解析会漏掉恰好被切开的那条错误帧
+    或 usage 帧。只做**只读**解析，转发的字节一个都不改。
+    """
+    if not isinstance(chunk, (bytes, bytearray)):
+        return pending
+    data = (pending or b"") + bytes(chunk)
+    lines = data.split(b"\n")
+    pending = lines.pop()
+    # 上游若长时间不发换行，尾巴会无限增长；超过 1MB 说明不是正常 SSE，
+    # 直接丢弃（解析已经不可能靠拼行救回），只保留末尾供下次重试。
+    if len(pending) > 1_048_576:
+        pending = pending[-65536:]
+    for line in lines:
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload:
+            continue
+        if payload == b"[DONE]":
+            state["done"] = True
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:  # noqa: BLE001 - 非 JSON 帧不属于我们的观测范围
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("usage"), dict):
+            state["usage"] = obj["usage"]
+        choices = obj.get("choices")
+        if isinstance(choices, list):
+            for item in choices:
+                if isinstance(item, dict) and item.get("finish_reason"):
+                    state["finish"] = True
+        elif not state.get("error"):
+            state["error"] = _inband_error(obj)
+    return pending
+
+
 def _usage_of(result: dict) -> dict:
     usage = result.get("usage") if isinstance(result, dict) else None
     return usage if isinstance(usage, dict) else {}
@@ -1356,51 +1453,73 @@ async def chat_completions(request: Request):
 
     if not wants_stream:
         usage = _usage_of(resp)
+        # 非流式同样可能是「HTTP 200 + 错误体」：`_classify()` 只能按状态码判，
+        # 这类拒绝会一路被当成成功记账。原样把上游 body 交给调用方（不改语义），
+        # 但记账要标成失败，否则面板上看不出真实成功率。
+        nonstream_error = _inband_error(resp if isinstance(resp, dict) else {})
+        if nonstream_error:
+            client.note_sentinel(realm, int(getattr(account, "id", 0) or 0),
+                                 "upstream_business", code="body_error",
+                                 status=200, detail=nonstream_error)
+            logger.warning("Marvis 非流式错误体（HTTP 200）| acc=%s | %s",
+                           account.id, nonstream_error[:200])
         await _bill_async(key, account, billed_model, usage, request=request,
-                          started=started)
+                          started=started,
+                          error=("upstream_business" if nonstream_error else ""))
         return JSONResponse(resp)
 
     async def generator():
         stats = {"ttfb_ms": 0, "total_ms": 0}
-        usage: dict = {}
+        # `state` 由 `_scan_stream` 增量填充：usage / finish / done / error。
+        state: dict = {}
         first_at = None
         began = time.perf_counter()
-        buffer = b""
+        pending = b""
         try:
             async for chunk in _iter_upstream(resp):
                 if first_at is None:
                     first_at = time.perf_counter()
                     stats["ttfb_ms"] = int((first_at - started) * 1000)
                 yield chunk
-                # 顺手把最后一个 usage 帧记下来 —— 不需要改动转发的字节
-                buffer += chunk
-                if b'"usage"' in buffer:
-                    for line in buffer.split(b"\n"):
-                        line = line.strip()
-                        if not line.startswith(b"data:"):
-                            continue
-                        payload = line[5:].strip()
-                        if payload in (b"", b"[DONE]"):
-                            continue
-                        try:
-                            obj = json.loads(payload)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
-                            usage = obj["usage"]
-                    # 只保留尾部，避免 buffer 无限增长
-                    buffer = buffer[-8192:]
+                # 只读旁路：解析 usage / finish_reason / 流内错误。
+                # **转发的字节一个都不改**，只记账与收尾需要这些信息。
+                pending = _scan_stream(pending, chunk, state)
+            # 上游既没给 `finish_reason` 也没给 `[DONE]`（错误帧 / 提前 EOF /
+            # 被截断）→ 补终止帧。不补的话客户端判定流被截断，按退避无限重试，
+            # 而网关这边一条日志都没有（FIXED-BUGS 五·补51）。
+            if not (state.get("finish") or state.get("done")):
+                logger.warning(
+                    "Marvis 流缺终止帧，已补发 | acc=%s | %s",
+                    account.id,
+                    "流内错误" if state.get("error") else "提前 EOF")
+                yield _terminal_frame(billed_model)
         finally:
             stats["total_ms"] = int((time.perf_counter() - began) * 1000)
             client.close_stream(resp)
-            # 流正常读完才算这个号「用成功过」—— 失败的情况下 note_success
-            # 会把刚才 note_failure 记的失败计数清零，等于把坏号洗白。
-            shared.note_success(account)
+            usage = state.get("usage") if isinstance(state.get("usage"), dict) else {}
+            error = str(state.get("error") or "")
+            if error:
+                # 流内错误 = 上游明确拒绝。三件事分开做：
+                #   · 不 `note_success()` —— 否则把刚被拒的号记成「成功过」，
+                #     失败计数清零，坏号永远洗不白也筛不掉；
+                #   · 也不 `note_failure()` —— 这一层分不清「号坏了」还是
+                #     「这个请求参数它不认」，后者换号 100% 无效，误记会把
+                #     一池好号挨个打上失败记录；
+                #   · 上哨兵 + 记账 error_kind —— 让「网关全绿、客户端重试」
+                #     这种静默故障在控制台可见，而不是等用户来报。
+                client.note_sentinel(realm, int(getattr(account, "id", 0) or 0),
+                                     "upstream_business", code="stream_error",
+                                     status=200, detail=error)
+                logger.warning("Marvis 流内错误（HTTP 200，已补终止帧）| acc=%s | %s",
+                               account.id, error[:200])
+            else:
+                shared.note_success(account)
             shared.release(account)
             # 记账是同步 DB 写，必须离开事件循环（客户端断开时也不会丢账，
             # 见 `_bill_async` 里的 shield）。
             await _bill_async(key, account, billed_model, usage, request=request,
-                              started=started, stats=stats)
+                              started=started, stats=stats,
+                              error=("upstream_business" if error else ""))
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
