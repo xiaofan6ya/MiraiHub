@@ -115,6 +115,35 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
     code = exc.code or "upstream_error"
     message = exc.message
     # ------------------------------------------------------------------
+    # 签名器不可用（fail-closed）—— **请求根本没发出去**
+    # ------------------------------------------------------------------
+    #
+    # 这一类必须排在最前面：它不是上游给的结论，是网关自己拒的。
+    # 用 503 而不是 4xx/5xx 的原因：这是「本机环境没配好」，不是客户端的错，
+    # 客户端会按 Retry-After 退避重试，也不会误渲染成「API 密钥无效」。
+    #
+    # `upstream_account: False` 很关键 —— 上层任何 failover / 号池调度逻辑
+    # 看到这个字段就不该再换号（换号也签不出来）。
+    if exc.kind == "signer_unavailable":
+        detail = (exc.detail or "").strip()
+        return JSONResponse(
+            {"error": {
+                "type": "signature_unavailable",
+                "code": "signer_unavailable",
+                "message": (
+                    "Marvis 客户端指纹签名器不可用，网关已按 fail-closed 拒绝本次"
+                    "请求（请求一个字节都没发给上游）。这与你的 API Key、"
+                    "Marvis 账号状态都无关，换号 / 重扫码 / 换 Key 都不会好。"
+                    "处理方式：① Windows 上确认 beacon_wrapper.dll（含依赖）在位、"
+                    "能加载，控制台 marvis 状态里 uskey.mode 应为 sdk；"
+                    "② Linux 上起 wine 签名服务并配置 MARVIS_USKEY_SERVICE；"
+                    "③ 临时确需放行（会撞 4100404 并污染账号池）可设 "
+                    "MARVIS_USKEY_FAIL_CLOSED=0，仅限排查用。"
+                    + ("诊断：%s" % detail[:300] if detail else "")),
+                "upstream_account": False}},
+            status_code=503,
+            headers={"Retry-After": "30"})
+    # ------------------------------------------------------------------
     # 内容风控（4100406）单独处理 —— 这是**请求内容**的问题
     # ------------------------------------------------------------------
     #
@@ -1046,6 +1075,18 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             return result, account, started
         except client.UpstreamError as exc:
             shared.release(account)
+            # 签名器不可用（fail-closed）：**请求根本没发出去**。
+            #
+            # 换号必然也签不出来（签名器是进程级/环境级的东西，与账号无关），
+            # 所以这里必须立刻停、且**不** note_failure —— 否则环境问题会被
+            # 写成「这三个号都被风控」，用户去换号重扫码，全是白费。
+            if exc.kind == "signer_unavailable":
+                last_error = exc
+                logger.error(
+                    "Marvis 签名器不可用，fail-closed 拒绝（不换号、不记账号失败，"
+                    "与账号无关）| acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:200])
+                break
             # 内容风控（4100406）：**请求正文**命中上游黑名单。
             # 换号毫无用处 —— 同一个号、别的号都拦这条提示词；而且换号会把
             # 好号一个个写成「有错误记录」，用户会以为号坏了。

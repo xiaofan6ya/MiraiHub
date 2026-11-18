@@ -281,7 +281,20 @@ def open_chat_stream(credential: dict, realm: str, body: dict, *,
     # 现场表现很像「出口被风控」：凭证钱包接口正常、换号无效、换 Key 无效，
     # 因为被拦的根本不是账号，是这条请求的身份自证。
     chat_model = str(body.get("model") or "")
-    headers = endpoints.llm_headers(acct, model=chat_model)
+    try:
+        headers = endpoints.llm_headers(acct, model=chat_model)
+    except endpoints.SignerUnavailable as exc:
+        # fail-closed：签名器不可用时**一个字节都不往上游发**。
+        #
+        # 这里必须转成 `UpstreamError` 而不是让异常裸奔：裸奔会被下面那个
+        # 兜底 except 归成 `network`，上层于是「换号重试」—— 换号也签不出来，
+        # 白白把号池里的号一个个 note_failure。归成 `signer_unavailable`
+        # 之后 `_attempt()` 会直接 break、不记账号失败（见 gateway）。
+        raise UpstreamError(
+            "Marvis 客户端指纹签名不可用（beacon 未就绪），已按 fail-closed "
+            "拒绝本次请求；这与 API Key、账号状态都无关",
+            status=503, code="signer_unavailable", kind="signer_unavailable",
+            detail=(exc.detail or str(exc))[:300]) from exc
     for key, value in headers.items():
         req.add_header(str(key), str(value))
 
