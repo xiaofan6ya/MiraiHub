@@ -1286,14 +1286,37 @@ def _acquire(request, body: dict, realm: str, *, stream: bool):
         db.close()
 
 
+#: 一次从上游读多少字节。
+#:
+#: 配 `read1()` 用，**不是**配 `read()` —— 见 `_iter_upstream()`。
+_STREAM_CHUNK = 65536
+
+
 async def _iter_upstream(resp):
     """把同步 `HTTPResponse` 的 read 挪到工作线程，避免卡住事件循环。
 
     用 `asyncio.to_thread`（而不是裸 `run_in_executor`）：它会带上当前
     contextvars，`request_metrics` / 实时面板那套按请求隔离的上下文才不会丢。
+
+    ## 为什么是 `read1()` 而不是 `read()`（首字延迟）
+
+    `HTTPResponse.read(n)` 底层是 `BufferedReader.read(n)` —— 它会**一直读到凑满
+    n 字节或 EOF** 才返回。SSE 的帧又小又慢（一个 token 十几字节、几十毫秒一个），
+    于是「攒满 8KB 才吐一次」变成常态：客户端看到的是**先卡一秒、再一次性刷一屏**，
+    而不是逐字出。流式体验被这一行吃掉了大半，且越慢的模型越明显。
+
+    `HTTPResponse.read1(n)` 只做**一次**底层读取，有多少给多少（chunked /
+    `Content-Length` 的解码它都自己处理，语义安全），所以：
+
+      · 上游吐一帧 → 这里立刻拿到并转发（真正的逐帧流式）；
+      · `n` 可以放大到 64KB 而**不会**引入等待（读不到就返回，不会等满），
+        顺带把 `to_thread` 的线程切换次数从「每 8KB 一次」降到「有多少读多少」。
+
+    兜底：极老的 Python 或自定义 `resp` 没有 `read1` 时退回 `read`，行为与以前一致。
     """
+    read = getattr(resp, "read1", None) or resp.read
     while True:
-        chunk = await asyncio.to_thread(resp.read, 8192)
+        chunk = await asyncio.to_thread(read, _STREAM_CHUNK)
         if not chunk:
             break
         yield chunk
