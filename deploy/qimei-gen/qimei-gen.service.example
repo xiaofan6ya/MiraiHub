@@ -1,0 +1,39 @@
+# 外部 qimei 生成服务（systemd 模板）
+#
+# 用途：MiraiHub 自己生成不了设备串（缺 SDK 依赖 / 容器里跑不起来）时，
+# 把生成能力留在能跑它的那台机器上，用 HTTP 暴露给 MiraiHub。
+# 接口见 deploy/uskey-signer-http.md；本文件只给"怎么把它拉起来"的骨架。
+#
+# 用法：复制成 /etc/systemd/system/qimei-gen.service，把 <...> 逐个换成
+# 该机器的真实值，然后 systemctl enable --now qimei-gen。
+[Unit]
+Description=MiraiHub qimei generator (external signer over HTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+#: 跑生成脚本的账户；脚本需要什么权限（网络命名空间 / 特权端口）由它决定。
+User=<generator-user>
+Group=<generator-group>
+WorkingDirectory=<repo-root>
+
+#: 生成脚本路径属**部署数据**：仓库不给默认值，没配就只走 HTTP 侧。
+Environment=QIMEI_GEN_CMD=<生成脚本绝对路径>
+Environment=QIMEI_GEN_TIMEOUT=30
+#: 状态目录（qimei_table.json / qimei_pool.json 所在）。留空 = 模块同目录。
+Environment=QIMEI_STATE_DIR=<qimei-json-目录>
+#: 生成脚本自己要提权时置 1（配合上面脚本内的 sudo 规则）。
+#Environment=QIMEI_GEN_SUDO=1
+
+#: 这里按**文件路径**跑而不是 -m：这个模块只依赖标准库，宿主上通常没有
+#: 装应用依赖；按路径跑能少一层导入环境要求。
+ExecStart=/usr/bin/python3 <repo-root>/admin/platform/marvis/core/qimei_assign.py --serve-generator --host 127.0.0.1 --port 8792
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+#: 监听地址默认回环：跨容器调用时改成该网卡地址，并且自己确认访问控制 ——
+#: 这个接口没有鉴权，能调它就能消耗生成额度。
+
+[Install]
+WantedBy=multi-user.target
