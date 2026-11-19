@@ -237,6 +237,8 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
 !tests/test_marvis_input_cleared.py
+# SSE 帧对齐回归（心跳不得撕开半帧）：见 gateway._iter_upstream
+!tests/test_marvis_stream_framing.py
 
 # ===== Marvis uskey 免客户端方案（2026-11-18）=====
 # 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不出 uskey，
