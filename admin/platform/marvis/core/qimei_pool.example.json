@@ -1,0 +1,12 @@
+{
+  "_comment": "qimei36 -> 台账。这是「一台设备挂几个号」的唯一权威：owners 超过 2 个，load_state() 直接抛 QimeiPoolError，install() 让进程拒绝启动。仓库只提交本示例：复制为 qimei_pool.json，或设 QIMEI_POOL_PATH / QIMEI_STATE_DIR。文件不存在等价空池（首次部署时由 qimei_table.json 迁移出来）。",
+  "_example": {
+    "<24hex>3000<8hex>": {
+      "owners": ["<UID_32HEX_UPPER>", "<UID_32HEX_UPPER>"],
+      "real": true,
+      "created_at": "1970-01-01T00:00:00Z",
+      "last_rotated": "1970-01-01T00:00:00Z",
+      "last_used_at": null
+    }
+  }
+}

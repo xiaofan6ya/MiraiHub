@@ -1,0 +1,6 @@
+{
+  "_comment": "uid -> qimei36 映射（真机设备串）。这份文件**属部署数据**，仓库只提交本示例：复制为 qimei_table.json，或把 QIMEI_TABLE_PATH 指到受管目录。没有它 = 空表 = 全部按账号派生（sha256 派生，结构合法但不是真机）。值的形态：24 位 hex 摘要 + '3000' + 8 位 hex 尾段，共 36 位。",
+  "_example": {
+    "<UID_32HEX_UPPER>": "<24hex>3000<8hex>"
+  }
+}

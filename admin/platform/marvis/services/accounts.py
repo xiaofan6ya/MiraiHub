@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -424,6 +425,44 @@ def select(db: Session, realm: str = "", *, exclude_ids: set[int] | None = None)
     return candidates[0][3]
 
 
+def _assign_qimei_for_account(account: Account) -> None:
+    """新号入库后自动分配「设备串」（失败只记日志，不阻断入库）。
+
+    这里是扫码登录 / 批量导入的**共同出口**，所以挂在这里而不是各个入口。
+    真机设备串的生成要 7~13 s，同步调用意味着创建账号的请求会等它 ——
+    这是有意的：先拿到设备串再让号进池，比"号先进池、设备串稍后再补"
+    少一类并发状态。
+
+    失败**不回滚**账号：号本身是好的，只是设备串还缺；按 WARNING 走
+    共用/派生，留痕即可。`QIMEI_AUTO_ASSIGN=0` 可整体关掉。
+    """
+    if os.environ.get("QIMEI_AUTO_ASSIGN", "1") == "0":
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return  # 单测不该改生产 JSON
+    if (getattr(account, "platform", "") or "") != PLATFORM:
+        return
+    uid = str(getattr(account, "uid", "") or "").strip()
+    if not uid:
+        return
+    try:
+        from admin.platform.marvis.core import qimei_assign
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qimei 自动分配模块不可用 acc=%s：%s", account.id, exc)
+        return
+    try:
+        result = qimei_assign.assign_ex(uid)
+        logger.info("qimei 自动分配完成 acc=%s uid=%s source=%s owners=%s",
+                    account.id, qimei_assign.mask_uid(uid),
+                    result.get("source"), result.get("owners"))
+    except qimei_assign.QimeiCapacityError as exc:
+        logger.error("qimei 自动分配被拒（容量满）acc=%s uid=%s：%s",
+                     account.id, qimei_assign.mask_uid(uid), exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qimei 自动分配失败 acc=%s uid=%s：%s（账号已入库，未回滚）",
+                       account.id, qimei_assign.mask_uid(uid), exc)
+
+
 def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
     """按 openid 幂等写入。返回 `(行, 是否新建)`。"""
     data = dict(payload)
@@ -482,6 +521,7 @@ def _upsert(db: Session, payload: dict) -> tuple[Account, bool]:
             setattr(account, flag, 0)
     db.commit()
     db.refresh(account)
+    _assign_qimei_for_account(account)
     return account, created
 
 

@@ -49,8 +49,30 @@ def _task_runners() -> dict:
             "marvis_keepalive": _pg._run_keepalive}
 
 
+def _validate_qimei_pool() -> None:
+    """启动即校验 qimei 池硬约束：`owners > 2` 直接拒绝启动。
+
+    为什么放在 install() 里而不是请求路径上：这套池台账的坏状态（一台"设备"
+    挂 3 个号）**修不回来也不能带着跑** —— 它会一路把同一个设备串用到被上游
+    整体标记。宁可容器起不来，让人先去修 JSON。
+
+    排障时可设 `QIMEI_VALIDATE_ON_START=0` 跳过（只跳过校验，不改任何数据）。
+    池文件不存在时等价于空池，校验直接通过。
+    """
+    import os as _os
+
+    if (_os.environ.get("QIMEI_VALIDATE_ON_START") or "1").strip() == "0":
+        logger.warning("QIMEI_VALIDATE_ON_START=0：跳过 qimei 池启动校验")
+        return
+    from admin.platform.marvis.core import qimei_assign
+
+    qimei_assign.validate_or_raise()
+    qimei_assign.install_orm_hooks()
+
+
 def install() -> None:
     """登记 PlatformSpec（幂等）。"""
+    _validate_qimei_pool()
     from admin.platform import registry as _registry
 
     for realm in REALMS:
