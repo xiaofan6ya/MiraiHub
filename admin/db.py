@@ -2,6 +2,7 @@
 import logging
 import re
 import time
+from datetime import datetime
 
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -272,6 +273,11 @@ def init_db() -> bool:
         # 归一「区级平台名」-> storage 平台（trae-cn/intl -> trae），
         # 否则统计与筛选里会出现两条同名的「Trae 国内版」。
         _normalize_usage_platform_values()
+        # 数据迁移：给 marvis 补一条 `main-auto` 的模型配置（幂等、只插不改）。
+        # 没有这一行时 `model_configs` 里 marvis 是空的，
+        # `dispatch.resolve()` 按模型名选平台拿不到候选，请求会掉进
+        # 「无头分摊」策略（raccoon）→ 404 `model_not_found`。
+        _seed_marvis_main_auto()
         # 迁移：视频任务表（OpenAI /v1/videos 的对外 ID ↔ 上游任务 + 账号）。
         # 老库没有这张表时 create_all 会建；此处只为「表已存在但缺字段」的
         # 半升级状态兜底（历史版本曾在同一路径上改过列）。
@@ -419,6 +425,56 @@ def _backfill_platform() -> None:
                         {"v": value})
         except Exception as e:  # noqa: BLE001 - 回填失败不该阻塞启动
             logger.warning("%s.%s 回填失败（不影响启动）：%s", table, column, e)
+
+
+def _seed_marvis_main_auto() -> None:
+    """给 marvis 补一条 `main-auto` 配置（幂等：先查后插，绝不改已有行）。
+
+    ## 为什么需要这条数据迁移
+
+    `main-auto` 是腾讯 Marvis 的**上游槽位名**，也是最早对外文档里的调用名。
+    `model_configs` 里没有 marvis 的行时：
+
+      * `dispatch.resolve()` 第 3 步「按模型名查 `model_configs`」拿不到候选；
+      * 于是落到第 4 步「无头分摊」策略（线上 priority=1 是 raccoon）；
+      * raccoon 的清单里没有 `main-auto` → 404 `model_not_found`。
+
+    带上 `X-Platform: marvis` 时走的是显式平台分支，所以「带头能通、
+    不带头 404」—— 这正是最难排查的那种半通状态。
+
+    ## 为什么倍率是 -1.0
+
+    `shared.credits_for()` 只对**正倍率**计费，`< 0` 是「无倍率概念」标记
+    （Marvis 按 token 计量）。写 -1.0 才能保持现在的 `credits = 0`，
+    既不误扣，也不会像 0 那样被判成「免费模型」。
+
+    ## 为什么只 INSERT
+
+    运营可能在控制台手调过这一行（启停 / 展示名 / 倍率），启动时覆盖等于
+    把人的配置改回去。所以：**存在就完全不动**，不存在才插一条默认值。
+    """
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(text(
+                "SELECT 1 FROM model_configs "
+                "WHERE LOWER(platform) = :p AND LOWER(model_id) = :m LIMIT 1"),
+                {"p": "marvis", "m": "main-auto"}).first()
+            if exists:
+                return
+            # 时间戳由 Python 给（UTC，与 ORM 写入的行同口径），
+            # 不用 CURRENT_TIMESTAMP：MySQL 给服务器本地时间，混在一起排序会错位。
+            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(text(
+                "INSERT INTO model_configs "
+                "(level, platform, model_id, enabled, note, credit_multiplier, "
+                "credits_raw, description, upstream_metadata, created_at, updated_at) "
+                "VALUES ('system', :p, :m, 1, :note, -1.0, '', '', :meta, :now, :now)"),
+                {"p": "marvis", "m": "main-auto",
+                 "note": "DeepSeek-V4.1-Flash", "now": now,
+                 "meta": '{"name": "DeepSeek-V4.1-Flash"}'})
+            logger.info("已为 marvis 补上 main-auto 模型配置")
+    except Exception as e:  # noqa: BLE001 - 数据迁移失败不该阻塞启动
+        logger.warning("marvis/main-auto 种子写入失败（不影响启动）：%s", e)
 
 
 def _ensure_column(table: str, col: str, col_type: str, default: str = ""):
