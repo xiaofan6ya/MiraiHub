@@ -209,10 +209,10 @@ def _http_sign(**kwargs) -> dict:
 def qimei_for(account_key: str) -> str:
     """按账号派生**结构合法**的 qimei36：24hex 摘要 + '3000' + 8hex 尾段。
 
-    同一账号恒定，不同账号互不相同。⚠ 这不是真机 qimei：真机值由 qimei.dll
-    采集整台设备向量（SMBIOS UUID / 磁盘序列号 / MAC / BSSID / GPU / CPU /
-    分辨率 / locale / 计算机名）后经 /ola/v2 注册得到；这里只是格式合法的
-    占位值，只换摘要不换源数据本身仍是"自相矛盾"信号。
+    同一账号恒定，不同账号互不相同。⚠ 这**不是**真机 qimei：真机值由厂商 SDK
+    采集整台设备向量后向服务端注册得到（具体采集字段与注册路径不在本仓库）。
+    这里只是**格式合法**的占位值 —— 它能让一块 uskey 内部自洽，但拿它当
+    「这台设备的身份」是自欺：只换摘要不换源数据，本身就是"自相矛盾"信号。
     """
     h = hashlib.sha256((DEVICE_TAG + str(account_key)).encode('utf-8')).hexdigest()
     value = h[:24] + DEVICE_MARK + h[24:32]
