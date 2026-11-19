@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 
@@ -890,6 +891,10 @@ def _degrade_body(body: dict, dropped: set[str]) -> dict | None:
 #: 不同后端说法不一样，换个路由后端就换一套措辞。全部按小写子串匹配，
 #: 判据取「够具体、不会误伤」的短语 —— 不能只匹配 `token`，否则把
 #: `invalid token` 这类参数错也吃进来。
+#:
+#: ⚠ 这里**不含业务码**：`3000100` 是额度族（见 `QUOTA_EXHAUSTED_CODES`），
+#: 按「装不下」处理会在同一个号上反复重发。而它的文案里带 `max input token`，
+#: 所以 `_is_context_overflow()` 还要先按**码**排掉一次（见下）。
 _CONTEXT_OVERFLOW_WORDS = (
     "max input token",
     "maximum context length",
@@ -899,7 +904,6 @@ _CONTEXT_OVERFLOW_WORDS = (
     "prompt is too long",
     "too many tokens",
     "exceeds the maximum",
-    "3000100",
 )
 
 #: 上下文超限时**原样重发**几次。
@@ -912,13 +916,113 @@ _MAX_CTX_RETRIES = 4
 #: 间隔一两秒能显著提高「换一个后端」的概率。
 _CTX_RETRY_GAP = 1.2
 
+# ---------------------------------------------------------------------------
+# ① 3000100（max_input_tokens）到底是什么 —— **额度族，不是「请求太大」**
+# ---------------------------------------------------------------------------
+#
+# 我们曾按字面意思把它读成「这条请求装不下」，于是在 `_attempt` 里原样重发
+# 4 次，指望上游重新选路 —— 结果是同一个号被同一条请求连撞 4 次，最后还告诉
+# 用户「请新建对话」。用户去删历史，删完照样失败。
+#
+# 实测反例（2026-11-19，fork 侧直连对照）：24 KB / 2 条消息 / 系统提示 1058
+# 字符的请求被 3000100 拒；而**同一个号**在同一个实时窗口内成功处理过
+# 515 KB / 98 条消息的形状。体积不是判据。
+#
+# 真正的判据是「该号在该模型上的当次可用预算」：输入 + `max_tokens` 合起来
+# 越过这个号此刻的额度，上游就用 3000100 回你。所以它属于**额度族**，
+# 处置方式也与额度一致 —— 先省钱（把输出预算降下来）再换号。
+#: 额度族的业务码。上游 HTTP 层只给状态码，业务码在响应体的 JSON 里。
+QUOTA_EXHAUSTED_CODES = ("3000100",)
+#: 输出预算超过这个值才认为「用户传了一个上游预算装不下的 max_tokens」。
+#:
+#: 实测依据：256 / 4096 / 16384 / 32768 / 65536 / 128000 / 1M 这一串取值都试过，
+#: 32768 是折中 —— 足够长（不会因为截断让用户以为模型变笨），又能在绝大多数
+#: 「输入偏大」的形状下把总预算压回上游收得下的区间。
+MAX_TOKENS_DEGRADE_THRESHOLD = 32768
+#: 降级目标值。与阈值同值：只降不升，绝不会把用户要的更短的长度改长。
+MAX_TOKENS_DEGRADE_TARGET = 32768
+#: 降级后仍 3000100 ⇒ **该号在该模型上的当次额度不足**，按 (账号 × 模型) 隔离。
+#:
+#: 为什么不是账号级：额度只对触发的那一个模型成立，同一个号换个小模型多半还能
+#: 用，按 `degrade_until` 整号摘掉等于白扔一个账号。`shared.select_account` 已按
+#: `account_model_cool` 跳过 (账号, 模型) 组合，这里只是往那张既有表里写一行
+#: —— **没有第二套换号机制**。
+MODEL_QUOTA_TIGHT_SECONDS = 1800
+MODEL_QUOTA_TIGHT_KIND = "model_quota"
+
+# ---------------------------------------------------------------------------
+# ② 5100007（上游服务端内部错误）：同号重试一次，**不换号**
+# ---------------------------------------------------------------------------
+#
+# 这个码是「上游自己出错了」，与账号无关：同一份 body 打给任何号都是同一个
+# 答案。它以前落进 5xx 的「换号重试」路径，于是一条请求把整池号依次打一遍、
+# 每个号各记一次 `note_failure`（err_count 全池 +1），用户看到「号全坏了」，
+# 而号一个都没坏。正确处置只有一条：**在同号上重试一次**，仍失败就如实报错。
+UPSTREAM_INTERNAL_CODES = ("5100007",)
+#: 同号再试几次（不含首发）。1 = 「首发 + 1 次」。
+INTERNAL_RETRIES = 1
+#: 退避基数 + 抖动上限（秒）：实测落在 1~2 秒 —— 够上游缓过来，又不至于让
+#: 客户端以为卡死。
+INTERNAL_RETRY_BASE = 1.0
+INTERNAL_RETRY_JITTER = 1.0
+
+
+def _biz_blob(exc: "client.UpstreamError") -> str:
+    """上游错误的可检索文本。
+
+    `detail` 是上游**原始响应体**（业务码在里面），`message` 是网关自己的话。
+    上游把 HTTP 状态塞进 `exc.code`，业务码从来不在那个字段里 —— 所以只能按
+    文本认，与既有的 `_is_param_error()` 同口径。
+    """
+    return "%s %s" % (exc.detail or "", exc.message or "")
+
+
+def _quota_code_of(exc: "client.UpstreamError") -> str:
+    """这条错误里的额度族业务码；不是额度族返回空串。"""
+    blob = _biz_blob(exc)
+    for code in QUOTA_EXHAUSTED_CODES:
+        if code in blob:
+            return code
+    return ""
+
+
+def _is_quota_exhausted(exc: "client.UpstreamError") -> bool:
+    """3000100：该号在该模型上的**当次可用额度不足**（不是请求太大）。"""
+    return bool(_quota_code_of(exc))
+
+
+def _is_upstream_internal(exc: "client.UpstreamError") -> bool:
+    """5100007：上游服务端内部错误（与账号无关，换号无意义）。"""
+    blob = _biz_blob(exc)
+    return any(code in blob for code in UPSTREAM_INTERNAL_CODES)
+
+
+def _max_tokens_of(body: dict) -> int:
+    """取请求里的输出预算（三个别名等价）；取不到 / 非正数返回 0。"""
+    if not isinstance(body, dict):
+        return 0
+    for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        raw = body.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        value = int(raw)
+        if value > 0:
+            return value
+    return 0
+
 
 def _is_context_overflow(exc: "client.UpstreamError") -> bool:
     """这条错误是不是「上下文太长，这次那个后端装不下」。
 
-    必须在 `_is_param_error` **之前**判断：`3000100` 和 `3000101` 前缀相同，
-    但一是内容长度、一是字段不认，处理方式完全相反。
+    必须在 `_is_param_error` **之前**判断：`3000101` 是字段不认，
+    与「装不下」的处置完全相反。
+
+    ⚠ `3000100` **不归这里**：它是额度族（见 `QUOTA_EXHAUSTED_CODES`），
+    要先降 `max_tokens` 再换号。上游 3000100 的文案里也带 `max input token`，
+    只按措辞判会把它抢走，所以第一件事是**按码排掉**。
     """
+    if _quota_code_of(exc):
+        return False
     if int(exc.status or 0) not in (400, 413, 422):
         return False
     blob = ("%s %s" % (exc.detail or "", exc.message or "")).lower()
@@ -1019,6 +1123,89 @@ def _is_param_error(exc: client.UpstreamError) -> bool:
     return "3000101" in blob or "invalid parameter" in blob
 
 
+def _note_model_quota_tight(db, account, model: str, *,
+                            code: str = "3000100") -> None:
+    """把「该号在该模型上的当次额度不够」写成 **(账号 × 模型)** 级隔离。
+
+    ## 为什么不是账号级
+
+    额度紧张只对**触发的那一个模型**成立：同一个号换个小模型多半还能用，
+    按 `degrade_until` 整号摘掉等于白扔一个账号。`shared.select_account` 已经
+    按 `account_model_cool` 跳过 (账号, 模型) 组合，所以这里只负责落库
+    —— **走的是既有链路，没有第二套换号机制**。
+
+    ## 与 5100007 的分界（本 PR 的核心判据）
+
+    · `3000100` 是**额度**：换一个号就有预算，所以标完继续换号；
+    · `5100007` 是上游**服务端内部错误**：同一个 body 打给任何号都是同一个
+      答案，标了也没用，换号只会把好号也打脏 —— 所以那边同号重试后直接报错。
+
+    **不抛异常**：隔离写失败不能影响响应。
+    """
+    if account is None or not str(model or "").strip():
+        return
+    try:
+        from datetime import datetime, timedelta
+
+        from admin.models import AccountModelCooldown
+
+        now = datetime.utcnow()
+        until = now + timedelta(seconds=MODEL_QUOTA_TIGHT_SECONDS)
+        reason = ("上游 %s：该号在该模型上的当次可用额度不足"
+                  % (code or "3000100"))
+        row = (db.query(AccountModelCooldown)
+               .filter(AccountModelCooldown.account_id == account.id,
+                       AccountModelCooldown.model == model)
+               .first())
+        if row is None:
+            db.add(AccountModelCooldown(
+                account_id=int(account.id or 0), model=model, until=until,
+                kind=MODEL_QUOTA_TIGHT_KIND, reason=reason[:255],
+                upstream_error=str(code or "3000100"),
+                reset_source="quota"))
+        else:
+            row.until = until
+            row.kind = MODEL_QUOTA_TIGHT_KIND
+            row.reason = reason[:255]
+            row.upstream_error = str(code or "3000100")
+            row.hits = int(row.hits or 0) + 1
+        db.commit()
+    except Exception:  # noqa: BLE001 - 隔离写失败不影响响应
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _log_failure_profile(account, exc: "client.UpstreamError", *,
+                         model: str, stream: bool, body: dict,
+                         degraded: bool) -> None:
+    """上游失败画像 —— **必须带 max_tokens 与 degraded 两列**。
+
+    为什么这两列是硬要求：3000100 的判据是「`max_tokens` 与该号该模型当次剩余
+    预算的对照」，没有 `max_tokens` 就看不出这次到底是原始值还是降级值撞的；
+    没有 `degraded` 就分不清「第一次命中」与「降级后仍命中」，而这两者的处置
+    完全相反（前者同号重试、后者换号）。缺任何一列，事后都无法复核这条链路。
+
+    其余字段只记**数字**：`detail` 是上游返回体（不含凭证），截断到 200 字符。
+    """
+    messages = body.get("messages") if isinstance(body, dict) else None
+    msgs = len(messages) if isinstance(messages, list) else 0
+    try:
+        size = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    except Exception:  # noqa: BLE001 - 画像失败绝不能影响转发
+        size = 0
+    detail = str(exc.detail or exc.message or "").replace("\n", " ")
+    max_tokens = body.get("max_tokens", "-") if isinstance(body, dict) else "-"
+    logger.warning(
+        "Marvis 失败画像 kind=%s status=%s code=%s acc=%s model=%s stream=%s "
+        "bytes=%d msgs=%d max_tokens=%s degraded=%s detail=%s",
+        exc.kind, exc.status or "-", exc.code or "-",
+        int(getattr(account, "id", 0) or 0), model or "-",
+        "1" if stream else "0", size, msgs, max_tokens,
+        "1" if degraded else "0", detail[:200])
+
+
 def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
     """选号 + 租约 + 调上游。换号语义与其它平台一致。
 
@@ -1032,6 +1219,21 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
       1. 先按 `_DEGRADE_FIELDS` 摘一个字段，**同号重试**；
       2. 摘到能过就出字（并把摘掉的字段记进日志）；
       3. 实在摘不干净，才按原样抛给上层，且**不污染账号**。
+
+    ## 3000100 与 5100007：同号重试一次，但失败后的处置**相反**
+
+    两者的共同点是「**不是这个号的错**」：都不该 `note_failure`（err_count /
+    冷却会把好号一路推向熔断），也都不该吃 `MAX_ATTEMPTS` 的换号名额。
+    但之后必须分开走：
+
+      · `3000100`（额度族）：第一次命中就**就地**把 `max_tokens` 降到
+        `MAX_TOKENS_DEGRADE_TARGET` 再同号试一次；降过还失败 ⇒ 这个号在这个
+        模型上的当次额度不够，标 (账号 × 模型) 后**换号** —— 换一个号就有预算。
+      · `5100007`（上游服务端内部错误）：同号重试一次，仍失败**直接报错**。
+        换号只会把同一份 body 打进另一个好号，给它也记一次失败。
+
+    降级是**就地改同一个 dict**：值必须跟着换号走，否则每个新号都要先用原值
+    白撞一次 3000100 再降级，白耗一轮上游往返。
     """
     model = str(body.get("model") or "")
     exclude: set[int] = set()
@@ -1042,8 +1244,14 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
     attempts = 0
     param_retries = 0
     # 上下文超限的重试计数。和参数降级分开，因为失败原因正交：
-    # 一条请求既可能字段不被认（3000101），也可能这次路由到的后端装不下（3000100）。
+    # 一条请求既可能字段不被认（3000101），也可能这次路由到的后端装不下
+    # （措辞类超限，见 `_CONTEXT_OVERFLOW_WORDS`；3000100 是额度族，不在此列）。
     ctx_retries = 0
+    # 「这条请求的 max_tokens 是否已经被降级」—— **请求级**，不是账号级：
+    # 降级值是就地写进 body 的，换号后仍然生效，所以日志里的 degraded 必须
+    # 反映整条请求的状态，否则第二个号会同时打出「max_tokens=32768」和
+    # 「degraded=0」，事后读不出它到底是不是降级后的那一发。
+    degraded_max_tokens = False
     while attempts < MAX_ATTEMPTS:
         attempts += 1
         # `min_balance=0` = 只要余额 > 0 的号。
@@ -1062,17 +1270,75 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             exclude.add(account.id)
             continue
         started = time.perf_counter()
+        # 同号重试的计数是**每个号各自一份**：不吃 `MAX_ATTEMPTS` 的换号名额，
+        # 也不重新选号（租约继续持有，见下面两处 `continue`）。
+        internal_retries = 0
         try:
             data = marvis_accounts.ensure_token(db, account)
-            if stream:
-                resp = client.open_chat_stream(
-                    data, realm, body, account_id=int(account.id or 0))
-                return resp, account, started
-            result = client.chat_completions(
-                data, realm, body, account_id=int(account.id or 0))
-            shared.note_success(account)
-            shared.release(account)
-            return result, account, started
+            # 同号重试循环：只有「降级」与「上游内部错误」这两种**与账号无关**的
+            # 失败会 `continue`；其余一律 `raise` 给下面那个 except 统一处置
+            # （换号 / 停 / 冷却）。
+            while True:
+                try:
+                    if stream:
+                        resp = client.open_chat_stream(
+                            data, realm, body, account_id=int(account.id or 0))
+                        return resp, account, started
+                    result = client.chat_completions(
+                        data, realm, body, account_id=int(account.id or 0))
+                    shared.note_success(account)
+                    shared.release(account)
+                    return result, account, started
+                except client.UpstreamError as exc:
+                    # 失败画像：**每一次**上游失败都留痕，包括即将被降级重试的
+                    # 第一次命中 —— 否则事后无法判定「这一发是原值还是降级值」。
+                    # 画像自带 max_tokens 与 degraded 两列（判据缺一不可）。
+                    _log_failure_profile(account, exc, model=model,
+                                         stream=stream, body=body,
+                                         degraded=degraded_max_tokens)
+                    # ① 3000100（额度族）：把输出预算降下来，**同号**再试一次。
+                    #
+                    # 就地改 `body`（不是 `body = dict(body)`）是硬要求：这个
+                    # dict 是整条请求共用的，降级后的值必须跟着换号走 —— 否则每个
+                    # 新号都会先拿原值白撞一次 3000100 再降级，白耗一轮上游往返。
+                    #
+                    # 两种情况才降：
+                    #   · want == 0：请求根本没带输出预算，上游会按它自己的默认值
+                    #     算总预算 —— 这时显式给 32768 是**收紧**，不是放宽；
+                    #   · want > 32768：显式要得太长，压回 32768。
+                    # 0 < want <= 32768 时不动（降了等于把用户要的更短的长度改长），
+                    # 直接交给外层换号。
+                    if not degraded_max_tokens and _is_quota_exhausted(exc):
+                        want = _max_tokens_of(body)
+                        if want == 0 or want > MAX_TOKENS_DEGRADE_THRESHOLD:
+                            body["max_tokens"] = MAX_TOKENS_DEGRADE_TARGET
+                            body.pop("max_completion_tokens", None)
+                            body.pop("max_output_tokens", None)
+                            degraded_max_tokens = True
+                            logger.warning(
+                                "Marvis max_tokens 降级同号重试 degraded=1 "
+                                "acc=%s from=%s to=%d（3000100 是额度族：这个号"
+                                "在这个模型上的当次预算不够，先省输出预算）",
+                                int(account.id or 0), want or "-",
+                                MAX_TOKENS_DEGRADE_TARGET)
+                            continue
+                    # ② 5100007（上游服务端内部错误）：同号重试一次。
+                    #
+                    # **绝不换号**：同一份 body 打给任何号都是同一个答案，换号只会
+                    # 把好号也记一次失败。仍失败就交给外层如实报错。
+                    if (internal_retries < INTERNAL_RETRIES
+                            and _is_upstream_internal(exc)):
+                        internal_retries += 1
+                        delay = (INTERNAL_RETRY_BASE
+                                 + random.uniform(0, INTERNAL_RETRY_JITTER))
+                        logger.warning(
+                            "Marvis 上游内部错误同号重试 acc=%s code=5100007 "
+                            "第 %d/%d 次，退避 %.2fs（不换号）",
+                            int(account.id or 0), internal_retries,
+                            INTERNAL_RETRIES, delay)
+                        time.sleep(delay)
+                        continue
+                    raise
         except client.UpstreamError as exc:
             shared.release(account)
             # 签名器不可用（fail-closed）：**请求根本没发出去**。
@@ -1097,7 +1363,38 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                     "Marvis 内容风控拦截（换号无效，不记账号失败）| acc=%s | %s",
                     account.id, (exc.detail or exc.message or "")[:200])
                 break
-            # 上下文超限（400/413 + 3000100）：**原样重发**，靠重新路由过关。
+            # ① 3000100（额度族）：同号降级已经在上面用掉了，仍失败 ⇒
+            # **该号在该模型上的当次额度不够**，换号重试。
+            #
+            # 与 5100007 的分界（两者都不记账号失败，但处置相反）：
+            #   · 3000100 = 额度：换一个号就有预算 → 标 (账号 × 模型) 后换号；
+            #   · 5100007 = 上游内部错误：换号只会把好号也打脏 → 同号重试后停。
+            quota_code = _quota_code_of(exc)
+            if quota_code:
+                _note_model_quota_tight(db, account, model, code=quota_code)
+                last_error = exc
+                logger.warning(
+                    "Marvis 额度不足换号 | acc=%s | model=%s | code=%s | "
+                    "max_tokens=%s | 同号降级重试已用尽",
+                    account.id, model or "-", quota_code,
+                    body.get("max_tokens", "-"))
+                exclude.add(account.id)
+                # 不吃 note_failure：号本身是健康的，只是「这个模型 + 当次」额度
+                # 不够 —— 计 err_count 会把它一路推向熔断。
+                continue
+            # ② 5100007（上游服务端内部错误）：同号重试也在上面用掉了，
+            # 仍失败就如实报错 —— **不换号、不 note_failure、不进 exclude**。
+            if _is_upstream_internal(exc):
+                last_error = exc
+                logger.warning(
+                    "Marvis 上游内部错误，同号重试已用尽（不换号、不记账号失败）"
+                    " | acc=%s | %s",
+                    account.id, (exc.detail or exc.message or "")[:200])
+                break
+            # 上下文超限（400/413 + 措辞类信号）：**原样重发**，靠重新路由过关。
+            #
+            # ⚠ 3000100 **不在这里**：它是额度族，处置是「降 max_tokens → 换号」，
+            # 见上面那个分支；`_is_context_overflow()` 也会先按码排掉它。
             #
             # 为什么不裁消息：对话历史就是任务本身。删掉一半，模型不会
             # 「少看几轮」，它会看不到前面的约束和已确认的决策，**把任务做错**。
@@ -1105,7 +1402,7 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             #
             # 为什么原样重发有可能过：`main-auto` 是自动路由槽位，同一个模型名
             # 每次派到哪个后端由上游决定。实测同一段 40 万字符的历史，
-            # 一次落到装不下的后端（3000100），下一次落到装得下的后端（200）。
+            # 一次落到装不下的后端（措辞类超限），下一次落到装得下的后端（200）。
             #
             # 为什么不换号：内容长度是请求本身的属性，换号发也一样长，
             # 只会把好号挨个写成失败记录。所以不 note_failure、不进 exclude。
