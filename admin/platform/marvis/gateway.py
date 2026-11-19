@@ -271,6 +271,101 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
         status_code=status)
 
 
+# ---------------------------------------------------------------------------
+# 请求体体积兜底（2026-11-18）
+# ---------------------------------------------------------------------------
+#: ## 为什么需要这一层
+#:
+#: 上游对单条消息的体积有硬上限，超了只回一个看不出原因的
+#: `400 3000101 invalid parameter`。线上 27 次 3000101 全是同一个形状
+#: （bytes≈11.4MB / msgs=2 / sys_chars=252）—— 客户端把单条 11MB 的消息塞进
+#: `messages[0]`。于是每次都要走完「选号 → 建连 → 4xx → 换号」才失败，
+#: 白占一个账号的上游配额，日志里也只剩一句 `invalid parameter`。
+#:
+#: ## 阈值为什么不是 4MB
+#:
+#: 最初取 4MB，依据是「3.7MB 的正常大对话成功过」。但真实长对话会到 6.5MB
+#: 级，被本地 4MB 的 413 挡住 —— 用户看到的是「请求体过大」，只能去拆消息，
+#: 而拆消息对他们往往是不可接受的。所以默认值提到 256MiB：它已远超任何真实
+#: 对话，实际上等于「不设限」，但仍保留一个兜底，防止单个请求把进程内存打爆。
+#:
+#: ## 环境变量 `MIRAIHUB_MARVIS_MAX_BODY_BYTES` 的语义
+#:
+#:   * 未设置 / 非法值 → 用 `DEFAULT_MAX_BODY_BYTES`（256 MiB）
+#:   * 正数           → 用该值（按需调大或调小）
+#:   * **0 或负数**   → 完全关闭体积检查（不限制）
+#:
+#:   ⚠ 0 是**语义反转**：旧实现里 0 属于「非法值」，会退回当时的默认 4MB。
+#:     升级后若要保留旧上限，请显式写 `MIRAIHUB_MARVIS_MAX_BODY_BYTES=4194304`，
+#:     不要依赖 0 的旧行为。负数一律按「关闭」处理，与 0 等价。
+MAX_BODY_ENV = "MIRAIHUB_MARVIS_MAX_BODY_BYTES"
+DEFAULT_MAX_BODY_BYTES = 256 * 1024 * 1024   # 256 MiB：给长对话留足空间
+#: 旧名字保留，避免外部脚本 / 历史代码引用时炸掉。
+MAX_BODY_DEFAULT_BYTES = DEFAULT_MAX_BODY_BYTES
+
+
+def _max_body_bytes() -> int:
+    """单次请求体的上限（字节）。
+
+    返回值 **<= 0 表示不限制**（`MIRAIHUB_MARVIS_MAX_BODY_BYTES=0` 或负数）。
+    未设置 / 非法值退回 `DEFAULT_MAX_BODY_BYTES`（256 MiB）。
+    """
+    raw = str(os.environ.get(MAX_BODY_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_BODY_BYTES
+    try:
+        # int(float(...)) 而不是裸 int：兼容 "1048576.0" / "1e6" 这类写法
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_BODY_BYTES
+
+
+def _too_large(size: int, limit: int) -> JSONResponse:
+    """413：说清这是**本网关**的体积兜底，并给出唯一的两个动作。
+
+    不再教用户「自己去拆消息」—— 用户要的是能发，解法是调上限或关掉检查。
+    """
+    logger.warning("Marvis 请求体过大已本地拒绝 bytes=%d limit=%d（未打上游）",
+                   size, limit)
+    return JSONResponse(
+        {"error": {
+            "type": "invalid_request_error",
+            "code": "body_too_large",
+            "message": (
+                "请求体过大（约 %.1f MB，当前网关上限 %.1f MB）。"
+                "这是本网关的体积兜底，不是模型 / 账号 / 额度问题"
+                "（上游根本没被调用）。"
+                "如需发送更大的请求，把环境变量 %s 设为更大的字节数，"
+                "或设为 0 完全关闭该检查。"
+                % (size / 1048576.0, limit / 1048576.0, MAX_BODY_ENV)),
+        }},
+        status_code=413)
+
+
+async def _reject_oversized(request: Request):
+    """体积检查：超限返回 413 响应，否则返回 None。
+
+    上限 <= 0（`MIRAIHUB_MARVIS_MAX_BODY_BYTES=0` 或负数）表示**关闭检查**，
+    直接放行。先看 `Content-Length`（不读 body，零成本）；缺这个头时才把 body
+    读出来量（Starlette 会缓存已读的 body，后续 `request.json()` 不会重复读流）。
+    """
+    limit = _max_body_bytes()
+    if limit <= 0:              # 0 / 负数 = 不限制
+        return None
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            size = int(declared)
+        except (TypeError, ValueError):
+            size = 0
+        return _too_large(size, limit) if size > limit else None
+    try:
+        raw = await request.body()
+    except Exception:  # noqa: BLE001 - 读不出来就交给下游按原逻辑报错
+        return None
+    return _too_large(len(raw), limit) if len(raw) > limit else None
+
+
 async def _body_of(request: Request) -> dict:
     try:
         data = await request.json()
@@ -1537,6 +1632,10 @@ def _wrap_keepalive(response, ping: bytes):
 
 async def chat_completions(request: Request):
     """OpenAI 兼容入口 —— 本平台的唯一主路径。"""
+    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    oversized = await _reject_oversized(request)
+    if oversized is not None:
+        return oversized
     body = await _body_of(request)
     realm = _realm(request)
     try:
@@ -1803,6 +1902,10 @@ async def _run_normalized(request: Request, normalized: dict, *, protocol: str):
 
 async def messages(request: Request):
     """Anthropic 入口 → 转成 OpenAI 请求跑主路径 → 响应翻回 Anthropic。"""
+    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    oversized = await _reject_oversized(request)
+    if oversized is not None:
+        return oversized
     body = await _body_of(request)
     normalized = _anthropic_to_openai(body)
     return await _run_normalized(request, normalized, protocol="anthropic")
@@ -1810,6 +1913,10 @@ async def messages(request: Request):
 
 async def responses(request: Request):
     """Responses 入口 → 折叠成 chat/completions → 响应翻回 Responses。"""
+    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    oversized = await _reject_oversized(request)
+    if oversized is not None:
+        return oversized
     body = await _body_of(request)
     normalized = _responses_to_openai(body)
     return await _run_normalized(request, normalized, protocol="responses")

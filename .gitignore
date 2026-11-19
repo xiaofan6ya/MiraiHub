@@ -297,3 +297,6 @@ tools/set_safe_context_limits.py
 
 # 服务器地址一律不进仓库
 112.124.*
+
+# ===== 请求体上限（PR-09）：锁「默认 256MiB / 0 关闭 / 超限本地 413」 =====
+!tests/test_marvis_body_limit.py

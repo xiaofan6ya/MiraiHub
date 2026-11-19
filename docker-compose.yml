@@ -27,10 +27,18 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.docker}
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?Set ADMIN_JWT_SECRET in .env.docker}
       TZ: Asia/Shanghai
+      # 请求体兜底：应用层默认 256 MiB（268435456），0 或负数 = 关闭检查。
+      # 这里显式写出来是为了让「部署侧的取值」看得见；不写也等价于默认值。
+      MIRAIHUB_MARVIS_MAX_BODY_BYTES: ${MIRAIHUB_MARVIS_MAX_BODY_BYTES:-268435456}
     command: ["python3", "-m", "uvicorn", "admin.server:app", "--host", "0.0.0.0", "--port", "8790"]
     restart: unless-stopped
     init: true
-    stop_grace_period: 30s
+    # 停机预算：这是部署停机时长的主要来源。实测 compose up -d 的重建缺口
+    # = stop + start；本服务在真实负载下（并发 SSE 长连接）uvicorn 的
+    # graceful shutdown 会把 30s 全部吃满 -> 单次部署停机约 32s。
+    # 5s 只够收尾本地落库，超时的长连接交给新容器重连。
+    # 与请求体上限无关，属同批的部署侧附注，可单独 revert。
+    stop_grace_period: 5s
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/app/version', timeout=3)"]
       interval: 30s
