@@ -158,10 +158,25 @@ def resolve(request: Request) -> tuple[str, str]:
             raise PlatformDisabled(picked[0])
         return picked
 
+    # ---- 3) 按模型归属选平台（**与 Key 是否开聚合无关**）----
+    #
+    # 2026-11-19 事故：裸名 `deepseek-v4.1-flash` 被分到积分耗尽的 raccoon，
+    # 而上游错误码 1000007 直接冒到客户端（换 `X-Platform: marvis` 就 200）。
+    # 根因就是这一步只在 `aggregate=1` 时才做：
+    #
+    #     key.platform='' + key.aggregate=0
+    #       -> 跳过「按模型选路」-> 落「无头分摊」-> 策略按"可用号数"选中 raccoon
+    #          （raccoon 27 个号 > marvis 8 个号，throughput 策略必然先选它）
+    #
+    # 现在只要「没有 X-Platform 且 Key 没有平台绑定」（上面两个分支都没返回）
+    # 就先做一次成员校验：哪些平台**声明**了这个模型。
+    #
+    # ⚠️ 这一层只解决**选择阶段**的归属问题，选中后平台钉死：
+    # 不存在「P 平台失败就改走 Q 平台」的运行期改道（用户明确禁止过）。
     model = _model_of(request)
-    if model and _aggregate_enabled(key):
-        picked = _platform_for_model(model, key)
-        if picked:
+    if model:
+        picked = _route_by_model_ownership(model, key, disabled)
+        if picked is not None:
             return picked[0], picked[1]
 
     # 通用路由名（`auto` 等）不走「无头分摊」：它没有模型归属，
@@ -527,8 +542,34 @@ def _model_catalog(db) -> list[dict]:
         }
         rows.append(entry)
         by_storage.setdefault(storage, []).append(entry)
-        if entry["key"]:
-            by_key.setdefault(entry["key"], []).append(entry)
+        # **同一条配置可能对应多个 key**（2026-11-18）：
+        #
+        # 上面算出的 `key` 用的是「可读名」（Marvis 的槽位 `main-auto` ->
+        # `deepseek-v4.1-flash`）。客户端**直接发上游原生 id / 槽位名**
+        # （`main-auto`，早期文档与老客户端配置里的写法）时归一 key 是
+        # `mainauto`，与清单里的 `deepseekv41flash` 永远对不上 ——
+        # `_model_platforms()` 拿不到候选，`resolve()` 于是掉进「无头分摊」
+        # 策略（线上是 raccoon），那个平台的清单里没有该模型就 404。
+        #
+        # 所以再按**库里原始 model_id 自己的 key** 登记一次。这里故意不带
+        # 展示名：`canonical_key(model_id, display)` 会优先采用展示名命中的
+        # 人工别名，槽位名又会被收敛回可读名，等于什么都没加。
+        #
+        # 重复登记不会让候选变多：`_model_platforms()` 按 (platform, realm)
+        # 归并，同一平台只会出现一次。
+        raw_key = canonical_key(model_id)
+        if raw_key and raw_key != key:
+            by_key.setdefault(raw_key, []).append(entry)
+        if key:
+            by_key.setdefault(key, []).append(entry)
+        # 还有第三种写法：**平台自报的规范名**。Marvis 的清单同步后只存
+        # 可读名（`deepseek-v4.1-flash`），而它的规范名是槽位 `main-auto`
+        # —— 客户端裸写槽位名时，只有这一条能把请求领回 marvis。
+        # 没有 `canonical_model_id()` 钩子的平台这里恒为空，行为不变。
+        canonical_id = _platform_canonical(storage, model_id)
+        canonical_norm = canonical_key(canonical_id) if canonical_id else ""
+        if canonical_norm and canonical_norm not in (key, raw_key):
+            by_key.setdefault(canonical_norm, []).append(entry)
     _model_cache.update({"at": now, "rows": rows,
                          "by_storage": by_storage, "by_key": by_key})
     return rows
@@ -816,10 +857,10 @@ def _model_for_platform(db, storage: str, model: str) -> tuple[str, dict | None]
         # 并在消息里指出「可能只是没同步清单」，避免用户以为功能坏了。
         if by_storage.get(storage):
             return model, {
-                "message": "模型 %s 不存在于平台 %s 的模型清单里。"
-                           "如果上游刚上线了这个模型，请先在控制台「模型配置」同步一次；"
-                           "也可以不带 X-Platform，让网关按模型自动选平台。"
-                           % (model, storage),
+                "message": "模型 %s 在平台 %s 的清单里不存在。"
+                           "可用 X-Platform 指定平台，或先在控制台"
+                           "「模型配置」为 %s 同步该模型。"
+                           % (model, storage, storage),
                 "type": "invalid_request_error",
                 "code": "model_not_found",
             }
@@ -1066,6 +1107,202 @@ def _platform_for_model(model: str, key) -> tuple[str, str, str] | None:
     picked = candidates[0]
     logger.info("按模型选平台：%s -> %s (%d 个候选)", model, picked[0], len(candidates))
     return picked
+
+
+# ---------------------------------------------------------------------------
+# 选择阶段：按模型归属选平台（与 Key 的 aggregate 开关无关）
+# ---------------------------------------------------------------------------
+class ModelUnknownOnAnyPlatform(Exception):
+    """模型在**任何平台**的清单里都不存在（选择阶段就拒绝）。
+
+    以前这种情况会掉进「无头分摊」，被分到一个**根本没有这个模型**的平台，
+    由那个平台先跑一轮（选号 / 建连 / 甚至打真上游）再回 400 —— 用户看到的
+    是「模型不存在」，但落点不明，控制台也看不出是路由选错了平台。
+
+    platforms  本次「模型存在于哪些平台」的结论（零命中时为空）；
+    available  当时可选的平台 id，供错误体直接讲清楚能选什么。
+    """
+
+    def __init__(self, model: str, platforms, available):
+        self.model = str(model or "")
+        self.platforms = list(platforms or [])
+        self.available = list(available or [])
+        super().__init__(self.model)
+
+
+def _exact_declarers(db, model: str) -> set[str]:
+    """model_id 字段**就是**这个模型名的落库平台（大小写不敏感）。
+
+    ## 为什么要区分「精确登记」与「别名归一」
+
+    _model_platforms() 走归一 key，把 raccoon 的私有槽位
+    sn-deepseek-v4-1-flash-1017 也算成「声明了 deepseek-v4.1-flash」。
+    它确实能服务这个名字，但那是一次**平台内部改名**：上游对裸名另有
+    预检（实测 deepseek-v4-pro / v4-flash / hy3 在 raccoon 直接
+    404 model_not_on_platform，只有 v4.1-flash 因为槽位映射漏过预检，
+    结果把「积分余额不足」冒到了客户端）。
+
+    所以「同一个模型名同时被精确登记和别名登记」时，优先精确登记的平台 ——
+    客户端写什么名字，就先交给**同样用这个名字**的平台。别名登记只在
+    没有精确登记者时才兜底（否则像 main-auto 这种只有槽位名的模型会被误杀）。
+    """
+    name = str(model or "").strip().lower()
+    if not name:
+        return set()
+    by_storage, _unused = _catalog_maps(db)
+    out: set[str] = set()
+    for storage, rows in (by_storage or {}).items():
+        for row in rows or ():
+            if str(row.get("model_id") or "").strip().lower() == name:
+                out.add(str(storage))
+                break
+    return out
+
+
+def _model_membership(db, model: str) -> list[tuple[str, str, str]]:
+    """**声明**了这个模型的平台：[(public_platform_id, realm, storage)]。
+
+    口径 = model_configs 里有一行能把这个模型名归一过去（即 _model_platforms()），
+    **与有没有可用账号无关** —— 那是下一步 _candidates_for_model() 的事。
+
+    返回顺序沿用 _model_platforms()（倍率升序），同一平台只出现一次。
+    """
+    platforms = _model_platforms(db, model)
+    if not platforms:
+        return []
+    specs: list = []
+    for storage, realm_hint in platforms:
+        matches = [spec for spec in registry.all_platforms()
+                   if spec.storage() == storage
+                   and (not realm_hint or spec.realm == realm_hint)]
+        if not matches:
+            matches = [spec for spec in registry.all_platforms()
+                       if spec.storage() == storage]
+        for spec in matches:
+            if not spec.enabled or spec in specs:
+                continue
+            specs.append(spec)
+    return [(str(spec.id), str(getattr(spec, "realm", "") or ""),
+             str(spec.storage()).lower()) for spec in specs]
+
+
+def model_not_found_payload(exc) -> dict:
+    """`ModelUnknownOnAnyPlatform` -> 404 错误体（独立出来给单测直接用）。
+
+    错误体里必须能看出两件事：
+      * `platforms`：这个模型到底在哪些平台存在（零命中时为空）——
+        用户照这个列表去改名字/改平台，而不是反复猜；
+      * `available_platforms`：当时可选的平台（未禁用/未停用）。
+    """
+    declared = list(getattr(exc, "platforms", []) or [])
+    available = list(getattr(exc, "available", []) or [])
+    where = "、".join(declared) if declared else "没有任何平台登记这个模型"
+    avail = "、".join(available) if available else "（无）"
+    return {"error": {
+        "message": "模型 %s 不在任何平台的模型清单里（%s）；当前可用平台：%s"
+                   % (getattr(exc, "model", ""), where, avail),
+        "type": "invalid_request_error",
+        "code": "model_not_found",
+        "model": str(getattr(exc, "model", "") or ""),
+        "platforms": declared,
+        "available_platforms": available,
+    }}
+
+
+def _available_platforms(disabled: set[str]) -> list[str]:
+    """当时**可选**的平台 id（未停用、未禁用），用于 404 错误体。"""
+    out = []
+    for pid in registry.ids():
+        spec = registry.get(pid)
+        if spec is not None and not spec.enabled:
+            continue
+        if _is_disabled(pid, disabled):
+            continue
+        out.append(pid)
+    return out
+
+
+def _strategy_pick_within(platform_ids) -> tuple[str, str] | None:
+    """在**给定集合内**按网关策略挑一个平台（集合外的平台不参与）。
+
+    gateway_router.pick() 内部是 order(db, platform_ids)：先按策略排序再取第一个，
+    并且会跳过「已禁用」与「没有可用账号」的平台 —— 所以命中集合里那些
+    「只有模型、没号」的平台不会被选中。
+    """
+    ids = [str(pid) for pid in (platform_ids or []) if str(pid or "").strip()]
+    if not ids:
+        return None
+    try:
+        from admin.platform import gateway_router
+
+        with _db() as db:
+            best = gateway_router.pick(db, ids)
+    except Exception:  # noqa: BLE001 - 策略坏了不能挡住转发
+        logger.debug("集合内策略选平台失败", exc_info=True)
+        return None
+    if not best:
+        return None
+    pid = str(best.get("platform") or "")
+    if not pid:
+        return None
+    spec = registry.get(pid)
+    return pid, (str(getattr(spec, "realm", "") or "") if spec is not None else "")
+
+
+def _route_by_model_ownership(model: str, key, disabled: set[str]):
+    """按「哪些平台声明了这个模型」选平台（**选择阶段**，不存在运行期改道）。
+
+    分支（严格按顺序）：
+
+      1. **一个平台都没声明** -> 抛 ModelUnknownOnAnyPlatform（上层回 404，
+         错误体给出「模型存在于哪些平台」= 空，以及当时可选的平台）；
+      2. 命中集合里**只剩一个可用** -> 直接路由过去；
+      3. **多个可用** -> 只在命中集合内按既有策略（优先级 / 额度 / 轮转…）
+         分摊，集合外的平台一个都不许进；
+      4. 命中集合里有精确登记者 -> 只在精确登记者内分摊；没有才退回别名登记者
+         （main-auto 这类只有槽位名的模型靠这条活下来）。
+
+    返回 None = 不接管（通用路由名 auto / default … 交给默认平台自己解释）。
+    """
+    text = str(model or "").strip()
+    if not text or text.lower() in _GENERIC_MODEL_NAMES:
+        return None
+    try:
+        with _db() as db:
+            declared = _model_membership(db, text)
+            exact = _exact_declarers(db, text)
+            candidates = _candidates_for_model(db, text, key)
+    except Exception:  # noqa: BLE001 - 归属查询失败不接管，走既有路径
+        logger.debug("按模型归属选平台失败 model=%s", text, exc_info=True)
+        return None
+    if not declared:
+        raise ModelUnknownOnAnyPlatform(text, [], _available_platforms(disabled))
+
+    live = [item for item in declared if not _is_disabled(item[0], disabled)]
+    if not live:
+        # 声明者全被用户禁用：明确报 403，而不是偷偷换一个平台。
+        raise PlatformDisabled(declared[0][0])
+
+    # 命中集合再收窄到「当前真能服务这个模型」的平台（有号 + 未按模型冷却 + 健康）。
+    # 全都不可用时仍回到声明集合：让那个平台自己给出它的错误，比在这里
+    # 编一个 503 更可诊断（也不会把「没号」说成「没这个模型」）。
+    servable = {str(pid) for pid, _realm, _mapped in candidates}
+    pool = [item for item in live if item[0] in servable] or live
+    exact_pool = [item for item in pool if item[2] in exact]
+    if exact_pool:
+        pool = exact_pool
+    if len(pool) == 1:
+        logger.info("按模型归属选平台：%s -> %s（命中集合唯一）", text, pool[0][0])
+        return pool[0][0], pool[0][1]
+    picked = _strategy_pick_within([item[0] for item in pool])
+    if picked is not None:
+        logger.info("按模型归属选平台：%s -> %s（在 %d 个命中平台内按策略分摊）",
+                    text, picked[0], len(pool))
+        return picked[0], picked[1]
+    first = pool[0]
+    logger.info("按模型归属选平台：%s -> %s（策略无可用，退回首个命中平台）",
+                text, first[0])
+    return first[0], first[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1452,6 +1689,15 @@ class PlatformDispatchMiddleware:
                     "code": "platform_disabled",
                     "platform": exc.platform,
                 }})(scope, receive, send)
+        except ModelUnknownOnAnyPlatform as exc:
+            # 选择阶段就判定「谁都没有这个模型」：给 404，并把
+            # 「模型在哪些平台存在」与当时可选平台写进错误体，
+            # 免得客户端以为是自己拼错了名字却查不到该用哪个平台。
+            logger.info("模型不属于任何平台 | model=%r declared=%s available=%s",
+                        exc.model, exc.platforms, exc.available)
+            return await JSONResponse(
+                status_code=404,
+                content=model_not_found_payload(exc))(scope, receive, send)
         except Exception:  # noqa: BLE001
             logger.warning("平台解析失败，回落默认平台", exc_info=True)
             platform_id, realm = registry.DEFAULT_PLATFORM, ""
