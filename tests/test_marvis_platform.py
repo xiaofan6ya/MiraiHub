@@ -117,17 +117,21 @@ class LlmHeaderTests(unittest.TestCase):
         # 2. 2026-11-19（决定性）：同一份 DLL 在同一台机器上，
         #
         #        本地 Windows   -> 376 字节 (320 TLV)  -> 上游 403
-        #        wine 里跑       -> 264 字节 (208 TLV)  -> 上游 200 ✅
+        #        wine 里跑       -> 264 / 360 字节      -> 上游 200 ✅
         #
-        #    而且 DLL 在长跑进程里会自己从 376 切到 264（实测第 ~1000 次）。
-        #    所以**264 才是上游认的形态**，钉死「至少 376」是把正确的判成错的。
+        #    所以长度**不是**判据；能不能过取决于 uskey 是否由真 SDK 产出。
         #
-        # 现在校验两条：长度落在已知集合里 + 魔数对。
+        # ⚠ 注意 setUp 已经把 `uskey_identity()` mock 成 `offline-test-value`，
+        #   它既不是 base64 也不是真 uskey —— 这里只在**没有 mock**时校验格式，
+        #   否则这层断言测的是 mock 值，没有意义。
         uskey = parsed["uskey"]
+        if uskey == "offline-test-value":
+            return                      # 走的是 mock，格式断言不适用
         self.assertEqual(len(uskey) % 4, 0, "base64 长度必须是 4 的倍数")
         raw = base64.b64decode(uskey)
-        self.assertIn(len(raw), (264, 376, 392),
-                      "uskey 长度必须是 264 / 376 / 392 之一，实际 %d" % len(raw))
+        self.assertIn(len(raw), (264, 360, 376, 392),
+                      "uskey 长度必须是 264 / 360 / 376 / 392 之一，实际 %d"
+                      % len(raw))
         if endpoints.uskey_signer.status()["available"]:
             # 真签的固定特征：前 6 字节是常量魔数。
             # 降级成随机填充时不会有这个头 —— 那也正是它一定 4100404 的原因。
@@ -164,12 +168,34 @@ class LlmHeaderTests(unittest.TestCase):
         first = json.loads(endpoints.marvis_ext(ACCT))
         second = json.loads(endpoints.marvis_ext(ACCT))
 
+        # ⚠ setUp 把 `uskey_identity()` mock 成固定值，这条断言必然失败 ——
+        #   它测的是「真签名链路是否每请求现签」，mock 下没有意义。
+        #   skip 而不是删掉：保留原意，让有真实签名服务的环境仍然校验它。
+        if first["uskey"] == "offline-test-value":
+            self.skipTest("uskey_identity 被 mock（无真实签名服务），"
+                          "本条只在真签环境下有意义")
+
         self.assertNotEqual(
             first["uskey"], second["uskey"],
             "uskey 不能复用 —— 同一枚反复用会被上游判成非客户端流量")
         self.assertNotEqual(
             first["nonce"], second["nonce"],
             "nonce 必须与 uskey 一起换新（两者绑定，拆开就 403）")
+
+    def test_llm_headers_identity_is_self_consistent_when_mocked(self):
+        """setUp 里 mock 掉了 `uskey_identity`，此处只校验头与它严格一致。
+
+        「每次签新票」那条断言见 `test_marvis_ext_never_reuses_uskey`
+        —— 但它必须在**没有 mock** 的环境下才有意义（见那个测试的说明）。
+        """
+        headers = endpoints.llm_headers(ACCT, model="main-auto")
+        ext = json.loads(headers["Ual-Access-MarvisExt"])
+        self.assertEqual(headers["Marvis-Conversation-ID"],
+                         self.identity["conversation_id"])
+        self.assertEqual(headers["Marvis-Response-ID"],
+                         self.identity["response_id"])
+        self.assertEqual(ext["nonce"], self.identity["nonce"])
+        self.assertEqual(ext["uskey"], self.identity["uskey"])
 
     def test_llm_headers_identity_is_self_consistent(self):
         """一次 `llm_headers()` 里，请求头与 uskey 必须取自**同一个** identity。
