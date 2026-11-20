@@ -1440,6 +1440,58 @@ def _acquire(request, body: dict, realm: str, *, stream: bool):
 #: 配 `read1()` 用，**不是**配 `read()` —— 见 `_iter_upstream()`。
 _STREAM_CHUNK = 65536
 
+#: SSE 帧分隔符：一个空行。一帧由若干字段行 + 一个空行收尾。
+_FRAME_SEP = b"\n\n"
+
+#: 攒到这么多字节还没见到空行就原样放行。
+#:
+#: 防守用：上游如果根本不是 SSE（或迟迟不发空行），缓冲会一直长，「按帧
+#: 对齐」就变成「攒到 EOF 才吐」—— 那比撕裂更糟。宁可失去对齐，也不能
+#: 把流卡死。
+_FRAME_MAX = 262144
+
+#: 一条 SSE 字段行的前缀（data / event / id / retry / 注释）。
+_SSE_FIELD_PREFIXES = (b"data:", b"event:", b"id:", b"retry:", b":")
+
+
+def _flush_tail(tail: bytes) -> bytes:
+    """给 EOF 前没等到空行的**半个帧**补上分隔符；非 SSE 尾巴原样返回。
+
+    ## 为什么必须补
+
+    上游最后一段常常是裸的 `data: [DONE]` —— **连一个换行都没有**，这正是
+    「`data: [DONE]` 与终止帧粘连」的精确触发条件（有换行、但没有空行时
+    **不**触发：`_scan_stream` 按换行切行，那一行已经能判读）。不补的话
+    紧随其后的帧（心跳 / `_terminal_frame`）会直接粘在这一行后面：
+
+        data: [DONE]data: {"id":"chatcmpl-gateway", ...}
+
+    一行两帧，客户端按行 `json.loads` 必炸。
+
+    ## 为什么带守卫
+
+    这条路径同时承担**原样透传**（上游 200 + JSON 错误体、非 SSE 的响应
+    对象）：尾巴不是 SSE 字段行时一个字节都不能改，否则「转发不改字节」
+    这条承诺就破了。
+    """
+    if not tail:
+        return tail
+    if not any(line.startswith(_SSE_FIELD_PREFIXES)
+               for line in tail.split(b"\n")):
+        return tail
+    return tail + b"\n" if tail.endswith(b"\n") else tail + _FRAME_SEP
+
+
+def _open_frame(chunk: bytes) -> bool:
+    """块是不是停在**半个帧**里（还没等到帧分隔符）。
+
+    判据宁窄勿宽：去掉前导缩进后，以 SSE 字段行（data / event / id / retry /
+    注释）或 JSON 片段（{ / [）起头，才算半帧。非 SSE 的普通字节（测试桩、
+    纯文本透传）一律返回 False —— 心跳照发，行为与加守卫之前完全一致。
+    """
+    head = chunk.lstrip()
+    return head.startswith(_SSE_FIELD_PREFIXES) or head[:1] in (b"{", b"[")
+
 
 async def _iter_upstream(resp):
     """把同步 `HTTPResponse` 的 read 挪到工作线程，避免卡住事件循环。
@@ -1462,13 +1514,40 @@ async def _iter_upstream(resp):
         顺带把 `to_thread` 的线程切换次数从「每 8KB 一次」降到「有多少读多少」。
 
     兜底：极老的 Python 或自定义 `resp` 没有 `read1` 时退回 `read`，行为与以前一致。
+
+    ## 为什么还要按帧对齐（2026-11-19 修）
+
+    `read1()` 的块边界与 SSE 帧边界**无关**：一帧可能被切成两块，两块也可能
+    凑成一帧。下游 `_with_keepalive()` 在空闲 `PING_INTERVAL_S`（8s）后插一帧
+    心跳，它只看「有没有新块」、不看「块停在哪」—— 于是心跳会落在
+    `data: {"content":"hel` 与 `f"}}]}` 之间，客户端按行 `json.loads` 必炸。
+
+    **对齐放在这一层**：出口只有完整帧（以空行收尾），下游无论怎么插心跳都
+    只能落在帧边界上。同一处顺带把 EOF 前的半帧补上分隔符，收尾帧也就不会
+    和裸的 `data: [DONE]` 粘成一行。
     """
     read = getattr(resp, "read1", None) or resp.read
+    buf = b""
     while True:
         chunk = await asyncio.to_thread(read, _STREAM_CHUNK)
         if not chunk:
             break
-        yield chunk
+        buf += chunk
+        # 只把**已完整**的帧交出去（见 docstring 末段）：半帧留在 buf 里，
+        # 等下一块拼齐。read1() 的块边界与 SSE 帧边界无关，直接透传就会
+        # 让下游的空闲心跳插在半帧中间。
+        frames = buf.split(_FRAME_SEP)
+        buf = frames.pop()
+        for frame in frames:
+            yield frame + _FRAME_SEP
+        if len(buf) > _FRAME_MAX:
+            # 上游不是 SSE（或迟迟不发空行）：宁可失去对齐，也不能卡死
+            yield buf
+            buf = b""
+    # EOF：尾巴是半帧就补齐分隔符。不补的话紧随其后的帧会粘在这一行后面
+    # —— 客户端看到 `data: [DONE]data: {...}`，一行两帧。
+    if buf:
+        yield _flush_tail(buf)
 
 
 def _inband_error(obj: dict) -> str:
@@ -1641,15 +1720,31 @@ async def _with_keepalive(source, *, interval: float, ping: bytes):
     """给 async 生成器加空闲心跳：`interval` 秒没新块就发一帧 `ping`。
 
     超时**不取消**内层那次读取（见上），只把心跳先吐出去。
+
+    ## 帧边界守卫（第二道防线）
+
+    `_iter_upstream()` 已经保证「出口只有完整帧」，所以正常路径上这个守卫
+    不会触发。它防的是**将来**：谁再往这条链上接一个按字节切块的源，心跳就
+    会插进半帧中间，客户端按行 `json.loads` 必炸。
+
+    判据刻意保守，两条都满足才判「半帧」：块不以空行收尾，且**要么**已经
+    见过空行（确认这是分帧的 SSE），**要么**块本身是 SSE 字段行 / JSON 片段
+    的起头（`_open_frame`）。纯文本块（测试桩、非 SSE 透传）照常发心跳 ——
+    行为与加守卫之前完全一致，不猜。
     """
     iterator = source.__aiter__()
     pending: "asyncio.Future | None" = None
+    framed = False   # 见过空行 → 确认这是按帧分隔的 SSE
+    tail = b""       # 上一块的末尾，用来判断它停在不在帧边界上
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(iterator.__anext__())
             done, _ = await asyncio.wait({pending}, timeout=interval)
             if not done:
+                if not tail.endswith(_FRAME_SEP) and (framed or _open_frame(tail)):
+                    # 停在半帧中间：这一轮不插心跳，接着等同一块
+                    continue
                 yield ping
                 continue
             try:
@@ -1658,6 +1753,9 @@ async def _with_keepalive(source, *, interval: float, ping: bytes):
                 return
             finally:
                 pending = None
+            if chunk:
+                framed = framed or _FRAME_SEP in chunk
+                tail = chunk
             yield chunk
     finally:
         # 客户端断开 / 上层取消：把还挂着的读任务收掉，别让它悬着
@@ -1752,6 +1850,11 @@ async def chat_completions(request: Request):
                 # 只读旁路：解析 usage / finish_reason / 流内错误。
                 # **转发的字节一个都不改**，只记账与收尾需要这些信息。
                 pending = _scan_stream(pending, chunk, state)
+            # EOF：最后一段可能没带换行（裸 `data: [DONE]`），`_scan_stream`
+            # 只缓存不成行的尾巴、不判读 —— 补一个分隔符再扫一遍，否则 `done`
+            # 认不出来：白白多补一帧终止帧，还会和 `[DONE]` 粘成一行。
+            if pending:
+                _scan_stream(pending, _FRAME_SEP, state)
             # 上游既没给 `finish_reason` 也没给 `[DONE]`（错误帧 / 提前 EOF /
             # 被截断）→ 补终止帧。不补的话客户端判定流被截断，按退避无限重试，
             # 而网关这边一条日志都没有（FIXED-BUGS 五·补51）。
