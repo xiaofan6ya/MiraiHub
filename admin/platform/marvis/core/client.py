@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -454,6 +455,73 @@ def close_stream(resp) -> None:
         pass
 
 
+#: 上游业务码里属于「**额度耗尽**」的那几个。
+#:
+#: `3000001 用户名下token不足` —— 账号级总额度用尽：凭证、登录态、风控全都
+#: 正常，只有钱包是 0。旧实现把它归成 `upstream_business`（不冷却、不隔离、
+#: 不换号），后果是 `select_account` 按 `last_used_at` 升序永远先选到它，
+#: 每个请求都先白撞一次 402 才轮到好号。
+#:
+#: `1000007 积分余额不足` 与它同源：号没坏、Key 也没错，只是这个号此刻拿不出
+#: 这次请求要的额度。归到 `quota_exceeded` 才能走既有的「换号 + 降级窗口」
+#: 处置；归成 `upstream_business` 只会原样抛错，用户看到的是一句看不出原因的
+#: 「请求失败」，然后去翻一个根本没问题的 Key。
+BIZ_QUOTA_CODES = frozenset({"3000001", "1000007"})
+
+#: 上游「**输入 + max_tokens** 超出该号的当次预算」：`3000100 max input token error`。
+#:
+#: 体积不是判据（同一账号在实时窗口内成功处理过更大的形状），所以它不能被当成
+#: 「请求太大」引导用户拆消息 —— 拆了也没用。归成独立 kind `max_input_tokens`，
+#: 网关据此识别「这是额度/预算问题」，并在对外文案里说清楚。
+BIZ_MAX_INPUT_CODES = frozenset({"3000100"})
+
+#: 上游「**服务端内部错误**」—— 与账号、凭证、请求形状都无关的那几个码。
+#:
+#: `5100007 服务端通用错误:服务端严重报错`：同一份 body 换任何一个号都会得到
+#: 同一个答案，当成普通 5xx 去「换号重试」唯一的实际效果是把整池的 `err_count`
+#: 写满、最后报「已无更多可用账号」。归成 `upstream_internal` 后上层不再换号。
+BIZ_INTERNAL_CODES = frozenset({"5100007"})
+
+#: 从错误体里抠业务码：`{"code":4100406,...}` / `{"code":"4100403",...}`。
+_BIZ_CODE_RE = re.compile(r'"code"\s*:\s*"?(-?[A-Za-z0-9_.]+)"?')
+
+
+def _biz_code_of(text: str) -> str:
+    """解析上游错误体里的业务码（返回**字符串**；解析不出返回 ""）。
+
+    上游的错误信封实测有两种写法：
+
+        {"code":4100406,"msg":"非法请求"}     ← 数字
+        {"code":"4100403", ...}               ← 字符串
+
+    还可能被包一层（`{"error": {"code": ...}}`）。先按 JSON 解，
+    解不动退回正则抠第一处 `"code":` —— 错误体里混了别的文本时也要能认。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    start = raw.find("{")
+    if start > 0:
+        raw = raw[start:]
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            code = data.get("code")
+            if code is None:
+                err = data.get("error")
+                if isinstance(err, dict):
+                    code = err.get("code")
+            if isinstance(code, bool):
+                code = None
+            if code is not None:
+                return str(code).strip()
+    match = _BIZ_CODE_RE.search(raw)
+    return match.group(1).strip() if match else ""
+
+
 def _classify(status: int, text: str) -> str:
     """把上游错误归成一类 —— 上层据此决定冷却 / 禁用 / 换号。
 
@@ -484,6 +552,25 @@ def _classify(status: int, text: str) -> str:
     # 「重扫码」，用户看到的就是「一直在换号但一句话都出不来」。
     if "4100403" in blob or "登录态过期" in blob or "未登录" in blob:
         return "auth"
+    # ------------------------------------------------------------------
+    # 业务码族：**不能只看 HTTP 状态**（402 / 400 / 500 都不是判据）
+    # ------------------------------------------------------------------
+    #
+    # 上游把「额度不足」「预算不够」「服务端内部错误」全塞在 HTTP 4xx/5xx 里，
+    # 真正的判据只在 body 的 `code` 上。只看状态的话这四种码一律落进
+    # `upstream_business` → 网关「不重试、不冷却、原样抛」，用户拿到的是一句
+    # 看不出原因的「模型网关失败（HTTP 402 / 500）」，然后去改一个没写错的请求体。
+    #
+    # ⚠ 插在 `status == 401` 之前是有意的：402 + 3000001 与登录态无关，
+    # 归错就会变成「永不隔离的号永远排第一，每次请求先白撞一次」。
+    # 4100404 / 4100406 / 4100403 的判定在上面，一个都不动。
+    code = _biz_code_of(text)
+    if code in BIZ_QUOTA_CODES:
+        return "quota_exceeded"
+    if code in BIZ_MAX_INPUT_CODES:
+        return "max_input_tokens"
+    if code in BIZ_INTERNAL_CODES:
+        return "upstream_internal"
     if status == 401:
         return "auth"
     if status == 403:

@@ -85,7 +85,112 @@ def _client_ip(request) -> str:
         return ""
 
 
-def _fail(exc: client.UpstreamError) -> JSONResponse:
+def _quota_tight_message(upstream_code: str, notes: dict | None = None) -> str:
+    """额度族（3000100 / 1000007）的对外文案 —— 给用户看的那一段。
+
+    ## 为什么不能只说「请求太大」
+
+    `3000100 max input token error` 曾经被解释成「输入 token + max_tokens 合计
+    一条预算」，于是文案引导用户拆消息。线上样本把这个解释否掉了：被拒的请求
+    只有 24 KB / 2 条消息，而**同一个账号**在实时窗口内成功处理过更大的形状
+    （515 KB / 98 条消息，20 次 200）。体积不是判据，拆消息改了也没用。
+
+    剩下唯一站得住的维度是「**该账号在该模型上的当次剩余可用额度**」不够。
+    文案必须同时否掉两个方向：不是你的 API Key 无效、也不是账号池总额度用光。
+    """
+    notes = notes if isinstance(notes, dict) else {}
+    degraded = notes.get("degraded_max_tokens") or {}
+    switched = int(notes.get("quota_switch_accounts") or 0)
+    tried = []
+    if degraded:
+        tried.append("把 max_tokens 从 %s 降到 %s 后同号重试"
+                     % (degraded.get("from"), degraded.get("to")))
+    if switched:
+        tried.append("换号后试过 %d 个账号" % switched)
+    action = ("网关已自动处置：%s，但" % "、".join(tried)) if tried else ""
+    return (
+        "Marvis 上游额度不足（上游 %s）：这是「该账号在该模型上的当次可用"
+        "额度」不够，不是请求太大、不是你的 API Key 无效，也不是账号池的"
+        "总额度已经用光。%s额度仍然不够，本次请求失败。"
+        "建议：稍后重试、换一个模型，或在控制台换一个 Marvis 账号再发。"
+        % (upstream_code or "3000100", action))
+
+
+def _error_payload(exc: client.UpstreamError,
+                   notes: dict | None = None) -> tuple[int, dict, dict] | None:
+    """额度族 / 上游内部错误 → `(status, error_obj, headers)`；其余返回 `None`。
+
+    **只处理本 PR 新增的三种 kind**，其余（signer_unavailable / content_block /
+    risk_control / auth / 参数 400）一律返回 `None` 交回 `_fail()` 的既有分支 ——
+    这样那几条已在 origin/main 上稳定的分类一个字都不用动。
+
+    ## 为什么要独立出来
+
+    这几种失败以前全都落进 `upstream_business`：网关「不重试、不冷却、原样抛」，
+    客户端只拿到 `HTTP 402` / `HTTP 500`，语义上等于「你的请求写错了」，
+    用户于是去改一个根本没写错的请求体。业务码才是判据，所以：
+
+      · `3000100` → 400 `max_input_tokens_exceeded`（额度族，可操作文案）；
+      · `1000007` → 400 `insufficient_quota`；
+      · `3000001` → 402 `quota_exhausted`（账号级总额度，等每日重置 / 加号）；
+      · `5100007` → 502 `upstream_internal_error`（上游侧故障，与号池无关）。
+
+    `family` 是给下游聚合用的族标记（目前只有 `quota`），具体原因看
+    `upstream_code` —— 后者保留上游业务码，便于排障时与上游工单对齐。
+    """
+    upstream_code = client._biz_code_of(exc.detail or "").strip()
+    headers: dict[str, str] = {}
+    family = ""
+    if exc.kind == "max_input_tokens" or upstream_code == "1000007":
+        # 额度族（3000100 / 1000007）：判据是「该号该模型当次可用额度」不够。
+        status = 400
+        code = ("max_input_tokens_exceeded"
+                if exc.kind == "max_input_tokens" else "insufficient_quota")
+        err_type = exc.kind or "quota_exceeded"
+        shown_code = upstream_code
+        if shown_code in ("", "400", "401", "402", "403", "404", "422",
+                          "429", "500", "502", "503"):
+            # detail 抠不出业务码时，exc.code 只是 HTTP 状态 —— 文案里要写上游码。
+            shown_code = ("3000100" if exc.kind == "max_input_tokens"
+                          else "1000007")
+        message = _quota_tight_message(shown_code, notes)
+        family = "quota"
+    elif exc.kind == "upstream_internal":
+        # 上游服务端内部错误：换号只会把整池的 err_count 写满，与账号无关。
+        status = 502
+        code = "upstream_internal_error"
+        err_type = "upstream_internal"
+        message = (
+            "Marvis 上游服务端内部错误（上游 %s）：与你的 API Key、账号、额度都"
+            "无关，这是上游侧故障，换账号不会改变结果。稍后重试即可。"
+            "原始信息：%s" % (upstream_code or "5100007", exc.message))
+    elif exc.kind == "quota_exceeded":
+        # 账号级总额度（3000001 用户名下 token 不足）：等的是上游每日
+        # 00:00(+08) 的配额重置，不是「冷却到期」—— 两种结局完全不同。
+        status = 402
+        code = "quota_exhausted"
+        err_type = "quota_exceeded"
+        family = "quota"
+        headers["Retry-After"] = "3600"
+        message = (
+            "Marvis 账号额度已耗尽（上游 %s）：这是账号级总额度用光，"
+            "不是你的 API Key 无效，也不是网关在冷却。上游每日 00:00(+08)"
+            "为各账号重置额度，请等待重置或在控制台加号。原始信息：%s"
+            % (upstream_code or "3000001", exc.message))
+    else:
+        return None
+    error_obj = {"type": err_type, "code": code, "message": message,
+                 # 这几种都不是「换个号就好」的登录态问题
+                 "upstream_account": False}
+    if family:
+        error_obj["family"] = family
+    if upstream_code:
+        error_obj["upstream_code"] = upstream_code
+    return status, error_obj, headers
+
+
+def _fail(exc: client.UpstreamError, *,
+          notes: dict | None = None) -> JSONResponse:
     """把**上游账号侧**的失败翻译成客户端能看懂的错误。
 
     ## 为什么不能把 401 原样透出去（2026-11-16 用户实测踩坑）
@@ -114,6 +219,17 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
         status = 502
     code = exc.code or "upstream_error"
     message = exc.message
+    # ------------------------------------------------------------------
+    # 额度族 / 上游内部错误（3000100 / 1000007 / 3000001 / 5100007）
+    # ------------------------------------------------------------------
+    #
+    # 先判掉这几种 kind：它们与下面 signer / content_block / risk_control /
+    # auth 的分支互斥，放在这里能保证那几条既有分类一个字都不动。
+    quota = _error_payload(exc, notes)
+    if quota is not None:
+        q_status, q_obj, q_headers = quota
+        return JSONResponse({"error": q_obj}, status_code=q_status,
+                            headers=q_headers or None)
     # ------------------------------------------------------------------
     # 签名器不可用（fail-closed）—— **请求根本没发出去**
     # ------------------------------------------------------------------
@@ -1246,6 +1362,39 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             % (len(risk_cooling), "、".join(str(i) for i in risk_ids[:8])),
             kind="upstream_risk_control", code="risk_control_cooling",
             headers={"Retry-After": "600"})
+    # **额度耗尽 ≠ 冷却**（2026-11-18 事故的直接放大器）。
+    #
+    # 上游 3000001 是**账号级**总额度用尽：几个号的日额度可以同时打满，
+    # 凭证、登录态、风控全部正常，只有钱包是 0。选号用的是 `min_balance=0`
+    # （余额 0 的号全部被滤掉）⇒ 一个号都选不到，走到这里被报成
+    # 503「都在冷却或排队中，请稍后重试」。
+    #
+    # 那句话把用户送去「等冷却到期」，而冷却永远不会到期 —— 真正要等的是
+    # **上游每日 00:00(+08) 的配额重置**（长则十几小时），或者加号。
+    # 两种结局完全不同，必须分开报：一个是「几分钟后就好」，一个是「等重置」。
+    #
+    # 判据只看 `alive`：active 且余额 <= 0 的号算「没配额」；NULL（从没同步过
+    # 余额）不计入 —— 未知不等于耗尽，那种情况仍按冷却重试。
+    zero = [r for r in alive
+            if getattr(r, "balance_remain", None) is not None
+            and int(getattr(r, "balance_remain", 0) or 0) <= 0]
+    if alive and len(zero) == len(alive):
+        logger.warning(
+            "Marvis 额度已耗尽 realm=%s model=%s active=%d 余额全为 0"
+            "（上游 3000001：等待 00:00+08 配额重置）",
+            realm, model or "-", len(alive))
+        # 走 `client.UpstreamError` 而不是 `shared.PlatformRejected`：只有前者
+        # 会经过 `_fail()` / `_error_payload()`，错误体才能带上 family /
+        # upstream_code 两个字段（PlatformRejected.openai() 只出 type/message/code）。
+        raise client.UpstreamError(
+            "Marvis 账号额度已耗尽（上游 3000001 用户名下token不足）："
+            "上游每日 00:00(+08) 为各账号重置额度，请等待重置或在控制台加号",
+            status=402, code="quota_exhausted", kind="quota_exceeded",
+            # detail 保持上游错误体的形状：`_error_payload()` 用
+            # `client._biz_code_of()` 从这里抠业务码，抠不到 `upstream_code`
+            # 字段就丢了（而它正是排障时要与上游工单对齐的那一列）。
+            detail='{"code":3000001,"msg":"用户名下token不足；'
+                   '等待上游 00:00(+08) 配额重置"}')
     if alive:
         raise shared.PlatformRejected(
             503, "Marvis 账号都在冷却或排队中，请稍后重试",

@@ -237,6 +237,8 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
 !tests/test_marvis_input_cleared.py
+# ===== PR-01 biz-code families: family marker + 402 quota_exhausted =====
+!tests/test_marvis_error_surface.py
 
 # ===== Marvis uskey 免客户端方案（2026-11-18）=====
 # 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不出 uskey，
