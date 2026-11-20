@@ -17,6 +17,7 @@
 反解而来（字面量规则反解 re.escape，正则规则按空白 / 可选项归一），规则一改，
 样例跟着变。
 """
+import json
 import logging
 import os
 import re
@@ -244,6 +245,243 @@ class LoggingTests(unittest.TestCase):
         finally:
             log.removeHandler(handler)
         self.assertEqual([r for r in records if "指纹改写" in r.getMessage()], [])
+
+
+class IdentityLineTests(unittest.TestCase):
+    """首行身份句兜底改写（2026-11-17 实测：Claude Code / Codex 全量 403）。
+
+    ## 这一组的由来
+
+    上游只凭**第一条非空行的 `You are <产品名>`** 就回 403 / 4100406，而
+    Claude Code 与 Codex 的身份句正好是这个形态。原来的 7 条逐句规则拦不住
+    新措辞（客户端改一个字就失效），而且其中两条的替换值**本身也被拦**。
+
+    所以这一组锁的是**形态**而不是某一句原文：
+
+      · 首行 `You are` → `You're`（大小写、缩进、前导空行都要覆盖）；
+      · 非首行不动（上游只看首行，动它等于篡改用户 prompt）；
+      · user 角色不动（上游不查 user）；
+      · `developer` 角色必须动（Codex 的身份句就放这儿）。
+    """
+
+    def setUp(self):
+        self._env_backup = os.environ.get(marvis_gateway.SANITIZE_TENCENT_ENV)
+        os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+
+    def tearDown(self):
+        if self._env_backup is None:
+            os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+        else:
+            os.environ[marvis_gateway.SANITIZE_TENCENT_ENV] = self._env_backup
+
+    @staticmethod
+    def _first_line_clean(text):
+        """业务判据：第一条非空行不能再以 `you are` 起句。"""
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            return not re.match(r"^[ \t]*you[ \t]+are[ \t]+", line, re.I)
+        return True
+
+    def test_client_identity_sentences_are_neutralised(self):
+        """各个客户端真实在发的身份句，改写后首行都不能再是 `You are`。"""
+        for name, sentence in (
+                ("claude-code", "You are Claude Code, Anthropic's official CLI for Claude."),
+                ("claude-agent-sdk",
+                 "You are a Claude agent, built on Anthropic's Claude Agent SDK."),
+                ("codex",
+                 "You are a coding agent running in the Codex CLI, a terminal-based coding agent."),
+                ("legacy-anthropic", "You are Claude Code."),
+                ("codex-plain", "You are Codex.")):
+            with self.subTest(client=name):
+                out, hits = marvis_gateway.rewrite_tencent_fingerprints(sentence)
+                self.assertEqual(hits, 1)
+                self.assertNotEqual(out, sentence)
+                self.assertTrue(self._first_line_clean(out), out)
+                self.assertIn("You're", out)
+
+    def test_case_and_whitespace_shapes(self):
+        """上游大小写不敏感、会跳过前导空白 —— 这几种形态都要改。"""
+        for variant in ("You are Claude Code.",
+                        "you are claude code.",
+                        "YOU ARE CLAUDE CODE.",
+                        "You  are  Claude Code.",
+                        "  You are Claude Code.",
+                        "\nYou are Claude Code.",
+                        "\n\n   You are Claude Code."):
+            with self.subTest(variant=variant):
+                out, hits = marvis_gateway.rewrite_tencent_fingerprints(variant)
+                self.assertEqual(hits, 1, variant)
+                self.assertTrue(self._first_line_clean(out), out)
+
+    def test_rewrite_is_idempotent(self):
+        """重复改写不再变（重试 / 多入口串联都安全）。"""
+        once, _ = marvis_gateway.rewrite_tencent_fingerprints("You are Claude Code.")
+        twice, hits = marvis_gateway.rewrite_tencent_fingerprints(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(hits, 0)
+        self.assertIs(twice, once)
+
+    def test_only_first_non_empty_line_is_touched(self):
+        """首行不是身份句时整段不动 —— 上游也只查首行。"""
+        for text in ("Preamble line.\nYou are Claude Code.",
+                     "Preamble.\n\nYou are a Claude agent."):
+            with self.subTest(text=text):
+                out, hits = marvis_gateway.rewrite_tencent_fingerprints(text)
+                self.assertIs(out, text)
+                self.assertEqual(hits, 0)
+
+    def test_markdown_prefixed_identity_is_left_alone(self):
+        """`# You are ...` 实测放行，没有理由去改用户的标题行。"""
+        for text in ("# You are Claude Code.", "- You are Claude Code."):
+            with self.subTest(text=text):
+                out, hits = marvis_gateway.rewrite_tencent_fingerprints(text)
+                self.assertIs(out, text)
+                self.assertEqual(hits, 0)
+
+    def test_developer_role_is_rewritten(self):
+        """Codex 把身份句放在 developer 段；只改 system 等于 Codex 全量 403。"""
+        body = {"model": "x", "messages": [
+            {"role": "developer", "content": "You are a coding agent running in the Codex CLI."},
+            {"role": "system", "content": "You are Claude Code."},
+            {"role": "user", "content": "You are Claude Code."},
+        ]}
+        out = marvis_gateway._prepare_body(body, "main-auto")
+        self.assertTrue(self._first_line_clean(out["messages"][0]["content"]))
+        self.assertTrue(self._first_line_clean(out["messages"][1]["content"]))
+        # user 角色上游不查，必须逐字不动
+        self.assertEqual(out["messages"][2]["content"], "You are Claude Code.")
+        self.assertIs(out["messages"][2], body["messages"][2])
+
+
+class ContentBlockClassificationTests(unittest.TestCase):
+    """`4100406` 必须归成 content_block，不能混进 signature_invalid。
+
+    混错的后果不是文案问题，是**换号语义错**：403 在 `_attempt` 里不 break，
+    同一条被拦的提示词会把三个好号依次撞一遍、每个号记一次失败 ——
+    用户看到「号全坏了」，而号一个都没坏。
+    """
+
+    def test_content_block_is_distinguished(self):
+        classify = marvis_gateway.client._classify
+        cases = {
+            '{"code":4100406,"msg":"非法请求"}': "content_block",
+            '{"code":4100404,"msg":"risk"}': "risk_control",
+            "": "signature_invalid",
+        }
+        for payload, expected in cases.items():
+            with self.subTest(payload=payload):
+                self.assertEqual(classify(403, payload), expected)
+
+    def test_content_block_returns_actionable_400(self):
+        """403 会被 Claude Code / Codex 渲染成「API 密钥无效」，必须换成 400。"""
+        exc = marvis_gateway.client.UpstreamError(
+            "模型网关失败（HTTP 403）", status=403, code="403",
+            kind="content_block", detail='{"code":4100406,"msg":"非法请求"}')
+        response = marvis_gateway._fail(exc)
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.body.decode("utf-8"))
+        error = payload["error"]
+        self.assertEqual(error["type"], "content_filter")
+        self.assertEqual(error["code"], "content_blocked")
+        # 不能让上层以为要换号 / 换 Key
+        self.assertFalse(error["upstream_account"])
+        self.assertIn("4100406", error["message"])
+
+
+class RiskControlTests(unittest.TestCase):
+    """设备 / IP 风控（4100404）与内容风控（4100406）是**两件完全不同的事**。
+
+    ## 为什么必须锁住（2026-11-17 用户实测）
+
+    两者都回 403，以前共用一条处理路径，后果是把「平台封了出口」说成
+    「你的提示词有问题」。用户按提示去改提示词，怎么改都没用 —— 实测
+    **连最简请求都过不了**：
+
+        {"model":"main-auto","messages":[{"role":"user","content":"hi"}]}
+        -> 403 {"code":4100404,"msg":"客户端通用错误:请求被风控拦截"}
+
+    而同一份凭证的钱包接口 `/v3/marvis_get_wallet` 回 200（余额正常）。
+    ⇒ 号没坏、key 没坏，是出口 IP / 设备画像被平台拦。
+
+    另一个更隐蔽的坑：风控以前**不 break**，一条请求会把池子里所有号
+    依次撞一遍、每个号吃 600 秒冷却 —— 4 个号撞满就是全池冷却，
+    之后哪怕风控解除，网关自己也回 `503 accounts_cooling` 把请求挡在门外。
+    """
+
+    def test_risk_control_is_not_content_block(self):
+        classify = marvis_gateway.client._classify
+        self.assertEqual(
+            classify(403, '{"code":4100404,"msg":"客户端通用错误:请求被风控拦截"}'),
+            "risk_control")
+        self.assertEqual(classify(403, '{"code":4100406,"msg":"非法请求"}'),
+                         "content_block")
+
+    def test_risk_control_returns_429_with_retry_after(self):
+        """必须是 429 + Retry-After：403 会被客户端当成「API 密钥无效」。"""
+        exc = marvis_gateway.client.UpstreamError(
+            "模型网关失败（HTTP 403）", status=403, code="403",
+            kind="risk_control",
+            detail='{"code":4100404,"msg":"客户端通用错误:请求被风控拦截"}')
+        response = marvis_gateway._fail(exc)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers.get("retry-after"), "600")
+        error = json.loads(response.body.decode("utf-8"))["error"]
+        self.assertEqual(error["type"], "upstream_risk_control")
+        self.assertEqual(error["code"], "risk_control")
+        # 不能让上层去 failover 换号（换号 100% 无效）
+        self.assertFalse(error["upstream_account"])
+        # 文案必须指向「出口 IP」，而不是提示词 / 账号
+        self.assertIn("出口", error["message"])
+        self.assertIn("4100404", error["message"])
+
+    def test_risk_control_stops_retry_and_spares_other_accounts(self):
+        """命中风控**立刻停**：不换号、只记当前号一次、冷却 60 秒。"""
+        import datetime as _dt
+        from unittest.mock import MagicMock, patch
+
+        account = MagicMock()
+        account.id = 404
+        account.uid = "uid-404"
+        account.cool_until = None
+        account.cool_kind = ""
+        account.balance_total = 10000000
+        account.balance_remain = 8000000
+
+        other = MagicMock()
+        other.id = 411
+
+        calls = {"selected": 0}
+
+        def fake_select(db, **kwargs):
+            calls["selected"] += 1
+            return account if calls["selected"] == 1 else other
+
+        risk = marvis_gateway.client.UpstreamError(
+            "模型网关失败（HTTP 403）", status=403, code="403",
+            kind="risk_control",
+            detail='{"code":4100404,"msg":"请求被风控拦截"}')
+
+        with patch.object(marvis_gateway.shared, "select_account", fake_select), \
+                patch.object(marvis_gateway.shared, "lease", return_value=True), \
+                patch.object(marvis_gateway.shared, "release"), \
+                patch.object(marvis_gateway.shared, "note_success"), \
+                patch.object(marvis_gateway.shared, "note_failure") as note_failure, \
+                patch.object(marvis_gateway.marvis_accounts, "ensure_token",
+                             return_value={}), \
+                patch.object(marvis_gateway.client, "chat_completions",
+                             side_effect=risk):
+            with self.assertRaises(marvis_gateway.client.UpstreamError):
+                marvis_gateway._attempt(None, None, None, {"model": "main-auto"},
+                                        "cn", stream=False)
+
+        # 只撞了一个号就停 —— 不许把池子里的号依次撞一遍
+        self.assertEqual(calls["selected"], 1,
+                         "风控后仍然继续换号，会把全池撞进冷却")
+        self.assertEqual(note_failure.call_count, 1)
+        kwargs = note_failure.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "risk_control")
+        self.assertEqual(kwargs["cool_seconds"], 60)
 
 
 class NoRegressionTests(unittest.TestCase):
