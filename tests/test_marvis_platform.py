@@ -89,7 +89,8 @@ class LlmHeaderTests(unittest.TestCase):
         self.assertNotIn(" ", ext, "含空格会被判无效")
         parsed = json.loads(ext)
         self.assertEqual(parsed["guid"], ACCT["guid"])
-        self.assertEqual(parsed["reqScene"], 1)
+        # 真机是 0（此前发 1，锚错了一个枚举值）
+        self.assertEqual(parsed["reqScene"], 0)
         self.assertEqual(parsed["taskType"], "user")
         self.assertIs(parsed["isIoa"], False)
 

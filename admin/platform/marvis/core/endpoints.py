@@ -36,6 +36,7 @@ import random
 import time
 import uuid
 
+from . import uskey
 from . import uskey_cache
 from . import uskey_signer
 
@@ -87,7 +88,11 @@ BROWSER_UA = (
     "Electron/44.7.0 Safari/537.36"
 )
 
-#: 客户端版本，随 `Ual-Access-MarvisExt` 上报。
+#: 客户端版本 —— 用于 uskey 缓存分桶（见 `uskey_identity()`）。
+#:
+#: ⚠ `Ual-Access-MarvisExt` 里上报的 `clientVersion` 不是这个值，
+#: 而是 `EXT_CLIENT_VERSION`（真客户端抓包实测的 .795）；两者差一个小版本，
+#: 混用等于自报「另一台机器」。
 #:
 #: ## 为什么是常量、不探测本机客户端（2026-11-18）
 #:
@@ -121,8 +126,34 @@ def _detect_client_version() -> str:
 
 CLIENT_VERSION = _detect_client_version()
 
-#: 登录方式 → `Ual-Access-Login-Type`
+#: 登录方式 → `Ual-Access-Login-Type`（`/v3/*` 业务接口用这一组）
 LOGIN_TYPE = {"QC": "1", "WX": "2", "WXAPP": "2"}
+
+#: 模型网关（`/v1/chat/completions`）的 `Ual-Access-Login-Type`。
+#:
+#: 真客户端 200 抓包实测发的是 **6**，不是 QC→1 / WX→2 —— 这一处不对，上游按
+#: 「设备登录态不可信」直接 4100404，且与请求体无关。业务接口不走这个值
+#: （`/v3/*` 那边没有 6 的证据），所以两个入口分开取。
+#:
+#: 改的是所有模型网关请求的默认值，故留 `MARVIS_LOGIN_TYPE_LLM` 覆盖点：
+#: 上游换口径时改环境变量就能回退，不用动代码。
+LOGIN_TYPE_LLM = os.environ.get("MARVIS_LOGIN_TYPE_LLM") or "6"
+
+
+def login_type_header(acct: dict) -> str:
+    """`Ual-Access-Login-Type` 的取值：DB 里的登录方式 → 客户端实际发的数字。
+
+    DB 存的是 `QC` / `WX`，header 必须发 `1` / `2` —— 直接透传
+    `QC` 会被上游判参数无效（最终表现为 4100404）。已经是数字的原样透传，
+    空值按 `1` 兜底。
+    """
+    raw = str(acct.get("login_type") or "").strip().upper()
+    if raw in LOGIN_TYPE:
+        return LOGIN_TYPE[raw]
+    if raw.isdigit():
+        return raw
+    return "1"
+
 
 # ---- 路径 ----
 CHAT_PATH = "/v1/chat/completions"
@@ -483,6 +514,34 @@ def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
             "client_version": version, "cached": False}
 
 
+#: `Ual-Access-MarvisExt` 上报的客户端标识 —— 这一组是对着真客户端 200 抓包
+#: 逐项对齐过的值，改任何一个都必须重新实测。
+#:
+#: 2026-11-18 抓包对照：osVersion 真机是 .29695（此前发 .26200，差一个大版本，
+#: 等于自报「另一台机器」）；reqScene 真机是 0；真机还带 clientPlatform /
+#: clientPlatformVersion 两个键 —— 少了它们等于只报了半台机器。
+EXT_OS_VERSION = "Windows-10-10.0.29695"
+EXT_CLIENT_VERSION = "1.60.3400.795"
+EXT_CLIENT_PLATFORM = "Windows"
+EXT_CLIENT_PLATFORM_VERSION = "1.60.3400.35"
+EXT_REQ_SCENE = 0
+EXT_TASK_TYPE = "user"
+
+
+def ext_qimei36() -> str:
+    """`Ual-Access-MarvisExt` 里的设备串 —— **只认**上游 `uskey.qimei36()`。
+
+    上游 `uskey.qimei36()` 是**无参**的，设备串只有一个来源：部署方通过
+    `MARVIS_QIMEI36` 显式提供的 36 个 hex。**不要**按账号派生 —— 按号派生会让
+    同一个账号在不同节点上报不同设备，等于自报「设备簇异常」，正是 4100404 的
+    触发面。取不到时返回空串，调用方**不写这个键**，绝不编一个值。
+    """
+    try:
+        return uskey.qimei36()
+    except ValueError:
+        return ""
+
+
 def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
                conversation_id: str = "", response_id: str = "",
                model: str = "", busiid: str = USKEY_BUSIID,
@@ -495,6 +554,11 @@ def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
     ⚠ 请求头里的 `Marvis-Conversation-ID` / `Marvis-Response-ID` 必须
     取自**同一个 identity**，否则 uskey 与头对不上会 403 —— 见
     `uskey_identity()` 的说明。
+
+    键序照真客户端 200 抓包：qimei36 → osVersion → guid → uskey → nonce →
+    reqScene(0) → taskType → clientVersion → clientPlatform →
+    clientPlatformVersion → isIoa。`json.dumps` 保持插入序，不要加 sort_keys
+    —— 服务端按原文比对。
     """
     ident = identity or uskey_identity(
         acct, scene=scene, agent_tag=agent_tag,
@@ -502,15 +566,23 @@ def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
         model=model, busiid=busiid,
     )
     payload = {
-        "osVersion": "Windows-10-10.0.26200",
+        "osVersion": EXT_OS_VERSION,
         "guid": str(acct.get("guid") or ""),
         "uskey": ident["uskey"],
         "nonce": ident["nonce"],
-        "reqScene": 1,
-        "taskType": "user",
-        "clientVersion": ident["client_version"],
+        "reqScene": EXT_REQ_SCENE,
+        "taskType": EXT_TASK_TYPE,
+        "clientVersion": EXT_CLIENT_VERSION,
+        "clientPlatform": EXT_CLIENT_PLATFORM,
+        "clientPlatformVersion": EXT_CLIENT_PLATFORM_VERSION,
         "isIoa": False,
     }
+    # 设备串写在最前面 —— 真机键序是 qimei36 → osVersion → guid → …。
+    # 取不到就不写这个键：签名器自己会往 TLV 里带设备串，header 里多写一个猜的
+    # 值只会造成「两处不一致」。
+    device = ext_qimei36()
+    if device:
+        payload = {"qimei36": device, **payload}
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -555,7 +627,7 @@ def llm_headers(acct: dict, *, scene: str = "agent_chat",
     )
     conversation_id = ident["conversation_id"]
     response_id = ident["response_id"]
-    return {
+    headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "User-Agent": CLIENT_UA,
@@ -570,16 +642,23 @@ def llm_headers(acct: dict, *, scene: str = "agent_chat",
         "Authorization": "Bearer placeholder",
         "Ual-Access-Openid": str(acct.get("openid") or ""),
         "Ual-Access-Access-Token": str(acct.get("access_token") or ""),
-        "Ual-Access-Login-Type": str(acct.get("login_type") or "1"),
+        "Ual-Access-Login-Type": LOGIN_TYPE_LLM,
         "Ual-Access-Guid": str(acct.get("guid") or ""),
         "Marvis-AgentTag": agent_tag,
         "Marvis-Conversation-ID": conversation_id,
         "Marvis-Response-ID": response_id,
         "Marvis-Scene": scene,
+        # 真客户端 200 抓包里这个头恒等于 Marvis-Response-ID（同一个 uuid），
+        # 缺了它上游判「请求没带请求 id」→ 4100404。
+        "Ual-Access-Requestid": response_id,
         "Marvis-Protocol-Version": "1000",
         "X-Device-GUID": str(acct.get("guid") or ""),
         "Ual-Access-MarvisExt": marvis_ext(acct, identity=ident),
     }
+    # 真客户端这两者恒等；同一个 rid 已经进了 bus_info 的 marvisResponseID，
+    # header 与 uskey 一旦不同源，上游用 nonce 复核立刻失效（403 4100404）。
+    assert headers["Ual-Access-Requestid"] == headers["Marvis-Response-ID"] == response_id
+    return headers
 
 
 def ual_signature(query: str, timestamp: str, nonce: str) -> str:
@@ -606,7 +685,7 @@ def business_headers(acct: dict, *, query: str, method: str = "GET") -> dict:
         "Ual-Access-Signature": ual_signature(query, timestamp, nonce),
         "Ual-Access-Guid": str(acct.get("guid") or ""),
         "Ual-Access-Access-Token": str(acct.get("access_token") or ""),
-        "Ual-Access-Login-Type": str(acct.get("login_type") or "1"),
+        "Ual-Access-Login-Type": login_type_header(acct),
         "Ual-Access-Openid": str(acct.get("openid") or ""),
     }
 
