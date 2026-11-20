@@ -173,6 +173,7 @@ tests/*
 !tests/test_anthropic_tool_result_image.py
 !tests/test_marvis_content_fingerprint.py
 !tests/test_marvis_egress_pool.py
+!tests/test_marvis_qimei_assign.py
 !tests/test_raccoon_quota_classification.py
 !tests/test_platform_rating.py
 scripts/build_trae_catalog.py

@@ -12,18 +12,28 @@
 （排障 / 对照实验）设 `MARVIS_USKEY_FORCE_SIDECAR=1`。
 
 历史坑（别再踩）：当年手工拼 `magic + F(bus_info) + 随机尾` 100% 撞
-风控错误，是因为 TLV 里还有 md5(bus_info)、两处设备串、15 字节进程常量
+`4100404`，是因为 TLV 里还有 md5(bus_info)、两处 qimei36、15 字节进程常量
 和 TEA/异或/AES 三层；**不是**"必须由 SDK 出"。现在三层都在
 `uskey_local.py` 里，且偏移有校准常量（`OFF_*`），别手调。
+
+## 侧车能当降级路径的证据（结论，不含设备串）
+
+侧车产出的 uskey 比真机短（字符数与字节数都少），它自报的设备串也不是真机
+采集来的；这组「短一截 + 非真机设备串」直打 `/v1/chat/completions`
+**上游照样 200**。
+⇒ 服务端认的是「uskey 内部自洽 + bus_info 与 header 一致」，**不是**某个
+特定的真机指纹。推论：设备串只要是结构合法、组内自洽的 36 hex 就能用；
+反过来说，**多账号共用一个设备串**才是真问题（见下）。
 
 ## 铁律
 
 * 本地 mint 失败**才**回落侧车；两条都失败就抛 `SidecarError`，
-  **绝不**退化成随机 uskey —— 那会把「签名不可用」伪装成「上游风控」，
-  让排障方向整体跑偏。
-* 每组 `(cid, rid, nonce, uskey)` 只能用一次；被拒后必须**整组换新**再试。
+  **绝不**退化成随机 uskey —— 那会把「签名不可用」变成「4100404 风控」，
+  还会把风控计数算到账号头上。
+* 每组 `(cid, rid, nonce, uskey)` 只能用一次；撞 4100404 必须**整组换新**。
 * `qimei36` 必须与签这块 uskey 时用的那串**完全一致**（它写进 TLV 两处）；
-  来源是环境变量 `MARVIS_QIMEI36`（见 `qimei36()`）。
+  默认按账号派生（见 `qimei_for()`），要指定真值设 `MARVIS_QIMEI36`
+  或放到 `QIMEI_TABLE_PATH` 指向的表里。
 """
 from __future__ import annotations
 
@@ -55,13 +65,38 @@ BUSINESS_ID = "7800255"
 #: uskey 的 base64 头（= magic `0ac0d50c2111` 的前 8 字符）。只做体检。
 USKEY_HEAD = "CsDVDCE"
 
-#: 设备串（36 hex 字符 = 18 字节）**必须由调用方提供**。
-#: 本模块不生成、不派生、不猜它 —— 它就是上游协议要求的一个输入。
+#: qimei36 派生：每个账号一台"虚拟设备"。
+#:
+#: 2026-11-18 事故：网关曾用同一个**真机** qimei36 常量给 8 个账号签名，
+#: 8 个不同 guid 共用一个 qimei => 上游把这台"设备"整体标记，连真客户端
+#: 一起 4100404。真机常量已删除，**不要把它写回代码**。
+#:
+#: 形态（由若干真实样本逆出，样本值一律不入库）：
+#:   字符 0-23   (字节 0-11 ) 12 字节设备摘要，随环境变
+#:   字符 24-27  (字节 12-13) '3000' —— 跨环境恒定，是**格式标记**，不是数据
+#:   字符 28-35  (字节 14-17) 4 字节尾段，可变
+#:   <24 hex 摘要> | 3000 | <8 hex 尾段>
+#: 旧实现是 md5()[:34] + 固定尾段：'3000' 格式标记被冲掉（只有 1/65536 概率
+#: 撞上），且 N 个账号尾段完全相同 —— 格式非法 + 尾段聚簇，等于自报"假的"。
+#:
+#: 现在：sha256(DEVICE_TAG + 账号标识) 铺成 24hex + '3000' + 8hex。
+#: 同一账号永远同一串，不同账号必然不同串，且结构合法。
+#:
+#: `DEVICE_TAG` 可用 `MARVIS_QIMEI_DEVICE_TAG` 覆盖：同一份代码在不同部署里
+#: 应该派生出**互不相干**的设备串，否则「这个部署派生成什么样」本身就成了
+#: 可跨站关联的特征。
+DEVICE_TAG = (os.environ.get("MARVIS_QIMEI_DEVICE_TAG") or "mh-qimei:")
+#: 字符 24-27 的格式标记：真实样本全带，缺了就不是合法 qimei36。
+DEVICE_MARK = "3000"
 
 #: 字节下限 = 真品口径 **376**（504 字符 base64）。
 #:
-#: 任何短包都是 bug，在本地拦死，不要发到上游。
-#: 排障时可临时用 MARVIS_USKEY_MIN_BYTES 覆盖。
+#: 历史：300 → 240 是因为侧车漂移出 264 字节的包，打过去居然 200，
+#: 于是把阈值降下来"放行"。2026-11-18 真客户端 200 抓包证明真品是 376 字节，
+#: 264 那版是「旧形态 + 仿的身份」（SDK 1.0.0.0 / node.exe / Not Specified、
+#: 没有 320 字节业务 TLV），后来上游收紧即全线 4100404。
+#: 现在本地 mint 只会产出 376，任何短包都是 bug，必须**在本地拦死**，
+#: 别拿 403 去污染号池。要临时放行用 MARVIS_USKEY_MIN_BYTES 覆盖。
 USKEY_MIN_BYTES = int(os.environ.get("MARVIS_USKEY_MIN_BYTES") or 376)
 
 
@@ -122,8 +157,9 @@ def _validate(payload: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise SidecarError("侧车返回的 uskey 不是合法 base64") from exc
     if len(raw) < USKEY_MIN_BYTES:
-        raise SidecarError("侧车返回的 uskey 太短（%d 字节 < %d；uskeyLen=%d）"
-                           % (len(raw), USKEY_MIN_BYTES, len(uskey)))
+        raise SidecarError(
+            "侧车返回的 uskey 太短（%d 字节 < %d；uskeyLen=%d qimei36=%s…）"
+            % (len(raw), USKEY_MIN_BYTES, len(uskey), qimei36[:8]))
     if not uskey.startswith(USKEY_HEAD):
         # 不硬失败：magic 变了说明 SDK 换了版本，记一笔就够。
         logger.warning("uskey 头不是预期的 %s：前 8 字符 %s",
@@ -170,48 +206,69 @@ def _http_sign(**kwargs) -> dict:
     return _validate(payload)
 
 
+def qimei_for(account_key: str) -> str:
+    """按账号派生**结构合法**的 qimei36：24hex 摘要 + '3000' + 8hex 尾段。
 
-
-
-
-def qimei36() -> str:
-    """取设备串。**必须由调用方通过环境变量提供**，本模块不生成。
-
-    它写进 uskey 的 TLV 两处（OFF_QIMEI1 / OFF_QIMEI2），并且必须与
-    header 里的同名字段完全一致 —— 三处同值。
-
-    未提供时直接报错：绝不回退到任何硬编码值。
+    同一账号恒定，不同账号互不相同。⚠ 这**不是**真机 qimei：真机值由厂商 SDK
+    采集整台设备向量后向服务端注册得到（具体采集字段与注册路径不在本仓库）。
+    这里只是**格式合法**的占位值 —— 它能让一块 uskey 内部自洽，但拿它当
+    「这台设备的身份」是自欺：只换摘要不换源数据，本身就是"自相矛盾"信号。
     """
-    value = (os.environ.get('MARVIS_QIMEI36') or '').strip()
-    if not value:
-        raise ValueError(
-            '未设置 MARVIS_QIMEI36：设备串必须由调用方提供（36 个 hex 字符）')
-    if len(value) != 36:
-        raise ValueError(
-            'MARVIS_QIMEI36 长度必须是 36，实际 %d：%r' % (len(value), value))
-    try:
-        bytes.fromhex(value)
-    except ValueError:
-        raise ValueError('MARVIS_QIMEI36 必须是纯 hex 字符：%r' % value)
+    h = hashlib.sha256((DEVICE_TAG + str(account_key)).encode('utf-8')).hexdigest()
+    value = h[:24] + DEVICE_MARK + h[24:32]
+    if len(value) != 36 or value[24:28] != DEVICE_MARK:
+        # 只在 DEVICE_TAG / DEVICE_MARK 被改坏时才会到这里：宁可炸，也别把
+        # 结构非法的串发到上游（那会被记成「这个号的设备指纹坏了」）。
+        raise ValueError("派生出的 qimei36 结构非法：%d 位" % len(value))
     return value
 
 
-def _local_sign(**kwargs) -> dict:
+def account_key_of(acct) -> str:
+    """账号记录 -> 设备派生键：优先 uid，其次 id，最后 openid。"""
+    acct = acct or {}
+    for field in ('uid', 'id', 'openid'):
+        value = str(acct.get(field) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def qimei36(account_key: str = '') -> str:
+    """本地签名用的设备串：MARVIS_QIMEI36 > 按账号派生。
+
+    这串必须与 header 的 Ual-Access-MarvisExt.qimei36 以及 TLV 里两处
+    （OFF_QIMEI1 / OFF_QIMEI2）完全一致，所以只有这一个来源。
+
+    没有账号标识时**直接报错**：绝不回退到共享常量 —— 多账号共用一个
+    qimei 正是 2026-11-18 设备簇被上游整体标记的原因。
+    """
+    value = (os.environ.get('MARVIS_QIMEI36') or '').strip()
+    if len(value) == 36:
+        return value
+    key = str(account_key or '').strip()
+    if key:
+        return qimei_for(key)
+    raise ValueError(
+        'qimei36 需要账号标识：设备串必须按账号派生，不允许使用共享常量')
+
+
+def _local_sign(*, device_key: str = '', **kwargs) -> dict:
     """纯本地 mint 一块 uskey（两次系统调用：urandom + 时间戳，不碰网络）。
 
     算法、偏移、常量全部在 `core/uskey_local.py`；这里只负责把 bus_info 拼对、
-    取设备串（`qimei36()`，来自环境变量），并复用 :func:`_validate` 的字节下限体检。
+    把 `qimei36` 带出去，并复用 :func:`_validate` 的字节下限体检。
     """
     from .uskey_local import mint_uskey
     info = bus_info(**kwargs)
-    device = qimei36()
+    device = qimei36(device_key)
     value = mint_uskey(device, info, os.urandom(18))
     return _validate({"uskey": value, "qimei36": device,
                       "busInfo": info, "ms": 0})
 
 
 def sign(*, agent_tag: str, conversation_id: str, response_id: str,
-         scene: str, model: str, nonce: str, openid: str) -> dict:
+         scene: str, model: str, nonce: str, openid: str,
+         account_key: str = '') -> dict:
     """取一块 uskey：**本地 mint 优先**，失败才回落侧车。
 
     返回值：`{"uskey", "qimei36", "uskey_len", "uskey_bytes", "bus_info", "ms"}`。
@@ -229,9 +286,9 @@ def sign(*, agent_tag: str, conversation_id: str, response_id: str,
     if os.environ.get("MARVIS_USKEY_FORCE_SIDECAR") == "1":
         return _http_sign(**kwargs)
     try:
-        return _local_sign(**kwargs)
+        return _local_sign(device_key=account_key, **kwargs)
     except ValueError:
-        # 配置类错误（比如没给设备串）不是「侧车挂了」，直接抛，别掩盖真因。
+        # 配置类错误（没给账号标识之类）不是「本地 mint 挂了」，直接抛，别掩盖真因。
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("本地 mint uskey 失败，回落侧车（%s）：%s",
@@ -248,3 +305,79 @@ def health(timeout: float = 2.0) -> dict:
             return json.loads(resp.read().decode("utf-8", "replace") or "{}")
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:300], "url": url}
+
+
+
+# --- qimei 真值表（可选 override） ---
+#: 「真机 qimei」表：uid -> 36 hex。**表本身属部署数据，仓库不带**，只提交
+#: `qimei_table.example.json` 说明形态。
+#: 来源优先级：`QIMEI_TABLE_PATH` > 模块同目录 `qimei_table.json`（存在才读）
+#: > 空表（全走派生）。
+_QIMEI_TABLE_CACHE = None
+
+
+def qimei_table_path() -> str:
+    """真值表文件路径（env 优先）。空/缺文件都等于「没有真值」。"""
+    env = (os.environ.get("QIMEI_TABLE_PATH") or "").strip()
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "qimei_table.json")
+
+
+def _read_table_file(path: str) -> dict:
+    """裸读表文件（只做形态归一化）；文件不存在 = 空表，不刷警告。"""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        logger.debug("qimei 真值表不存在（全走派生）：%s", path)
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qimei 真值表加载失败（全走派生）：%s", exc)
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("qimei 真值表顶层不是对象（全走派生）：%s", path)
+        return {}
+    return {str(key).strip().upper(): str(value).strip()
+            for key, value in data.items() if str(value).strip()}
+
+
+def _qimei_table() -> dict:
+    """真值表读路径：优先经 qimei_assign 加载（顺带校验「2 号/台」硬约束）。
+
+    池台账不合法时 `QimeiPoolError` 必须往外抛 —— 那是硬约束被破坏，
+    不能当成「读表失败」吞掉，否则带病状态会一路跑下去。
+    """
+    global _QIMEI_TABLE_CACHE
+    if _QIMEI_TABLE_CACHE is None:
+        try:
+            from .qimei_assign import QimeiPoolError, load_state
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("qimei_assign 不可用，退回直接读表：%s", exc)
+            _QIMEI_TABLE_CACHE = _read_table_file(qimei_table_path())
+            return _QIMEI_TABLE_CACHE
+        try:
+            _QIMEI_TABLE_CACHE = dict(load_state().table)
+        except QimeiPoolError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("qimei 真值表加载失败（退回直接读表）：%s", exc)
+            _QIMEI_TABLE_CACHE = _read_table_file(qimei_table_path())
+        else:
+            logger.info("qimei 真值表已加载：%d 条（含 pool 归一化）",
+                        len(_QIMEI_TABLE_CACHE))
+    return _QIMEI_TABLE_CACHE
+
+
+_qimei_for_derived = qimei_for
+
+
+def qimei_for(account_key: str) -> str:
+    """优先用真值表里的设备串，没有才按账号派生（结构合法但非真机）。"""
+    key = str(account_key or "").strip().upper()
+    if key:
+        hit = _qimei_table().get(key)
+        if hit:
+            return hit
+    return _qimei_for_derived(str(account_key or ""))
