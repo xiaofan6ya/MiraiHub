@@ -263,16 +263,73 @@ def qimei36(account_key: str = '') -> str:
         'qimei36 需要账号标识：设备串必须按账号派生，不允许使用共享常量')
 
 
+#: dev18 稳定化开关（2026-11-20，默认 **1 = 启用**）。
+#:
+#: 设 0 回到「每请求随机」的旧行为，只为留一条对照实验的路。
+STABLE_DEV18_ENV = "MARVIS_USKEY_STABLE_DEV18"
+#: 认出「关」的写法；其余（含写错）一律按**开**处理 —— 写错不该静默关掉加固。
+_DEV18_OFF = frozenset({"0", "false", "no", "off", "disable", "disabled"})
+
+
+def stable_dev18_enabled() -> bool:
+    """`MARVIS_USKEY_STABLE_DEV18` 是否为开（缺省 = 开）。"""
+    raw = (os.environ.get(STABLE_DEV18_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in _DEV18_OFF
+
+
+def dev18_for(openid: str) -> bytes:
+    """本账号的**稳定** dev18（18 字节）。
+
+    ## 为什么必须稳定（2026-11-20「一开始好、很快死」的成因之一）
+
+        dev18 落在 uskey 明文头 `raw[6:24]` 并参与 keystream。以前每次签名都
+        `os.urandom(18)` ⇒ 同一个 qimei 下每请求都报**另一台设备**：上游看到的
+        是「一个设备串配无穷多个 dev18」，契约自相矛盾，几十次之后就被判死。
+        真 DLL 那条路的 dev18 是稳定的，所以作者自己没事。
+
+        `device.for_account(openid)` 本来就有稳定的每账号 dev18，只是没被用。
+        qimei36 的取源**不动**（仍是 `qimei36(device_key)`：真值表 > 派生），
+        所以这里只换 dev18 这一个维度，改动面最小、回滚只需一个 env。
+
+    取不到就**回落随机 + 一条 WARNING**，绝不抛：把「设备维度不稳」抛成
+    「签名器挂了」是另一种误判（上层会把它记成 signer_unavailable）。
+    """
+    if not stable_dev18_enabled():
+        return os.urandom(18)
+    key = str(openid or "").strip()
+    if not key:
+        logger.warning(
+            "MARVIS_USKEY_STABLE_DEV18 已启用但本次签名没有 openid，dev18 回落"
+            "随机（同一账号会报出多台设备）")
+        return os.urandom(18)
+    try:
+        from .device import for_account
+        value = for_account(key)[1]
+    except Exception as exc:  # noqa: BLE001 - 派生失败不是签名失败
+        logger.warning("device.for_account(%s…) 取稳定 dev18 失败，回落随机：%s",
+                       key[:8], exc)
+        return os.urandom(18)
+    if not isinstance(value, (bytes, bytearray)) or len(value) != 18:
+        logger.warning("device.for_account(%s…) 的 dev18 形态不对（%r），回落随机",
+                       key[:8], value)
+        return os.urandom(18)
+    return bytes(value)
+
+
 def _local_sign(*, device_key: str = '', **kwargs) -> dict:
-    """纯本地 mint 一块 uskey（两次系统调用：urandom + 时间戳，不碰网络）。
+    """纯本地 mint 一块 uskey（系统调用：时间戳；dev18 已改为按账号派生，不碰网络）。
 
     算法、偏移、常量全部在 `core/uskey_local.py`；这里只负责把 bus_info 拼对、
     把 `qimei36` 带出去，并复用 :func:`_validate` 的字节下限体检。
+
+    `dev18` 走 :func:`dev18_for`（按账号稳定，2026-11-20 起），不是每请求随机。
     """
     from .uskey_local import mint_uskey
     info = bus_info(**kwargs)
     device = qimei36(device_key)
-    value = mint_uskey(device, info, os.urandom(18))
+    value = mint_uskey(device, info, dev18_for(kwargs.get("openid") or ""))
     return _validate({"uskey": value, "qimei36": device,
                       "busInfo": info, "ms": 0})
 
