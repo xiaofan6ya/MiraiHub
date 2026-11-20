@@ -52,8 +52,16 @@ STORAGE = endpoints.PLATFORM
 MAX_ATTEMPTS = 4
 
 #: 各类失败的冷却秒数。`quota` 要长冷却（智点耗尽不会自己回血）。
+#:
+#: `permission` = 单号没有 agent 对话权限（403 PermissionDenied）。
+#: 冷却给足 1 小时：这类号重试一百次也是 403（实测换 model / client_type /
+#: mode / base 全无效），留在候选集里只会让每次请求多花 2 秒再失败。
 _COOL = {"auth": 900, "rate": 300, "quota": 3600, "network": 20,
-         "audit": 0, "fatal": 0, "upstream": 30}
+         "audit": 0, "fatal": 0, "upstream": 30, "permission": 3600}
+
+#: 不能换号重试的 kind（换号也没用，纯粹浪费上游调用）。
+#: `permission` **不在**这里 —— 它就是最典型的「换号就好」。
+_NO_ROTATE = ("audit", "fatal")
 
 _SENTINEL = object()
 
@@ -94,6 +102,27 @@ def _client_ip(request) -> str:
 
 
 def _fail(exc: client.UpstreamError) -> JSONResponse:
+    """把上游失败翻成客户端不会误读的错误。
+
+    ## 为什么 403 不能原样透出去（2026-11-18 用户实测踩坑）
+
+    上游 403 `PermissionDenied` 的意思是「**这个 WPS 号**没有 agent 对话
+    权限」。但 401/403 在所有 OpenAI 兼容客户端（Claude Code / Codex /
+    Cherry Studio / DSH）里都被渲染成 **「API 密钥无效」** ——
+    用户去翻自己的 Key、去重扫码、去换号，三个方向全是错的。
+
+    实测（acc=199 涤尘）：profile / plans / create_session / create_run
+    全 200，只有 chat/completions 403，换 model / client_type / mode /
+    base 全部 403。号是活的、Key 是好的，是这个号没被授权。
+
+    ## 映射规则
+
+      · `permission` → **503** + 明确文案。503 在客户端里是「服务暂时
+        不可用」，不会被当成 Key 错误；`upstream_account=True` 让上层
+        继续 failover 到下一个号（正常情况下换号就好了，用户看不到这条）。
+      · `auth` / `credential_expired` → 503 + 「重新授权登录」。
+      · 其余保持 `exc.status`（402/429/5xx 本来就是上游语义）。
+    """
     try:
         logger.warning("灵犀上游失败 kind=%s status=%s msg=%s detail=%s",
                        getattr(exc, "kind", ""), getattr(exc, "status", ""),
@@ -102,6 +131,35 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
     except Exception:  # noqa: BLE001
         pass
     status = exc.status or 502
+
+    if exc.kind == "permission":
+        detail = (exc.detail or "").strip()
+        return JSONResponse(
+            {"error": {
+                "type": "upstream_account",
+                "code": "upstream_permission_denied",
+                "message": (
+                    "WPS 灵犀这个账号没有对话权限（上游 403 PermissionDenied）。"
+                    "与你的 API Key 无关，Key 是有效的；网关注销完所有账号"
+                    "都试过之后才把这条抛出来，说明池里**没有**可用的号了。"
+                    "处理方式：① 控制台「账号池」里换一个号（重新扫码/导入），"
+                    "② 确认该号在 WPS 灵犀网页端能正常对话。"
+                    + ("上游原文：%s" % detail[:200] if detail else "")),
+                "upstream_account": True}},
+            status_code=503)
+
+    if exc.kind == "auth" or exc.code == "credential_expired" or status == 401:
+        return JSONResponse(
+            {"error": {
+                "type": "upstream_account",
+                "code": "upstream_credential_expired",
+                "message": (
+                    "WPS 灵犀账号的登录态已失效（与你的 API Key 无关）："
+                    "请在控制台「授权登录」重新扫码。原始信息：%s"
+                    % str(exc.message or "")[:200]),
+                "upstream_account": True}},
+            status_code=503)
+
     if exc.kind == "audit":
         status = 400
     elif status < 400 or status > 599:
@@ -228,8 +286,10 @@ def _attempt(db, request, key, body: dict, realm: str):
                 cool_seconds=_COOL.get(exc.kind, 0))
             last_error = exc
             exclude.add(account.id)
-            # 审核 / 请求本身有问题：换号也没用
-            if exc.kind in ("audit", "fatal"):
+            # 审核 / 请求本身有问题：换号也没用。
+            # `permission`（单号无对话权限）**不在此列** —— 那是号的问题，
+            # 换下一个号就好了，见 2026-11-18 acc=199 实测。
+            if exc.kind in _NO_ROTATE:
                 break
         except Exception as exc:  # noqa: BLE001
             shared.release(account)
@@ -356,7 +416,7 @@ async def _forward_stream(body: dict, request):
                 cool_seconds=_COOL.get(exc.kind, 0))
             last_error = exc
             exclude.add(account.id)
-            if exc.kind in ("audit", "fatal"):
+            if exc.kind in _NO_ROTATE:
                 break
         except Exception as exc:  # noqa: BLE001
             shared.release(account)

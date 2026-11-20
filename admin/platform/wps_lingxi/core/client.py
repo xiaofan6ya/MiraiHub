@@ -50,6 +50,27 @@ _QUOTA_MARKERS = ("insufficient", "余额不足", "积分不足", "智点不足"
 _STALE_MARKERS = ("sqlnorows", "no rows", "session not found")
 _STALE_CN = ("会话不存在", "数据不存在")
 
+#: **单号无对话权限**的字眼（2026-11-18 实测 acc=199 涤尘）。
+#:
+#: 判定依据（逐层打上游得到的）：同一份 Cookie 下
+#:
+#:     profile          200  → 登录态有效
+#:     plans            200  → 模型目录可见
+#:     create_session   200  → 能建会话
+#:     create_run       200  → 能领 run
+#:     chat/completions 403 {"code":"PermissionDenied","message":"无权限"}
+#:
+#: 换 model（deepseek / qwen / GLM / plan_max / auto）、换 client_type
+#: （lingxi_claw/lingxi/desktop）、换 current_mode（agent/chat/ask/plan）、
+#: 换 base（lingxi.wps.cn / lingxi.kdocs.cn）**全部 403** —— 所以它不是
+#: 参数问题、不是指纹问题、不是模型不存在，而是**这个号在 agent-runtime
+#: 这一侧没有被授权**（账号属性 / 灰度 / 企业策略），只能换号。
+#:
+#: 把它单列一个 kind 的意义：`fatal` 意味着「换号也没用、直接中断」，
+#: 而这恰恰是最需要换号的一类 —— 见 gateway._attempt 的 break 条件。
+_PERMISSION_MARKERS = ("permissiondenied", "无权限", "no permission",
+                       "forbidden", "not permitted")
+
 
 class UpstreamError(Exception):
     def __init__(self, message: str, *, status: int = 0, kind: str = "upstream",
@@ -73,7 +94,17 @@ def classify(status: int, body: str = "") -> str:
     if status in (401, 403):
         if any(marker in low for marker in _AUTH_MARKERS):
             return "auth"
-        return "auth" if status == 401 else "fatal"
+        if status == 403:
+            # 403 分三种，别混成一种：
+            #   · 单号无 agent 对话权限 → permission（**换号能好**）
+            #   · 出口 / 设备风控        → permission 也归这类，换号治不了但不是 Key 的问题
+            #   · 其它                   → fatal
+            # 旧代码一律 fatal，后果是号池里一个没权限的号把整平台打死，
+            # 且 403 原样透给客户端被渲染成「API 密钥无效」。
+            if any(marker in low for marker in _PERMISSION_MARKERS):
+                return "permission"
+            return "fatal"
+        return "auth"
     if status == 429:
         return "rate"
     if status >= 500:

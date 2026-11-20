@@ -19,10 +19,42 @@ description: 多平台网关的架构规范与接入指南。当需要新增一�
 
 ---
 
+## 0. 平台准入判据（先判「该不该接」，再谈「怎么接」）
+
+**只有「直连上游模型网关」的平台才接。** 下面任意一条命中 → **直接 pass，
+不写一行代码**：
+
+| 判据 | 为什么 pass |
+|---|---|
+| 对话必须跑在**云容器 / 沙箱 / agent 运行时**里（ACP、e2b、自建 runtime） | 每条请求付容器冷启动（实测 5~15s）；上下文由上游每轮重灌（实测 +40k tokens/轮）；跨轮隔离、超时、上下文上限**都不由我们控制** |
+| 上游没有 `chat/completions` 一类**模型直连**接口，只有 `taskType` 型辅助接口 | 承载不了通用对话；`tools` 无从映射，客户端会以为「模型不会用工具」 |
+| 链路里还要过一层**代理 / 中继**（第三方 relay、需要隧道才能回调） | 可用性、延迟、隐私不可控；MCP 回调这类能力要先有公网可达才成立 |
+| 客户端 `tools` 无法真正执行（agent 不认外部函数） | 「能用」只是聊天，任务跑不了，接进来是负资产 |
+
+判定顺序（10 分钟能走完，别写代码）：
+
+1. **列对话端点**：`chat/completions`？还是「建运行时 → 长连接协议」？
+2. **列模型目录**：有没有独立于会话的模型列表（能直接指定 model）？
+3. **列凭证**：能不能不带容器、纯 HTTP 打一轮对话？
+4. 任一答案是「必须起容器 / 必须过代理」→ 记一条 pass 原因到本节末尾的
+   **拒绝清单**，收工。
+
+> 反例（2026-11-19，已整体移除）：`miora.design` 只有 ACP agent 运行时，
+> 没有模型直连；接完实测每轮 +40k tokens、客户端 tool calling 不可用、
+> 容器冷启动 5~15s，靠「按对话复用 + 25 万轮换」勉强能用但仍是负资产。
+> 代码、账号、模型配置、可用量日志已全部删除，**不要再接**。
+
+### 拒绝清单（接了也删掉的，别再问第二遍）
+
+| 平台 | 拒绝原因 |
+|---|---|
+| Miora（miora.design） | 云执行 agent（ACP + e2b 容器），无模型直连接口；每轮 +40k tokens；客户端 tools 无法执行 |
+
 ## 文档索引（按「遇到问题」查，不按顺序读）
 
 | 你要做什么 | 读哪份 |
 |---|---|
+| **新平台该不该接（云执行 / 代理中转 → pass）** | 本文 §0 — 准入判据 + 拒绝清单 |
 | **搞清楚「主网关是谁」、要不要改 workbuddy 命名** | 本文 §2.5 — admin 就是网关，别为命名动热路径 |
 | **偶发 400「模型 xxx-平台 不存在」/ 协议转换 / `/v1/models` 字段 / 缓存** | [PROTOCOL-ROUTING-CACHE.md](PROTOCOL-ROUTING-CACHE.md) — 预读 body、后缀还原、能力字段、四处缓存 |
 | **账号进不来 / 导出的导不回来 / 余额刷新失败 / 扫码后不能调** | [CREDENTIAL-LIFECYCLE.md](CREDENTIAL-LIFECYCLE.md) — 扫描·授权·登录·导入·导出·刷新 |
@@ -32,6 +64,7 @@ description: 多平台网关的架构规范与接入指南。当需要新增一�
 | **改过相关代码要验证** | [FIXED-BUGS.md](FIXED-BUGS.md) — 已修 bug 档案 + 验证清单 |
 | 读不出本机凭证 | [DEVICE-AUTH.md](DEVICE-AUTH.md) — Qoder 详细版、refresh 串格式 |
 | **接华为云系产品**（AK/SK 签名 / OSCrypt 凭证 / DPoP 续期） | [CASE-CODEARTS.md](CASE-CODEARTS.md) |
+| **接 KroWork**（Keycloak 30 分钟 id_token / 分 provider 端点前缀 / 槽位两层目录 / 管道取票） | [CASE-KROWORK.md](CASE-KROWORK.md) |
 | 追凭证存哪 | [NO-CREDENTIAL.md](NO-CREDENTIAL.md) — 追凭证四跳 |
 | 新平台接入 | [ONBOARDING.md](ONBOARDING.md) |
 | 任务/签到/保活 | [ACTIONS-AND-TASKS.md](ACTIONS-AND-TASKS.md) |

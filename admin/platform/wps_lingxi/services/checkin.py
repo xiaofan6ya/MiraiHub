@@ -90,16 +90,40 @@ def checkin_account(db: Session, account, *, claim_one_time: bool = True) -> dic
                 "detail": "上游任务中心里没有每日签到",
                 "one_time": len(one_time)}
 
+    # ------------------------------------------------------------------
+    # 「今天到底签没签」只看 extra.check_in_days[今天].status
+    #
+    # 上游的 `daily_check_in.status` 只有 `incomplete` / `claimed` 两种取值，
+    # 但 **`incomplete` 既可能是「今天还没签」，也可能是「今天签了，后续档位
+    # 未解锁」**（2026-11-18 实测：acc=199 streak=7，daily 仍是 incomplete，
+    # 而 check_in_days 里 2026-11-18 那条已经是 claimed）。
+    #
+    # 只看 `daily.status` 会把它判成「没签」→ 每跑一次就去 claim 一次 →
+    # 上游幂等返回、余额不变 → 被 `credit <= 0` 分支报成 done，
+    # 白打一次接口，且把「今天签过」说成「刚签到」。
+    # ------------------------------------------------------------------
+    today_state = ""
+    today_item = None
+    days = (daily.get("extra") or {}).get("check_in_days") \
+        if isinstance(daily.get("extra"), dict) else None
+    if isinstance(days, list):
+        today = _today()
+        for item in days:
+            if isinstance(item, dict) and str(item.get("date") or "") == today:
+                today_item = item
+                today_state = str(item.get("status") or "")
+                break
+
     extra = daily.get("extra") if isinstance(daily.get("extra"), dict) else {}
     streak = int(extra.get("consecutive_days") or 0)
     status = str(daily.get("status") or "")
     credit = 0
     detail = ""
 
-    if status == "claimed":
+    # 今天已签的两条判据：档位状态 claimed，或任务本体 claimed
+    if status == "claimed" or today_state == "claimed":
         outcome = "done"
         detail = "今日已签到"
-        streak = streak
     else:
         try:
             claim = client.claim_task(cookie, "daily_check_in",
@@ -134,7 +158,25 @@ def checkin_account(db: Session, account, *, claim_one_time: bool = True) -> dic
             outcome = "done"
             detail = "今日已签到（上游幂等，余额未变化）"
 
-    # 一次性任务：只领已经 claimable 的，不做需要「动作」的那几个
+    # 一次性任务：能直接领的就领，需要先做动作的如实报出来
+    #
+    # ## `incomplete` 的含义（2026-11-18 实测修正）
+    #
+    # 旧代码只认 `claimable`，把 `incomplete` 一律当成「不能领」跳过。
+    # 实测 acc=412 同一时刻：
+    #
+    #     try_expert_mode       status=claimable   ← 领到 +200
+    #     use_lingxi_client     status=claimable   ← 领到 +800
+    #     try_group_chat        status=incomplete  ← 确实还没做（没建群）
+    #
+    # 而 acc=199 上 try_expert_mode / use_lingxi_client 都是 `claimed`
+    # （用户已在客户端里对话过），`try_group_chat` 仍是 `incomplete`。
+    # 所以 `incomplete` = 「动作尚未完成」，`claimable` = 「已完成待领取」，
+    # 两者都不该在 claim 之前被跳过 —— **claim 一次让上游自己裁决**：
+    # 能领就返回奖励，不能领会回业务错误，那时再记 skipped。
+    #
+    # 这样用户「在客户端里对话完就完成两个任务」的场景，下一轮定时任务
+    # 就能自动把奖励领进来，不用等人手动点。
     claimed_one_time: list[dict] = []
     skipped_one_time: list[dict] = []
     if claim_one_time:
@@ -145,7 +187,8 @@ def checkin_account(db: Session, account, *, claim_one_time: bool = True) -> dic
             state = str(item.get("status") or "")
             if state == "claimed":
                 continue
-            if state != "claimable":
+            # 只跳过明确做不到的状态；incomplete / claimable 都去试一次
+            if state not in ("claimable", "incomplete", "available", ""):
                 skipped_one_time.append({"key": key, "status": state,
                                          "action": str(item.get("action") or "")})
                 continue
@@ -153,11 +196,25 @@ def checkin_account(db: Session, account, *, claim_one_time: bool = True) -> dic
                 claim = client.claim_task(cookie, key, "", base)
             except client.UpstreamError as exc:
                 skipped_one_time.append({"key": key, "status": state,
+                                         "action": str(item.get("action") or ""),
                                          "error": exc.message[:120]})
+                continue
+            result = str(claim.get("result") or "")
+            if result and result.lower() not in ("ok", "success"):
+                skipped_one_time.append({"key": key, "status": state,
+                                         "action": str(item.get("action") or ""),
+                                         "error": (claim.get("hint")
+                                                   or ("result=%s" % result))[:120]})
                 continue
             payload = claim.get("data") if isinstance(claim.get("data"), dict) else {}
             reward = int(payload.get("reward_amount") or 0)
-            credit += max(0, reward)
+            if reward <= 0:
+                # 上游回 200 但没给奖励 = 这个动作确实还没做
+                skipped_one_time.append({"key": key, "status": state,
+                                         "action": str(item.get("action") or ""),
+                                         "error": "动作未完成（上游未发奖励）"})
+                continue
+            credit += reward
             claimed_one_time.append({"key": key, "reward": reward})
 
     if outcome in ("claimed", "done"):

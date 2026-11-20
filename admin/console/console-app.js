@@ -6210,7 +6210,6 @@ document.addEventListener("wb-platform-action", event => {
     if (action === "begin-auth") {
       return platformBeginAuth(spec, storage);
     }
-
     // 「用量明细」：Trae 有网页 cookie 专用实现，其它平台走通用账号用量表
     if (action === "usage") {
       if (storage === "trae") return traeUsageDetail(spec);
@@ -7153,6 +7152,228 @@ async function platformBeginAuth(spec, storage) {
       setTimeout(tick, intervalMs);
     };
     setTimeout(tick, intervalMs);
+    return;
+  }
+
+  // KroWork（Kro）：Keycloak **手机号 / 短信 / 密码** 授权登录，PKCE + 回调粘贴。
+  //
+  // 为什么必须单独一段：KroWork 的客户端登录态只有 **30 分钟**，而且
+  // `credentials.bin` 是加密的、id_token 只在本地 daemon 管道里活着 ——
+  // 「扫描本机」在客户端登出后直接失效（KrowAIError: No credentials available）。
+  // 唯一不依赖客户端的路就是走官方 Keycloak 登录页自己拿票。
+  //
+  // 协议约束（实测）：`redirect_uri` 白名单**只认** `127.0.0.1:17321/callback`，
+  // 而那个端口被 krow-app 自己占着 —— 所以网关**绑不了回调端口**，只能让用户
+  // 复制地址栏那条 URL 回来（与 Marvis / Trae 同一套「粘贴回调」手感）。
+  // code_verifier 存在服务端会话里，用户不用管。
+  if (id === "krowork" || id === "kro") {
+    let begin;
+    try {
+      const r = await api("/api/krowork/auth/begin", { method: "POST" });
+      const parsed = await safeJson(r);
+      if (!parsed.ok || !parsed.data || !parsed.data.auth_id) {
+        toast("发起授权失败：" + ((parsed.data && parsed.data.detail) || "未返回授权会话"), "err");
+        return;
+      }
+      begin = parsed.data;
+    } catch (e) {
+      toast("发起授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+
+    const authId = begin.auth_id;
+    const authUrl = begin.auth_url || "";
+
+    // 打开登录页：**必须放在用户手势的同步链里**，否则被弹窗拦截。
+    // 这里不再先弹一个 confirm 再 open —— `await uiConfirm()` 之后已经离开
+    // 手势上下文，`window.open` 会被 Chrome/Safari 静默拦掉（用户看到的是
+    // 「点了授权登录，什么都没发生」）。改为：直接 open，弹窗里另给按钮兜底。
+    try { window.open(authUrl, "_blank", "noopener"); } catch (e) { /* 被拦就靠弹窗按钮 */ }
+
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · KroWork</h3>
+      <div style="padding:12px 14px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);margin-bottom:14px">
+        <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:20px;line-height:1.95">
+          <li>已在新标签打开 KroWork 官方登录页，用<b>手机号 + 验证码</b>（或密码）登录</li>
+          <li>登录后浏览器会跳到 <code>http://127.0.0.1:17321/callback?code=…</code> ——
+              <b style="color:var(--warn)">页面打不开是正常的</b>，那个端口属于客户端</li>
+          <li>在地址栏<b>整条复制</b>那条 URL，粘到下面输入框，<b>粘上就自动入库</b></li>
+        </ol>
+        <p class="text-[11px] mt-2 mb-0" style="color:var(--fg-subtle);line-height:1.6">
+          也可以只用手机号登录：如果官方页弹不出，用下面「打开授权页」按钮或复制链接自己开。
+          授权链接 10 分钟内有效。
+        </p>
+      </div>
+      <p class="text-xs mb-2" style="word-break:break-all;margin:0 0 8px">
+        <a href="${esc(authUrl)}" target="_blank" rel="noopener"
+           style="color:var(--brand);text-decoration:underline">${esc(authUrl.slice(0, 96))}…</a>
+      </p>
+      <div class="flex gap-2 mb-3">
+        <button type="button" class="console-btn primary" id="krowOpenBtn">打开授权页</button>
+        <button type="button" class="console-btn" id="krowCopyBtn">复制链接</button>
+      </div>
+      <input id="krowCb" autocomplete="off" spellcheck="false"
+             placeholder="授权后把地址栏那条地址粘进来（含 code=…），粘上就自动入库"
+             style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);
+                    border-radius:8px;background:var(--surface);color:var(--fg);font-size:12.5px">
+      <p id="krowStatus" class="text-sm mt-2" style="color:var(--brand)">▸ 等待授权…（粘上回调地址后自动导入）</p>
+      <div class="flex justify-end gap-2 mt-3">
+        <button id="krowPaste" class="console-btn">从剪贴板导入</button>
+        <button id="krowSubmit" class="console-btn primary">提交并入库</button>
+        <button class="console-btn quiet" onclick="closeModal()">收起</button>
+      </div>`, "max-w-lg");
+
+    const statusEl = () => document.getElementById("krowStatus");
+    const inputEl = () => document.getElementById("krowCb");
+    const submitBtn = document.getElementById("krowSubmit");
+    const openBtn = document.getElementById("krowOpenBtn");
+    const copyBtn = document.getElementById("krowCopyBtn");
+
+    if (openBtn) openBtn.addEventListener("click", () => {
+      try { window.open(authUrl, "_blank", "noopener"); } catch (e) { /* 忽略 */ }
+    });
+    if (copyBtn) copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(authUrl);
+        toast("授权链接已复制");
+      } catch (e) {
+        const el = statusEl();
+        if (el) el.textContent = "▸ 浏览器不允许写剪贴板，请手动复制上面的链接";
+      }
+    });
+
+    // 一个统一的提交动作：粘贴 / 输入 / 回车 / 点按钮都走这里。
+    // 授权码一次性，所以要做「同串不重试」+ busy 双保险（与 Marvis 同一教训）。
+    let busy = false;
+    let lastTried = "";
+    const submitCallback = async (raw, opts) => {
+      const auto = Boolean(opts && opts.auto);
+      const callback = String(raw || "").trim();
+      const el = statusEl();
+      if (!callback) {
+        if (el && !auto) el.textContent = "▸ 先把回调地址贴进来";
+        return;
+      }
+      if (auto) {
+        if (callback === lastTried) return;
+        if (!/code=/i.test(callback) && callback.length < 12) return;
+      }
+      if (busy || callback === lastTried) return;
+      busy = true;
+      lastTried = callback;
+      if (submitBtn) submitBtn.disabled = true;
+      if (el) el.textContent = "▸ 正在用 code 换登录态…";
+      try {
+        const r = await api("/api/krowork/auth/submit-callback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auth_id: authId, callback: callback }),
+        });
+        const parsed = await safeJson(r);
+        if (!parsed.ok) {
+          const detail = parsed.data && parsed.data.detail;
+          let msg;
+          if (typeof detail === "string") msg = detail;
+          else if (detail && typeof detail === "object") {
+            msg = detail.message || detail.error || JSON.stringify(detail);
+          } else msg = (parsed.data && parsed.data.message) || "提交失败";
+          if (el) el.textContent = "▸ " + msg;
+          toast(String(msg), "err");
+          // code 已作废，清空并让用户重走一次（重试同一串必然失败）
+          if (inputEl()) inputEl().value = "";
+          lastTried = "";
+          if (submitBtn) submitBtn.disabled = false;
+          busy = false;
+          return;
+        }
+        const data = parsed.data || {};
+        if (el) { el.textContent = "▸ 登录成功，账号已入库"; el.style.color = "var(--success)"; }
+        toast("已入库：" + (data.email || "KroWork 账号"));
+        if (inputEl()) inputEl().value = "";
+        closeModal();
+        loadAccounts();
+        if (window.WBPlatform && window.WBPlatform.refreshCounts) {
+          window.WBPlatform.refreshCounts();
+        }
+      } catch (e) {
+        if (el) el.textContent = "▸ 提交失败：" + (e && e.message ? e.message : e);
+        if (inputEl()) inputEl().value = "";
+        lastTried = "";
+        if (submitBtn) submitBtn.disabled = false;
+        busy = false;
+      }
+    };
+
+    if (submitBtn) submitBtn.addEventListener("click", () => {
+      submitCallback(inputEl() && inputEl().value);
+    });
+
+    if (inputEl()) {
+      inputEl().addEventListener("paste", () => {
+        setTimeout(() => submitCallback(inputEl().value, { auto: true }), 0);
+      });
+      inputEl().addEventListener("input", () => {
+        submitCallback(inputEl().value, { auto: true });
+      });
+      inputEl().addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submitCallback(inputEl().value);
+        }
+      });
+      // 点进输入框主动读一次剪贴板：多数人就是「浏览器复制 → 切回来」
+      inputEl().addEventListener("focus", async () => {
+        const box = inputEl();
+        if (!box || box.value.trim()) return;
+        try {
+          if (!navigator.clipboard || !navigator.clipboard.readText) return;
+          const text = (await navigator.clipboard.readText() || "").trim();
+          if (!/callback|code=/i.test(text)) return;
+          box.value = text;
+          toast("已从剪贴板填入回调地址");
+          submitCallback(text, { auto: true });
+        } catch (e) { /* 无权限就手动粘贴 */ }
+      });
+    }
+
+    const pasteBtn = document.getElementById("krowPaste");
+    if (pasteBtn) pasteBtn.addEventListener("click", async () => {
+      const el = statusEl();
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (e) {
+        if (el) el.textContent = "▸ 浏览器不允许读剪贴板，请手动粘贴";
+        if (inputEl()) inputEl().focus();
+        return;
+      }
+      if (!text || !text.trim()) {
+        if (el) el.textContent = "▸ 剪贴板是空的";
+        return;
+      }
+      if (inputEl()) inputEl().value = text.trim();
+      submitCallback(text, { auto: true });
+    });
+
+    // 会话 10 分钟过期：轮询只用于提示，不指望它自动完成
+    let left = Math.max(0, Number(begin.expires_in || 600));
+    const timer = setInterval(() => {
+      if (!document.getElementById("krowCb")) { clearInterval(timer); return; }
+      left -= 5;
+      const el = statusEl();
+      if (left <= 0) {
+        clearInterval(timer);
+        if (el) {
+          el.textContent = "▸ 会话已过期，请关掉重开一次「授权登录」";
+          el.style.color = "var(--danger)";
+        }
+        return;
+      }
+      if (el && busy === false && el.textContent.indexOf("等待") === 0) {
+        el.textContent = "▸ 等待授权…（剩余 " + Math.floor(left / 60) + " 分钟）";
+      }
+    }, 5000);
+
+    if (inputEl()) { try { inputEl().focus(); } catch (e) { /* 忽略 */ } }
     return;
   }
 

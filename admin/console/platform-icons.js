@@ -84,6 +84,10 @@
     // 腾讯 Marvis（应用宝 AI 助手）：官方应用图标（474×474 RGB，白底黑色
     // 羊头剪影 + 红围脖），缩放到 256。自带白底 ⇒ tone=color。
     marvis: { src: "/admin/assets/logos/marvis-256.png", tone: "color" },
+    // KroWork（Kro）：素材取自客户端 kro 资产 `assets/app-pin.png`
+    // （512×512 RGBA，奶白圆角底 + 深灰「点阵上扬」图形），缩放到 256。
+    // 自带底色 ⇒ tone=color，深浅主题都能直接用。
+    krowork: { src: "/admin/assets/logos/krowork-256.png", tone: "color" },
   };
 
   /* 兜底：不要用「加号」（看着像「新建平台」）。 */
@@ -129,6 +133,10 @@
     // 腾讯 Marvis（应用宝 AI 助手，QQ / 微信扫码登录）
     marvis: "marvis",
     "marvis-cn": "marvis",
+    // KroWork（Kro）：Keycloak 手机号授权登录
+    krowork: "krowork",
+    kro: "krowork",
+    "krowork-cn": "krowork",
   };
 
   function resolve(id) {

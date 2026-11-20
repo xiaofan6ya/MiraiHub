@@ -2073,6 +2073,16 @@ _TASK_SCHEDULE_META = {
     "wps_lingxi_ban_recheck": ("失效账号复检", 120),
     # Loomy 新手任务（一次性 10000 积分）：每天跑一次兜住半途失败，幂等。
     "loomy_onboarding": ("新手任务领积分", 1440),
+    # KroWork：id_token 只有 **30 分钟**寿命，`*_keepalive` 的 360 分钟兜底
+    # 等于「掉线六小时后才补一枪」—— 那期间所有请求都是 401。
+    # 10 分钟一轮 + runner 内 20 分钟窗口，任何一枚票都会被续两次。
+    "krowork_keepalive": ("续签保活", 10),
+    # 积分写回 balance_* 列（账号池不再显示 0 / 0）：每小时足够，
+    # 它同时兼任「凭证是否还有效」的探针。
+    "krowork_refresh_quota": ("刷新积分", 60),
+    "krowork_refresh_catalog": ("同步模型表", 360),
+    # 探针只用于健康度曲线，不需要进定时任务页污染列表
+    # （它仍在 task_runners 里，可手动触发）。
 }
 
 

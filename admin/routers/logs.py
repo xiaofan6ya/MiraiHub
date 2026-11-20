@@ -757,6 +757,36 @@ def _build_filters(q, *, key_id, account_ids, models, model, key, account,
     return q, False
 
 
+def _display_model(platform: str, model: str) -> str:
+    """把历史行里的**上游内部 id** 换成对外可读名。
+
+    ## 为什么需要（2026-11-17 用户实测反馈）
+
+    2026-11-17 之前，Marvis 网关记账时写的是上游**槽位名**（`main-auto`），
+    而不是对外可读名（`deepseek-v4.1-flash`）。两列对不上 → 控制台
+    「使用记录 / 用量统计」查询展示名失败，整张表原样显示 `main-auto`。
+
+    写入侧已经改了（见 `marvis/gateway.py::_billing_model`），但库里那批
+    历史行还是旧值。**不批量改库**，只在这一层翻译：
+
+      · 历史行不用迁移、也不会被改坏（原值仍在库里，随时可对账）；
+      · 换平台 / 换映射表时展示自动跟着变，不需要再跑一次 UPDATE；
+      · 回滚成本为零 —— 去掉这一层就是旧行为。
+
+    `readable_model_id` 对没有槽位映射的平台是**恒等**的，不会误伤
+    workbuddy / qoder 这些本来就存可读名的平台。
+    """
+    raw = str(model or "")
+    if not raw or not platform:
+        return raw
+    try:
+        from admin.platform import models_router
+
+        return models_router.readable_model_id(platform, raw)
+    except Exception:  # noqa: BLE001 - 映射失败就原样显示
+        return raw
+
+
 def _serialize(rows, key_names: dict, acc_names: dict,
                acc_platforms: dict | None = None) -> list[dict]:
     """日志行序列化。
@@ -765,6 +795,9 @@ def _serialize(rows, key_names: dict, acc_names: dict,
     不标平台的话用户看不出「这条请求走的是哪个上游」。
     取值优先用 `usage_logs.platform`（写入时填的），
     老行没填则用账号归属兜底 —— 两者都没有就是空串（孤儿日志）。
+
+    `model` 给的是**可读名**（`deepseek-v4.1-flash`）；原始落库值另存
+    `model_raw`，供排障与「按内部 id 筛选」的兼容路径使用。
     """
     platforms = acc_platforms or {}
     return [
@@ -779,7 +812,11 @@ def _serialize(rows, key_names: dict, acc_names: dict,
             # 平台：写入时的值优先，兜底用账号当前归属
             "platform": (getattr(r, "platform", "") or
                          platforms.get(r.account_id) or ""),
-            "model": r.model,
+            # 可读名优先；`model_raw` 保留落库原值（历史行是槽位名）。
+            "model": _display_model(
+                (getattr(r, "platform", "") or platforms.get(r.account_id) or ""),
+                r.model),
+            "model_raw": r.model or "",
             "credits": r.credits,
             "prompt_tokens": r.prompt_tokens,
             "completion_tokens": r.completion_tokens,

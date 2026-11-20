@@ -289,23 +289,42 @@ def _model_display_map(db: Session) -> dict[str, str]:
     为什么统计也要映射：Qoder 的用法日志里模型列存的是内部 id
     （`dfmodel` / `kmodel`），图表上显示出来用户根本不知道是哪个模型。
     这里借用聚合用的归一逻辑，把 `dfmodel` 显示成 `DeepSeek-V4.1-Flash`。
+
+    ## 槽位名别名（2026-11-17）
+
+    还要把**上游槽位名**（Marvis 的 `main-auto`）也登记进来 —— 历史
+    `usage_logs` 行存的是槽位名，而 `model_configs` 里只有可读名
+    （`deepseek-v4.1-flash`）。不登记的话统计表 / 下拉筛选里就是
+    `main-auto` 一行、`deepseek-v4.1-flash` 另一行，同一模型被拆成两条。
+
+    写入侧已改为落可读名（`marvis/gateway.py::_billing_model`），这里只是
+    让历史行也能归到同一组，**不需要批量改库**。
     """
     from admin.model_alias import canonical_key, display_name, model_display
     from admin.models import ModelConfig
+    from admin.platform.models_router import MODEL_NAME_MAP
 
     out: dict[str, str] = {}
     try:
-        rows = (db.query(ModelConfig.model_id, ModelConfig.upstream_metadata)
+        rows = (db.query(ModelConfig.model_id, ModelConfig.upstream_metadata,
+                         ModelConfig.platform)
                 .filter(ModelConfig.enabled == 1).all())
     except Exception:  # noqa: BLE001 - 映射失败就显示原始 id
         return out
-    for model_id, metadata in rows:
+    for model_id, metadata, platform in rows:
         model_id = str(model_id or "")
-        if not model_id or model_id in out:
+        if not model_id:
             continue
         display = model_display(metadata)
         key = canonical_key(model_id, display)
-        out[model_id] = display_name(key, display or model_id)
+        name = display_name(key, display or model_id)
+        out.setdefault(model_id, name)
+        # 反向登记：本平台的**上游槽位名**也指向同一个展示名。
+        # `MODEL_NAME_MAP[platform]` 是「槽位 → 可读名」，反查即得。
+        table = MODEL_NAME_MAP.get(str(platform or "").lower()) or {}
+        for slot, readable in table.items():
+            if readable and readable == model_id:
+                out.setdefault(slot, name)
     return out
 
 
