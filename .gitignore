@@ -284,6 +284,7 @@ tools/*
 # 这两份文档说明「怎么部署」「算法为什么没破」，属于交付物，放行
 !docs/uskey-wine-deploy.md
 !docs/uskey-reverse-report.md
+!docs/marvis-4100404-postmortem.md
 
 # ===== 生产环境运维脚本：含服务器路径 / 服务名，不入公开仓库 =====
 # 这些脚本是为特定部署环境写的（GW=/www/wwwroot/workbuddy2api、

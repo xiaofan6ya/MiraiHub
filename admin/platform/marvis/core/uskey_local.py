@@ -439,42 +439,41 @@ def build_week_json(sec: int, count: int = 19, exe: str = WEEK_EXE) -> bytes:
 def build_tlv_short(bus_info: str, qimei36: str, now_ms: int = None,
                     rnd8: bytes = None, blob: bytes = None,
                     anchor_sec: int = None) -> bytes:
-    """拼 **208 字节** TLV —— 上游真正认的那一版。
+    """拼 208 字节 TLV 的**对照实验版本** —— ⚠ 别当修复用。
 
-    ## 为什么要短版（2026-11-19 定案）
+    ## 已被实测否定（2026-11-20 复盘，见 docs/marvis-4100404-postmortem.md）
 
-        同账号、同机器、同出口，只换 uskey：
+        写这个函数的依据是：「线上那枚 264 字节能 200，本地 376 字节不能，
+        所以 264 才是上游认的形态」。
 
-            线上 wine 签 264 字节 → 200 ✅
-            本地 mint 签 376 字节 → 403 ✗
+        **那个结论是错的。** 当时线上能过是因为账号恰好在封禁窗口外，
+        与长度无关。后来实测：
+
+            本地 DLL 签 504 字符 / 376 字节  →  连打 5 次全 200
+
+        ⇒ **长度不是判据**，上游只看 uskey 是否由真 SDK 产出。
+
+    ## 保留它的理由
+
+        1. 历史对照：想知道「短包是什么结构」时可以拿出来比；
+        2. 它确实能产出结构合法（magic / TLV / 长度都对）的包 ——
+           结构合法是必要条件，只是不充分。
+
+    ## 别做的事
+
+        · 不要把它设成默认（`mint_uskey(short=True)`）；
+        · 417 行那个 `short=True` 的默认值是 `False`，改动前先读复盘文档；
+        · 遇到 403 先去查账号状态（`accounts.status` / `cool_kind`），
+          不要先怀疑长度。
+
+    原始说明（保留供对照）：
 
         264 - 24(header) = 240 body，按 8(rand) + 1(flag) + TLV + 7(tail) 拆：
 
             240 = 8 + 1 + 208 + 7   ⇒ TLV = 208
 
         320 版去掉「周计数 JSON」(189:302, 113B) 得 207 字节 ——
-        差 1 字节正好是 qimei 不可用时 DLL 写的那个占位字节，
-        于是 208。两版共用前 189 字节的布局，只是**没有 JSON 段和尾部 md5("")**。
-
-    ## 段布局（前 189 字节与 320 版完全一致）
-
-        0:2     len = 208-2
-        2:6     SDK 常量
-        6:24    busid
-        24:36   SDK 版本
-        36:45   appid
-        45:65   qimei36 #1
-        65:83   md5(bus_info)
-        83:87   常量
-        87:95   epoch 毫秒
-        95:112  BCD(秒) + 10B 随机
-        112:122 8B 随机
-        122:131 "5.1.4.2"
-        131:150 "MarvisAgent.exe"
-        150:170 qimei36 #2
-        170:183 "TX Gaming"
-        183:189 常量
-        189:208 16B md5(bus_info)  ← 尾部，320 版这里是 md5("")
+        差 1 字节正好是 qimei 不可用时 DLL 写的那个占位字节，于是 208。
     """
     qb = bytes.fromhex(qimei36)
     if len(qb) != 18:
