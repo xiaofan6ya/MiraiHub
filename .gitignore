@@ -175,6 +175,7 @@ tests/*
 !tests/test_marvis_egress_pool.py
 !tests/test_marvis_qimei_assign.py
 !tests/test_raccoon_quota_classification.py
+!tests/test_raccoon_quota_surface.py
 !tests/test_platform_rating.py
 !tests/test_workbuddy_credential_codec.py
 scripts/build_trae_catalog.py

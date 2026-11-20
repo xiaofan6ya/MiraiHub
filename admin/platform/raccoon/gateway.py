@@ -70,6 +70,56 @@ def _cool_seconds(exc) -> int:
     return 0
 
 
+#: 额度耗尽时 **(账号 × 模型)** 维度的冷却秒数。
+#:
+#: 为什么不再走 `_cool_seconds()` 的 `quota -> 600`（整号）：
+#: 上游 1000007 / insufficient_points 是「积分余额不足」，它确实让这个号
+#: 对**当前模型**不可用，但并没有证明这个号对别的模型也不能用。
+#: 整号冷却 600s 会把「换个模型立刻能用」的号白扔一小时，
+#: 而整池一起被摘掉时，用户看到的就是「所有账号都没额度」。
+#:
+#: 所以额度类失败**优先落模型维度**（`account_model_cool`），冷却期内
+#: 选号对同模型跳过它、换别的模型照常用；账号级冷却只留给 auth / rate。
+QUOTA_MODEL_COOL_SECONDS = 600
+
+
+def _cool_quota_model(db, account, model: str) -> None:
+    """(账号 × 模型) 级额度冷却：换模型可绕开，不整号摘掉。**不抛异常**。
+
+    写入口径与 loomy / trae / 主链路的 `AccountModelCooldown` 一致：
+    同 (账号, 模型) 只保留一行，重复命中累加 `hits` 并顺延 `until`。
+    """
+    if account is None or not str(model or "").strip():
+        return
+    try:
+        from datetime import datetime, timedelta
+
+        from admin.models import AccountModelCooldown
+
+        now = datetime.utcnow()
+        until = now + timedelta(seconds=QUOTA_MODEL_COOL_SECONDS)
+        existing = (db.query(AccountModelCooldown)
+                    .filter(AccountModelCooldown.account_id == account.id,
+                            AccountModelCooldown.model == model)
+                    .first())
+        if existing is None:
+            db.add(AccountModelCooldown(
+                account_id=int(account.id or 0), model=model, until=until,
+                kind="quota", reason="上游额度耗尽（积分余额不足）",
+                reset_source="upstream"))
+        else:
+            existing.until = until
+            existing.kind = "quota"
+            existing.reason = "上游额度耗尽（积分余额不足）"
+            existing.hits = int(existing.hits or 0) + 1
+        db.commit()
+    except Exception:  # noqa: BLE001 - 冷却写失败不影响响应
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class _BadRequest(Exception):
     """请求体本身有问题（客户端错误），应由调用方转成 400。
 
@@ -116,6 +166,33 @@ def _fail(exc: client.UpstreamError) -> JSONResponse:
                        str(getattr(exc, "detail", ""))[:600])
     except Exception:  # noqa: BLE001
         pass
+    # ---- 额度耗尽：**不要**把上游的 400 + 业务码原样透传 ----
+    #
+    # 上游对积分耗尽是 `HTTP 400 + {"code": 1000007, "msg": "积分余额不足"}`。
+    # 直接透传有两个问题：
+    #   1. 客户端看到的是 400「请求有错」，会去改请求体，而真正的解法是
+    #      换平台 / 换模型（这个平台的积分没了，换号也没用）；
+    #   2. 401/400 这类状态还会触发客户端自己的重试风暴。
+    #
+    # 所以统一表达成 402 + `quota_exhausted`，并带 `scope` 说明到底是谁的额度：
+    #   scope=platform:<平台名>  上游平台积分耗尽（换号无效，应该换平台/换模型）
+    #   scope=account            账号级额度耗尽
+    if getattr(exc, "kind", "") == "quota":
+        scope = str(getattr(exc, "quota_scope", "") or "") or "account"
+        detail = {"type": "quota_exhausted", "code": "quota_exhausted",
+                  "message": exc.message, "scope": scope}
+        if scope.startswith("platform:"):
+            detail["platform"] = scope.split(":", 1)[1]
+            detail["message"] = (
+                "上游平台 %s 的积分已耗尽（换号无效，请改用其它平台或模型）"
+                % detail["platform"])
+        else:
+            detail["message"] = "账号额度已耗尽（%s）" % PUBLIC
+        # 上游业务码保留在单独字段里，供排障对齐（不作为对外 code）。
+        if exc.code not in (None, "") and not isinstance(exc.code, bool):
+            detail["upstream_code"] = exc.code
+        return JSONResponse({"error": detail}, status_code=402)
+
     status = exc.status or 502
     if status < 400 or status > 599:
         status = 502
@@ -300,6 +377,9 @@ def _attempt(db, request, key, body: dict, realm: str):
     model = str(body.get("model") or "")
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
+    #: 到目前为止的失败是否**全部**是额度问题（决定对外的 scope 粒度）
+    quota_only = True
+    tried = 0
     for _ in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=raccoon_accounts.PLATFORM, realm=realm, key=key,
@@ -320,10 +400,24 @@ def _attempt(db, request, key, body: dict, realm: str):
             return result, account, started
         except client.UpstreamError as exc:
             shared.release(account)
+            tried += 1
+            cool = _cool_seconds(exc)
+            if exc.kind == "quota" and model:
+                # 额度类失败**先**落 (账号 × 模型) 冷却，不再整号冷却 600s。
+                # 见 _cool_quota_model 的说明：换模型能绕开，整号摘掉太粗。
+                _cool_quota_model(db, account, model)
+                cool = 0
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=_cool_seconds(exc))
+                cool_seconds=cool)
+            # 把「谁的额度」钉在异常上：_fail() 据此写 402 的 scope 字段。
+            # 尝试过至少两个号、且每一次都是额度 → 是平台级（换号无效）。
+            all_quota = quota_only and exc.kind == "quota" and tried >= 2
+            exc.quota_scope = ("platform:" + PUBLIC) if all_quota else "account"
+            exc.account_id = int(getattr(account, "id", 0) or 0)
+            exc.model = model
+            quota_only = quota_only and exc.kind == "quota"
             last_error = exc
             exclude.add(account.id)
             # 客户端参数错（400/422）与账号无关：换号必然同样失败，
@@ -354,7 +448,7 @@ def _attempt(db, request, key, body: dict, realm: str):
 
 
 def _bill(key, account, model, result, *, request, started=None, error="",
-          stats: dict | None = None):
+          stats: dict | None = None, account_id: int | None = None):
     try:
         from admin.db import SessionLocal
 
@@ -373,7 +467,7 @@ def _bill(key, account, model, result, *, request, started=None, error="",
             shared.record_usage(
                 db,
                 key_id=int(getattr(key, "id", 0) or 0),
-                account_id=int(getattr(account, "id", 0) or 0),
+                account_id=int(account_id or getattr(account, "id", 0) or 0),
                 model=model or str((result or {}).get("model") or ""),
                 usage=usage, public_platform=PUBLIC,
                 storage=raccoon_accounts.PLATFORM,
@@ -383,6 +477,27 @@ def _bill(key, account, model, result, *, request, started=None, error="",
                 reasoning_effort=shared.reasoning_effort_of_request(request))
     except Exception:  # noqa: BLE001
         logger.exception("小浣熊记账失败")
+
+
+def _bill_error(key, request, body: dict, exc) -> None:
+    """失败也落一行 `usage_logs`（error_kind=quota / rate / upstream…）。
+
+    ## 为什么必须有
+
+    以前只有成功路径记账：raccoon 的失败**一行都不落库**，于是
+    「某个模型在这个平台上一直 1000007」在控制台的请求/用量页里完全看不见，
+    只能靠一次次人肉试错；`dispatch._model_health_ok()` 的模型健康负缓存
+    也拿不到证据（它的判据是 `usage_logs` 里该模型的成功/失败比）。
+
+    这里只写「失败」这一件事，不扣额度（credits=0），不影响 Key 计费。
+    """
+    try:
+        kind = str(getattr(exc, "kind", "") or "upstream")
+        model = str(getattr(exc, "model", "") or (body or {}).get("model") or "")
+        _bill(key, None, model, {}, request=request, error=kind,
+              account_id=int(getattr(exc, "account_id", 0) or 0))
+    except Exception:  # noqa: BLE001 - 记账失败不能影响错误响应
+        logger.exception("小浣熊失败记账异常")
 
 
 async def _forward(body: dict, request) -> JSONResponse:
@@ -414,6 +529,7 @@ async def _forward(body: dict, request) -> JSONResponse:
         except shared.PlatformRejected:
             raise
         except client.UpstreamError as exc:
+            _bill_error(key, request, body, exc)
             return _fail(exc)
         shared.release(account)
         shared.note_success(account)
@@ -557,6 +673,7 @@ async def _forward_stream(body: dict, request):
     if upstream is None:
         db.close()
         if last_error is not None:
+            _bill_error(key, request, body, last_error)
             return _fail(last_error)
         raise shared.PlatformRejected(
             503, "小浣熊没有可用账号（请先在控制台导入凭证并确认状态为启用）",
