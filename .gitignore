@@ -229,6 +229,7 @@ TICKET_workbuddy_logout_p0.md
 # ===== 本轮新增的回归用例（锁真 bug，必须入库）=====
 !tests/test_marvis_token_ttl.py
 !tests/test_key_model_market.py
+!tests/test_marvis_local_ws.py
 !tests/test_marvis_platform.py
 !tests/test_marvis_model_naming.py
 !tests/test_keepalive_frames.py
