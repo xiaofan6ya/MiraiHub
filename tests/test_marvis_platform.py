@@ -15,6 +15,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # 必须早于 `admin.*` 导入：`admin/db.py` 在模块级按 settings 建引擎，
 # 默认值是 MySQL；固定成 SQLite 文件库才能脱库跑（内存库不接受连接池参数）。
@@ -63,6 +64,18 @@ class SignatureTests(unittest.TestCase):
 
 
 class LlmHeaderTests(unittest.TestCase):
+    def setUp(self):
+        self.identity = {
+            "uskey": "offline-test-value",
+            "nonce": "offline-test-nonce",
+            "client_version": "0.0.0",
+            "conversation_id": "offline-conversation",
+            "response_id": "offline-response",
+        }
+        provider = patch.object(endpoints, "uskey_identity", return_value=self.identity)
+        provider.start()
+        self.addCleanup(provider.stop)
+
     def test_llm_headers_shape(self):
         headers = endpoints.llm_headers(ACCT)
         for key in ("Ual-Access-Openid", "Ual-Access-Access-Token",

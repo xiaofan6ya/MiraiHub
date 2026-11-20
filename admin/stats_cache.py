@@ -156,6 +156,9 @@ def cached(key, compute, ttl=None):
     if hit is not None:
         return hit
     with _inflight_lock:
+        hit = _l1_get(key)
+        if hit is not None:
+            return hit
         pending = _inflight.get(key)
         leader = pending is None
         if leader:
@@ -168,12 +171,14 @@ def cached(key, compute, ttl=None):
         # leader 失败/超时：自己算，不再排队
     try:
         value = compute()
+        ttl = _DEFAULT_TTL if ttl is None else float(ttl)
+        _l1_put(key, value, ttl)
     finally:
         if leader:
             with _inflight_lock:
                 _inflight.pop(key, None)
             pending.set()
-    cache_put(key, value, ttl)
+    _redis_put(key, value, ttl)
     return value
 
 

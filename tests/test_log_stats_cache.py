@@ -2,6 +2,7 @@
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from admin import stats_cache
 from admin.routers import ip_management, logs
@@ -64,6 +65,21 @@ class StatsCacheTests(unittest.TestCase):
             thread.join(timeout=10)
         self.assertEqual(len(calls), 1, 'waiters must reuse the leader result')
         self.assertEqual(len(results), 5)
+
+    def test_leader_publishes_result_before_waking_followers(self):
+        key = logs._stats_cache_key('unit', ('publish',))
+        observed = []
+
+        class FlightEvent(threading.Event):
+            def set(self):
+                observed.append(stats_cache._l1_get(key))
+                super().set()
+
+        with patch.object(stats_cache.threading, 'Event', FlightEvent), \
+                patch.object(stats_cache, '_redis_put'):
+            result = logs._cached_stats(key, lambda: {'value': 42})
+
+        self.assertEqual(observed, [result])
 
     def test_failed_leader_unblocks_waiters(self):
         key = logs._stats_cache_key('unit', ('failure',))

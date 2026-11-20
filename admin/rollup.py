@@ -271,58 +271,45 @@ def _tps_ok():
                 decode >= 300, _tps_expr() <= 300)
 
 
+def _raw_sum_columns():
+    ok = UsageLog.error_kind.in_(OK_KINDS)
+    tps_ok = _tps_ok()
+    columns = {
+        "requests": func.count(UsageLog.id),
+        "successes": func.sum(case((ok, 1), else_=0)),
+        "prompt_tokens": func.sum(case((ok, UsageLog.prompt_tokens), else_=0)),
+        "completion_tokens": func.sum(case((ok, UsageLog.completion_tokens), else_=0)),
+        "total_tokens": func.sum(case((ok, UsageLog.total_tokens), else_=0)),
+        "cached_tokens": func.sum(case((ok, UsageLog.cached_tokens), else_=0)),
+        "credits": func.sum(case((ok, UsageLog.credits), else_=0.0)),
+        "latency_sum": func.sum(case((ok, UsageLog.latency_ms), else_=0)),
+        "latency_count": func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
+        "ttfb_sum": func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
+        "ttfb_count": func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
+        "tps_sum": func.sum(case((tps_ok, _tps_expr()), else_=0.0)),
+        "tps_count": func.sum(case((tps_ok, 1), else_=0)),
+    }
+    return [columns[name] for name in _SUM_FIELDS]
+
+
 def _aggregate_raw(db: Session, start: datetime, end: datetime) -> list[dict]:
     """把 `[start, end)` 的原表行按 (hour, platform, model) 聚成汇总行。"""
-    ok = UsageLog.error_kind.in_(OK_KINDS)
     hour = func.date_format(UsageLog.created_at, "%Y-%m-%d %H:00") \
         if db.get_bind().dialect.name != "sqlite" \
         else func.strftime("%Y-%m-%d %H:00", UsageLog.created_at)
     rows = (
-        db.query(
-            hour.label("h"),
-            UsageLog.platform,
-            UsageLog.model,
-            func.count(UsageLog.id),
-            func.sum(case((ok, 1), else_=0)),
-            func.sum(case((ok, UsageLog.prompt_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.completion_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.total_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.cached_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.credits), else_=0.0)),
-            func.sum(case((ok, UsageLog.latency_ms), else_=0)),
-            func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
-            func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
-            func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
-            # 逐请求 t/s 的累加：口径与日志页一致（纯解码段、0.3s 起、300 上限）
-            func.sum(case((_tps_ok(), _tps_expr()), else_=0.0)),
-            func.sum(case((_tps_ok(), 1), else_=0)),
-        )
+        db.query(hour.label("h"), UsageLog.platform, UsageLog.model, *_raw_sum_columns())
         .filter(UsageLog.created_at >= start, UsageLog.created_at < end)
         .group_by("h", UsageLog.platform, UsageLog.model)
         .all()
     )
-    out = []
-    for row in rows:
-        parsed = datetime.strptime(row[0], "%Y-%m-%d %H:00")
-        out.append({
-            "hour": parsed,
-            "platform": (row[1] or "").lower(),
-            "model": row[2] or "",
-            "requests": int(row[3] or 0),
-            "successes": int(row[4] or 0),
-            "prompt_tokens": int(row[5] or 0),
-            "completion_tokens": int(row[6] or 0),
-            "total_tokens": int(row[7] or 0),
-            "cached_tokens": int(row[8] or 0),
-            "credits": float(row[9] or 0),
-            "latency_sum": int(row[10] or 0),
-            "latency_count": int(row[11] or 0),
-            "ttfb_sum": int(row[12] or 0),
-            "ttfb_count": int(row[13] or 0),
-            "tps_sum": float(row[14] or 0),
-            "tps_count": int(row[15] or 0),
-        })
-    return out
+    return [
+        {"hour": datetime.strptime(row[0], "%Y-%m-%d %H:00"),
+         "platform": (row[1] or "").lower(), "model": row[2] or "",
+         **{name: _coerce(name, row[3 + index])
+            for index, name in enumerate(_SUM_FIELDS)}}
+        for row in rows
+    ]
 
 
 def ensure_coverage(db: Session, *, until: datetime | None = None,
@@ -406,15 +393,18 @@ def segments(start: datetime, end: datetime,
              covered: tuple[datetime | None, datetime | None]):
     """把窗口切成「走汇总表」与「走原表」的段（半开区间）。
 
-    汇总表只覆盖**已走完的整点**，所以当前这一小时永远是原表段 ——
-    看板的「今日」才不会比日志页少一小时的数。
+    只有查询窗口和覆盖水位都包含的完整小时才用汇总表；
+    窗口两端不足一小时的部分仍按原始时间戳查询。
     """
     covered_from, covered_to = covered
     out = []
     if covered_from is None or covered_to is None:
         return [("raw", start, end)]
-    roll_start = max(start, covered_from)
-    roll_end = min(end, covered_to)
+    first_full_hour = hour_start(start)
+    if first_full_hour < start:
+        first_full_hour += timedelta(hours=1)
+    roll_start = max(first_full_hour, covered_from)
+    roll_end = min(hour_start(end), covered_to)
     if roll_start < roll_end:
         if start < roll_start:
             out.append(("raw", start, roll_start))
@@ -438,25 +428,8 @@ def _rollup_rows(db: Session, start: datetime, end: datetime) -> list:
 
 
 def _raw_rows(db: Session, start: datetime, end: datetime):
-    ok = UsageLog.error_kind.in_(OK_KINDS)
     return (
-        db.query(
-            UsageLog.platform,
-            UsageLog.model,
-            func.count(UsageLog.id),
-            func.sum(case((ok, 1), else_=0)),
-            func.sum(case((ok, UsageLog.prompt_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.completion_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.total_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.cached_tokens), else_=0)),
-            func.sum(case((ok, UsageLog.credits), else_=0.0)),
-            func.sum(case((ok, UsageLog.latency_ms), else_=0)),
-            func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
-            func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
-            func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
-            func.sum(case((_tps_ok(), _tps_expr()), else_=0.0)),
-            func.sum(case((_tps_ok(), 1), else_=0)),
-        )
+        db.query(UsageLog.platform, UsageLog.model, *_raw_sum_columns())
         .filter(UsageLog.created_at >= start, UsageLog.created_at < end)
         .group_by(UsageLog.platform, UsageLog.model)
         .all()
@@ -588,23 +561,8 @@ def window_series(db: Session, start: datetime, end: datetime, granularity: str,
             hour = func.date_format(UsageLog.created_at, "%Y-%m-%d %H:00") \
                 if db.get_bind().dialect.name != "sqlite" \
                 else func.strftime("%Y-%m-%d %H:00", UsageLog.created_at)
-            ok = UsageLog.error_kind.in_(OK_KINDS)
             query = (
-                db.query(
-                    hour.label("h"),
-                    UsageLog.model,
-                    func.count(UsageLog.id),
-                    func.sum(case((ok, 1), else_=0)),
-                    func.sum(case((ok, UsageLog.prompt_tokens), else_=0)),
-                    func.sum(case((ok, UsageLog.completion_tokens), else_=0)),
-                    func.sum(case((ok, UsageLog.total_tokens), else_=0)),
-                    func.sum(case((ok, UsageLog.cached_tokens), else_=0)),
-                    func.sum(case((ok, UsageLog.credits), else_=0.0)),
-                    func.sum(case((ok, UsageLog.latency_ms), else_=0)),
-                    func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
-                    func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
-                    func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
-                )
+                db.query(hour.label("h"), UsageLog.model, *_raw_sum_columns())
                 .filter(UsageLog.created_at >= seg_start, UsageLog.created_at < seg_end)
             )
             if platform:

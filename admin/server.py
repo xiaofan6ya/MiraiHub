@@ -510,15 +510,6 @@ def _startup():
     except Exception:
         logger.exception("手机号登录会话回收线程启动失败（不影响其它功能）")
 
-    # 用量汇总（usage_rollups）的后台回填：老库升级后历史不在汇总表里，
-    # 不补的话第一次打开数据看板会走原表、慢到不可用。前台请求有 0.4 秒预算
-    # 补最近一小段，剩下的历史交给这个线程慢慢补（默认 5 分钟检查一次）。
-    try:
-        from admin import rollup
-        rollup.start_backfill_thread()
-    except Exception:
-        logger.exception("用量汇总后台回填线程启动失败（统计会自动降级为原表）")
-
     # 未配置登录凭据时给出醒目告警：此时后台登录一律 503，不会退化成空口令
     if not settings.ADMIN_USERNAME or not settings.ADMIN_PASSWORD:
         logger.warning(
@@ -548,6 +539,13 @@ def _startup():
             logger.exception("建表/迁移失败，服务继续启动（数据库可用后重启即可）")
     else:
         logger.error("数据库当前不可用，服务以降级模式启动：请求将返回 503，恢复后自动自愈")
+
+    # 首次启动先建表再回填；数据库暂不可用时仍保留后台重试。
+    try:
+        from admin import rollup
+        rollup.start_backfill_thread()
+    except Exception:
+        logger.exception("用量汇总后台回填线程启动失败（统计会自动降级为原表）")
 
     # 套用「设置 → 运行配置」里保存的覆盖值（exe/apk 没有 .env，全靠这）。
     # 位置必须在 init_db 之后：首次启动时表还不存在，早跑一次只会打一条
