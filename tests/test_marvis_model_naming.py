@@ -46,11 +46,37 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def test_marvis_no_rewrite() -> None:
-    print("\n== Marvis：可读名/wiki 槽位名不再被改写 ==")
+    """Marvis 的可读名 / 槽位名不再被**跨平台改名**，但仍会回平台归属。
+
+    ## 2026-11-20 跟着 PR #59 改了
+
+        旧断言：`alias_to_upstream(name) == ("", "")` —— 表示「完全不改写」。
+
+        PR #59 加了「裸模型名按平台归属路由」之后，带 marvis 后缀的模型名
+        会返回 `("marvis", "<槽位名>")`：这里的第二个元素不是给上游的**改名**，
+        而是该模型在 marvis 平台上的槽位 —— 路由用它决定打到哪个平台。
+
+        所以要区分两件事：
+          · **跨平台改名**（把 `xxx-marvis` 改成别家平台的模型 id）→ 仍然不许
+          · **平台归属解析**（认出这是 marvis 的哪个槽位）→ PR #59 之后正常
+
+    下面同时锁这两条：平台必须是 marvis，槽位必须落在合法表里。
+    """
+    print("\n== Marvis：可读名/wiki 槽位名不再被跨平台改写，但要正确归属 ==")
+    expected = {
+        "deepseek-v4.1-flash-marvis": "main-auto",
+        "deepseek-v4-pro-marvis": "deepseek-v4-pro-external",
+        "hy3-marvis": "hy3-preview-agent-real",
+    }
     for name in ("deepseek-v4.1-flash-marvis", "deepseek-v4.1-flash",
                  "deepseek-v4-pro-marvis", "hy3-marvis"):
         got = model_suffix.alias_to_upstream(name)
-        check(f"{name} 不改写", got == ("", ""), got)
+        if name in expected:
+            check(f"{name} 归属 marvis 且槽位正确",
+                  got == ("marvis", expected[name]), got)
+        else:
+            # 不带后缀的裸名：不在 merivs 后缀表里，保持原样
+            check(f"{name} 不改写", got == ("", ""), got)
 
 
 def test_marvis_suffix() -> None:

@@ -418,26 +418,37 @@ class RiskControlTests(unittest.TestCase):
         self.assertEqual(classify(403, '{"code":4100406,"msg":"非法请求"}'),
                          "content_block")
 
-    def test_risk_control_returns_429_with_retry_after(self):
-        """必须是 429 + Retry-After：403 会被客户端当成「API 密钥无效」。"""
+    def test_risk_control_returns_503_with_retry_after(self):
+        """必须是 503 + Retry-After：403 会被客户端当成「API 密钥无效」。
+
+        ## 为什么是 503 而不是 429（PR #67，2026-11-20）
+
+            旧：429 + Retry-After: 600 —— 那是「账号级冷却」时代的语义
+                （整池都在风控里，等 10 分钟）。
+
+            新：503 + 1~10s —— 4100404 是**请求级**失败，平台级退避窗口
+                只有 10 秒（`RISK_BACKOFF_DEFAULT_SECONDS`）。给 600 秒
+                会让客户端以为要等十分钟，实际这条请求下次就可能通。
+        """
         exc = marvis_gateway.client.UpstreamError(
             "模型网关失败（HTTP 403）", status=403, code="403",
             kind="risk_control",
             detail='{"code":4100404,"msg":"客户端通用错误:请求被风控拦截"}')
         response = marvis_gateway._fail(exc)
-        self.assertEqual(response.status_code, 429)
-        self.assertEqual(response.headers.get("retry-after"), "600")
+        self.assertEqual(response.status_code, 503)
+        # 退避窗口 10 秒，客户端按它退避即可
+        self.assertIn(response.headers.get("retry-after"), ("1", "10", "11"))
         error = json.loads(response.body.decode("utf-8"))["error"]
         self.assertEqual(error["type"], "upstream_risk_control")
-        self.assertEqual(error["code"], "risk_control")
+        # 两种文案：平台退避中 / 这一条被拦
+        self.assertIn(error["code"], ("risk_control_backoff",
+                                      "risk_control_request"))
         # 不能让上层去 failover 换号（换号 100% 无效）
         self.assertFalse(error["upstream_account"])
-        # 文案必须指向「出口 IP」，而不是提示词 / 账号
-        self.assertIn("出口", error["message"])
         self.assertIn("4100404", error["message"])
 
     def test_risk_control_stops_retry_and_spares_other_accounts(self):
-        """命中风控**立刻停**：不换号、只记当前号一次、冷却 60 秒。"""
+        """命中风控**立刻停**：不换号、不写账号状态、交给平台级退避（PR #67）。"""
         import datetime as _dt
         from unittest.mock import MagicMock, patch
 
@@ -472,17 +483,39 @@ class RiskControlTests(unittest.TestCase):
                              return_value={}), \
                 patch.object(marvis_gateway.client, "chat_completions",
                              side_effect=risk):
-            with self.assertRaises(marvis_gateway.client.UpstreamError):
+            # PR #67 起 `_attempt` 直接抛 `PlatformRejected`（由
+            # `_risk_control_rejected()` 构造，503 + 两档文案），
+            # 不再是上游原始的 `UpstreamError` —— 旧断言在这里会红。
+            with self.assertRaises(marvis_gateway.shared.PlatformRejected) as ctx:
                 marvis_gateway._attempt(None, None, None, {"model": "main-auto"},
                                         "cn", stream=False)
+
+        # 状态码与文案：503（可重试）而不是 403/429
+        self.assertEqual(ctx.exception.status, 503)
+        self.assertEqual(ctx.exception.kind, "upstream_risk_control")
 
         # 只撞了一个号就停 —— 不许把池子里的号依次撞一遍
         self.assertEqual(calls["selected"], 1,
                          "风控后仍然继续换号，会把全池撞进冷却")
-        self.assertEqual(note_failure.call_count, 1)
+
+        # ## 这两条跟着 PR #67 改了（2026-11-20）
+        #
+        # 旧断言是「note_failure 调一次 + cool_seconds=60」，对应**账号级冷却**。
+        # PR #67 把 4100404 改成**请求级失败**：
+        #
+        #   · 仍然 note_failure 一次（留痕，排查时要能看出这个号撞过风控）
+        #   · 但 cool_seconds=0 —— 不打冷却窗口
+        #   · 退避由平台级窗口接管（连续命中撞满阈值才退避）
+        #
+        # 理由见 gateway.py 里「4100404：请求级判定 + 平台级退避」那段：
+        # 给命中账号打冷却会把好号坏号一起停掉，而换号 100% 无效
+        # （同一份 body 换个号重放还是被拦）。
+        self.assertEqual(note_failure.call_count, 1,
+                         "风控事件仍然要留痕（否则排查看不出这个号撞过）")
         kwargs = note_failure.call_args.kwargs
         self.assertEqual(kwargs["kind"], "risk_control")
-        self.assertEqual(kwargs["cool_seconds"], 60)
+        self.assertEqual(kwargs["cool_seconds"], 0,
+                         "请求级失败不该给账号打冷却（PR #67）")
 
 
 class NoRegressionTests(unittest.TestCase):

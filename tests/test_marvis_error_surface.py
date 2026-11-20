@@ -203,16 +203,31 @@ def test_fail_end_to_end() -> None:
     check("5100007 → 502", resp.status_code == 502, resp.status_code)
     check("5100007 错误体不带 family", "family" not in body["error"], body)
 
-    # 对照组：4100404 的错误体形状与 origin/main 完全一致
+    # 4100404 的错误面 —— **PR #67 起变了**（2026-11-20）
+    #
+    #   旧：429 + code=risk_control + Retry-After: 600
+    #       （对应账号级冷却时代：整池都在风控里、等十分钟）
+    #
+    #   新：503 + code=risk_control_backoff / risk_control_request
+    #       + Retry-After: 1~10
+    #       （请求级失败，平台级退避窗口只有 10 秒）
+    #
+    # 为什么改成 503：403/429 在多数 OpenAI 兼容客户端里会被渲染成
+    # 「API 密钥无效」或「被限流」，用户于是去翻一个没问题的 Key。
+    # 503 才是「上游暂时不可用，稍后重试」的中性表达。
     resp = gateway._fail(_err(status=403, code="403", kind="risk_control",
                               detail='{"code":4100404}'))
     body = json.loads(resp.body)
-    check("4100404 仍是 429", resp.status_code == 429, resp.status_code)
-    check("4100404 仍是 risk_control",
-          body["error"].get("code") == "risk_control", body)
+    check("4100404 是 503（可重试）", resp.status_code == 503, resp.status_code)
+    check("4100404 的 code 分两档",
+          body["error"].get("code") in ("risk_control_backoff",
+                                        "risk_control_request"), body)
     check("4100404 不带 family", "family" not in body["error"], body)
-    check("4100404 的 Retry-After 未变",
-          resp.headers.get("retry-after") == "600", dict(resp.headers))
+    check("4100404 的 Retry-After 是退避窗口（1~11s）",
+          resp.headers.get("retry-after") in ("1", "10", "11"),
+          dict(resp.headers))
+    check("4100404 不引导换号",
+          body["error"].get("upstream_account") is False, body)
 
 
 # ----------------------------------------------------------------------
