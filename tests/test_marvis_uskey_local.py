@@ -1,5 +1,7 @@
 """uskey 纯 Python 实现的回归测试：KAT + 结构 + 长度。零 mock，零网络。"""
 import hashlib
+import subprocess
+import sys
 import unittest
 
 from admin.platform.marvis.core import uskey_local as U
@@ -102,6 +104,47 @@ class StructureTests(unittest.TestCase):
 
     def test_two_mints_differ(self):
         self.assertNotEqual(U.mint_uskey(FIX_Q, BUS), U.mint_uskey(FIX_Q, BUS))
+
+
+class KatTests(unittest.TestCase):
+    """KAT：固定输入 -> 固定字节，且默认夹具永远是合成值。"""
+
+    def test_selfcheck_ok(self):
+        report = U.selfcheck()
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["uskey_chars"], U.USKEY_CHARS)
+        self.assertEqual(report["uskey_bytes"], U.USKEY_BYTES)
+
+    def test_replayable(self):
+        self.assertEqual(U.kat_mint(), U.kat_mint(),
+                         "固定输入必须得到固定字节，否则 KAT 没有意义")
+
+    def test_default_fixture_is_synthetic(self):
+        self.assertEqual(U.KAT_FIXTURE_QIMEI36, U.SYNTHETIC_QIMEI36,
+                         "不带 MARVIS_KAT_QIMEI36 时夹具必须是合成值")
+
+    def test_template_holds_no_identity(self):
+        baked = U.TLV_TEMPLATE[U.OFF_QIMEI1:U.OFF_QIMEI1 + 18]
+        self.assertEqual(baked, bytes.fromhex(U.SYNTHETIC_QIMEI36),
+                         "模板里的占位设备串被换成了非合成值")
+
+    def test_env_can_inject_fixture(self):
+        # 用子进程隔离 env，别污染本进程已 import 的模块状态。
+        fixture = "ffeeddccbbaa998877665544" + "3000" + "11223344"
+        code = (
+            "import os;"
+            "os.environ['MARVIS_KAT_QIMEI36']=%r;"
+            "from admin.platform.marvis.core import uskey_local as U;"
+            "print(U.KAT_FIXTURE_QIMEI36);"
+            "print(U.selfcheck()['ok'])" % fixture
+        )
+        out = subprocess.run([sys.executable, "-X", "utf8", "-c", code],
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+        self.assertEqual(out.returncode, 0, (out.stderr or "")[-2000:])
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(lines[0], fixture)
+        self.assertEqual(lines[-1], "True")
 
 
 if __name__ == "__main__":

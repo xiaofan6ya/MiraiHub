@@ -400,9 +400,15 @@ PROC_NAME = "MarvisAgent.exe"
 PRODUCT_NAME = "TX Gaming"
 WEEK_EXE = "Marvis.exe"
 
-#: 设备串是 mint_uskey() 的参数，不要改模板。
-#: 仅用于 KAT 自检的合成夹具（36 hex = 18 字节），不是任何真实设备。
-KAT_FIXTURE_QIMEI36 = "0123456789abcdef012345673000deadbeef"  # 合成夹具，非任何真实设备
+#: TLV 模板里那两段设备串的**占位值**。`build_tlv()` 会把它整段覆盖成调用方
+#: 给的值，所以它不是"默认设备串"，也不承载任何身份 —— 这里钉死成合成值，
+#: 是为了让 `selfcheck()` 能发现"有人把真机值焊回模板"这种改动。
+SYNTHETIC_QIMEI36 = "0123456789abcdef012345673000deadbeef"
+
+#: KAT 夹具设备串（36 hex = 18 字节）。默认就是这个合成值，**不是任何真实设备**。
+#: 要和真机抓包逐字节对照时用 `MARVIS_KAT_QIMEI36` 注入：真值留在你自己的
+#: 机器 / CI secret 里，别写回代码（写回来的那一刻它就是公开的）。
+KAT_FIXTURE_QIMEI36 = os.environ.get("MARVIS_KAT_QIMEI36") or SYNTHETIC_QIMEI36
 
 #: 载荷第 8 字节（TLV 前的那个 flag）。真品是 0x5a，不是随机数。
 STREAM_FLAG = 0x5A
@@ -657,3 +663,77 @@ def decode_uskey(uskey: str) -> dict:
     return {"raw": raw, "header": header, "dev18": dev18, "payload": payload,
             "p224": payload, "stream": stream,
             "tlv": stream[9:9 + TLV_BYTES] if len(stream) >= 329 else b""}
+
+# ---------------------------------------------------------------------------
+# KAT：固定输入 -> 固定字节
+# ---------------------------------------------------------------------------
+#: KAT 的固定 bus_info（七字段顺序固定；内容本身无所谓，只要恒定）。
+KAT_BUS_INFO = (
+    "marvisAgentTag=main&marvisConversationID=conv_" + "a" * 32
+    + "&marvisResponseID=11111111-2222-3333-4444-555555555555"
+    "&marvisScene=agent_chat&model=main-auto"
+    "&nonce=66666666-7777-8888-9999-aaaaaaaaaaaa"
+    "&originOpenID=" + "0" * 32
+)
+#: 固定时间戳（毫秒）/ 随机源：KAT 要能逐字节重放，就不能读时钟和 urandom。
+KAT_NOW_MS = 1730000000000
+
+
+def kat_mint(qimei36: str = "") -> str:
+    """用**全固定输入**签一块 uskey：同样输入必得同样字节（KAT / 回归用）。
+
+    真签那条路每次都必须随机（`dev18` / 毫秒 / blob 的后 10 字节），
+    所以这里显式固定它们 —— 只有 KAT 能这么用。
+    """
+    device = qimei36 or KAT_FIXTURE_QIMEI36
+    sec = KAT_NOW_MS // 1000
+    return mint_uskey(
+        device, KAT_BUS_INFO,
+        dev18=bytes(range(18)),
+        now_ms=KAT_NOW_MS,
+        rnd8=bytes(range(8)),
+        blob=bcd_seconds(sec) + bytes(10),
+        head8=bytes(8),
+        flag=STREAM_FLAG,
+        anchor_sec=sec,
+    )
+
+
+def selfcheck() -> dict:
+    """KAT 自检：长度 / 两处设备串 / 确定性 / 模板不承载身份。
+
+    返回可断言的报告；任何一条不成立就抛 `AssertionError`。这是"签名链路还能用"
+    的最低门槛 —— 故意放在库里而不是测试里，线上排障也能直接调。
+    """
+    device = KAT_FIXTURE_QIMEI36
+    wanted = bytes.fromhex(device)
+    one = kat_mint()
+    report = {
+        "qimei36_masked": device[:8] + "…",
+        "uskey_chars": len(one),
+        "uskey_bytes": len(b64_custom_decode(one)),
+    }
+    if report["uskey_chars"] != USKEY_CHARS:
+        raise AssertionError("uskey 必须 %d 字符，实际 %d"
+                             % (USKEY_CHARS, report["uskey_chars"]))
+    if report["uskey_bytes"] != USKEY_BYTES:
+        raise AssertionError("uskey 必须 %d 字节，实际 %d"
+                             % (USKEY_BYTES, report["uskey_bytes"]))
+    if one != kat_mint():
+        # 固定输入却不稳定 = 某处还在读时钟/urandom，KAT 就失去意义。
+        raise AssertionError("KAT 不可重放：相同输入两次产出不同")
+    tlv = decode_uskey(one)["tlv"]
+    if len(tlv) != TLV_BYTES:
+        raise AssertionError("TLV 必须 %d 字节，实际 %d" % (TLV_BYTES, len(tlv)))
+    for offset, name in ((OFF_QIMEI1, "qimei1"), (OFF_QIMEI2, "qimei2")):
+        if tlv[offset:offset + 18] != wanted:
+            raise AssertionError("%s 处不是调用方给的设备串" % name)
+    # 模板里那段占位必须还是合成值：真机值一旦被焊回模板，它就是公开的。
+    baked = TLV_TEMPLATE[OFF_QIMEI1:OFF_QIMEI1 + 18]
+    if baked != bytes.fromhex(SYNTHETIC_QIMEI36):
+        raise AssertionError(
+            "TLV 模板里焊了非合成占位设备串（%s…）：build_tlv 会覆盖它，"
+            "所以它只可能是一个泄漏出来的真值" % baked.hex()[:8])
+    report["ok"] = True
+    return report
+
