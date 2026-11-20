@@ -175,6 +175,7 @@ tests/*
 !tests/test_marvis_content_fingerprint.py
 !tests/test_raccoon_quota_classification.py
 !tests/test_platform_rating.py
+!tests/test_workbuddy_credential_codec.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 

@@ -16,6 +16,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -160,6 +161,66 @@ class StatsDashboardTests(unittest.TestCase):
         self.assertIsNone(data["summary"]["success_rate"])
         self.assertEqual(data["ranking"], [])
         self.assertTrue(data["distribution"]["series"] == [])
+
+    def test_rolling_window_counts_only_rows_inside_partial_hours(self):
+        from admin import rollup
+
+        end = datetime(2025, 1, 2, 12, 30)
+        start = end - timedelta(days=1)
+        first_hour = rollup.hour_start(start)
+        last_hour = rollup.hour_start(end)
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def utcnow(cls):
+                return end
+
+        app, session_factory = make_app()
+        with session_factory() as db:
+            for timestamp in (
+                start - timedelta(microseconds=1), start, start + timedelta(minutes=10),
+                first_hour + timedelta(hours=1), last_hour, end - timedelta(microseconds=1), end,
+            ):
+                db.add(UsageLog(model="boundary-model", platform="workbuddy",
+                                created_at=timestamp, credits=1, total_tokens=60,
+                                completion_tokens=40, latency_ms=900, ttfb_ms=400))
+            db.commit()
+            covered = rollup.ensure_coverage(db, until=end)
+            self.assertEqual(covered, (first_hour, last_hour))
+
+        with patch.object(stats_routes, "datetime", FixedDatetime), \
+                patch.object(rollup, "datetime", FixedDatetime), TestClient(app) as client:
+            dashboard = client.get("/api/stats/dashboard", params={"days": 1, "model": "boundary-model"})
+            self.assertEqual(dashboard.status_code, 200, dashboard.text)
+            data = dashboard.json()
+            self.assertEqual(data["source"], "rollup")
+            self.assertEqual(data["summary"]["requests"], 5)
+            self.assertEqual(data["summary"]["credits"], 5)
+            self.assertEqual(data["summary"]["total_tokens"], 300)
+            self.assertEqual(sum(data["trend"]["total_requests"]), 5)
+            self.assertEqual(sum(data["distribution"]["series"][0]["values"]), 5)
+
+            market = client.get("/api/stats/model-market", params={"hours": 24})
+            self.assertEqual(market.status_code, 200, market.text)
+            item = next(item for item in market.json()["items"] if "boundary-model" in item["models"])
+            self.assertEqual(item["requests"], 5)
+            self.assertEqual(item["tps"], 80)
+
+    def test_window_series_keeps_throughput_on_raw_and_rollup_paths(self):
+        from admin import rollup
+
+        start = datetime(2025, 1, 2, 12)
+        end = start + timedelta(hours=1)
+        with self.session_factory() as db:
+            db.add(UsageLog(model="throughput-model", created_at=start, completion_tokens=40,
+                            latency_ms=900, ttfb_ms=400))
+            db.commit()
+            covered = rollup.ensure_coverage(db, until=end)
+            raw = rollup.window_series(db, start, end, "hour", (None, None), model="throughput-model")
+            aggregated = rollup.window_series(db, start, end, "hour", covered, model="throughput-model")
+
+        self.assertEqual((raw[0]["tps_sum"], raw[0]["tps_count"]), (80, 1))
+        self.assertEqual(raw, aggregated)
 
     def test_sum_coercion_handles_mysql_decimal(self):
         """MySQL 的 SUM() 返回 Decimal；直接拿它除 float 会 500（线上已复现）。"""

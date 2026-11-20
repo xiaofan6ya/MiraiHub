@@ -30,12 +30,26 @@ def main():
         import fastapi
         import pydantic
         from fastapi.testclient import TestClient
+        from sqlalchemy import inspect
+        from unittest.mock import patch
+        from admin import rollup
         from admin.server import app
         from admin.db import engine
         from admin.security import create_admin_token
 
+        backfill_schema_ready = []
+        start_backfill = rollup.start_backfill_thread
+
+        def check_backfill_schema():
+            schema = inspect(engine)
+            backfill_schema_ready.append(
+                schema.has_table('usage_rollups') and schema.has_table('usage_rollup_state'))
+            start_backfill()
+
         try:
-            with TestClient(app) as client:
+            with patch.object(rollup, 'start_backfill_thread', side_effect=check_backfill_schema), \
+                    TestClient(app) as client:
+                assert backfill_schema_ready == [True], 'rollup must start after both tables are created'
                 assert client.get('/api/app/version').status_code == 200
                 assert client.get('/admin').status_code == 200
                 # 2026-11-05 安全加固：join 总闸默认关闭，公开注册页一律 404；

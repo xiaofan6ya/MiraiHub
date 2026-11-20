@@ -641,31 +641,43 @@ def test_sentinel() -> None:
 
 
 def test_desktop_catalog() -> None:
-    """客户端目录：真实全量模型（含新模型），且与快照/接口不同。"""
+    """从合成客户端缓存读取目录，不把自定义渠道模型纳入网关。"""
     print("客户端模型目录")
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+
     from admin.platform.trae.services import desktop_catalog
 
-    result = desktop_catalog.read_all()
-    for realm in ("cn", "intl"):
-        data = result.get(realm) or {}
-        if not data.get("models"):
-            skip(f"{realm} 客户端目录", data.get("error") or "未安装 Trae")
-            continue
-        names = [m["name"] for m in data["models"]]
-        check(f"{realm} 模型数量足够多", len(names) >= 20, f"{len(names)} 个")
-        # 自定义模型（custom_openai_compatible//xxx）不该进来：
-        # 它们指向用户自配的第三方端点，走网关转发没有意义
-        bad = [n for n in names if n.startswith("custom_")]
-        check(f"{realm} 已过滤自定义模型", not bad, str(bad[:3]))
-        # 上下文长度必须能解析出来（客户端里有 int/list/dict 三种形态）
-        with_ctx = [m for m in data["models"] if m["context_window"] > 0]
-        check(f"{realm} 上下文长度可解析", len(with_ctx) >= len(names) // 2,
-              f"{len(with_ctx)}/{len(names)}")
-        # 免费/会员判定必须对每个模型都有结论（free 是 bool 而不是 None）
-        known = [m for m in data["models"] if isinstance(m.get("free"), bool)]
-        check(f"{realm} 每个模型都有 free 判定",
-              len(known) == len(data["models"]),
-              f"{len(known)}/{len(data['models'])}")
+    payload = {"agent": [
+        {"name": "official-text", "context_window": 8192},
+        {"name": "official-vision", "context_window_size": {"max": [32768]},
+         "features": {"access": {"data": {"identity_list": [1]}}}},
+        {"name": "custom_openai_compatible//example"},
+        {"name": "custom_anthropic_compatible//example"},
+        {"name": "CUSTOM_OTHER//example"},
+    ]}
+    with TemporaryDirectory(prefix="trae-catalog-", dir=".") as temp:
+        path = Path(temp).resolve() / "Trae CN" / "User" / "globalStorage" / "state.vscdb"
+        path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+            conn.execute("INSERT INTO ItemTable VALUES (?, ?)",
+                         ("fixture_AI.agent.model.model_list_map", json.dumps(payload)))
+            conn.commit()
+        with patch.dict(os.environ, {"APPDATA": str(path.parents[3])}):
+            result = desktop_catalog.read_all()
+
+    cn = result["cn"]
+    assert not cn["error"], cn["error"]
+    assert [(m["name"], m["context_window"], m["free"]) for m in cn["models"]] == [
+        ("official-text", 8192, True),
+        ("official-vision", 32768, False),
+    ]
+    assert cn["free_count"] == 1
+    assert not result["intl"]["models"] and result["intl"]["error"]
 
 
 def test_free_identity() -> None:

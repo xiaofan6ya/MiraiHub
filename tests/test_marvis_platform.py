@@ -14,6 +14,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # 必须早于 `admin.*` 导入：`admin/db.py` 在模块级按 settings 建引擎，
 # 默认值是 MySQL；固定成 SQLite 文件库才能脱库跑（内存库不接受连接池参数）。
@@ -62,6 +63,18 @@ class SignatureTests(unittest.TestCase):
 
 
 class LlmHeaderTests(unittest.TestCase):
+    def setUp(self):
+        self.identity = {
+            "uskey": "offline-test-value",
+            "nonce": "offline-test-nonce",
+            "client_version": "0.0.0",
+            "conversation_id": "offline-conversation",
+            "response_id": "offline-response",
+        }
+        provider = patch.object(endpoints, "uskey_identity", return_value=self.identity)
+        provider.start()
+        self.addCleanup(provider.stop)
+
     def test_llm_headers_shape(self):
         headers = endpoints.llm_headers(ACCT)
         for key in ("Ual-Access-Openid", "Ual-Access-Access-Token",
@@ -91,11 +104,9 @@ class LlmHeaderTests(unittest.TestCase):
         self.assertEqual(parsed["reqScene"], 1)
         self.assertEqual(parsed["taskType"], "user")
         self.assertIs(parsed["isIoa"], False)
-        # uskey 是 376 字节的 base64 → ceil(376/3)*4 = 504 字符（含 '=' 填充）
-        self.assertEqual(len(parsed["uskey"]), 504)
-        # nonce 每次不同（上游拿去去重）
-        self.assertNotEqual(parsed["nonce"],
-                            json.loads(endpoints.marvis_ext(ACCT))["nonce"])
+        self.assertEqual(parsed["uskey"], self.identity["uskey"])
+        self.assertEqual(parsed["nonce"], self.identity["nonce"])
+        self.assertEqual(parsed["clientVersion"], self.identity["client_version"])
 
 
 class ModelTests(unittest.TestCase):

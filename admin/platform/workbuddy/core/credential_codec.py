@@ -63,6 +63,21 @@ def _installed_key(executable: str, mtime: int, size: int) -> tuple[str, bytes]:
         raise CredentialDecodeError('无法读取本机客户端的凭证解密能力，请更新 WorkBuddy 或使用手机号授权登录') from None
 
 
+def _workbuddy_executable(install) -> Path | None:
+    """Find the client executable that carries the at-rest key.
+
+    New installs ship WorkBuddy.exe; older ones only have WorkBuddyAI.exe.
+    Both expose the same key through the storage binding.
+    """
+    if not install:
+        return None
+    for name in ('WorkBuddy.exe', 'WorkBuddyAI.exe'):
+        candidate = Path(install) / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _local_key() -> tuple[str, bytes]:
     configured = os.getenv('WORKBUDDY_CREDENTIAL_KEY_FILE')
     key_file = Path(configured) if configured else Path(__file__).resolve().parents[1] / '.workbuddy' / 'credential-key.json'
@@ -81,10 +96,11 @@ def _local_key() -> tuple[str, bytes]:
     if os.name != 'nt' or os.getenv('WORKBUDDY_ANDROID') == '1':
         raise CredentialDecodeError('未配置官方客户端加密能力，请管理员配置 WORKBUDDY_CREDENTIAL_KEY_FILE；也可使用明文备份或手机号授权登录')
     from wb_install import WB
-    install = WB.install_dir()
-    executable = Path(install) / 'WorkBuddy.exe' if install else None
-    if executable is None or not executable.is_file():
-        raise CredentialDecodeError('这是新版客户端加密凭证，未找到本机 WorkBuddy；请配置客户端安装目录或使用手机号授权登录')
+    executable = _workbuddy_executable(WB.install_dir())
+    if executable is None:
+        raise CredentialDecodeError(
+            '这是新版客户端加密凭证，未在配置的安装目录中找到 WorkBuddy.exe 或 '
+            'WorkBuddyAI.exe；请重新指定客户端安装目录，或使用手机号授权登录')
     stat = executable.stat()
     return _installed_key(str(executable), stat.st_mtime_ns, stat.st_size)
 

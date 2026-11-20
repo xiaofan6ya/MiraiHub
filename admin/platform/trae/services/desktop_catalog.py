@@ -40,9 +40,8 @@ KEY_SUFFIX = "_AI.agent.model.model_list_map"
 #: 专用，模型集合是前者的子集，合并时以这些为主、其余只补元数据。
 PRIMARY_GROUPS = ("solo_agent", "agent", "solo_coder", "solo_agent_lite")
 
-#: 自定义模型的前缀：`custom_openai_compatible//xxx`。它们指向用户自己配的
-#: 第三方端点，走本网关转发没有意义，且名字不是上游真名。
-CUSTOM_PREFIX = "custom_openai_compatible"
+#: `custom_` 模型指向用户配置的第三方端点，不属于 Trae 模型目录。
+CUSTOM_PREFIX = "custom_"
 
 
 def appdata_dir() -> str:
@@ -200,7 +199,7 @@ def read_models(realm: str) -> dict:
                 if not isinstance(model, dict):
                     continue
                 name = str(model.get("name") or "").strip()
-                if not name or name.startswith(CUSTOM_PREFIX):
+                if not name or name.lower().startswith(CUSTOM_PREFIX):
                     continue
                 # 同一模型可能出现在多个分组，取「上下文/最大输出」信息最全的那份
                 previous = merged.get(name)
