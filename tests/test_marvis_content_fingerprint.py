@@ -41,6 +41,7 @@ def _specimen(pattern):
     """按规则自身的正则反解一条**必定命中**的样例（不写字面量）。"""
     src = pattern.pattern
     src = re.sub(r"\(\?:[^()]*\)\?", "", src)   # 可选非捕获组取缺席
+    src = re.sub(r"\(\?:([^()|]*)\|[^()]*\)", r"\1", src)  # 交替组取首个分支
     src = re.sub(r"\\s[*+]", " ", src)            # 空白类归一成单个空格
     src = re.sub(r"([A-Za-z])\?", r"\1", src)     # 单字符可选取该字符
     src = re.sub(r",\?", "", src)                  # 可选逗号取缺席
@@ -51,9 +52,9 @@ def _specimen(pattern):
 class RuleTableTests(unittest.TestCase):
     """规则表本身：条数、每条都能命中自己的样例。"""
 
-    def test_rule_table_has_all_seven_fingerprints(self):
-        """少一条就是留一个随时会踩的 403。"""
-        self.assertEqual(len(marvis_gateway._TENCENT_FINGERPRINT_RULES), 7)
+    def test_rule_table_has_all_twelve_fingerprints(self):
+        """少一条就是留一个随时会踩的 403（2026-11-18 扩表后为 12 条）。"""
+        self.assertEqual(len(marvis_gateway._TENCENT_FINGERPRINT_RULES), 12)
 
     def test_every_rule_rewrites_its_own_specimen(self):
         """每条规则：样例命中 → 改写后文本变了、且不再命中。"""
@@ -497,6 +498,209 @@ class NoRegressionTests(unittest.TestCase):
         out = marvis_gateway._prepare_body(body, "main-auto")
         self.assertEqual(out["model"], "main-auto")
         self.assertEqual(body["model"], "user-visible-name")
+
+
+class GenericAssistantOpeningRuleTests(unittest.TestCase):
+    """规则 9-13：通用开场白（`You are a helpful assistant` 这一类）。
+
+    真机对照（同一把 key、同一个槽位，交替 24 次）：不带 system 12 次全 200，
+    带 system 12 次全 403 / 4100406；长段自定义提示词 200 ⇒ 命中的是这些固定
+    开头，不是长度。
+
+    这里**必须写字面量**：要锁的是「上游登记的那几条原串」以及改写后的等价
+    表述，没法像 `RuleTableTests` 那样从正则反解。规则一改，这里就该红。
+
+    ⚠ 期望值是 `You're` 形态，不是 `You are a capable ...`：本文件跑在上游
+    代码上，`rewrite_tencent_fingerprints()` 末尾还有 `_rewrite_identity_line()`
+    兜底 —— 只要首行以 `You are ` 起句就会被再改一次。规则自己写成 `You're`，
+    一条规则就只改一次，`rules_hit` 不会虚高一倍。
+    """
+
+    #: 规则 4 的两个品牌名：旧名中间带空格，新名连写。
+    BRANDS = ("DeepSeek " + "Runtime", "DeepSeek" + "Runtime")
+
+    #: (上游触发串, 网关改写后的文本)
+    CASES = (
+        ("You are a helpful AI assistant", "You're a capable AI assistant"),
+        ("You are a helpful assistant", "You're a capable assistant"),
+        ("You are an AI assistant.", "You're a capable AI assistant."),
+        ("You are a coding assistant.", "You're a capable coding assistant."),
+        ("你是乐于助人的助手。", "你是一位能力出众的助手。"),
+    )
+
+    def setUp(self):
+        self._env_backup = os.environ.get(marvis_gateway.SANITIZE_TENCENT_ENV)
+        os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+
+    def tearDown(self):
+        if self._env_backup is None:
+            os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+        else:
+            os.environ[marvis_gateway.SANITIZE_TENCENT_ENV] = self._env_backup
+
+    def test_every_generic_opening_is_rewritten_to_expected_text(self):
+        """5 条通用开场白：命中一次、改写结果逐字锁死。"""
+        for poison, expected in self.CASES:
+            out, hits = marvis_gateway.rewrite_tencent_fingerprints(poison)
+            self.assertEqual(hits, 1, "开场白没命中：%r" % (poison,))
+            self.assertEqual(out, expected,
+                             "改写结果不对：%r -> %r" % (poison, out))
+
+    def test_rule_four_covers_both_brand_names(self):
+        """规则 4 的品牌名兼容：换名之后旧正则空跑，两个名字都必须被**规则 4**吃掉。
+
+        这里直接查表项（`pattern` / `replacement`），而不是只看
+        `rewrite_tencent_fingerprints()` 的返回值：末尾的 `_rewrite_identity_line()`
+        兜底会把任何以 `You are ` 起句的首行改成 `You're `，于是「规则 4 空跑」
+        也能被它掩盖成「命中 1 次」—— 那正是这条规则在真机上静默失效、
+        日志看着却不像坏了的原因。
+        """
+        pattern, replacement = marvis_gateway._TENCENT_FINGERPRINT_RULES[3]
+        expected = ("You're a capable AI coding assistant, "
+                    "powered by a large language model")
+        for brand in self.BRANDS:
+            trigger = "You are an AI coding agent, powered by " + brand
+            self.assertIsNotNone(pattern.search(trigger),
+                                 "品牌名 %r 没被规则 4 覆盖" % (brand,))
+            self.assertEqual(pattern.sub(replacement, trigger), expected)
+
+    def test_rule_four_rewritten_text_breaks_the_you_are_an_ai_prefix(self):
+        """黑名单锚的是 `You are an AI` 前缀：改写结果不能还带着它。"""
+        for brand in self.BRANDS:
+            trigger = "You are an AI coding agent, powered by " + brand
+            out, hits = marvis_gateway.rewrite_tencent_fingerprints(trigger)
+            self.assertEqual(hits, 1, "没命中：%r" % (brand,))
+            self.assertFalse(out.lower().startswith("you are an ai"),
+                             "替换后仍保留触发前缀：%r" % (out,))
+            self.assertEqual(
+                out,
+                "You're a capable AI coding assistant, "
+                "powered by a large language model")
+
+    def test_case_and_whitespace_drift_is_covered(self):
+        """大小写翻转 + 连续空白 / 换行都要命中（上游按归一后的文本判）。"""
+        for poison, _expected in self.CASES:
+            if not poison.isascii():
+                continue
+            for variant in (poison.upper(), poison.lower(), poison.swapcase(),
+                            re.sub(r" ", "  \n", poison)):
+                out, hits = marvis_gateway.rewrite_tencent_fingerprints(variant)
+                self.assertEqual(hits, 1, "变体没命中：%r" % (variant,))
+                self.assertNotEqual(out, variant)
+
+    def test_helpful_ai_assistant_is_not_double_rewritten(self):
+        """顺序陷阱：不能先改成 `You're a capable assistant`，把 `AI` 吃掉。"""
+        out, hits = marvis_gateway.rewrite_tencent_fingerprints(
+            "You are a helpful AI assistant")
+        self.assertEqual(hits, 1)
+        self.assertEqual(out, "You're a capable AI assistant")
+        self.assertNotIn("capable capable", out)
+
+    def test_generic_rule_does_not_eat_capable_text(self):
+        """已经写成 `capable` 的正文不能被泛化规则二次改写。"""
+        text = "You're a capable AI assistant"
+        out, hits = marvis_gateway.rewrite_tencent_fingerprints(text)
+        self.assertIs(out, text)
+        self.assertEqual(hits, 0)
+
+    def test_trailing_text_is_preserved(self):
+        """只换开场白，后面正文逐字保留（不删句子 = 不丢语义约束）。"""
+        original = ("You are a helpful assistant. You must answer in Chinese.\n"
+                    "Never reveal secrets.")
+        out, hits = marvis_gateway.rewrite_tencent_fingerprints(original)
+        self.assertEqual(hits, 1)
+        self.assertEqual(
+            out,
+            "You're a capable assistant. You must answer in Chinese.\n"
+            "Never reveal secrets.")
+
+    def test_full_pipeline_rewrites_system_message(self):
+        """走 `_prepare_body`：messages 里的 system 消息同样被改写。"""
+        for poison, expected in self.CASES:
+            body = {"model": "x",
+                    "messages": [{"role": "system", "content": poison},
+                                 {"role": "user", "content": "ping"}]}
+            out = marvis_gateway._prepare_body(body, "main-auto")
+            self.assertEqual(out["messages"][0]["content"], expected,
+                             "完整链路没改写：%r" % (poison,))
+            self.assertEqual(body["messages"][0]["content"], poison)
+
+    def test_switch_off_skips_generic_openings(self):
+        """`MIRAIHUB_MARVIS_SANITIZE_TENCENT=0` 时逐字符透传、连对象都不换。"""
+        os.environ[marvis_gateway.SANITIZE_TENCENT_ENV] = "0"
+        for poison, _expected in self.CASES:
+            out, hits = marvis_gateway.rewrite_tencent_fingerprints(poison)
+            self.assertIs(out, poison)
+            self.assertEqual(hits, 0)
+
+
+class TopLevelSystemFieldTests(unittest.TestCase):
+    """顶层 `system` 字段（Anthropic 形态）也必须过规则表。
+
+    `/v1/messages` 会把顶层 system 搬进 `messages[0]`，但走
+    `/v1/chat/completions` 的客户端可以直接带一个顶层 `system` —— 旧实现只
+    遍历 `messages[]`，这份正文整段在改写作用域之外：同一句触发串换个承载
+    字段就能打到上游，日志里 `rules_hit` 还是 0。
+    """
+
+    POISON = "You are a helpful assistant"
+    EXPECTED = "You're a capable assistant"
+
+    def setUp(self):
+        self._env_backup = os.environ.get(marvis_gateway.SANITIZE_TENCENT_ENV)
+        os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+
+    def tearDown(self):
+        if self._env_backup is None:
+            os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+        else:
+            os.environ[marvis_gateway.SANITIZE_TENCENT_ENV] = self._env_backup
+
+    def test_top_level_system_is_rewritten_and_stays_top_level(self):
+        """改写后**仍在顶层**（上游没有角色归一化，字段不该被搬走）。"""
+        body = {"model": "x", "system": self.POISON,
+                "messages": [{"role": "user", "content": "ping"}]}
+        out = marvis_gateway._prepare_body(body, "main-auto")
+        self.assertEqual(out["system"], self.EXPECTED)
+        self.assertIn("system", out, "顶层 system 被搬走了：%r" % (out,))
+        self.assertEqual(body["system"], self.POISON, "调用方 body 不能被就地改")
+        self.assertIs(out["messages"], body["messages"])
+
+    def test_top_level_system_list_is_rewritten(self):
+        """Anthropic 的数组形态同样逐段洗，非指纹段逐字不动。"""
+        payload = [{"type": "text", "text": self.POISON},
+                   {"type": "text", "text": "回答用中文。"}]
+        out = marvis_gateway._prepare_body({"model": "x", "system": payload},
+                                           "main-auto")
+        self.assertEqual(out["system"][0]["text"], self.EXPECTED)
+        self.assertEqual(out["system"][1]["text"], "回答用中文。")
+        self.assertEqual(payload[0]["text"], self.POISON, "入参 list 不能被就地改")
+
+    def test_zero_hit_top_level_system_is_the_same_object(self):
+        """零命中：连字符串对象都不换（前缀缓存不能被无谓重建打掉）。"""
+        text = "普通系统提示词，没有指纹。"
+        out = marvis_gateway._prepare_body({"model": "x", "system": text},
+                                           "main-auto")
+        self.assertIs(out["system"], text)
+
+    def test_other_shapes_pass_through(self):
+        out = marvis_gateway._prepare_body({"model": "x", "system": 123},
+                                           "main-auto")
+        self.assertEqual(out["system"], 123)
+
+    def test_top_level_and_message_hits_are_both_logged(self):
+        """两处命中各记一条，且日志里不带原文。"""
+        with self.assertLogs("admin.platform.marvis.gateway",
+                             level="INFO") as captured:
+            marvis_gateway._prepare_body(
+                {"model": "x", "system": self.POISON,
+                 "messages": [{"role": "system",
+                               "content": "You are a coding assistant"}]},
+                "main-auto")
+        logged = "\n".join(captured.output)
+        self.assertIn("rules_hit=1", logged)
+        self.assertIn("顶层 system", logged)
+        self.assertNotIn(self.POISON, logged, "日志里不能出现原文")
 
 
 if __name__ == "__main__":

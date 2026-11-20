@@ -687,6 +687,36 @@ async def _bill_async(*args, **kwargs) -> None:
 #   · 新增 `_rewrite_identity_line()` 作为**兜底**：首行只要是 `You are ` 就改写。
 #     它覆盖 Claude Code、Codex 以及以后新增的任何客户端身份句 —— 不再需要
 #     每次客户端升级就来补一条规则。
+#
+# ## 2026-11-18 扩表：通用开场白（当前第 9-13 条）
+#
+# 原来的规则 1-7 只覆盖「特定客户端」的身份句（Claude Code / Codex / DSH），
+# 但上游黑名单同时还有一层**通用开场白**：任何客户端只要把
+# `You are a helpful assistant` 这类开场白放进 system，就整条 403 / 4100406。
+# 真机对照（同一把 key、同一个槽位，交替 24 次）：
+#
+#     不带 system 的同一请求           12 次 -> 全 200
+#     带 system 的同一请求             12 次 -> 全 403 / 4100406
+#     长段自定义提示词（不带开场白）      -> 200
+#
+# 即命中的是**那几句固定开头**，不是长度、不是内容本身。于是补 5 条：
+#
+#     9.  You are a helpful AI assistant
+#     10. You are a helpful assistant
+#     11. You are an AI assistant（含 `You are a AI assistant` 这种冠词错写）
+#     12. You are a coding assistant
+#     13. 你是乐于助人的助手
+#
+# 改法与上面 7 条**完全同一口径**：只把开场白写成同义的另一种说法
+# （`helpful` -> `capable` / 给 `AI assistant` 补 `capable`），**不删句子**。
+# 这些开场白后面常跟同一条身份约束（「回答用中文」「不要泄露密钥」），
+# 删掉首句等于把约束一起丢掉 —— 网关不替用户做这种裁剪。
+#
+# ⚠️ 顺序是「具体 -> 泛化」：`a helpful AI assistant` 必须排在
+#    `a helpful assistant` 之前 —— 两条正则的 `helpful` 与 `assistant` 之间
+#    分别是 `AI\s+` 与直接相接，本来不会互相吃掉，但先把具体的改完更稳妥：
+#    以后若有人把 `(?:AI\s+)?` 合进一条，前半被改坏后后半会再命中一次。
+#    第 11 / 12 条同理，各留一条独立规则，不做「合并成一条」的优化。
 
 #: 改写开关（默认开）：设为 0 / false / off / no 时**完全跳过**改写，请求原样
 #: 发上游。这是「替用户改写内容」的行为，必须能一键退回原样透传。
@@ -732,9 +762,16 @@ _TENCENT_FINGERPRINT_RULES = (
     #    **反而是 403** —— 也就是说这条规则以前每命中一次，就在把一条正常
     #    请求改成失败（2026-11-17 实测）。保留规则但换成 `You're` 形态，
     #    从此它只是同义改写、不再是陷阱。
+    #
+    #    ⚠ **品牌名要同时认两个**（2026-11-18 实测）：DSH 换过一次产品名 ——
+    #    旧名是 `DeepSeek\s+Harness`（带空格），新名去掉了空格、把 Harness
+    #    换成了 Runtime。旧正则只认前者，换名之后在真机上**静默空跑**：
+    #    规则还在表里、`rules_hit` 恒 0、上游照旧 403 / 4100406。
+    #    「规则存在、看着也修过、却永不命中」是最难查的一类，所以这里用
+    #    `DeepSeek\s*(?:Harness|Runtime)` 同时认两个品牌名（`\s*` 容忍有无空格）。
     (re.compile(r"You\s+are\s+an?\s+AI\s+(?:coding\s+)?agent\s*,?\s*powered\s+by\s+"
-                r"(?:the\s+)?DeepSeek\s+Harness", re.I),
-     "You're an AI coding agent, powered by the DeepSeek Harness"),
+                r"(?:the\s+)?DeepSeek\s*(?:Harness|Runtime)", re.I),
+     "You're a capable AI coding assistant, powered by a large language model"),
     # 5. DSH Web 运行面的开头两句。位置无关。
     #    触发串**跨句边界**（前半句、后半句各自都放行），find 必须是前两句的
     #    并集；砍半 = 静默空跑。改写只去掉品牌串，其余逐字不动。
@@ -761,6 +798,31 @@ _TENCENT_FINGERPRINT_RULES = (
     # 7. 客户端 SDK 的计费头字样。位置无关；连裸词也会被拦。
     (re.compile(re.escape("x-anthropic-billing-header"), re.I),
      "x-client-billing-header"),
+    # 9. 通用开场白：`You are a helpful AI assistant`（2026-11-18 真机新增黑名单）。
+    #    只把 `helpful` 换成 `capable`：**不删句子** —— 这类开场白后面常跟同一条
+    #    身份约束（「回答用中文」「不要泄露密钥」），删掉首句等于把约束一起丢掉。
+    #    替换值用 `You're` 形态而不是 `You are a capable ...`：上游兜底的
+    #    `_rewrite_identity_line()` 会把首行的 `You are ` 再改一次，一条规则
+    #    命中一次更好对账（也免得 `rules_hit` 虚高一倍）。
+    (re.compile(r"You\s+are\s+a\s+helpful\s+AI\s+assistant", re.I),
+     "You're a capable AI assistant"),
+    # 10. 通用开场白：`You are a helpful assistant`（不含 AI）。
+    #     **必须排在 9 之后**：先跑 10 的话，9 的触发串会被改成
+    #     `You're a capable assistant`，后半句的 `AI` 直接丢掉。
+    (re.compile(r"You\s+are\s+a\s+helpful\s+assistant", re.I),
+     "You're a capable assistant"),
+    # 11. 通用开场白：`You are an AI assistant`；冠词错写 `You are a AI assistant`
+    #     一样会被拦，所以用 `an?`。替换文本里的冠词只能是 `a`，否则会改出
+    #     `an capable` 这种病句。
+    (re.compile(r"You\s+are\s+an?\s+AI\s+assistant", re.I),
+     "You're a capable AI assistant"),
+    # 12. 通用开场白：`You are a coding assistant`。
+    (re.compile(r"You\s+are\s+a\s+coding\s+assistant", re.I),
+     "You're a capable coding assistant"),
+    # 13. 中文通用开场白：`你是乐于助人的助手`。句末标点（`。` / `！` / 无标点）
+    #     不在匹配内，原样保留；同上，不删句子、只换说法。
+    (re.compile(r"你是乐于助人的助手", re.I),
+     "你是一位能力出众的助手"),
 )
 
 
@@ -955,6 +1017,53 @@ def _sanitize_messages(messages: list) -> tuple[list, int]:
         hits += n
         changed = True
     return (out if changed else messages), hits
+
+
+def _sanitize_top_level_system(body: dict) -> int:
+    """顶层 `system` 字段同样过一遍指纹改写，返回命中条数。
+
+    ## 为什么还要单独洗这一处（2026-11-18）
+
+    `/v1/messages` 的 `_anthropic_to_openai()` 会把顶层 `system` 搬进
+    `messages[0]`，那条路径本来就被 `_sanitize_messages()` 覆盖了。但走
+    `/v1/chat/completions` 的客户端可以直接带一个**顶层** `system`
+    （Anthropic 风格：`{"system": "You are a helpful assistant", ...}`），
+    而 `_sanitize_messages()` 只遍历 `messages[]` —— 这份正文整段在改写
+    作用域之外：**同一句触发串换个承载字段就能打到上游**，日志里
+    `rules_hit` 还是 0，看起来像「规则没生效」。
+
+    这里只改写、**不搬位置**：字段仍然是顶层的 `system`（上游认哪个字段是
+    上游的事，网关不做形态搬迁）；列表形态（`[{"type": "text", ...}]`）
+    逐段洗，其余形态原样放行。
+
+    命中才写回 —— 零命中时 `body` 一个字符都不动，与 `_sanitize_messages()`
+    同一取舍：前缀缓存不能被无谓重建打掉。
+    """
+    value = body.get("system")
+    if isinstance(value, str):
+        rewritten, hits = rewrite_tencent_fingerprints(value)
+        if hits:
+            body["system"] = rewritten
+        return hits
+    if isinstance(value, list):
+        hits = 0
+        out = list(value)
+        for index, part in enumerate(value):
+            if isinstance(part, str):
+                rewritten, n = rewrite_tencent_fingerprints(part)
+                if n:
+                    out[index] = rewritten
+                    hits += n
+                continue
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                rewritten, n = rewrite_tencent_fingerprints(part["text"])
+                if n:
+                    out[index] = dict(part, text=rewritten)
+                    hits += n
+        if hits:
+            body["system"] = out
+        return hits
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1186,6 +1295,8 @@ def _prepare_body(body: dict, slot: str) -> dict:
     · **system 正文过一遍腾讯内容风控指纹改写**（`4100406` 的修法，表见上）。
       `/v1/messages` 与 `/v1/responses` 都经 `_run_normalized` → `chat_completions`
       落到这里，所以只改这一处就覆盖三个入口。
+    · 顶层 `system` 字段（Anthropic 形态）同样过一遍改写：`_sanitize_messages()`
+      只遍历 messages，顶层字段是同一句触发串的另一条承载路径。
     """
     out = dict(body)
     out["model"] = slot
@@ -1203,6 +1314,11 @@ def _prepare_body(body: dict, slot: str) -> dict:
         if hits:
             # 只记命中条数，**不记原文**：system 里可能带用户的 prompt / 路径 / 密钥。
             logger.info("Marvis 内容风控指纹改写 | rules_hit=%d", hits)
+    # 顶层 `system` 字段（Anthropic 形态）不在 messages 里，单独过一遍 ——
+    # 同一句触发串换个承载字段就能绕过上面那段改写。
+    system_hits = _sanitize_top_level_system(out)
+    if system_hits:
+        logger.info("Marvis 内容风控指纹改写（顶层 system）| rules_hit=%d", system_hits)
     if "response_format" in out:
         shape, note = _normalize_response_format(out["response_format"])
         if note:
