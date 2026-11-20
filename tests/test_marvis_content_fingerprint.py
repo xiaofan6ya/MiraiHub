@@ -44,6 +44,7 @@ def _specimen(pattern):
     src = re.sub(r"\\s[*+]", " ", src)            # 空白类归一成单个空格
     src = re.sub(r"([A-Za-z])\?", r"\1", src)     # 单字符可选取该字符
     src = re.sub(r",\?", "", src)                  # 可选逗号取缺席
+    src = re.sub(r"\\b", "", src)                  # 词边界 \b 不贡献字符
     src = re.sub(r"\\(.)", r"\1", src)           # 其余转义还原成字面量
     src = re.sub(r"^\^", "", src)               # 行首锚点 ^ 不贡献字符
     return src
@@ -53,8 +54,8 @@ class RuleTableTests(unittest.TestCase):
     """规则表本身：条数、每条都能命中自己的样例。"""
 
     def test_rule_table_has_all_fingerprints(self):
-        """少一条就是留一个随时会踩的 403；2026-11-18 扩到 13 条。"""
-        self.assertEqual(len(marvis_gateway._TENCENT_FINGERPRINT_RULES), 13)
+        """少一条就是留一个随时会踩的 403；2026-11-20 补 4b / 4c 后扩到 15 条。"""
+        self.assertEqual(len(marvis_gateway._TENCENT_FINGERPRINT_RULES), 15)
 
     def test_every_rule_rewrites_its_own_specimen(self):
         """每条规则：样例命中 → 改写后文本变了、且不再命中。"""
@@ -285,6 +286,11 @@ class FindLiteralDriftTests(unittest.TestCase):
     #: 从 94 → 106），其余是 `find` 字面量长度。
     PLUGIN_LENGTHS = (47, 56, 99, 106, 221, 111, 26)
 
+    #: 插件 7 条 → **本表下标**：2026-11-20 在规则 4 之后插入了 4b / 4c，
+    #: 插件第 5-7 条（本表规则 5-7）的下标因此整体后移 2 位。
+    #: 别再按位置切前 7 条 —— 那会把 4b 当成插件第 5 条，断言虚高。
+    PLUGIN_TO_LOCAL = (0, 1, 2, 3, 6, 7, 8)
+
     @staticmethod
     def _literal(pattern):
         """把 `re.escape` 出来的正则还原成字面量（仅对字面量规则有意义）。"""
@@ -325,10 +331,18 @@ class FindLiteralDriftTests(unittest.TestCase):
         其余六条比「re.escape 之前的字面量」长度。混为一谈会让断言虚高
         —— 正则里的转义反斜杠也会被算进长度。
         """
+        rules = marvis_gateway._TENCENT_FINGERPRINT_RULES
+        self.assertEqual(len(rules), 15)
+        # 下标映射的自检：本表第 7 条必须仍是插件第 5 条（DSH Web 运行面两句）。
+        self.assertTrue(
+            self._literal(rules[self.PLUGIN_TO_LOCAL[4]][0]).startswith(
+                "You are interacting with the user through the "
+                "DeepSeek Harness Web GUI"),
+            "下标映射错位：本表第 7 条已不是插件第 5 条")
         lengths = []
-        for index, (pattern, _replacement) in enumerate(
-                marvis_gateway._TENCENT_FINGERPRINT_RULES[:len(self.PLUGIN_LENGTHS)]):
-            if index == 3:
+        for plugin_index, local_index in enumerate(self.PLUGIN_TO_LOCAL):
+            pattern = rules[local_index][0]
+            if plugin_index == 3:
                 lengths.append(len(pattern.pattern))
             else:
                 lengths.append(len(self._literal(pattern)))
@@ -441,8 +455,9 @@ class FollowUpSuggestionPrefixRuleTests(unittest.TestCase):
     def test_rule_is_eighth_and_prefix_anchored(self):
         """规则 8 必须存在、必须锚在行首、必须大小写不敏感。"""
         rules = marvis_gateway._TENCENT_FINGERPRINT_RULES
-        self.assertEqual(len(rules), 13)
-        pattern, replacement = rules[7]
+        self.assertEqual(len(rules), 15)
+        # 4b / 4c 插在规则 4 之后：规则 8 的下标由 7 后移到 9。
+        pattern, replacement = rules[9]
         self.assertTrue(pattern.pattern.startswith("^"),
                         "规则 8 丢了行首锚点：%r" % (pattern.pattern,))
         self.assertEqual(pattern.flags & re.IGNORECASE, re.IGNORECASE)
@@ -553,6 +568,108 @@ class GenericAssistantOpeningRuleTests(unittest.TestCase):
             self.assertEqual(out["messages"][0]["content"], expected,
                              "完整链路没改写：%r" % (poison,))
             self.assertEqual(body["messages"][0]["content"], poison)
+
+
+class AiCodingAssistantRuleTests(unittest.TestCase):
+    """规则 4b / 4c：2026-11-20 实测漏掉的两种 DSH 身份句形态（4100406）。
+
+    改前（13 条）这几种形态在**规则表**层面全 MISS，只有首行身份句兜底把它们改成
+    `You're ...` —— 上游能过，但规则表 `rules_hit` 记不到，日志里等于没命中，
+    与「规则写窄」同形（见 FindLiteralDriftTests），归因直接断链。三条都不吃的原因：
+
+      * 规则 4 要求 `agent`（不是 `assistant`）；
+      * 规则 11 要求 `AI` **紧跟** `assistant`；
+      * 规则 12 要求 `a coding assistant`（`an AI coding assistant` 不满足）。
+      ⇒ `AI coding assistant + powered by <品牌>` 这个组合是纯空洞。
+
+    这里**必须写字面量**：要锁的是改前的漏形态与改写后的等价表述，没法从正则反解。
+    """
+
+    #: 规则 4 的替换值。4b 必须与之**逐字一致** —— 同一种「把 capable 插到 AI 前」
+    #: 的破坏前缀做法（2026-11-18 对照：`You are an AI` 前缀才是被拦的东西）。
+    DEEPSEEK_REWRITE = ("You are a capable AI coding assistant, "
+                        "powered by a large language model")
+
+    #: 规则 4b：`assistant` 形态（身份在前、品牌在后），两种品牌名都要吃。
+    ASSISTANT_CASES = (
+        "You are an AI coding assistant, powered by DeepSeek Harness",
+        "You are an AI coding assistant, powered by the DeepSeekRuntime",
+    )
+
+    #: 规则 4c：品牌前置形态（身份名词在后），只改前缀。
+    BRAND_FIRST_CASE = "You are DeepSeek Harness, an agentic coding tool"
+
+    def setUp(self):
+        self._env_backup = os.environ.get(marvis_gateway.SANITIZE_TENCENT_ENV)
+        os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+
+    def tearDown(self):
+        if self._env_backup is None:
+            os.environ.pop(marvis_gateway.SANITIZE_TENCENT_ENV, None)
+        else:
+            os.environ[marvis_gateway.SANITIZE_TENCENT_ENV] = self._env_backup
+
+    def test_rule_4b_replacement_is_identical_to_rule_4(self):
+        """4b 的替换值必须与规则 4 逐字相同，位置必须紧跟规则 4（下标 4）。"""
+        rules = marvis_gateway._TENCENT_FINGERPRINT_RULES
+        self.assertEqual(rules[4][1], rules[3][1])
+        self.assertEqual(rules[4][1], self.DEEPSEEK_REWRITE)
+        self.assertEqual(rules[5][1], "You are a capable")
+
+    def test_assistant_variants_are_rewritten_by_the_rule_table(self):
+        """规则 4b：各命中 1 条、结果与规则 4 相同、开头不再是 `You are an AI`。"""
+        for poison in self.ASSISTANT_CASES:
+            out, hits = marvis_gateway.rewrite_tencent_fingerprints(poison)
+            self.assertEqual(hits, 1, "规则 4b 没命中（又空跑了）：%r" % (poison,))
+            self.assertEqual(out, self.DEEPSEEK_REWRITE,
+                             "规则 4b 改写结果不对：%r -> %r" % (poison, out))
+            self.assertFalse(out.lower().startswith("you are an ai"),
+                             "替换后仍保留触发前缀：%r" % (out,))
+
+    def test_brand_first_variant_keeps_the_identity_noun(self):
+        """规则 4c：只改前缀，`agentic coding tool` 逐字保留。"""
+        out, hits = marvis_gateway.rewrite_tencent_fingerprints(self.BRAND_FIRST_CASE)
+        self.assertEqual(hits, 1)
+        self.assertEqual(out, "You are a capable agentic coding tool")
+        self.assertTrue(out.endswith("agentic coding tool"))
+
+    def test_rule_4c_needs_the_comma_and_the_article(self):
+        """4c 不许写宽：品牌后没有「逗号 + 冠词」时一个字都不改。
+
+        没有这条，「`..., and you must ...`」会被 `an?` 吃成
+        `a capable d you must ...`（真红用例）。
+        """
+        pattern = marvis_gateway._TENCENT_FINGERPRINT_RULES[5][0]
+        for text in ("You are DeepSeek Harness users who need help.",
+                     "You are DeepSeek Harness and the tool is running.",
+                     "You are DeepSeek Harness, and you must answer in Chinese."):
+            self.assertIsNone(pattern.search(text), "规则 4c 写宽了：%r" % (text,))
+
+    def test_agent_without_brand_suffix_still_hits_once(self):
+        """第四种形态回归保护：`agent + powered by DeepSeek`（无品牌后缀）。
+
+        规则 4 带品牌后缀 ⇒ 规则表层面**有意**不吃它（放宽会把普通正文吃掉）；
+        但它仍被首行身份句兜底命中 1 次，开头同样不再是 `You are an AI`。
+        这里锁的是「不会被漏掉」，同时锁住规则 4 / 4b 的边框。
+        """
+        poison = "You are an AI coding agent powered by DeepSeek"
+        rules = marvis_gateway._TENCENT_FINGERPRINT_RULES
+        self.assertIsNone(rules[3][0].search(poison),
+                          "规则 4 被写宽了（丢了品牌后缀要求）")
+        self.assertIsNone(rules[4][0].search(poison), "规则 4b 不该吃 agent 形态")
+        out, hits = marvis_gateway.rewrite_tencent_fingerprints(poison)
+        self.assertEqual(hits, 1)
+        self.assertEqual(out, "You're an AI coding agent powered by DeepSeek")
+        self.assertFalse(out.lower().startswith("you are an ai"))
+
+    def test_natural_sentence_with_brand_is_untouched(self):
+        """反向：不带身份句的自然文本必须原样返回（防 4b / 4c 写宽误伤）。"""
+        for text in ("DeepSeek Harness is the runtime behind this tool.",
+                     "The DeepSeek Harness Web GUI is served on port 2305.",
+                     "本句是中文说明，不含任何身份句。"):
+            out, hits = marvis_gateway.rewrite_tencent_fingerprints(text)
+            self.assertIs(out, text, "被误改：%r -> %r" % (text, out))
+            self.assertEqual(hits, 0)
 
 
 class TopLevelSystemFieldTests(unittest.TestCase):

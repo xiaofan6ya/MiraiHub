@@ -831,6 +831,34 @@ _TENCENT_FINGERPRINT_RULES = (
     (re.compile(r"You\s+are\s+an?\s+AI\s+(?:coding\s+)?agent\s*,?\s*powered\s+by\s+"
                  r"(?:the\s+)?DeepSeek\s*(?:Harness|Runtime)", re.I),
      "You are a capable AI coding assistant, powered by a large language model"),
+    # 4b. 规则 4 的 **assistant** 形态（2026-11-20 实测空洞，紧跟规则 4 补）。
+    #     漏的是这个组合：`You are an AI coding assistant, powered by DeepSeek
+    #     Harness`（或 `... powered by the DeepSeekRuntime`）。三条都不吃 ——
+    #       · 规则 4 要求 `agent`（不是 `assistant`）；
+    #       · 规则 11 要求 `AI` **紧跟** `assistant`；
+    #       · 规则 12 要求 `a coding assistant`（`an AI coding assistant` 不匹配）。
+    #     实测（改前 13 条）：规则表层面全 MISS，只剩首行身份句兜底把它改成
+    #     `You're ...` —— 能过，但 `rules_hit` 记不到这条，日志里等于没命中，
+    #     归因断链（与「规则写窄」同形，见本文件 FindLiteralDriftTests）。
+    #     替换值与规则 4 **逐字一致**：`You are a capable AI ...` 正是 4100406
+    #     的原样命中形态（2026-11-18 对照：`You are an AI` 前缀被拦，必须把
+    #     `capable` 插到 `AI` 前）。
+    #     ⚠ 顺序仍排在规则 4 之后：具体（带品牌后缀 + agent）先吃，泛化后吃，
+    #     与 9 → 10 的既有约定一致，避免将来合表时二次改写。
+    (re.compile(r"You\s+are\s+an?\s+AI\s+coding\s+assistant\s*,?\s*powered\s+by\s+"
+                 r"(?:the\s+)?DeepSeek\s*(?:Harness|Runtime)", re.I),
+     "You are a capable AI coding assistant, powered by a large language model"),
+    # 4c. **品牌前置**形态（2026-11-20 实测空洞）：`You are DeepSeek Harness, an
+    #     agentic coding tool`。规则 4 / 4b 都是「身份在前、品牌在后」，这条反过来，
+    #     同样三条都不吃。只改前缀、**保留后面的身份名词**：匹配截到冠词
+    #     （含可选的 `n`）为止，替换成 `You are a capable`，于是
+    #     `... , an agentic coding tool` → `You are a capable agentic coding tool`。
+    #     ⚠ 逗号是**必需**的：只认「品牌 + 逗号 + 冠词」这个句式，写成可选会把
+    #     `You are DeepSeek Harness and ...` 这类正文改坏。
+    #     ⚠ 冠词后的 `\b` 同理：没有它，`, and you must ...` 会被吃成
+    #     `a capable d you must ...`（`an?` 贪掉 `and` 的前两个字母）。
+    (re.compile(r"You\s+are\s+DeepSeek\s*(?:Harness|Runtime)?\s*,\s*an?\b", re.I),
+     "You are a capable"),
     # 5. DSH Web 运行面的开头两句。位置无关。
     #    触发串**跨句边界**（前半句、后半句各自都放行），find 必须是前两句的
     #    并集；砍半 = 静默空跑。改写只去掉品牌串，其余逐字不动。
