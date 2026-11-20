@@ -14,9 +14,24 @@
 
   · 4100404 **不再重试**（client.CHAT_ATTEMPTS = 1）—— 18:19:11 撞 4100404 后
     整组轮换重发，18:23 同一个 token 就变成 401 4100403（登录态被打死）；
-  · 撞墙的那个号改为打 **300 秒**账号冷却（COOL_SECONDS_RISK），
-    但**仍然不换号、不 exclude** —— 自放大来自「重放同一份 body」，不是冷却；
   · 平台级退避的阈值是**连续 5 次**（17:38 从 1 提到 5），单次命中只让本次失败。
+
+⚠ 2026-11-20 口径更新 —— 本文件里**还有 4 条断言是红的，本批明确不修**：
+
+  · `COOL_SECONDS_RISK` / `UpstreamError(cool_seconds=…)` /
+    `UpstreamError(local=…)` 这三个名字在当前代码里都不存在。撞墙号的处置
+    早已从「写库 300 秒冷却」改成「平台级退避 + **内存** 60 秒账号冷却」：
+
+        MARVIS_RISK_ACCOUNT_COOLDOWN=60      冷却秒数
+        MARVIS_RISK_COOLDOWN_ON_4100404=1    总开关（0 = 回到不冷却）
+        实现见 gateway.py 的 _RISK_ACCOUNT_STATE（不写库、不跨进程）
+
+    按新契约写的测试在 `tests/test_marvis_risk_no_retry_cooldown.py`。
+    本文件那 4 条（test_cool_seconds_auth_and_risk /
+    test_cool_seconds_prefers_client_value /
+    test_risk_control_cools_only_the_hit_account /
+    test_local_cooldown_block_does_not_count_as_risk_hit）留给单独的清理批次。
+  · `CHAT_ATTEMPTS` 现在**真的是 1**（以前这里写 1、代码是 2 的那处漂移收口了）。
 """
 import asyncio
 import json
@@ -71,12 +86,16 @@ class _FakeDB:
 def _clean_state(monkeypatch):
     """每个用例都从「没有退避、没有 opener 缓存、没有代理 env」开始。"""
     gateway.reset_risk_backoff()
+    gateway.reset_risk_account_cooldown()
     upstream_http.reset_platform_openers()
     monkeypatch.delenv("MIRAIHUB_MARVIS_PROXY", raising=False)
     monkeypatch.delenv("MIRAIHUB_MARVIS_MAX_BODY_BYTES", raising=False)
     monkeypatch.delenv(gateway.RISK_BACKOFF_ENV, raising=False)
+    monkeypatch.delenv(gateway.RISK_ACCOUNT_COOLDOWN_ENV, raising=False)
+    monkeypatch.delenv(gateway.RISK_ACCOUNT_COOLDOWN_SWITCH_ENV, raising=False)
     yield
     gateway.reset_risk_backoff()
+    gateway.reset_risk_account_cooldown()
     upstream_http.reset_platform_openers()
 
 

@@ -350,12 +350,21 @@ def fetch_wallet(credential: dict, realm: str = "cn", *, account_id: int = 0) ->
 #: 100% 撞这个码；只有走完整三层流水线产出的 uskey（见 `uskey_local.py`）
 #: 才 200。这说明 `uskey` 的尾块服务端会校验，不是装饰。
 #:
-#: 即便是好 uskey，**同一组 (cid/rid/nonce)** 也不该复用 —— 拿到 4100404
-#: 就整组换新重试，复用只会继续撞同一个判定、把风控计数刷上去。
+#: 即便是好 uskey，**同一组 (cid/rid/nonce)** 也不该复用；但**重签重发同样
+#: 有害**（2026-11-20）：撞 4100404 之后再打一发，等于 1 秒内把同一份 body 的
+#: 第二份特征喂给风控引擎，而那一发必然还撞同一个判定 —— 18:19 的现场就是这样
+#: 把 4100404 推成 4100403（登录态被打死，不可逆）的。现在一发即止（见
+#: `_open_chat_stream_direct` 里 4100404 分支的注释）。
 RISK_CONTROL_CODE = "4100404"
 
-#: 模型网关每次调用最多试几次：1 次首发 + 1 次整组轮换重试。
-CHAT_ATTEMPTS = 2
+#: 模型网关每次调用最多试几次：**1 = 只发首发，不重试**（2026-11-20 起）。
+#:
+#: 这个常量只约束 4100404 那条路径：`_open_chat_stream_direct` 里只有它曾经
+#: `continue` 重发，其它错误（network / timeout / 4100406 / 3000101 / 4100403）
+#: 本来就是直接抛。所以降到 1 **不改变**任何其它错误码的重试次数 —— 同号重试
+#: 的 2 次在 gateway `_call_upstream` 里，判据是
+#: `RETRY_SAME_ACCOUNT_KINDS` / `RETRY_SAME_ACCOUNT_BIZ_CODES` 白名单，与这里无关。
+CHAT_ATTEMPTS = 1
 
 
 def _open_chat_stream_direct(credential: dict, realm: str, body: dict, *,
@@ -369,8 +378,9 @@ def _open_chat_stream_direct(credential: dict, realm: str, body: dict, *,
     ⚠ 不要在这里读流：读干了上层就没东西可转发（插件侧踩过的同一个坑）。
     上层负责 finally 调 `close_stream()`。
 
-    ⚠ 撞 `4100404` 时**整组轮换**（新的 cid / rid / nonce / uskey）再试一次；
-    每次 `llm_headers()` 都会现签，所以重试天然就是换新的一组。
+    ⚠ 撞 `4100404` 时**不重试**（2026-11-20）：一发即止，原样抛给上层去做
+    平台级退避 + 账号级冷却。整组重签重发只会把同一份 body 的第二份特征喂给
+    风控引擎（见下方 risk 分支的注释）。
     """
     acct = _acct(credential)
     url = endpoints.chat_url(realm)
@@ -394,15 +404,23 @@ def _open_chat_stream_direct(credential: dict, realm: str, body: dict, *,
             except Exception:  # noqa: BLE001
                 pass
             risk = _biz_code_of(payload) == RISK_CONTROL_CODE
-            if risk and attempt + 1 < CHAT_ATTEMPTS:
-                logger.warning(
-                    "Marvis 模型网关 4100404（account=%s），整组轮换 "
-                    "cid/rid/nonce/uskey 后重试", account_id)
+            if risk:
+                # **不再同号重签重试**（2026-11-20）。
+                #
+                # 旧行为（CHAT_ATTEMPTS = 2）：撞 4100404 之后立刻整组换新
+                # cid/rid/nonce/uskey 再打一发。后果是 1 秒内把同一份 body 的
+                # 第二份特征喂给风控引擎，而那一发必然还撞同一个判定；18:19 的
+                # 现场就是这么把 4100404 推成 4100403（登录态被打死）的。
+                # 一发的信息量已经够了：定性、平台退避、账号冷却都在上层做，
+                # 这里只上报，不重发。
                 try:
-                    exc.close()   # 别把上一发的连接晾着
+                    exc.close()   # 别把这一发的连接晾着（以前是重发前才关）
                 except Exception:  # noqa: BLE001
                     pass
-                continue
+                logger.warning(
+                    "Marvis 模型网关 4100404（account=%s），按 2026-11-20 口径"
+                    "不再同号重签重试：原样抛给上层（平台退避 + 账号冷却）",
+                    account_id)
             kind = _classify(exc.code, payload)
             note_sentinel(realm, account_id, kind, code=str(exc.code),
                           status=exc.code, detail=payload)

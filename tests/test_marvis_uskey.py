@@ -177,18 +177,23 @@ class _FakeResp:
 
 
 class RiskRetryTests(unittest.TestCase):
-    """4100404 的客户端契约：定性 risk_control、冷却 300 秒、**绝不复用同一组 id**。
+    """4100404 的客户端契约：定性 risk_control、**一发即止**、绝不复用同一组 id。
 
-    ⚠ 契约口径提醒（20:xx 实测，不是本文件放宽的）：当前
-    `client.CHAT_ATTEMPTS = 2`，即撞 4100404 会**整组轮换重试一次** ——
-    与 `tests/test_marvis_risk_backoff.py` 模块注释里写的「CHAT_ATTEMPTS = 1，
-    不再重试」不一致。所以这里不做"只有一发"的断言（那会直接红），
-    而是锁"每一发必须是新的一组 id"，attempts 数直接取常量本身。
+    ⚠ 2026-11-20 口径收口：`client.CHAT_ATTEMPTS` 现在是 **1**（以前是 2，与
+    `tests/test_marvis_risk_backoff.py` 模块注释里的 1 长期不一致 —— 那处漂移
+    已经收口）。撞 4100404 之后**不再**整组重签重发：1 秒内的第二份特征只会
+    继续撞同一个判定，18:19 那次的 4100404 → 4100403 就是这么来的。
+
+    所以这里锁两件事，且都不写死数字：
+
+      · `len(_SEEN) == client.CHAT_ATTEMPTS` —— 跟着常量走，调回 2 就会红；
+      · 每一发必须是**新的一组** cid/rid/nonce/uskey。
 
     "不换号 / 平台级退避挡住第二发"属于 gateway 层，见
     `tests/test_marvis_risk_backoff.py::test_risk_control_does_not_switch_account`
-    与 `::test_platform_backoff_blocks_second_request`（该文件另有 5 条当前是
-    红的，不在本批范围内，已在交付报告里列出）。
+    与 `::test_platform_backoff_blocks_second_request`（该文件另有 4 条按旧
+    COOL_SECONDS_RISK 契约写的断言当前是红的，不在本批范围内）。
+    账号级短冷却（内存 60 秒）见 `tests/test_marvis_risk_no_retry_cooldown.py`。
     """
 
     def setUp(self):
@@ -255,7 +260,7 @@ class RiskRetryTests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "auth")
 
     def test_risk_control_is_platform_level_not_account_cooldown(self):
-        """4100404 **不给账号打冷却**（IP 级风控），只开平台级退避窗口。
+        """4100404 **不写库冷却账号**（IP 级风控 + 这条请求的内容），只开平台级退避窗口。
 
         旧断言是「该号冷却 300 秒（COOL_SECONDS_RISK）」，那套契约已被
         2026-11-17 的线上死循环推翻：给号打冷却 → 冷却到期立刻复发 →
@@ -263,6 +268,11 @@ class RiskRetryTests(unittest.TestCase):
         `_cool_seconds("risk_control") == 0` + `note_risk_control()` 连撞
         `RISK_BACKOFF_THRESHOLD` 次才开窗口。这条锁的是**当前**契约，
         不是放宽 —— 旧值 300 现在是错的。
+
+        ⚠ 2026-11-20 补充：账号维度**有**冷却，但**只在内存里**
+        （`gateway._RISK_ACCOUNT_STATE`，默认 60 秒，`account.cool_until`
+        一个字都不写）。所以 `_cool_seconds("risk_control") == 0` 这条断言
+        仍然成立，两者不矛盾 —— 见 tests/test_marvis_risk_no_retry_cooldown.py。
         """
         from admin.platform.marvis import gateway
         self.assertEqual(client._classify(403, '{"code":4100404,"msg":"风控"}'),

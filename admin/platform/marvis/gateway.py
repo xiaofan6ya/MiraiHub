@@ -1758,6 +1758,97 @@ def reset_risk_backoff() -> None:
         _RISK_STATE["hits"] = 0.0
 
 
+# ---------------------------------------------------------------------------
+# 4100404 的**账号级短冷却**（2026-11-20，内存态、不写库）
+# ---------------------------------------------------------------------------
+# 平台级退避回答的是「这几十秒别再打上游」；它没回答「撞墙的那个号下一发
+# 还会不会排到队首」。没有账号维度的话，退避过去后同一个号立刻又被选中、
+# 再撞一次 4100404 —— 用户看到的就是「一直好不了」。
+#
+# 刻意**不**复用 DB 的 cool_until（shared.note_failure 那条路）：
+#   · 4100404 的触发源里既有出口 IP、也有这一条请求的内容，把它写进号表等于
+#     给好号留一条永久脏记录，控制台上还会长成一排「风控」；
+#   · 这里要的只是「几十秒内别选它」——进程内的单调时钟表就够了，重启即清空。
+#
+# 这也是本 fork 的口径：不写库、不跨进程，单进程内生效。
+#: 冷却秒数（默认 60）。`MARVIS_RISK_ACCOUNT_COOLDOWN` 覆盖。
+RISK_ACCOUNT_COOLDOWN_ENV = "MARVIS_RISK_ACCOUNT_COOLDOWN"
+RISK_ACCOUNT_COOLDOWN_DEFAULT = 60
+#: 总开关（默认 1 = 开）。设 0 回到「命中后不冷却任何账号」。
+RISK_ACCOUNT_COOLDOWN_SWITCH_ENV = "MARVIS_RISK_COOLDOWN_ON_4100404"
+
+#: 认出「关」的写法；其余（含写错）一律按开处理。
+_OFF_VALUES = frozenset({"0", "false", "no", "off", "disable", "disabled"})
+
+_RISK_ACCOUNT_LOCK = threading.Lock()
+#: account_id -> 冷却截止的 monotonic 时间戳。**只活在本进程**。
+_RISK_ACCOUNT_STATE: dict[int, float] = {}
+
+
+def risk_account_cooldown_enabled() -> bool:
+    """`MARVIS_RISK_COOLDOWN_ON_4100404` 是否为开（缺省 = 开）。"""
+    raw = (os.environ.get(RISK_ACCOUNT_COOLDOWN_SWITCH_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in _OFF_VALUES
+
+
+def _risk_account_cooldown_seconds() -> int:
+    """账号冷却秒数；未设置 / 非法 / 非正值一律退回默认 60。"""
+    raw = str(os.environ.get(RISK_ACCOUNT_COOLDOWN_ENV) or "").strip()
+    if not raw:
+        return RISK_ACCOUNT_COOLDOWN_DEFAULT
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return RISK_ACCOUNT_COOLDOWN_DEFAULT
+    return value if value > 0 else RISK_ACCOUNT_COOLDOWN_DEFAULT
+
+
+def cool_account_after_risk(account_id: int) -> float:
+    """记一次 4100404 的账号冷却，返回本次冷却秒数（0 = 关掉了 / 记不上）。**绝不抛**。
+
+    取 max 而不是直接覆盖：并发请求同时命中同一个号时，后到的那次不许把
+    先到那次的窗口改短（与 _RISK_STATE 的写法同口径）。
+    """
+    if not risk_account_cooldown_enabled():
+        return 0.0
+    try:
+        account_id = int(account_id or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if account_id <= 0:
+        return 0.0
+    seconds = _risk_account_cooldown_seconds()
+    until = time.monotonic() + seconds
+    with _RISK_ACCOUNT_LOCK:
+        _RISK_ACCOUNT_STATE[account_id] = max(
+            _RISK_ACCOUNT_STATE.get(account_id, 0.0), until)
+    return float(seconds)
+
+
+def risk_cooled_accounts() -> frozenset[int]:
+    """当前仍在冷却窗口内的账号 id（顺手清掉过期的）。"""
+    now = time.monotonic()
+    with _RISK_ACCOUNT_LOCK:
+        for account_id in [k for k, until in _RISK_ACCOUNT_STATE.items()
+                           if until <= now]:
+            _RISK_ACCOUNT_STATE.pop(account_id, None)
+        return frozenset(_RISK_ACCOUNT_STATE)
+
+
+def risk_account_cooldown_remaining() -> float:
+    """还在冷却的账号里最长的剩余秒数（0 = 没有号在冷却）。"""
+    now = time.monotonic()
+    with _RISK_ACCOUNT_LOCK:
+        return max([0.0] + [until - now for until in _RISK_ACCOUNT_STATE.values()])
+
+
+def reset_risk_account_cooldown() -> None:
+    """清空账号级冷却（测试 / 人工恢复用）。"""
+    with _RISK_ACCOUNT_LOCK:
+        _RISK_ACCOUNT_STATE.clear()
+
 
 def _warn_upstream_failure(account, exc: client.UpstreamError, *,
                            model: str, stream: bool) -> None:
@@ -2442,6 +2533,10 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
     # 退化成完全不粘，行为与改动前一致）。
     sticky_key = _sticky_key_for(body)
     exclude: set[int] = set()
+    # 4100404 的账号级短冷却（内存，2026-11-20）：窗口内的号这次不参与选号。
+    # 放在选号之前而不是选完再筛 —— 否则 select_account 的 sticky / 排序都白做，
+    # 而且「选到了却不能用」会走成租约失败，日志里看不出真因。
+    exclude.update(risk_cooled_accounts())
     last_error: client.UpstreamError | None = None
     # 请求画像只算一次，本次请求的所有上游尝试共用（只记数字，不落内容）。
     profile = _profile_of(body)
@@ -2681,13 +2776,16 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             # 正确处置：整平台退避，等出口 IP 换掉 / 风控自然过期。
             if exc.kind == "risk_control":
                 # 2026-11-18：单次 4100404 **不锁平台**，只让本次请求失败。
-                # 同号重试一次已经在下层做掉了（client.CHAT_ATTEMPTS = 2，
-                # 且每次重签 cid/rid/nonce/uskey 整组轮换，见 open_chat_stream）——
-                # 所以这里再重试只会把同一份 body 再打一遍上游，不做。
-                # 只有**连续**撞满阈值才开平台窗口，见 note_risk_control。
+                # 2026-11-20：下层**不再同号重签重试**（client.CHAT_ATTEMPTS = 1）
+                # —— 一次命中 = 一份特征 = 一发请求。所以这里再重试只会把同一份
+                # body 再打一遍上游，不做。只有**连续**撞满阈值才开平台窗口，
+                # 见 note_risk_control。
                 backoff = note_risk_control()
                 hits = risk_hits()
                 threshold = _risk_backoff_threshold()
+                # 账号维度：撞墙的这个号歇一会儿（内存表，不写库、不跨进程）。
+                # 没有这一步的话，平台退避一过它又排在队首、再撞同一个判定。
+                cooled = cool_account_after_risk(int(account.id or 0))
                 if backoff > 0:
                     logger.warning(
                         "Marvis 风控连续命中 %d/%d 次（code=%s acc=%s）："
@@ -2697,8 +2795,11 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                 else:
                     logger.warning(
                         "Marvis 内容风控命中（code=%s acc=%s）：单次不触发平台"
-                        "退避，仅本次请求失败（连续 %d/%d 次）",
-                        exc.code or "-", int(account.id or 0), hits, threshold)
+                        "退避，仅本次请求失败（连续 %d/%d 次）；该号冷却 %.0fs"
+                        "（MARVIS_RISK_COOLDOWN_ON_4100404=%s）",
+                        exc.code or "-", int(account.id or 0), hits, threshold,
+                        cooled,
+                        "1" if risk_account_cooldown_enabled() else "0")
                 raise exc
             # ② 上游内部错误：同号重试已经在 _call_upstream 用掉了 -> 直接抛，
             # **不进 exclude、不换号**。
@@ -2754,9 +2855,13 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
         alive = [r for r in rows if (getattr(r, "status", "") or "") == "active"]
         expired = [r for r in alive
                    if "过期" in str(getattr(r, "last_err_msg", "") or "")]
-        # 风控冷却段已删除（上游 PR #67）：4100404 判的是这条请求 / 这个出口，
-        # 不是账号好坏。给命中账号打冷却会自我循环（命中 -> 锁 -> 到期 -> 再命中），
-        # 现在由平台级退避接管（见 note_risk_control）。
+        # 风控处置分两层（2026-11-20 起）：
+        #   · 平台级退避（note_risk_control）：连续成串才开窗，解决「别继续轰上游」；
+        #   · 账号级短冷却（_RISK_ACCOUNT_STATE，内存 60s）：只把**这一发撞墙的号**
+        #     挪出选号队列一会儿，不写库、不留脏记录，重启即清空。
+        # 旧实现（上游 PR #67 之前）把 300s 冷却写进账号表，于是「命中 → 锁 300s
+        # → 到期 → 又排到队首 → 再命中」自我循环 —— 那是**写库 + 300s + 不区分
+        # 触发源**造成的，不是「账号维度」本身造成的。
     except Exception:  # noqa: BLE001
         alive, expired = [], []
     # 「一个号都没选到」同样是网关失败，而且是最难从响应里看出原因的一种：
@@ -2803,6 +2908,22 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             # 上游工单对齐的那一列）。
             detail="{\"code\":3000001,\"msg\":\"用户名下token不足；"
                    "等待上游 00:00(+08) 配额重置\"}")
+    # 全池都在 4100404 的**账号级短冷却**里：这不是「排队中」，而是一句能照做的
+    # 话（等几十秒；别去换 Key / 重扫码 —— 那三个方向都错）。2026-11-20 新增，
+    # 与平台级退避分开报，否则用户会把「出口风控」误读成「账号坏了」。
+    cooled = risk_cooled_accounts()
+    if alive and cooled and all(
+            int(getattr(row, "id", 0) or 0) in cooled for row in alive):
+        left = risk_account_cooldown_remaining()
+        logger.warning(
+            "Marvis 账号全部在 4100404 冷却中 realm=%s model=%s active=%d "
+            "剩余 %.0fs", realm, model or "-", len(alive), left)
+        raise shared.PlatformRejected(
+            503, "Marvis 账号刚撞上游风控（4100404），已按账号隔离冷却 %.0f 秒："
+                 "窗口过后自动恢复，不需要换 Key、也不需要重新扫码"
+            % (left + 1,),
+            kind="server_error", code="risk_control_cooling",
+            headers={"Retry-After": str(int(left) + 1)})
     if alive:
         raise shared.PlatformRejected(
             503, "Marvis 账号都在冷却或排队中，请稍后重试",
