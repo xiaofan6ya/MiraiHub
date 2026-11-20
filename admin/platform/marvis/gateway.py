@@ -32,6 +32,7 @@ uvicorn，所以任何同步上游调用只要留在事件循环线程上，就�
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -1349,6 +1350,35 @@ def _is_context_overflow(exc: "client.UpstreamError") -> bool:
     return any(word in blob for word in _CONTEXT_OVERFLOW_WORDS)
 
 
+def _sticky_key_for(body: dict) -> str:
+    """会话键：`marvis|` + 会话标识。
+
+    平台前缀不是装饰：`session_key_for()` 在各平台算法相同，不带前缀会让
+    「同一段对话同时打 marvis 和 loomy」共用一条绑定 —— 换平台会命中不到，
+    更糟是命中到别的平台的 uid。
+    """
+    try:
+        from admin.pool import session_key_for
+
+        key = session_key_for(body)
+    except Exception:  # noqa: BLE001 - 算不出来就退化成「不粘」
+        return ""
+    return ("marvis|" + key) if key else ""
+
+
+def _bind_sticky(sticky_key: str, account) -> None:
+    """把这个会话绑到**刚刚成功**的号上，后续同会话优先回到它。"""
+    if not sticky_key or account is None:
+        return
+    uid = str(getattr(account, "uid", "") or "")
+    if not uid:
+        return
+    try:
+        from admin.pool import POOL
+
+        POOL.sticky.bind(sticky_key, uid)
+    except Exception:  # noqa: BLE001 - 粘性只是优化，不能影响主链路
+        pass
 
 
 def _normalize_token_limit(out: dict) -> None:
@@ -1766,6 +1796,9 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             "Marvis 平台级风控退避中，拒绝上游调用：剩余 %.0fs model=%s",
             remaining, model or "-")
         raise _risk_control_rejected()
+    # 会话亲和：同一会话在 TTL 内优先回到上次成功的号。算不出就是空串，
+    # 退化成完全不粘 —— 行为与改动前逐字节一致。
+    sticky_key = _sticky_key_for(body)
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
     dropped: set[str] = set()
@@ -1791,9 +1824,22 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
         # 它又排回队首（这些号从没成功过，`last_used_at` 恒为 NULL，选号按它升序）
         # —— 用户感受到的就是「一直失败，用不了」。NULL 余额（从没同步过）仍放行，
         # 否则新导入的号会被全部误杀。
+        # 会话亲和只在「算得出会话键 + 选号函数确实收 sticky_key」时才传参：
+        # 没这个参数的老签名（第三方包装 / 测试替身）不会被多一个 kwarg 打挂。
+        # 用签名探测而不是 try/except TypeError —— 后者会把选号实现内部真正的
+        # TypeError 一起吞掉。
+        sticky_kwargs = {}
+        if sticky_key:
+            try:
+                params = inspect.signature(shared.select_account).parameters
+            except (TypeError, ValueError):  # noqa: BLE001 - 拿不到签名就当不支持
+                params = {}
+            if "sticky_key" in params:
+                sticky_kwargs["sticky_key"] = sticky_key
         account = shared.select_account(
             db, storage=STORAGE, realm=realm, key=key,
-            model=model, exclude_ids=exclude, min_balance=0)
+            model=model, exclude_ids=exclude, min_balance=0,
+            **sticky_kwargs)
         if account is None:
             break
         if not shared.lease(account):
@@ -1827,6 +1873,9 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                     # 成串，不是历史累计（否则一天里零散撞 5 次也会锁一次平台）。
                     clear_risk_hits()
                     shared.release(account)
+                    # 只有**成功**才写绑定：失败号不该被这个会话粘住，
+                    # 下一次还要照常重试它。
+                    _bind_sticky(sticky_key, account)
                     return result, account, started
                 except client.UpstreamError as exc:
                     # 失败画像：**每一次**上游失败都留痕，包括即将被降级重试的
