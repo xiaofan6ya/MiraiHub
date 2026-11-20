@@ -8,6 +8,7 @@
   * 不可用模型回 401 → 上层当成登录失效，把整池好号全标死；
   * QQ 的 state 写成整数 → 上游判参数无效（必须与渲染层一致是小数）。
 """
+import base64
 import hashlib
 import json
 import os
@@ -91,11 +92,121 @@ class LlmHeaderTests(unittest.TestCase):
         self.assertEqual(parsed["reqScene"], 1)
         self.assertEqual(parsed["taskType"], "user")
         self.assertIs(parsed["isIoa"], False)
-        # uskey 是 376 字节的 base64 → ceil(376/3)*4 = 504 字符（含 '=' 填充）
-        self.assertEqual(len(parsed["uskey"]), 504)
-        # nonce 每次不同（上游拿去去重）
-        self.assertNotEqual(parsed["nonce"],
-                            json.loads(endpoints.marvis_ext(ACCT))["nonce"])
+
+        # ## uskey 长度不是常量（2026-11-18 起，2026-11-19 再次修正）
+        #
+        # 这里原来断言「必须 504 字符（376 字节）」。实测推翻过两次：
+        #
+        # 1. 2026-11-18：`beacon_get_qimei` 调过之后长度会变（376 → 392），
+        #    因为 `C:\ProgramData\Tencent\qimei\` 落了设备指纹文件。
+        #
+        # 2. 2026-11-19（决定性）：同一份 DLL 在同一台机器上，
+        #
+        #        本地 Windows   -> 376 字节 (320 TLV)  -> 上游 403
+        #        wine 里跑       -> 264 字节 (208 TLV)  -> 上游 200 ✅
+        #
+        #    而且 DLL 在长跑进程里会自己从 376 切到 264（实测第 ~1000 次）。
+        #    所以**264 才是上游认的形态**，钉死「至少 376」是把正确的判成错的。
+        #
+        # 现在校验两条：长度落在已知集合里 + 魔数对。
+        uskey = parsed["uskey"]
+        self.assertEqual(len(uskey) % 4, 0, "base64 长度必须是 4 的倍数")
+        raw = base64.b64decode(uskey)
+        self.assertIn(len(raw), (264, 376, 392),
+                      "uskey 长度必须是 264 / 376 / 392 之一，实际 %d" % len(raw))
+        if endpoints.uskey_signer.status()["available"]:
+            # 真签的固定特征：前 6 字节是常量魔数。
+            # 降级成随机填充时不会有这个头 —— 那也正是它一定 4100404 的原因。
+            self.assertEqual(raw[:6].hex(), "0ac0d50c2111",
+                             "真签的 uskey 必须以魔数 0ac0d50c2111 开头")
+
+    def test_marvis_ext_never_reuses_uskey(self):
+        """每次调用必须签出**新的** uskey —— 复用会被上游拉黑。
+
+        ## 这条断言怎么来的（2026-11-18 事故，整条链路瘫了几小时）
+
+        上一版本这里写的是反过来的：断言「缓存命中时 uskey 与 nonce 应复用」。
+        依据是「同一个 uskey 连发 3 次，上游 3/3 通过」。
+
+        **3 次太少，看不出问题。** 真实时间线：
+
+            15:25  建缓存，签出 1 枚 uskey
+            15:38  连打 10 次（复用同一枚）-> 4 次 4100404
+            15:39+ 之后无论单发、等 3 分钟、拉长到 25 秒间隔，全部 403
+            缓存条目 hits=23
+
+        对照实验（`tools/probe_fresh_uskey.py`）：
+
+            清空缓存 + 每账号现签一枚、立刻发一次  ->  4/4 全 200 ✅
+            恢复复用                              ->  全部 403
+
+        ⇒ 上游认的是「客户端每次签新票」这个**行为特征**。
+          同一枚反复用会被判成非客户端流量，而且是账号级标记，
+          不像普通限流那样等一会儿就自己好。
+
+        所以这条断言必须钉死「不复用」，谁再想把缓存加回来，
+        先让它红。
+        """
+        first = json.loads(endpoints.marvis_ext(ACCT))
+        second = json.loads(endpoints.marvis_ext(ACCT))
+
+        self.assertNotEqual(
+            first["uskey"], second["uskey"],
+            "uskey 不能复用 —— 同一枚反复用会被上游判成非客户端流量")
+        self.assertNotEqual(
+            first["nonce"], second["nonce"],
+            "nonce 必须与 uskey 一起换新（两者绑定，拆开就 403）")
+
+    def test_llm_headers_identity_is_self_consistent(self):
+        """一次 `llm_headers()` 里，请求头与 uskey 必须取自**同一个** identity。
+
+        ## 这条防的是什么
+
+        改造前 `marvis_ext()` 从缓存拿一组 id 签 uskey，
+        而 `llm_headers()` 自己又生成另一组放进请求头。
+        上游拿 nonce 复核时对不上 —— 直接 403 4100404。
+
+        ## 为什么用 mock 而不是比较两次调用
+
+        现在每次调用都会**新签**一枚 uskey（复用会被上游拉黑），
+        所以两次 `llm_headers()` 的 conv/rid 必然不同 —— 跨调用比较没意义，
+        反而会误报。
+
+        正确的检查点是：**同一次调用内部**，头里的 conv/rid 和 uskey 里的那组
+        是不是同一个来源。这里把 `uskey_identity()` 包一层记录下来，
+        验证它只被调用一次、且返回值就是头里用的那份。
+        """
+        from unittest import mock
+
+        from admin.platform.marvis.core import endpoints as ep
+
+        real = ep.uskey_identity
+        calls: list[dict] = []
+
+        def spy(acct, **kwargs):
+            ident = real(acct, **kwargs)
+            calls.append(ident)
+            return ident
+
+        with mock.patch.object(ep, "uskey_identity", side_effect=spy):
+            headers = ep.llm_headers(ACCT, model="main-auto")
+
+        ext = json.loads(headers["Ual-Access-MarvisExt"])
+
+        self.assertEqual(len(calls), 1,
+                         "一次 llm_headers 只能取一份 identity，"
+                         "取两次就会让头和 uskey 错位")
+        ident = calls[0]
+        self.assertEqual(headers["Marvis-Conversation-ID"],
+                         ident["conversation_id"])
+        self.assertEqual(headers["Marvis-Response-ID"],
+                         ident["response_id"])
+        self.assertEqual(ext["nonce"], ident["nonce"])
+        self.assertEqual(ext["uskey"], ident["uskey"])
+        self.assertTrue(headers["Marvis-Conversation-ID"],
+                        "Conversation-ID 不能为空")
+        self.assertTrue(headers["Marvis-Response-ID"],
+                        "Response-ID 不能为空")
 
 
 class ModelTests(unittest.TestCase):

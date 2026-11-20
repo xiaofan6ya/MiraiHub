@@ -403,25 +403,31 @@ def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
     sign_ms = 0.0
 
     def _sign(bus_info: str) -> str:
-        """只返回**真签**结果；签不出来返回空串。
+        """签一枚 uskey，**按账号派生设备串**；签不出来返回空串。
 
-        ## 为什么不能直接用 `uskey_signer.uskey()`
+        ## 为什么是 `sign_for(…, openid)` 而不是 `_beacon.sign(…)`
 
-        那个函数在 DLL 缺失时会返回 376 字节随机填充 —— 这是为了「网关不断链」
-        做的降级，但它会把**随机值**当成功结果交出去。
+        2026-11-19 实测（4 个号 + 新进程各自复现）：
 
-        随机值写进历史文件后，诊断时会误以为「签过了」，
-        排查时容易往错误方向找。所以这里只认真签结果。
+          · `beacon_wrapper.dll` 是**设备级**组件，同一枚 DLL 里
+            `beacon_get_qimei()` 永远返回同一串设备号
+            （`db4215ebb2ed553ee359779430001461950c`）。4 个账号拿它签，
+            TLV 里两处设备段完全一样，上游看到的是「设备 A → 402/403/404/411」
+            —— 账号农场形状，先于任何速率特征被判死，回 `4100404`；
+          · 长跑进程里 DLL 还会抖出 **264 字节短包**（16:03:48 网关写进
+            `uskey_cache.json` 的那条，同 bus_info 在新进程是 376），
+            短包解不出 TLV，同样 4100404。
+
+        所以主路径换成 `uskey_signer.sign_for()`：设备串从 openid 派生
+        （`core/device.py`），纯 Python mint，长度恒定 376 字节。
+        DLL 只在派生路径抛异常时兜底。
         """
         nonlocal sign_ms
-        if not uskey_signer._beacon.available:  # noqa: SLF001
-            log.warning("beacon 不可用，本次无法真签 uskey")
-            return ""
         began = time.perf_counter()
         try:
-            return uskey_signer._beacon.sign(busiid, bus_info)  # noqa: SLF001
+            return uskey_signer.sign_for(busiid, bus_info, openid)
         except Exception as exc:  # noqa: BLE001
-            log.warning("uskey 真签失败：%s", exc)
+            log.warning("uskey 签名失败：%s", exc)
             return ""
         finally:
             sign_ms = (time.perf_counter() - began) * 1000.0

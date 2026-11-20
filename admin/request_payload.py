@@ -1,4 +1,22 @@
-"""Opt-in expiring process cache; request content never enters the database."""
+"""Opt-in expiring process cache; request content never enters the database.
+
+## ⚠ 开关为什么必须每次现读（2026-11-19 修）
+
+    原来这里写的是模块级常量：
+
+        _enabled = bool(settings.LOG_REQUEST_PAYLOAD)   # 导入时读一次
+
+    于是出现一个谁都会踩的坑：控制台「运行配置 → 记录请求载荷」打开、
+    `runtime_settings.save()` 也确实把 `settings.LOG_REQUEST_PAYLOAD`
+    改成了 True —— **但这个模块的 `_enabled` 还是导入时的 False**，
+    因为它是拷贝，不是引用。
+
+    现场表现就是「开关打开了，请求详情还是空的」，而数据库里
+    `usage_logs.diagnostic_json` 也一直是 NULL，看着像两条路都坏了。
+
+    现在改成每次 `capture()` / `configure()` 现读 `settings`，
+    运行配置改完立刻生效，不用重启。
+"""
 from collections import OrderedDict
 from datetime import datetime, timezone
 import json
@@ -17,11 +35,26 @@ MAX_RECORD_BYTES = 8 * 1024 * 1024
 MAX_HEADER_BYTES = 32 * 1024
 _SECRET = re.compile(r'authorization|cookie|token|secret|password|credential|api[-_]?key|auth', re.I)
 _lock = threading.RLock()
-_enabled = bool(settings.LOG_REQUEST_PAYLOAD)
+#: 运行期显式覆盖。`None` = 跟随 `settings.LOG_REQUEST_PAYLOAD`（实时读）。
+_override = None
 _entries = OrderedDict()
 _bytes = 0
 _active_bytes = 0
 _generation = 0
+
+
+def _enabled_now() -> bool:
+    """当前是否记录载荷。
+
+    优先级：`configure()` 显式设置 → 实时读 `settings`。
+    后者是关键：运行配置页改完立刻生效，不再等重启。
+    """
+    if _override is not None:
+        return _override
+    try:
+        return bool(getattr(settings, "LOG_REQUEST_PAYLOAD", False))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _prune():
@@ -36,18 +69,21 @@ def _prune():
 def status():
     with _lock:
         _prune()
-        return {'enabled': _enabled, 'ttl_seconds': TTL_SECONDS,
+        return {'enabled': _enabled_now(), 'ttl_seconds': TTL_SECONDS,
                 'max_cache_bytes': MAX_CACHE_BYTES, 'max_entries': MAX_ENTRIES,
                 'cached_requests': len(_entries), 'cache_bytes': _bytes,
                 'active_bytes': _active_bytes, 'record_max_bytes': MAX_RECORD_BYTES,
                 'body_max_bytes': max(1, min(8, settings.PAYLOAD_MAX_MB)) * 1024 * 1024,
-                'storage': 'process_memory', 'restart_clears': True}
+                'storage': 'process_memory', 'restart_clears': True,
+                'source': ('runtime override' if _override is not None
+                           else 'settings (live)')}
 
 
 def configure(enabled):
-    global _enabled
+    """显式设置开关。传 None 恢复「跟随 settings」。"""
+    global _override
     with _lock:
-        _enabled = enabled
+        _override = None if enabled is None else bool(enabled)
     return status()
 
 
@@ -98,7 +134,7 @@ def capture(headers, raw_body):
     if record is None:
         return
     with _lock:
-        enabled = _enabled
+        enabled = _enabled_now()
         record['_capture_generation'] = _generation
     record['_capture_enabled'] = enabled
     if not enabled:

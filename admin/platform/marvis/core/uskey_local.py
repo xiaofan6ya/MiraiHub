@@ -358,6 +358,20 @@ PAYLOAD_BYTES = 336
 USKEY_BYTES = 376
 USKEY_CHARS = 504
 
+# ---------------------------------------------------------------------------
+# 短版（208 字节 TLV / 264 字节 uskey）—— **上游真正认的那一版**
+# ---------------------------------------------------------------------------
+#: 2026-11-19 实测：线上 wine 签出 264 字节 → 200；本地 376 字节 → 403。
+#: 264 = 24(header) + 8(rand) + 1(flag) + 208(TLV) + 7(tail)
+TLV_SHORT_BYTES = 208
+PAYLOAD_SHORT_BYTES = 224
+USKEY_SHORT_BYTES = 264
+USKEY_SHORT_CHARS = 352
+
+#: 短版尾部 16 字节的偏移（TLV 内）。320 版这里是 md5("")（302:320），
+#: 短版没有 JSON 段，尾部紧接着 189，写 md5(bus_info)。
+OFF_SHORT_MD5 = 189
+
 #: 字段偏移（**按 320 字节真品模板**校准；2026-11-18 之前的 44/64/85/94/111 那组
 #: 是按旧 208 字节模板量的，SDK 版本串从 "1.0.0.0"(7) 变成 "1.60.34.10"(10)
 #: 之后整体后移 3 字节，毫秒那处还多错 2 字节 —— 那组数会写歪 TLV，别再用）。
@@ -416,10 +430,82 @@ def build_week_json(sec: int, count: int = 19, exe: str = WEEK_EXE) -> bytes:
     return out
 
 
+def build_tlv_short(bus_info: str, qimei36: str, now_ms: int = None,
+                    rnd8: bytes = None, blob: bytes = None,
+                    anchor_sec: int = None) -> bytes:
+    """拼 **208 字节** TLV —— 上游真正认的那一版。
+
+    ## 为什么要短版（2026-11-19 定案）
+
+        同账号、同机器、同出口，只换 uskey：
+
+            线上 wine 签 264 字节 → 200 ✅
+            本地 mint 签 376 字节 → 403 ✗
+
+        264 - 24(header) = 240 body，按 8(rand) + 1(flag) + TLV + 7(tail) 拆：
+
+            240 = 8 + 1 + 208 + 7   ⇒ TLV = 208
+
+        320 版去掉「周计数 JSON」(189:302, 113B) 得 207 字节 ——
+        差 1 字节正好是 qimei 不可用时 DLL 写的那个占位字节，
+        于是 208。两版共用前 189 字节的布局，只是**没有 JSON 段和尾部 md5("")**。
+
+    ## 段布局（前 189 字节与 320 版完全一致）
+
+        0:2     len = 208-2
+        2:6     SDK 常量
+        6:24    busid
+        24:36   SDK 版本
+        36:45   appid
+        45:65   qimei36 #1
+        65:83   md5(bus_info)
+        83:87   常量
+        87:95   epoch 毫秒
+        95:112  BCD(秒) + 10B 随机
+        112:122 8B 随机
+        122:131 "5.1.4.2"
+        131:150 "MarvisAgent.exe"
+        150:170 qimei36 #2
+        170:183 "TX Gaming"
+        183:189 常量
+        189:208 16B md5(bus_info)  ← 尾部，320 版这里是 md5("")
+    """
+    qb = bytes.fromhex(qimei36)
+    if len(qb) != 18:
+        raise ValueError("qimei36 必须是 36 个 hex 字符（18 字节）：%r" % qimei36)
+    ts = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    sec = ts // 1000 if anchor_sec is None else int(anchor_sec)
+
+    # 前 189 字节直接复用长版模板（两版布局相同），再补 19 字节尾部
+    tlv = bytearray(TLV_TEMPLATE[:189]) + bytearray(19)
+
+    tlv[OFF_LEN:OFF_LEN + 2] = (TLV_SHORT_BYTES - 2).to_bytes(2, "big")
+    tlv[OFF_BUSID:OFF_BUSID + 16] = BUSID.encode("ascii")
+    tlv[OFF_QIMEI1:OFF_QIMEI1 + 18] = qb
+    tlv[OFF_QIMEI2:OFF_QIMEI2 + 18] = qb
+    md5_bus = hashlib.md5(str(bus_info).encode("utf-8")).digest()
+    tlv[OFF_MD5:OFF_MD5 + 16] = md5_bus
+    tlv[OFF_MS:OFF_MS + 8] = ts.to_bytes(8, "big")
+    tlv[OFF_BLOB:OFF_BLOB + 15] = (blob if blob is not None
+                                   else bcd_seconds(sec) + os.urandom(10))
+    tlv[OFF_RND:OFF_RND + 8] = rnd8 if rnd8 is not None else os.urandom(8)
+    # 尾部 16 字节：短版仍写 md5(bus_info)，与 320 版的 md5("") 不同键
+    tlv[OFF_SHORT_MD5:OFF_SHORT_MD5 + 16] = md5_bus
+
+    assert len(tlv) == TLV_SHORT_BYTES, len(tlv)
+    assert tlv[OFF_QIMEI1:OFF_QIMEI1 + 18] == qb
+    assert tlv[OFF_QIMEI2:OFF_QIMEI2 + 18] == qb
+    return bytes(tlv)
+
+
 def build_tlv(bus_info: str, qimei36: str, now_ms: int = None,
               rnd8: bytes = None, blob: bytes = None,
               week_count: int = 19, anchor_sec: int = None) -> bytes:
-    """拼 320 字节 TLV。
+    """拼 320 字节 TLV（长版）。
+
+    ⚠ **上游已经不认这一版**（2026-11-19 实测：320 字节 TLV → 403）。
+    保留它是为了 `--legacy` 对照和历史 KAT 自检；
+    生产路径请用 `build_tlv_short()`（208 字节）。
 
     变量只有 5 处：md5(bus_info)、两处 qimei36、8 字节毫秒、15 字节 blob
     （= BCD(秒) + 10 随机）、8 字节随机、以及 JSON 里的 1/2 号。
@@ -447,6 +533,16 @@ def build_tlv(bus_info: str, qimei36: str, now_ms: int = None,
     assert tlv[OFF_QIMEI1:OFF_QIMEI1 + 18] == qb
     assert tlv[OFF_QIMEI2:OFF_QIMEI2 + 18] == qb
     return bytes(tlv)
+
+
+def build_stream_short(tlv: bytes, head8: bytes = None, flag: int = None) -> bytes:
+    """224 字节载荷（短版）：8B 头 + 1B flag + TLV(208) + 7B。"""
+    if len(tlv) != TLV_SHORT_BYTES:
+        raise ValueError("短版 TLV 必须 %d 字节，收到 %d"
+                         % (TLV_SHORT_BYTES, len(tlv)))
+    head = bytearray(head8 if head8 is not None else os.urandom(8))
+    head[0] = (head[0] & 0xF8) | 0x06
+    return bytes(head) + bytes([STREAM_FLAG if flag is None else int(flag)]) + tlv + bytes(7)
 
 
 def build_stream(tlv: bytes, head8: bytes = None, flag: int = None) -> bytes:
@@ -488,25 +584,64 @@ def mint_uskey(qimei36: str, bus_info: str, dev18: bytes = None,
                now_ms: int = None, rnd8: bytes = None,
                blob: bytes = None, head8: bytes = None,
                flag: int = None, week_count: int = 19,
-               anchor_sec: int = None) -> str:
-    """造一块 uskey。dev18 为 None 时随机；其余参数只为自检/重放留口。
+               anchor_sec: int = None, short: bool = False) -> str:
+    """造一块 uskey。
 
-    末尾断言产出必须是真品口径（376 字节 / 504 字符）—— 短一截的包上游直接 403，
-    与其拿去污染号池，不如在这里当场炸掉。
+    ## `short` 参数要不要开（2026-11-19 实测记录，**别急着开**）
+
+        同一账号、同一机器、同一出口的对照：
+
+            线上 wine 里那枚 DLL 签出的 uskey（264 字节）  → 200 ✅
+            本地本进程 mint 的 uskey（376 字节，320 TLV）  → 403 ✗
+
+        于是按 264 口径写了一版短模板（`short=True`，208 TLV /
+        352 字符 / magic `0ac0d50c2111`），**结果仍然 403**。
+
+        进一步对比才发现：线上那枚用本地密钥**根本解不开**
+        （`PKCS#7 填充不合法`），说明它不是同一套算法换个长度，
+        而是 wine 里那份 DLL 内部走了另一条分支 —— 密钥或结构都不同。
+
+    ## 所以
+
+        `short=False`（376 字节）仍是**默认**，它至少是本地能自洽、
+        能解开、能过 KAT 的那一版。
+
+        `short=True` 保留着供对照实验用 —— 但**别把它当修复**：
+        已验证它对上游无效（403）。
+
+        真正能把本地救回来的只有两条：
+          ① 想办法让本地 DLL 也走 wine 那条分支（目前 Windows 下
+             无论换 bus_info / busiid / 缓冲大小 / 干净目录，都稳定 376）；
+          ② 长期用线上签名服务（`_scratch/tunnel_sign.py`）。
+
+    `dev18` 为 None 时随机；其余参数只为自检/重放留口。
     """
     if dev18 is None:
         dev18 = os.urandom(18)
     if len(dev18) != 18:
         raise ValueError("dev18 必须是 18 字节，收到 %d" % len(dev18))
-    tlv = build_tlv(bus_info, qimei36, now_ms=now_ms, rnd8=rnd8, blob=blob,
-                    week_count=week_count, anchor_sec=anchor_sec)
-    stream = build_stream(tlv, head8=head8, flag=flag)
-    payload = build_payload(stream, dev18)
-    header = bytes.fromhex("030057040111") + dev18
+
+    if short:
+        tlv = build_tlv_short(bus_info, qimei36, now_ms=now_ms, rnd8=rnd8,
+                              blob=blob, anchor_sec=anchor_sec)
+        stream = build_stream_short(tlv, head8=head8, flag=flag)
+        payload = build_payload(stream, dev18)
+        # 短版 header 用真机魔数 0ac0d50c2111（线上那枚就是这样）
+        header = bytes.fromhex("0ac0d50c2111") + dev18
+    else:
+        tlv = build_tlv(bus_info, qimei36, now_ms=now_ms, rnd8=rnd8, blob=blob,
+                        week_count=week_count, anchor_sec=anchor_sec)
+        stream = build_stream(tlv, head8=head8, flag=flag)
+        payload = build_payload(stream, dev18)
+        header = bytes.fromhex("030057040111") + dev18
+
     out = b64_custom_encode(header + aes128_cbc_encrypt(K_AES, K_AES, payload))
     raw = b64_custom_decode(out)
-    assert len(raw) == USKEY_BYTES, "uskey 必须 %d 字节，实际 %d" % (USKEY_BYTES, len(raw))
-    assert len(out) == USKEY_CHARS, "uskey 必须 %d 字符，实际 %d" % (USKEY_CHARS, len(out))
+
+    want_bytes = USKEY_SHORT_BYTES if short else USKEY_BYTES
+    want_chars = USKEY_SHORT_CHARS if short else USKEY_CHARS
+    assert len(raw) == want_bytes, "uskey 必须 %d 字节，实际 %d" % (want_bytes, len(raw))
+    assert len(out) == want_chars, "uskey 必须 %d 字符，实际 %d" % (want_chars, len(out))
     return out
 
 

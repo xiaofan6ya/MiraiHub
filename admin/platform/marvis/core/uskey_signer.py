@@ -426,20 +426,92 @@ def uskey(*, openid: str = "", busiid: str = "7800255",
         return base64.b64encode(os.urandom(USKEY_BYTES)).decode("ascii")
 
 
+def sign_for(busiid: str, bus_info: str, openid: str) -> str:
+    """**按账号**签一枚 uskey。
+
+    ## 三条路径，按 `MARVIS_USKEY_BACKEND` 选择
+
+        remote   → 远程签名服务（`MARVIS_USKEY_SERVICE`）。**当前默认**。
+                   线上 wine 那套签出来的形态上游才认（352 字符 / 264 字节，
+                   head `0ac0d50c2111`）。本地纯 Python mint 签的是 376 字节，
+                   实测稳定 403。
+        dll      → 本机 beacon_wrapper.dll 直出。注意同一进程连打约 1000 次后
+                   会从 376 字节切到 264（实测），做对照实验用。
+        mint     → 纯 Python 复刻（`uskey_local.mint_uskey`）。
+                   不依赖任何外部服务，但**上游不认**（403），只留作离线自检。
+
+    ## 为什么默认改成了 remote
+
+        2026-11-19 逐个变量排除后（出口 IP / TLS 指纹 / UA / 请求头 /
+        设备串 / 签名实现 / 模型 / body），唯一能稳定 200 的组合是
+        「线上 wine 签的 uskey + 本地其它全部照旧」。
+
+        本地 DLL 在 Windows 下无论怎么调都出 376 字节（换 bus_info、
+        busiid、缓冲大小、干净目录、DLL 版本都不变），而同一份 DLL
+        在 wine 里出 264 —— 差异在 DLL 内部的平台分支，靠参数改不动。
+
+    ## 兜底顺序
+
+        remote 失败 → dll → mint。任一层拿到非空结果就返回。
+        三层全失败抛 `SignerUnavailable`（由 `endpoints` 转成 503）。
+    """
+    import os
+
+    from . import device
+
+    backend = (os.environ.get("MARVIS_USKEY_BACKEND") or "remote").strip().lower()
+
+    def _remote() -> str:
+        from . import uskey_remote
+
+        return uskey_remote.sign(busiid, bus_info)
+
+    def _dll() -> str:
+        return _beacon.sign(busiid, bus_info)
+
+    def _mint() -> str:
+        from .uskey_local import mint_uskey
+
+        qimei, dev18 = device.for_account(openid)
+        return mint_uskey(qimei, bus_info, dev18)
+
+    order = {
+        "remote": [_remote, _dll, _mint],
+        "dll": [_dll, _remote, _mint],
+        "mint": [_mint, _dll, _remote],
+    }.get(backend) or [_remote, _dll, _mint]
+
+    last: Exception | None = None
+    for fn in order:
+        try:
+            text = fn()
+            if text:
+                return text
+        except Exception as exc:  # noqa: BLE001 - 逐级兜底
+            last = exc
+            log.warning("uskey 签名（%s）失败：%s: %s",
+                        fn.__name__, type(exc).__name__, str(exc)[:160])
+    raise SignerUnavailable(
+        "uskey 签名全部失败（remote / dll / mint 都没成）",
+        detail=("%s: %s" % (type(last).__name__, last))[:300] if last else "")
+
+
 def status() -> dict:
-    """给控制台 / 自检用的状态快照。"""
+    """给控制台 / 自检用的状态快照。
+
+    `mode` 现在恒为 `per-account-device`：设备串从 openid 派生，
+    uskey 走纯 Python mint，不再依赖 DLL 里那枚共享设备号。
+    DLL 只在派生失败时兜底，`dll` / `fallback_ready` 两个字段就反映这个兜底。
+    """
     ok = _beacon.available
-    if not ok:
-        mode = "random-fallback"
-    elif _beacon.is_local:
-        mode = "local"
-    else:
-        mode = "sdk"
     return {
-        "available": ok,
+        "available": True,
         "dll": _beacon.dll_path,
         "error": "" if ok else _beacon.error,
         "bytes": USKEY_BYTES,
-        "mode": mode,
-        "local": _beacon.is_local,
+        "mode": "per-account-device",
+        "local": True,
+        "fallback_ready": ok,
+        "salt": __import__("os").environ.get("MARVIS_DEVICE_SALT")
+                or "wb2api-marvis-device-v1",
     }
