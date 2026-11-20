@@ -18,6 +18,18 @@ base64_A 用的是自定义 64 项字母表（不是标准 base64 顺序）。
 * 纯 Python mint 的 uskey 直接打上游 HTTP 200（真实账号 190）。
 * 全随机 dev18（os.urandom(18)）同样 200 ⇒ 不依赖侧车进程的任何状态。
 
+## TLV 形状（2026-11-20 新增）
+
+    真 DLL 在本机签出的 TLV 是 **336 字节 / 头 014e / 设备串 47+153**，
+    本模块历史模板是 **320 / 013e / 47+152**。所以 TLV 长度、两处设备串偏移
+    和头两个字节都进了形状表（`SHAPES`），由 `MARVIS_USKEY_TLV_SHAPE` 选：
+
+        320（默认，线上当前就是这个）  320 字节 TLV，段布局由真品抓包逐字节反解
+        336（真 DLL 同构）             长度 / 头 / 两处偏移与实测吻合，
+                                       但多出来的 16 字节内容**没有样本**，位置只能推
+
+    默认仍是 320：改成 336 等于改线上字节，验证过再切（见 TLV_GAP_* 的说明）。
+
 ## 与侧车的关系
 
 本模块**不需要**侧车。dev18 每次随机；qimei36 是账号侧的设备串
@@ -26,16 +38,19 @@ core/uskey.py 只在本地 mint 抛异常时才回落侧车。
 
 ## 依赖
 
-只用 base64 / hashlib / os / struct / time —— AES-128 与 TEA 都是本文件内的
+只用 base64 / hashlib / logging / os / struct / time —— AES-128 与 TEA 都是本文件内的
 纯 Python 实现（为的是镜像里不需要 cryptography）。
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 import struct
 import time
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 三层 key
@@ -413,6 +428,218 @@ KAT_FIXTURE_QIMEI36 = os.environ.get("MARVIS_KAT_QIMEI36") or SYNTHETIC_QIMEI36
 #: 载荷第 8 字节（TLV 前的那个 flag）。真品是 0x5a，不是随机数。
 STREAM_FLAG = 0x5A
 
+# ---------------------------------------------------------------------------
+# TLV 形状表：320（历史真品，默认）/ 336（真 DLL 同构，内容未验）
+# ---------------------------------------------------------------------------
+#: 形状选择的环境变量。写错值 → warning + 回落到 320。
+SHAPE_ENV = "MARVIS_USKEY_TLV_SHAPE"
+#: 默认形状 = **320**：线上当前跑的就是它。改默认值等于改线上字节，验证过再动。
+SHAPE_DEFAULT = "320"
+#: 真 DLL 形状：2026-11-20 本机 Windows x64 实测 524 字符 / 392 字节 / TLV 336 /
+#: 设备串 47+153 / 头 014e / magic 030057040111（magic 与 320 相同）。
+SHAPE_DLL = "336"
+
+#: 336 版的长度是**推得出来的**，不是抄的：
+#:
+#:     stream = 8 + 1 + 336 + 7 = 352
+#:     body   = AES-128-CBC(352) = 368（352 已被 16 整除，PKCS#7 补满一整块）
+#:     uskey  = 24 + 368 = 392 字节 → base64_A 后 524 字符
+#:
+#: 392 / 524 与实测逐项吻合 —— 所以长度这一环没有悬念，有悬念的是里面那 16 字节。
+TLV_BYTES_336 = 336
+PAYLOAD_BYTES_336 = 352
+USKEY_BYTES_336 = 392
+USKEY_CHARS_336 = 524
+
+#: 336 - 320 = 16 字节，但实测偏移说明**不是一整块**：
+#:
+#:     0:65      两版同长（qimei1 的值都在 47 ⇒ busid / sdk / appid 三段长度不变）
+#:     65:152    DLL 段 A 多 1 字节（于是 qimei2 的值从 152 落到 153）
+#:     152:170   qimei2 的值段（320 版坐标）
+#:     170:320   DLL 段 B 多 15 字节
+#:
+#: 那 1 + 15 字节**是什么字段、落在段内哪个位置，目前定不了** —— 手上没有一份
+#: 真 DLL 的 392 字节 TLV 原文。下面四个常量是**位置假设**（A 取 65 这个最早段边界，
+#: B 取尾部 0010+md5 段之前），内容默认 0x00。拿到真样本后：设
+#: `MARVIS_USKEY_TLV_336_UNKNOWN=<32 hex>` 原样灌进来，或改这里的常量 ——
+#: 别去改 build_tlv 的组装逻辑。
+TLV_GAP_A_AT = 65      # 320 坐标：qimei1 段之后、md5(bus_info) 段之前
+TLV_GAP_A_LEN = 1
+TLV_GAP_B_AT = 302     # 320 坐标：尾部 0010+md5("") 段之前
+TLV_GAP_B_LEN = 15
+#: 未知道字节的外部注入口（1 + 15 = 16 字节 = 32 个 hex 字符）。
+TLV_GAP_ENV = "MARVIS_USKEY_TLV_336_UNKNOWN"
+GAP_BYTES = TLV_GAP_A_LEN + TLV_GAP_B_LEN
+
+#: 尾部那一段 0010 + md5("") 在 320 模板里的起点（build_tlv 不重写它，保持模板原值）。
+OFF_MD5_TAIL = 302
+
+
+def gap_bytes() -> bytes:
+    """336 形状那 16 字节未知内容的**当前取值**（env 覆盖 > 全 0）。
+
+    env 只接受 32 个 hex 字符；写错就当没设（warning + 全 0）——"猜错的字节"
+    和"没有字节"对这个形状是同一件事：都过不了上游。
+    """
+    raw = (os.environ.get(TLV_GAP_ENV) or "").strip()
+    if not raw:
+        return bytes(GAP_BYTES)
+    try:
+        got = bytes.fromhex(raw)
+    except ValueError:
+        log.warning("%s=%r 不是 hex，按全 0 处理", TLV_GAP_ENV, raw)
+        return bytes(GAP_BYTES)
+    if len(got) != GAP_BYTES:
+        log.warning("%s 必须 %d 字节（%d 个 hex），收到 %d，按全 0 处理",
+                    TLV_GAP_ENV, GAP_BYTES, GAP_BYTES * 2, len(got))
+        return bytes(GAP_BYTES)
+    return got
+
+
+def tlv_336_template(unknown: bytes = None) -> bytes:
+    """320 模板 → 336 模板：在 A / B 两处插入未知道字节（默认取 gap_bytes()）。
+
+    拼完顺手把开头的长度字段改成 336-2 = 0x014e：模板本身也要自洽，
+    否则把模板 dump 出来对照时，头还是 013e 会误导人。
+    """
+    gap = gap_bytes() if unknown is None else bytes(unknown)
+    if len(gap) != GAP_BYTES:
+        raise ValueError("336 形状的未知道字节必须 %d 字节，收到 %d"
+                         % (GAP_BYTES, len(gap)))
+    out = bytearray(TLV_TEMPLATE[:TLV_GAP_A_AT] + gap[:TLV_GAP_A_LEN]
+                    + TLV_TEMPLATE[TLV_GAP_A_AT:TLV_GAP_B_AT] + gap[TLV_GAP_A_LEN:]
+                    + TLV_TEMPLATE[TLV_GAP_B_AT:])
+    out[0:2] = (len(out) - 2).to_bytes(2, "big")
+    return bytes(out)
+
+
+def _off_336(off: int) -> int:
+    """320 偏移 → 336 偏移（按上面两个 gap 平移；不手抄偏移表）。"""
+    return (off + (TLV_GAP_A_LEN if off >= TLV_GAP_A_AT else 0)
+            + (TLV_GAP_B_LEN if off >= TLV_GAP_B_AT else 0))
+
+
+def _offsets_320() -> dict:
+    return {"len": OFF_LEN, "busid": OFF_BUSID, "sdk": OFF_SDK, "appid": OFF_APPID,
+            "qimei1": OFF_QIMEI1, "md5": OFF_MD5, "ms": OFF_MS, "blob": OFF_BLOB,
+            "rnd": OFF_RND, "ver2": OFF_VER2, "proc": OFF_PROC,
+            "qimei2": OFF_QIMEI2, "product": OFF_PRODUCT, "json": OFF_JSON,
+            "md5_tail": OFF_MD5_TAIL}
+
+
+def _offsets_336() -> dict:
+    return {name: _off_336(off) for name, off in _offsets_320().items()}
+
+
+#: 336 版模板（gap 全 0 的**基线**；设了 TLV_GAP_ENV 时由 shape_spec() 现拼）
+TLV_TEMPLATE_336 = tlv_336_template(bytes(GAP_BYTES))
+
+SHAPES = {
+    SHAPE_DEFAULT: {
+        "key": SHAPE_DEFAULT,
+        "tlv_bytes": TLV_BYTES,
+        "payload_bytes": PAYLOAD_BYTES,
+        "uskey_bytes": USKEY_BYTES,
+        "uskey_chars": USKEY_CHARS,
+        "head": (TLV_BYTES - 2).to_bytes(2, "big"),
+        "template": TLV_TEMPLATE,
+        "offsets": _offsets_320(),
+        "layout_verified": True,
+        "layout_note": "2026-11-18 真客户端 504 字符 uskey 逐字节反解；KAT 锁着",
+    },
+    SHAPE_DLL: {
+        "key": SHAPE_DLL,
+        "tlv_bytes": TLV_BYTES_336,
+        "payload_bytes": PAYLOAD_BYTES_336,
+        "uskey_bytes": USKEY_BYTES_336,
+        "uskey_chars": USKEY_CHARS_336,
+        "head": (TLV_BYTES_336 - 2).to_bytes(2, "big"),
+        "template": TLV_TEMPLATE_336,
+        "offsets": _offsets_336(),
+        "layout_verified": False,
+        "layout_note": ("长度 336 / 头 014e / 设备串 47+153 三项与实测吻合；"
+                        "多出的 16 字节内容与位置未验 —— 需要一份真 DLL 的 392 字节样本"),
+    },
+}
+
+
+def shape_spec(value=None) -> dict:
+    """解析 TLV 形状：显式参数 > `MARVIS_USKEY_TLV_SHAPE` > 默认 320。
+
+    写错值（含 env 写错）一律 `log.warning` 后按 320 处理 —— 形状是字节级契约，
+    猜错不如不动。
+    """
+    if value is None or value == "":
+        raw = (os.environ.get(SHAPE_ENV) or "").strip()
+        key = raw or SHAPE_DEFAULT
+        source = "%s=%r" % (SHAPE_ENV, raw)
+    else:
+        key = str(value).strip()
+        source = "shape=%r" % (key,)
+    if key not in SHAPES:
+        log.warning("%s 不认识（可选 %s），按 %s 处理",
+                    source, "/".join(SHAPES), SHAPE_DEFAULT)
+        key = SHAPE_DEFAULT
+    spec = SHAPES[key]
+    if key == SHAPE_DLL:
+        gap = gap_bytes()
+        if gap != bytes(GAP_BYTES):
+            spec = dict(spec, template=tlv_336_template(gap))
+    return spec
+
+
+def verify_shapes() -> dict:
+    """形状表自洽检查（长度 / 头字节 / 两处设备串占位 / 载荷与 uskey 长度换算）。
+
+    全是**推得出来的**不变量：头 = 长度-2、载荷 = 长度+16、uskey = 24+载荷+补块、
+    字符数 = 4*ceil(bytes/3)。任何一条不成立说明形状表被改错了。
+    """
+    seen = {}
+    for key, spec in SHAPES.items():
+        n = spec["tlv_bytes"]
+        tpl = spec["template"]
+        if len(tpl) != n:
+            raise AssertionError("形状 %s：模板 %d 字节 != 声明 %d" % (key, len(tpl), n))
+        want_head = (n - 2).to_bytes(2, "big")
+        if spec["head"] != want_head:
+            raise AssertionError("形状 %s：头 %s != 长度-2=%s"
+                                 % (key, spec["head"].hex(), want_head.hex()))
+        if tpl[:2] != spec["head"]:
+            raise AssertionError("形状 %s：模板头 %s != 声明 %s"
+                                 % (key, tpl[:2].hex(), spec["head"].hex()))
+        off = spec["offsets"]
+        one = tpl[off["qimei1"]:off["qimei1"] + 18]
+        two = tpl[off["qimei2"]:off["qimei2"] + 18]
+        if one != two:
+            raise AssertionError("形状 %s：模板两处设备串不相等（%s / %s）"
+                                 % (key, one.hex()[:8], two.hex()[:8]))
+        if one != bytes.fromhex(SYNTHETIC_QIMEI36):
+            raise AssertionError("形状 %s：模板里的占位不是合成值" % (key,))
+        if off["qimei1"] != OFF_QIMEI1:
+            raise AssertionError("形状 %s：第一处设备串偏移 %d != 实测 %d"
+                                 % (key, off["qimei1"], OFF_QIMEI1))
+        if spec["payload_bytes"] != n + 16:
+            raise AssertionError("形状 %s：载荷 %d != TLV %d + 16"
+                                 % (key, spec["payload_bytes"], n))
+        pad = 16 - spec["payload_bytes"] % 16
+        if spec["uskey_bytes"] != 24 + spec["payload_bytes"] + pad:
+            raise AssertionError("形状 %s：uskey %d != 24 + 载荷 + 补块"
+                                 % (key, spec["uskey_bytes"]))
+        chars = 4 * -(-spec["uskey_bytes"] // 3)
+        if spec["uskey_chars"] != chars:
+            raise AssertionError("形状 %s：字符 %d != base64 口径 %d"
+                                 % (key, spec["uskey_chars"], chars))
+        seen[key] = {"tlv": n, "head": spec["head"].hex(),
+                     "qimei2": off["qimei2"], "verified": spec["layout_verified"]}
+    if seen[SHAPE_DEFAULT]["qimei2"] != OFF_QIMEI2:
+        raise AssertionError("320 形状的第二处设备串偏移漂了：%d"
+                             % (seen[SHAPE_DEFAULT]["qimei2"],))
+    return seen
+
+
+#: import 时就校验一遍：形状表是派生量，改错了必须立刻炸，别发一块坏包出去。
+SHAPE_REPORT = verify_shapes()
+
 
 def bcd_seconds(sec: int) -> bytes:
     """10 位十进制秒数 -> 5 字节 BCD（真品 blob 的前 5 字节就是这么来的）。"""
@@ -505,16 +732,21 @@ def build_tlv_short(bus_info: str, qimei36: str, now_ms: int = None,
 
 def build_tlv(bus_info: str, qimei36: str, now_ms: int = None,
               rnd8: bytes = None, blob: bytes = None,
-              week_count: int = 19, anchor_sec: int = None) -> bytes:
-    """拼 320 字节 TLV（长版）。
+              week_count: int = 19, anchor_sec: int = None,
+              shape=None) -> bytes:
+    """按形状拼一块 TLV（默认 320 字节；`shape="336"` 出真 DLL 同构的 336 字节）。
 
-    ⚠ **上游已经不认这一版**（2026-11-19 实测：320 字节 TLV → 403）。
-    保留它是为了 `--legacy` 对照和历史 KAT 自检；
-    生产路径请用 `build_tlv_short()`（208 字节）。
+    长度、头两字节、两处设备串偏移、各段偏移**全部来自形状表**（`SHAPES`），
+    本函数里不再出现字面偏移。
 
-    变量只有 5 处：md5(bus_info)、两处 qimei36、8 字节毫秒、15 字节 blob
+    变量只有 6 处：md5(bus_info)、两处 qimei36、8 字节毫秒、15 字节 blob
     （= BCD(秒) + 10 随机）、8 字节随机、以及 JSON 里的 1/2 号。
+
+    ⚠ 336 那一版：长度 / 头 / 两处偏移与实测吻合，但多出的 16 字节**内容未知**
+      （见 TLV_GAP_*）。它结构自洽，语义未验 —— 别当"已经修好 403"用。
     """
+    spec = shape_spec(shape)
+    off = spec["offsets"]
     qb = bytes.fromhex(qimei36)
     if len(qb) != 18:
         raise ValueError("qimei36 必须是 36 个 hex 字符（18 字节）：%r" % qimei36)
@@ -522,21 +754,25 @@ def build_tlv(bus_info: str, qimei36: str, now_ms: int = None,
     #: 真品里 JSON 的 "2" 和 blob 的 BCD 秒是**同一个**锚点（= 令牌/session 出生时间），
     #: 与毫秒字段不是同一个源（抓包里差 1715 s）。默认都取当前秒，重放时单独指定。
     sec = ts // 1000 if anchor_sec is None else int(anchor_sec)
-    tlv = bytearray(TLV_TEMPLATE)
-    tlv[OFF_LEN:OFF_LEN + 2] = (TLV_BYTES - 2).to_bytes(2, "big")
-    tlv[OFF_BUSID:OFF_BUSID + 16] = BUSID.encode("ascii")
-    tlv[OFF_QIMEI1:OFF_QIMEI1 + 18] = qb
-    tlv[OFF_QIMEI2:OFF_QIMEI2 + 18] = qb
-    tlv[OFF_MD5:OFF_MD5 + 16] = hashlib.md5(str(bus_info).encode("utf-8")).digest()
-    tlv[OFF_MS:OFF_MS + 8] = ts.to_bytes(8, "big")
-    tlv[OFF_BLOB:OFF_BLOB + 15] = (blob if blob is not None
-                                   else bcd_seconds(sec) + os.urandom(10))
-    tlv[OFF_RND:OFF_RND + 8] = rnd8 if rnd8 is not None else os.urandom(8)
-    tlv[OFF_JSON:OFF_JSON + JSON_BYTES] = build_week_json(sec, week_count)
+    tlv = bytearray(spec["template"])
+    tlv[off["len"]:off["len"] + 2] = (spec["tlv_bytes"] - 2).to_bytes(2, "big")
+    tlv[off["busid"]:off["busid"] + 16] = BUSID.encode("ascii")
+    tlv[off["qimei1"]:off["qimei1"] + 18] = qb
+    tlv[off["qimei2"]:off["qimei2"] + 18] = qb
+    tlv[off["md5"]:off["md5"] + 16] = hashlib.md5(
+        str(bus_info).encode("utf-8")).digest()
+    tlv[off["ms"]:off["ms"] + 8] = ts.to_bytes(8, "big")
+    tlv[off["blob"]:off["blob"] + 15] = (blob if blob is not None
+                                        else bcd_seconds(sec) + os.urandom(10))
+    tlv[off["rnd"]:off["rnd"] + 8] = rnd8 if rnd8 is not None else os.urandom(8)
+    tlv[off["json"]:off["json"] + JSON_BYTES] = build_week_json(sec, week_count)
+    assert len(tlv) == spec["tlv_bytes"], len(tlv)
     # qimei36 必须三处一致：header 的 Ual-Access-MarvisExt + TLV 两处。
     # 任意一处不同，上游会判定「设备串与签名不匹配」并拒掉这条请求。
-    assert tlv[OFF_QIMEI1:OFF_QIMEI1 + 18] == qb
-    assert tlv[OFF_QIMEI2:OFF_QIMEI2 + 18] == qb
+    assert tlv[off["qimei1"]:off["qimei1"] + 18] == qb
+    # 第二处偏移随形状漂（320→152 / 336→153），所以这里按表断言，不写字面量。
+    assert tlv[off["qimei2"]:off["qimei2"] + 18] == qb
+    assert tlv[off["qimei1"]:off["qimei1"] + 18] == tlv[off["qimei2"]:off["qimei2"] + 18]
     return bytes(tlv)
 
 
@@ -550,10 +786,16 @@ def build_stream_short(tlv: bytes, head8: bytes = None, flag: int = None) -> byt
     return bytes(head) + bytes([STREAM_FLAG if flag is None else int(flag)]) + tlv + bytes(7)
 
 
-def build_stream(tlv: bytes, head8: bytes = None, flag: int = None) -> bytes:
-    """336 字节载荷：8B 头（低 3 位打 pad 标记 6）+ 1B flag + TLV(320) + 7B。"""
-    if len(tlv) != TLV_BYTES:
-        raise ValueError("TLV 必须 %d 字节，收到 %d" % (TLV_BYTES, len(tlv)))
+def build_stream(tlv: bytes, head8: bytes = None, flag: int = None,
+                 shape=None) -> bytes:
+    """载荷：8B 头（低 3 位打 pad 标记 6）+ 1B flag + TLV + 7B。
+
+    320 形状 → 336 字节载荷；336 形状 → 352 字节载荷（= TLV + 16）。
+    """
+    spec = shape_spec(shape)
+    if len(tlv) != spec["tlv_bytes"]:
+        raise ValueError("形状 %s 的 TLV 必须 %d 字节，收到 %d"
+                         % (spec["key"], spec["tlv_bytes"], len(tlv)))
     head = bytearray(head8 if head8 is not None else os.urandom(8))
     head[0] = (head[0] & 0xF8) | 0x06
     return bytes(head) + bytes([STREAM_FLAG if flag is None else int(flag)]) + tlv + bytes(7)
@@ -589,8 +831,20 @@ def mint_uskey(qimei36: str, bus_info: str, dev18: bytes = None,
                now_ms: int = None, rnd8: bytes = None,
                blob: bytes = None, head8: bytes = None,
                flag: int = None, week_count: int = 19,
-               anchor_sec: int = None, short: bool = False) -> str:
+               anchor_sec: int = None, short: bool = False,
+               shape=None) -> str:
     """造一块 uskey。
+
+    ## 形状：`shape` / `MARVIS_USKEY_TLV_SHAPE`（2026-11-20 新增）
+
+        320（默认，线上当前这一版）  320 TLV / 376 字节 / 504 字符 / 设备串 47+152
+        336（真 DLL 同构）          336 TLV / 392 字节 / 524 字符 / 设备串 47+153
+
+        336 那套的长度、头两字节（014e）、两处设备串偏移都是实测口径推出来的，
+        但**多出来的 16 字节内容没有样本**（见 TLV_GAP_*）：它结构自洽、语义未验。
+        所以默认仍是 320；`MARVIS_USKEY_TLV_SHAPE` 写错值 → warning + 按 320。
+
+        `short=True`（208 TLV）是第三条对照路径，优先级高于 shape。
 
     ## `short` 参数要不要开（2026-11-19 实测记录，**别急着开**）
 
@@ -633,25 +887,31 @@ def mint_uskey(qimei36: str, bus_info: str, dev18: bytes = None,
         payload = build_payload(stream, dev18)
         # 短版 header 用真机魔数 0ac0d50c2111（线上那枚就是这样）
         header = bytes.fromhex("0ac0d50c2111") + dev18
+        want_bytes, want_chars = USKEY_SHORT_BYTES, USKEY_SHORT_CHARS
     else:
+        spec = shape_spec(shape)
         tlv = build_tlv(bus_info, qimei36, now_ms=now_ms, rnd8=rnd8, blob=blob,
-                        week_count=week_count, anchor_sec=anchor_sec)
-        stream = build_stream(tlv, head8=head8, flag=flag)
+                        week_count=week_count, anchor_sec=anchor_sec,
+                        shape=spec["key"])
+        stream = build_stream(tlv, head8=head8, flag=flag, shape=spec["key"])
         payload = build_payload(stream, dev18)
+        # magic 与形状无关：真 DLL 与 mint 在本机都是 030057040111（别拿它分辨来源）
         header = bytes.fromhex("030057040111") + dev18
+        want_bytes, want_chars = spec["uskey_bytes"], spec["uskey_chars"]
 
     out = b64_custom_encode(header + aes128_cbc_encrypt(K_AES, K_AES, payload))
     raw = b64_custom_decode(out)
-
-    want_bytes = USKEY_SHORT_BYTES if short else USKEY_BYTES
-    want_chars = USKEY_SHORT_CHARS if short else USKEY_CHARS
     assert len(raw) == want_bytes, "uskey 必须 %d 字节，实际 %d" % (want_bytes, len(raw))
     assert len(out) == want_chars, "uskey 必须 %d 字符，实际 %d" % (want_chars, len(out))
     return out
 
 
 def decode_uskey(uskey: str) -> dict:
-    """uskey -> 各层中间值（排障 / 自检用，密钥与本模块同源）。"""
+    """uskey -> 各层中间值（排障 / 自检用，密钥与本模块同源）。
+
+    TLV 长度取自**流里的 TLV 头**（+2），不再按 320 硬切：真 DLL 那块是 336，
+    硬切会把它截断成 320，然后偏移全错（历史上 152 与 153 的 1 字节之争就是这来的）。
+    """
     raw = b64_custom_decode(uskey)
     header, body = raw[:24], raw[24:]
     dev18 = header[6:24]
@@ -659,9 +919,10 @@ def decode_uskey(uskey: str) -> dict:
     payload = aes128_cbc_decrypt(K_AES, K_AES, body)
     scrambled = bytes(x ^ ks[i % 16] for i, x in enumerate(payload))
     stream = tea_dualfeedback_decrypt(scrambled)
+    want = int.from_bytes(stream[9:11], "big") + 2 if len(stream) >= 11 else 0
+    tlv = stream[9:9 + want] if 0 < want <= len(stream) - 9 else b""
     return {"raw": raw, "header": header, "dev18": dev18, "payload": payload,
-            "p224": payload, "stream": stream,
-            "tlv": stream[9:9 + TLV_BYTES] if len(stream) >= 329 else b""}
+            "p224": payload, "stream": stream, "tlv": tlv, "tlv_len": len(tlv)}
 
 # ---------------------------------------------------------------------------
 # KAT：固定输入 -> 固定字节
@@ -678,11 +939,14 @@ KAT_BUS_INFO = (
 KAT_NOW_MS = 1730000000000
 
 
-def kat_mint(qimei36: str = "") -> str:
+def kat_mint(qimei36: str = "", shape=None) -> str:
     """用**全固定输入**签一块 uskey：同样输入必得同样字节（KAT / 回归用）。
 
     真签那条路每次都必须随机（`dev18` / 毫秒 / blob 的后 10 字节），
     所以这里显式固定它们 —— 只有 KAT 能这么用。
+
+    `shape` 走 `shape_spec()`：默认 320；给 "336" 就出真 DLL 同构的那一套，
+    两套都必须可重放（同一输入两次逐字节相等）。
     """
     device = qimei36 or KAT_FIXTURE_QIMEI36
     sec = KAT_NOW_MS // 1000
@@ -695,40 +959,55 @@ def kat_mint(qimei36: str = "") -> str:
         head8=bytes(8),
         flag=STREAM_FLAG,
         anchor_sec=sec,
+        shape=shape,
     )
 
 
-def selfcheck() -> dict:
+def selfcheck(shape=None) -> dict:
     """KAT 自检：长度 / 两处设备串 / 确定性 / 模板不承载身份。
 
     返回可断言的报告；任何一条不成立就抛 `AssertionError`。这是"签名链路还能用"
     的最低门槛 —— 故意放在库里而不是测试里，线上排障也能直接调。
+
+    `shape` 默认取 320（线上口径）。报告里带 `shape` / `shape_verified`：
+    336 那套是 `shape_verified=False`，只证明结构自洽，不证明上游认。
     """
+    spec = shape_spec(shape)
+    off = spec["offsets"]
     device = KAT_FIXTURE_QIMEI36
     wanted = bytes.fromhex(device)
-    one = kat_mint()
+    one = kat_mint(shape=spec["key"])
     report = {
+        "shape": spec["key"],
+        "shape_verified": spec["layout_verified"],
+        "tlv_bytes": spec["tlv_bytes"],
         "qimei36_masked": device[:8] + "…",
         "uskey_chars": len(one),
         "uskey_bytes": len(b64_custom_decode(one)),
     }
-    if report["uskey_chars"] != USKEY_CHARS:
-        raise AssertionError("uskey 必须 %d 字符，实际 %d"
-                             % (USKEY_CHARS, report["uskey_chars"]))
-    if report["uskey_bytes"] != USKEY_BYTES:
-        raise AssertionError("uskey 必须 %d 字节，实际 %d"
-                             % (USKEY_BYTES, report["uskey_bytes"]))
-    if one != kat_mint():
+    if report["uskey_chars"] != spec["uskey_chars"]:
+        raise AssertionError("形状 %s 的 uskey 必须 %d 字符，实际 %d"
+                             % (spec["key"], spec["uskey_chars"],
+                                report["uskey_chars"]))
+    if report["uskey_bytes"] != spec["uskey_bytes"]:
+        raise AssertionError("形状 %s 的 uskey 必须 %d 字节，实际 %d"
+                             % (spec["key"], spec["uskey_bytes"],
+                                report["uskey_bytes"]))
+    if one != kat_mint(shape=spec["key"]):
         # 固定输入却不稳定 = 某处还在读时钟/urandom，KAT 就失去意义。
         raise AssertionError("KAT 不可重放：相同输入两次产出不同")
     tlv = decode_uskey(one)["tlv"]
-    if len(tlv) != TLV_BYTES:
-        raise AssertionError("TLV 必须 %d 字节，实际 %d" % (TLV_BYTES, len(tlv)))
-    for offset, name in ((OFF_QIMEI1, "qimei1"), (OFF_QIMEI2, "qimei2")):
+    if len(tlv) != spec["tlv_bytes"]:
+        raise AssertionError("形状 %s 的 TLV 必须 %d 字节，实际 %d"
+                             % (spec["key"], spec["tlv_bytes"], len(tlv)))
+    for offset, name in ((off["qimei1"], "qimei1"), (off["qimei2"], "qimei2")):
         if tlv[offset:offset + 18] != wanted:
-            raise AssertionError("%s 处不是调用方给的设备串" % name)
+            raise AssertionError("%s 处（偏移 %d）不是调用方给的设备串"
+                                 % (name, offset))
+    if tlv[off["qimei1"]:off["qimei1"] + 18] != tlv[off["qimei2"]:off["qimei2"] + 18]:
+        raise AssertionError("两处设备串不一致")
     # 模板里那段占位必须还是合成值：真机值一旦被焊回模板，它就是公开的。
-    baked = TLV_TEMPLATE[OFF_QIMEI1:OFF_QIMEI1 + 18]
+    baked = spec["template"][off["qimei1"]:off["qimei1"] + 18]
     if baked != bytes.fromhex(SYNTHETIC_QIMEI36):
         raise AssertionError(
             "TLV 模板里焊了非合成占位设备串（%s…）：build_tlv 会覆盖它，"

@@ -1,5 +1,6 @@
-"""uskey 纯 Python 实现的回归测试：KAT + 结构 + 长度。零 mock，零网络。"""
+"""uskey 纯 Python 实现的回归测试：KAT + 结构 + 长度 + TLV 形状。零 mock，零网络。"""
 import hashlib
+import os
 import subprocess
 import sys
 import unittest
@@ -145,6 +146,160 @@ class KatTests(unittest.TestCase):
         lines = out.stdout.strip().splitlines()
         self.assertEqual(lines[0], fixture)
         self.assertEqual(lines[-1], "True")
+
+
+class TlvShapeTests(unittest.TestCase):
+    """两套 TLV 形状：320（默认 / 线上）与 336（真 DLL 同构）。
+
+    336 这套只锁**能从实测推出来的三项**：长度 336、头 014e、两处设备串 47+153。
+    多出来的 16 字节内容没有真样本，测试不替它编内容（见 uskey_local.TLV_GAP_*），
+    只锁"灌进来以后能被原样写进正确位置"。
+    """
+
+    def _env(self, name, value):
+        """改 env 并登记还原（用例之间不许互相污染形状）。"""
+        old = os.environ.get(name)
+
+        def restore():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+        self.addCleanup(restore)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    # --- 默认口径 ---------------------------------------------------------
+    def test_default_shape_is_320(self):
+        """不带任何 env / 参数时必须是 320：默认值等于线上字节，不许漂。"""
+        self._env(U.SHAPE_ENV, None)
+        spec = U.shape_spec()
+        self.assertEqual(spec["key"], "320")
+        self.assertEqual(spec["tlv_bytes"], 320)
+        self.assertTrue(spec["layout_verified"])
+        self.assertEqual(len(U.b64_custom_decode(U.mint_uskey(FIX_Q, BUS))), 376)
+
+    def test_320_regression(self):
+        """旧形状回归：376 字节 / 504 字符 / TLV 320 / 设备串 47+152。"""
+        u = U.mint_uskey(FIX_Q, BUS, shape="320")
+        s = decode_stream(u)
+        tlv = s[9:9 + 320]
+        self.assertEqual(len(u), 504)
+        self.assertEqual(len(U.b64_custom_decode(u)), 376)
+        self.assertEqual(len(s), 336)
+        self.assertEqual(tlv[:2], (320 - 2).to_bytes(2, "big"))
+        self.assertEqual(tlv[47:65], FIX_Q_BYTES)
+        self.assertEqual(tlv[152:170], FIX_Q_BYTES)
+        self.assertEqual(tlv.count(FIX_Q_BYTES), 2)
+
+    # --- 新形状：真 DLL 同构 ----------------------------------------------
+    def test_336_lengths(self):
+        """392 字节 / 524 字符 / 载荷 352 —— 与真 DLL 实测逐项相同。"""
+        u = U.mint_uskey(FIX_Q, BUS, shape="336")
+        s = decode_stream(u)
+        self.assertEqual(len(u), 524)
+        self.assertEqual(len(U.b64_custom_decode(u)), 392)
+        self.assertEqual(len(s), 352, "载荷 = 8 头 + 1 flag + 336 TLV + 7 尾")
+
+    def test_336_header_and_offsets(self):
+        """TLV 336 / 头 014e / 两处设备串 47 与 153，且两处相等。"""
+        tlv = decode_stream(U.mint_uskey(FIX_Q, BUS, shape="336"))[9:9 + 336]
+        self.assertEqual(len(tlv), 336)
+        self.assertEqual(tlv[:2], b"\x01\x4e")
+        self.assertEqual(int.from_bytes(tlv[:2], "big") + 2, 336)
+        self.assertEqual(tlv[47:65], FIX_Q_BYTES)
+        self.assertEqual(tlv[153:171], FIX_Q_BYTES)
+        self.assertEqual(tlv[47:65], tlv[153:171], "两处设备串必须同值")
+        self.assertEqual(tlv.count(FIX_Q_BYTES), 2)
+        # 152 处确实已经漂了：这正是 320 那套偏移表不能拿来解 DLL 包的原因
+        self.assertNotEqual(tlv[152:170], FIX_Q_BYTES)
+
+    def test_decode_reads_tlv_length_from_header(self):
+        """decode_uskey 的 TLV 长度取自流里的头，不按 320 硬切。"""
+        info = U.decode_uskey(U.mint_uskey(FIX_Q, BUS, shape="336"))
+        self.assertEqual(len(info["tlv"]), 336)
+        self.assertEqual(info["tlv_len"], 336)
+        self.assertEqual(info["tlv"][153:171], FIX_Q_BYTES)
+        old = U.decode_uskey(U.mint_uskey(FIX_Q, BUS, shape="320"))
+        self.assertEqual(len(old["tlv"]), 320)
+
+    def test_shape_table_is_consistent(self):
+        """形状表自洽：头=长度-2、载荷=TLV+16、uskey=24+载荷+补块。"""
+        report = U.verify_shapes()
+        self.assertEqual(report["320"], {"tlv": 320, "head": "013e",
+                                         "qimei2": 152, "verified": True})
+        self.assertEqual(report["336"], {"tlv": 336, "head": "014e",
+                                         "qimei2": 153, "verified": False})
+        self.assertEqual(U.SHAPE_REPORT, report)
+
+    # --- 开关 -------------------------------------------------------------
+    def test_env_switches_shape(self):
+        """MARVIS_USKEY_TLV_SHAPE=336 时 mint_uskey 出 392 字节。"""
+        self._env(U.SHAPE_ENV, "336")
+        self.assertEqual(U.shape_spec()["key"], "336")
+        u = U.mint_uskey(FIX_Q, BUS)
+        self.assertEqual(len(U.b64_custom_decode(u)), 392)
+        self.assertEqual(len(u), 524)
+
+    def test_env_typo_falls_back_to_320(self):
+        """写错值 → warning + 按 320（宁可不动，也不悄悄换成猜的形状）。"""
+        self._env(U.SHAPE_ENV, "33")
+        with self.assertLogs(U.log, level="WARNING") as caught:
+            spec = U.shape_spec()
+        self.assertEqual(spec["key"], "320")
+        self.assertIn("33", caught.output[0])
+        self.assertEqual(len(U.b64_custom_decode(U.mint_uskey(FIX_Q, BUS))), 376)
+
+    # --- KAT：两套都要能逐字节重放 ----------------------------------------
+    def test_kat_per_shape(self):
+        for shape, chars, tlv_bytes, off2 in (("320", 504, 320, 152),
+                                              ("336", 524, 336, 153)):
+            one = U.kat_mint(shape=shape)
+            self.assertEqual(len(one), chars, shape)
+            self.assertEqual(one, U.kat_mint(shape=shape),
+                             "KAT 必须可重放：" + shape)
+            tlv = U.decode_uskey(one)["tlv"]
+            self.assertEqual(len(tlv), tlv_bytes)
+            self.assertEqual(tlv[47:65], FIX_Q_BYTES)
+            self.assertEqual(tlv[off2:off2 + 18], FIX_Q_BYTES)
+
+    def test_selfcheck_both_shapes(self):
+        """selfcheck 自带形状口径；336 那套必须标 shape_verified=False。"""
+        for shape, chars in (("320", 504), ("336", 524)):
+            report = U.selfcheck(shape=shape)
+            self.assertTrue(report["ok"], shape)
+            self.assertEqual(report["shape"], shape)
+            self.assertEqual(report["uskey_chars"], chars)
+        self.assertTrue(U.selfcheck("320")["shape_verified"])
+        self.assertFalse(U.selfcheck("336")["shape_verified"],
+                         "336 的段内容没有真样本，不许标成已验证")
+
+    # --- 那 16 字节未知内容：留注入口，不编内容 ----------------------------
+    def test_gap_bytes_injectable(self):
+        """拿到真 DLL 样本后不改代码就能灌：32 hex = 16 字节，落位 A=65 / B=303。"""
+        self._env(U.TLV_GAP_ENV, "aa" + "bb" * 15)
+        spec = U.shape_spec("336")
+        self.assertEqual(len(spec["template"]), 336)
+        self.assertEqual(spec["template"][65], 0xAA)
+        self.assertEqual(spec["template"][303:318], b"\xbb" * 15)
+        # 灌了字节也照旧是 392 / 524，且两处设备串仍被覆盖成调用方给的那串
+        u = U.mint_uskey(FIX_Q, BUS, shape="336")
+        self.assertEqual(len(u), 524)
+        tlv = U.decode_uskey(u)["tlv"]
+        self.assertEqual(tlv[47:65], FIX_Q_BYTES)
+        self.assertEqual(tlv[153:171], FIX_Q_BYTES)
+        self.assertEqual(tlv[65], 0xAA)
+
+    def test_gap_env_bad_value_warns(self):
+        """注入口写错 → warning + 全 0，不抛（形状本身仍然可用）。"""
+        self._env(U.TLV_GAP_ENV, "zz")
+        with self.assertLogs(U.log, level="WARNING"):
+            gap = U.gap_bytes()
+        self.assertEqual(gap, bytes(U.GAP_BYTES))
+        self.assertEqual(len(U.b64_custom_decode(U.mint_uskey(FIX_Q, BUS, shape="336"))), 392)
 
 
 if __name__ == "__main__":
