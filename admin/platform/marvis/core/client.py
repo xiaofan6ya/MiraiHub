@@ -12,10 +12,13 @@
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +45,59 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# --- 按账号固定出口（egress） ---
+#: 当前请求绑定的出口代理（contextvar）。空串 = 不指定出口，走平台级 opener
+#: （直连，或 `MIRAIHUB_<PLATFORM>_PROXY` 配的出口）。
+_EGRESS_VAR = contextvars.ContextVar("marvis_egress_proxy", default="")
+#: 按代理 URL 缓存 opener：每次重建都要重建 TLS 上下文（见 `_opener()`）。
+_EGRESS_OPENERS: dict = {}
+_EGRESS_LOCK = threading.Lock()
+
+
+def _egress_proxy(account_id: int) -> str:
+    """当前账号的出口代理；池没配 / 模块缺失返回 ""（= 不指定出口）。"""
+    try:
+        from . import egress
+
+        return egress.pick(account_id)
+    except Exception as exc:  # noqa: BLE001
+        # 出口池是可选加速项：它坏了不能连带把对话打死。
+        logger.warning("出口池不可用（回退平台出口）：%s", exc)
+        return ""
+
+
+def _opener_for(proxy: str):
+    """按代理 URL 取 opener；空串时与改动前行为一致（平台级 opener）。"""
+    if not proxy:
+        from admin.upstream_http import platform_opener
+
+        return platform_opener(endpoints.PLATFORM)
+    with _EGRESS_LOCK:
+        opener = _EGRESS_OPENERS.get(proxy)
+        if opener is None:
+            from admin.upstream_http import build_opener
+
+            opener = build_opener(None, proxy=proxy)
+            _EGRESS_OPENERS[proxy] = opener
+        return opener
+
+
+@contextlib.contextmanager
+def _egress_bound(proxy: str):
+    """在 with 块内把 `_opener()` 绑到指定出口（空串 = 平台级 opener）。"""
+    token = _EGRESS_VAR.set(str(proxy or ""))
+    try:
+        yield
+    finally:
+        _EGRESS_VAR.reset(token)
+
+
+def reset_egress_openers() -> None:
+    """丢掉按出口的 opener 缓存（测试用；轮换出口后想立刻重建也用它）。"""
+    with _EGRESS_LOCK:
+        _EGRESS_OPENERS.clear()
+
+
 def _opener():
     """进程级共享的 urllib opener（**别用裸 `urllib.request.urlopen`**）。
 
@@ -55,13 +111,14 @@ def _opener():
     `admin.upstream_http.urllib_opener()` 把共享 SSL 上下文（系统库 + certifi）
     建一次复用，并默认不走系统代理（加速器塞进注册表的代理会让 TLS 校验失败，
     见 issue #5）。与 Loomy 等平台同一条链路，不再各写各的。
-    """
-    global _OPENER
-    if _OPENER is None:
-        from admin.upstream_http import urllib_opener
 
-        _OPENER = urllib_opener()
-    return _OPENER
+    ## 2026-11-18：出口可按账号固定
+
+    有出口池时（`core/egress.py`），本次请求会绑一个出口代理，这里返回
+    **按代理 URL 缓存**的 opener；没绑（默认）时返回平台级 opener，与改动前
+    完全一致。绑定用 contextvar，所以 SSE 流跨线程流转也不会串号。
+    """
+    return _opener_for(_EGRESS_VAR.get())
 
 
 def _no_redirect_opener():
@@ -298,9 +355,13 @@ def fetch_wallet(credential: dict, realm: str = "cn", *, account_id: int = 0) ->
     return inner
 
 
-def open_chat_stream(credential: dict, realm: str, body: dict, *,
-                     account_id: int = 0):
+def _open_chat_stream_direct(credential: dict, realm: str, body: dict, *,
+                            account_id: int = 0):
     """打开模型网关的 SSE 流，**原样**返回 `HTTPResponse` 交给上层转发。
+
+    「不指定出口」的那一半实现：出口由 `open_chat_stream()` 绑好再进来，
+    这里只管发请求。
+    
 
     ⚠ 不要在这里读流：读干了上层就没东西可转发（插件侧踩过的同一个坑）。
     上层负责 finally 调 `close_stream()`。
@@ -389,6 +450,39 @@ def open_chat_stream(credential: dict, realm: str, body: dict, *,
         raise UpstreamError("模型网关网络失败", status=0, kind="network",
                             detail=str(exc)[:200]) from exc
     return _reject_json_body(resp, body, realm, account_id)
+
+
+def open_chat_stream(credential: dict, realm: str, body: dict, *,
+                     account_id: int = 0):
+    """按账号固定出口打开 SSE 流；**出口不可用时回退平台出口**。
+
+    出口由 `core/egress.py::pick(account_id)` 决定 —— 同一账号恒定同一出口。
+    池没配（默认）时 `pick()` 返回 ""，这里直接走
+    `_open_chat_stream_direct()`，行为与改动前一致。
+
+    ## 回退的边界（只在**传输层**失败时回退）
+
+    `kind == "network"` 意味着请求没到达上游（连不上出口、TLS 断了、
+    超时），这时换出口重发是安全的。`4xx/5xx` 与业务错误**已经到过上游**，
+    重发就是二次记账 + 可能触发更重的风控 —— 那类错误原样抛给上层，走既有
+    的换号 / 冷却路径。
+    """
+    proxy = _egress_proxy(account_id)
+    if not proxy:
+        return _open_chat_stream_direct(credential, realm, body,
+                                        account_id=account_id)
+    try:
+        with _egress_bound(proxy):
+            return _open_chat_stream_direct(credential, realm, body,
+                                            account_id=account_id)
+    except UpstreamError as exc:
+        if exc.kind != "network":
+            raise
+        logger.warning("出口 %s 不可用，回退平台出口 | acc=%s err=%s",
+                       proxy, account_id, exc.detail or exc.message)
+    with _egress_bound(""):
+        return _open_chat_stream_direct(credential, realm, body,
+                                        account_id=account_id)
 
 
 def _reject_json_body(resp, body: dict, realm: str, account_id: int):
