@@ -252,6 +252,25 @@ def qimei36(account_key: str = '') -> str:
         'qimei36 需要账号标识：设备串必须按账号派生，不允许使用共享常量')
 
 
+def dev18_for(account_key: str, device_qimei: str) -> bytes:
+    """Stable local-signing device bytes, scoped to an account and QIMEI.
+
+    Rotating that account's QIMEI resets these bytes. Request IDs, nonce and
+    signature randomness remain fresh; this is not an SDK hardware identity.
+    """
+    key = str(account_key or '').strip().upper()
+    if not key:
+        raise ValueError('dev18 requires an account key')
+    try:
+        raw_qimei = bytes.fromhex(device_qimei)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('dev18 requires a valid QIMEI') from exc
+    if len(raw_qimei) != 18:
+        raise ValueError('dev18 requires an 18-byte QIMEI')
+    return hashlib.sha256(b'marvis-dev18-v1\0' + key.encode('utf-8') +
+                          b'\0' + raw_qimei).digest()[:18]
+
+
 def _local_sign(*, device_key: str = '', **kwargs) -> dict:
     """纯本地 mint 一块 uskey（两次系统调用：urandom + 时间戳，不碰网络）。
 
@@ -261,7 +280,7 @@ def _local_sign(*, device_key: str = '', **kwargs) -> dict:
     from .uskey_local import mint_uskey
     info = bus_info(**kwargs)
     device = qimei36(device_key)
-    value = mint_uskey(device, info, os.urandom(18))
+    value = mint_uskey(device, info, dev18_for(device_key, device))
     return _validate({"uskey": value, "qimei36": device,
                       "busInfo": info, "ms": 0})
 
