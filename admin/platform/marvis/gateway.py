@@ -774,6 +774,15 @@ _TENCENT_FINGERPRINT_RULES = (
     (re.compile(r"You\s+are\s+an?\s+AI\s+(?:coding\s+)?agent\s*,?\s*powered\s+by\s+"
                 r"(?:the\s+)?DeepSeek\s*(?:Harness|Runtime)", re.I),
      "You're a capable AI coding assistant, powered by a large language model"),
+    # 4b. DSH 的 assistant-powered-by 形态；品牌后的边界排除 RuntimePlus 等正文。
+    #     用 You're 避免首行身份兜底重复计数，保留品牌后的标点和约束。
+    (re.compile(r"You\s+are\s+an?\s+AI\s+coding\s+assistant\s*,?\s*powered\s+by\s+"
+                r"(?:the\s+)?DeepSeek\s*(?:Harness|Runtime)\b", re.I),
+     "You're a capable AI coding assistant, powered by a large language model"),
+    # 4c. 品牌前置身份句：只替换「You are + 品牌 + 逗号 + 冠词」，保留身份描述。
+    #     逗号必需，冠词后必须有单词边界，避免误改 and / another 等自然语言。
+    (re.compile(r"You\s+are\s+DeepSeek\s*(?:Harness|Runtime)?\s*,\s*an?\b", re.I),
+     "You're a capable"),
     # 5. DSH Web 运行面的开头两句。位置无关。
     #    触发串**跨句边界**（前半句、后半句各自都放行），find 必须是前两句的
     #    并集；砍半 = 静默空跑。改写只去掉品牌串，其余逐字不动。
