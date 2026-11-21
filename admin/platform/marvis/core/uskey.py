@@ -243,6 +243,8 @@ def qimei36(account_key: str = '') -> str:
     qimei 正是 2026-11-18 设备簇被上游整体标记的原因。
     """
     value = (os.environ.get('MARVIS_QIMEI36') or '').strip()
+    if value and (os.environ.get('QIMEI_SNAPSHOT_PATH') or '').strip():
+        raise SidecarError('QIMEI snapshot mode does not allow a shared override')
     if len(value) == 36:
         return value
     key = str(account_key or '').strip()
@@ -271,7 +273,8 @@ def dev18_for(account_key: str, device_qimei: str) -> bytes:
                           b'\0' + raw_qimei).digest()[:18]
 
 
-def _local_sign(*, device_key: str = '', **kwargs) -> dict:
+def _local_sign(*, device_key: str = '', device_qimei: str | None = None,
+                **kwargs) -> dict:
     """纯本地 mint 一块 uskey（两次系统调用：urandom + 时间戳，不碰网络）。
 
     算法、偏移、常量全部在 `core/uskey_local.py`；这里只负责把 bus_info 拼对、
@@ -279,7 +282,7 @@ def _local_sign(*, device_key: str = '', **kwargs) -> dict:
     """
     from .uskey_local import mint_uskey
     info = bus_info(**kwargs)
-    device = qimei36(device_key)
+    device = qimei36(device_key) if device_qimei is None else device_qimei
     value = mint_uskey(device, info, dev18_for(device_key or kwargs.get('openid'), device))
     return _validate({"uskey": value, "qimei36": device,
                       "busInfo": info, "ms": 0})
@@ -300,6 +303,16 @@ def sign(*, agent_tag: str, conversation_id: str, response_id: str,
     kwargs = dict(agent_tag=agent_tag, conversation_id=conversation_id,
                   response_id=response_id, scene=scene, model=model,
                   nonce=nonce, openid=openid)
+    if (os.environ.get('QIMEI_SNAPSHOT_PATH') or '').strip():
+        # Capture the required assignment before signing. A device-level
+        # sidecar cannot accept this identity, so it is never a fallback here.
+        device = qimei36(account_key)
+        if os.environ.get('MARVIS_USKEY_FORCE_SIDECAR') == '1':
+            raise SidecarError('QIMEI snapshot mode requires local signing')
+        try:
+            return _local_sign(device_key=account_key, device_qimei=device, **kwargs)
+        except Exception as exc:
+            raise SidecarError('QIMEI snapshot local signing failed') from exc
     if _signer is not None:
         return _signer(**kwargs)
     if os.environ.get("MARVIS_USKEY_FORCE_SIDECAR") == "1":
@@ -332,9 +345,6 @@ def health(timeout: float = 2.0) -> dict:
 #: `qimei_table.example.json` 说明形态。
 #: 来源优先级：`QIMEI_TABLE_PATH` > 模块同目录 `qimei_table.json`（存在才读）
 #: > 空表（全走派生）。
-_QIMEI_TABLE_CACHE = None
-
-
 def qimei_table_path() -> str:
     """真值表文件路径（env 优先）。空/缺文件都等于「没有真值」。"""
     env = (os.environ.get("QIMEI_TABLE_PATH") or "").strip()
@@ -363,30 +373,27 @@ def _read_table_file(path: str) -> dict:
 
 
 def _qimei_table() -> dict:
-    """真值表读路径：优先经 qimei_assign 加载（顺带校验「2 号/台」硬约束）。
+    """按当前路径读取真值表，来源文件未变时复用已验证的状态。
 
     池台账不合法时 `QimeiPoolError` 必须往外抛 —— 那是硬约束被破坏，
     不能当成「读表失败」吞掉，否则带病状态会一路跑下去。
     """
-    global _QIMEI_TABLE_CACHE
-    if _QIMEI_TABLE_CACHE is None:
-        try:
-            from .qimei_assign import QimeiPoolError, load_state
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("qimei_assign 不可用，退回直接读表：%s", exc)
-            _QIMEI_TABLE_CACHE = _read_table_file(qimei_table_path())
-            return _QIMEI_TABLE_CACHE
-        try:
-            _QIMEI_TABLE_CACHE = dict(load_state().table)
-        except QimeiPoolError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("qimei 真值表加载失败（退回直接读表）：%s", exc)
-            _QIMEI_TABLE_CACHE = _read_table_file(qimei_table_path())
-        else:
-            logger.info("qimei 真值表已加载：%d 条（含 pool 归一化）",
-                        len(_QIMEI_TABLE_CACHE))
-    return _QIMEI_TABLE_CACHE
+    try:
+        from .qimei_assign import QimeiPoolError, _request_state
+    except Exception as exc:  # noqa: BLE001
+        if (os.environ.get("QIMEI_SNAPSHOT_PATH") or "").strip():
+            raise SidecarError("QIMEI snapshot mode requires the assignment loader") from exc
+        logger.warning("qimei_assign 不可用，退回直接读表：%s", exc)
+        return _read_table_file(qimei_table_path())
+    try:
+        return dict(_request_state().table)
+    except QimeiPoolError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if (os.environ.get("QIMEI_SNAPSHOT_PATH") or "").strip():
+            raise SidecarError("QIMEI snapshot could not be loaded") from exc
+        logger.warning("qimei 真值表加载失败（退回直接读表）：%s", exc)
+        return _read_table_file(qimei_table_path())
 
 
 _qimei_for_derived = qimei_for
@@ -399,4 +406,6 @@ def qimei_for(account_key: str) -> str:
         hit = _qimei_table().get(key)
         if hit:
             return hit
+    if (os.environ.get('QIMEI_SNAPSHOT_PATH') or '').strip():
+        raise SidecarError('QIMEI snapshot has no assignment for this account')
     return _qimei_for_derived(str(account_key or ""))

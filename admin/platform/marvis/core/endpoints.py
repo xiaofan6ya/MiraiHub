@@ -429,6 +429,37 @@ def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
     version = str(acct.get("client_version") or CLIENT_VERSION)
     sign_model = model or _DEFAULT_SIGN_MODEL
 
+    if (os.getenv("QIMEI_SNAPSHOT_PATH") or "").strip() or os.getenv("QIMEI_MANAGED_IDENTITY") == "1":
+        # Explicit snapshot mode must use the assigned account identity. Legacy
+        # device-level remote/DLL signers cannot consume that identity.
+        try:
+            from . import device_identity
+            from . import uskey as account_signer
+            from .uskey_local import mint_uskey
+            context = device_identity.resolve(acct)
+            if os.getenv("MARVIS_USKEY_FORCE_SIDECAR") == "1":
+                raise ValueError("snapshot signing requires the local backend")
+            key = account_signer.account_key_of(acct)
+            device = context.qimei36 if context else account_signer.qimei36(key)
+            dev18 = context.dev18 if context else account_signer.dev18_for(key, device)
+            cid = conversation_id or str(uuid.uuid4())
+            if context:
+                cid = context.conversation_id(cid)
+            rid = response_id or uuid.uuid4().hex
+            nonce = str(uuid.uuid4())
+            info = account_signer.bus_info(agent_tag=agent_tag or "main", conversation_id=cid,
+                                  response_id=rid, scene=scene or "agent_chat",
+                                  model=sign_model, nonce=nonce, openid=openid)
+            signed = account_signer._validate({"uskey": mint_uskey(device, info, dev18),
+                                      "qimei36": device})
+            return {"uskey": signed["uskey"], "nonce": nonce,
+                    "conversation_id": cid, "response_id": rid,
+                    "qimei36": device, "guid": context.guid if context else str(acct.get("guid") or ""),
+                    "client_version": version, "cached": False}
+        except Exception as exc:
+            raise SignerUnavailable("Account device signing is unavailable",
+                                    detail="required snapshot identity could not be signed") from exc
+
     #: 本次真签耗时（毫秒）。只用于日志埋点 —— 不放进返回值的 dict 里，
     #: 因为那份 dict 会被 `marvis_ext()` 序列化成请求头，多一个键就是脏头。
     sign_ms = 0.0
@@ -567,7 +598,7 @@ def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
     )
     payload = {
         "osVersion": EXT_OS_VERSION,
-        "guid": str(acct.get("guid") or ""),
+        "guid": ident.get("guid", str(acct.get("guid") or "")),
         "uskey": ident["uskey"],
         "nonce": ident["nonce"],
         "reqScene": EXT_REQ_SCENE,
@@ -580,7 +611,7 @@ def marvis_ext(acct: dict, *, scene: str = "", agent_tag: str = "",
     # 设备串写在最前面 —— 真机键序是 qimei36 → osVersion → guid → …。
     # 取不到就不写这个键：签名器自己会往 TLV 里带设备串，header 里多写一个猜的
     # 值只会造成「两处不一致」。
-    device = ext_qimei36()
+    device = ident["qimei36"] if "qimei36" in ident else ext_qimei36()
     if device:
         payload = {"qimei36": device, **payload}
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
@@ -643,7 +674,7 @@ def llm_headers(acct: dict, *, scene: str = "agent_chat",
         "Ual-Access-Openid": str(acct.get("openid") or ""),
         "Ual-Access-Access-Token": str(acct.get("access_token") or ""),
         "Ual-Access-Login-Type": LOGIN_TYPE_LLM,
-        "Ual-Access-Guid": str(acct.get("guid") or ""),
+        "Ual-Access-Guid": ident.get("guid", str(acct.get("guid") or "")),
         "Marvis-AgentTag": agent_tag,
         "Marvis-Conversation-ID": conversation_id,
         "Marvis-Response-ID": response_id,
@@ -652,7 +683,7 @@ def llm_headers(acct: dict, *, scene: str = "agent_chat",
         # 缺了它上游判「请求没带请求 id」→ 4100404。
         "Ual-Access-Requestid": response_id,
         "Marvis-Protocol-Version": "1000",
-        "X-Device-GUID": str(acct.get("guid") or ""),
+        "X-Device-GUID": ident.get("guid", str(acct.get("guid") or "")),
         "Ual-Access-MarvisExt": marvis_ext(acct, identity=ident),
     }
     # 真客户端这两者恒等；同一个 rid 已经进了 bus_info 的 marvisResponseID，

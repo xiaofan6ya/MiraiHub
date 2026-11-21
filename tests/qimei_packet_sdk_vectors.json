@@ -1,0 +1,510 @@
+{
+  "persistent_regression_fixture": true,
+  "schema": 1,
+  "scope": "Synthetic native outer-AES/RSA components and joined normal compact packet tail; not full SDK initialization or server interoperability",
+  "sdk_build": "Marvis 1.60.3400.35 win32-native/qimei.dll",
+  "sdk_dll_sha256": "5b284a088f848801c58003cfad742df5d47737f7619da44fc6000632464f10f4",
+  "common": {
+    "rsa_public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApLEpcsiHA/PE4MKl7WS7\nr11RijhytmEQH8jaY3nKhvq/KC29yEpJVAu+/asRp9mpoxCAiaTxJynVZMw5amwe\n24ff0Eau/MLCcfG9jFq8fp0LJwXmKtJuwha2hVr6zhW1+Q1h8f3T9hu+QMZTRxqQ\nnIY1mjqDY1/ARAK2hMzS+uoB+COosppWgFxOcQhzkjcM7Oa0RO+rSaatWsgBrKsp\nVEXFMYfHS+awD8qGXZyyOVaiDNvXgLfPecJerKCOFdujwR3isgtEEe8yyRryUm1F\nZgdIi8e+t23Lp0XDDB6LCox7DWLKmRjQ5K/5R7+HmSwNLANkw6yTUuLtYcoMY2nO\nUwIDAQAB\n-----END PUBLIC KEY-----"
+  },
+  "provenance": {
+    "outer_aes": {
+      "vector_count": 32,
+      "native_ranges": [
+        [
+          "0x50056",
+          "0x50701"
+        ],
+        [
+          "0x23b86",
+          "0x23d14"
+        ],
+        [
+          "0x23b24",
+          "0x23b71"
+        ]
+      ],
+      "native_instruction_count": 389368,
+      "runtime_hooks": {
+        "0x43ec": "string_data",
+        "0x4390": "string_data",
+        "0x42ce": "string_assign_pointer_length",
+        "0x5792": "string_destruct",
+        "0x1a0a": "string_append",
+        "0xb73b0": "bounded_emulated_strlen",
+        "0x5dfe": "string_copy_constructor",
+        "0x1e24": "string_reserve",
+        "0x612a": "string_append_one_byte"
+      },
+      "boundaries": [
+        "Starts at 50056 after RSA and key/IV selection; synthetic explicit frame/key/IV only.",
+        "Original AES128 key expansion, CBC, PKCS7 padding and Base64 instructions execute; native alphabet deobfuscation executes with synthetic initialized TLS.",
+        "Only generic string allocation/copy/reserve/append/destruction and bounded strlen are semantic hooks."
+      ]
+    },
+    "rsa_wrap": {
+      "vector_count": 1,
+      "native_ranges": [
+        [
+          "0x6192c",
+          "0x61b3c"
+        ],
+        [
+          "0x61c08",
+          "0x61ca6"
+        ],
+        [
+          "0x61ef8",
+          "0x6205e"
+        ],
+        [
+          "0x62c56",
+          "0x62d09"
+        ],
+        [
+          "0x4fc11",
+          "0x4ffbc"
+        ],
+        [
+          "0x588ce",
+          "0x5a411"
+        ]
+      ],
+      "native_instruction_count": 3255692,
+      "runtime_hooks": {
+        "0x43ec": "string_data",
+        "0x4390": "string_data",
+        "0x42ce": "string_assign_pointer_length",
+        "0x5792": "string_destruct",
+        "0x1a0a": "string_append",
+        "0x11038": "string_resize",
+        "0xb7250": "memory_copy",
+        "0xb7270": "memory_set"
+      },
+      "imported_runtime_hooks": [
+        "calloc",
+        "free",
+        "synthetic CRT rand with zero rejection"
+      ],
+      "boundaries": [
+        "Exact default public-key primitive INTEGER TLVs are supplied; full recursive SPKI parsing and vector construction are excluded.",
+        "Original INTEGER tag/length parsing and leading-zero removal yield a 256-byte modulus and exponent 65537.",
+        "Original PKCS1-v1_5 padding, limb conversion, modular exponentiation and fixed 256-byte output execute; synthetic 32-byte key||IV and deterministic nonzero PS221.",
+        "Root independently reran the native case and compared its output with pow(block,e,n) and candidate encode_packet ky."
+      ]
+    },
+    "packet_tail": {
+      "vector_count": 1,
+      "native_start_rva": "0x50701",
+      "native_stop_rva": "0x58785",
+      "approved_native_ranges": [
+        {
+          "start": "0x50701",
+          "end_exclusive": "0x58785",
+          "sha256": "33fca20f9fc4596c51a6d02e68bfd10233abf90cb286897309deecbd18a3d52a"
+        },
+        {
+          "start": "0x838d",
+          "end_exclusive": "0x8425",
+          "sha256": "dffa9af531bde8bb290c86b657836213093aeb483b45efb2b741ad2291d19ad3"
+        },
+        {
+          "start": "0x61198",
+          "end_exclusive": "0x611f1",
+          "sha256": "c90a8186992b4e4d6db6113b176535d714725a53428f24ff71e7e1d1deed0d9a"
+        },
+        {
+          "start": "0x31634",
+          "end_exclusive": "0x3168c",
+          "sha256": "da56f35061fbc529f319fa364c590349b39cbb5878da8272b31bea5988209fc4"
+        },
+        {
+          "start": "0x5f818",
+          "end_exclusive": "0x5f82e",
+          "sha256": "f35de3efe60cf0e0a76b4707a60f9496251fc54b5c740044d9da246512d970a9"
+        },
+        {
+          "start": "0x3820",
+          "end_exclusive": "0x3a0c",
+          "sha256": "8d53ee11620bc6be26e65cb50c32bcab42b833694fd763e5603ec253747ccc78"
+        },
+        {
+          "start": "0x3bcb",
+          "end_exclusive": "0x3c80",
+          "sha256": "c9029bd0a9ee58aa9bab83ddfb4b92cfadbf60d7049d96aa3a9e5086cbe39181"
+        },
+        {
+          "start": "0x6b48",
+          "end_exclusive": "0x6c01",
+          "sha256": "851f28664e888207248430ba4282ef646b78cba7476a5dc5b17d11a27b9e71ee"
+        },
+        {
+          "start": "0x45f8",
+          "end_exclusive": "0x46dd",
+          "sha256": "84624dfbc0132ee5b85ab0f2705ab7fe23ccc7e81579fec33ed508da431337f5"
+        },
+        {
+          "start": "0x1b00",
+          "end_exclusive": "0x1b50",
+          "sha256": "4029c4a0faf16510ab27c3478c669c97d99000f10c25f28f275b459b18617693"
+        },
+        {
+          "start": "0x1b50",
+          "end_exclusive": "0x1dce",
+          "sha256": "15ef6bb519a5372af383a2dd2d4ac6336be232978234f1fc950f7693b02b9eec"
+        },
+        {
+          "start": "0x1ea7",
+          "end_exclusive": "0x1f26",
+          "sha256": "5f9daee21d7aac06d16e19d8ef4ecb598d4f4d86adec4244f0d6496cc2e840ee"
+        },
+        {
+          "start": "0x6122",
+          "end_exclusive": "0x612a",
+          "sha256": "9a5990814a66a3004577de9d8f8156df68b088a9c79142e8913b114cde512a05"
+        },
+        {
+          "start": "0x7ffc",
+          "end_exclusive": "0x813e",
+          "sha256": "379ea255fa92951d6e98f5d3ac84f9872f485a50117dd6a41dee7935dedb7aa7"
+        },
+        {
+          "start": "0x813e",
+          "end_exclusive": "0x8197",
+          "sha256": "224000cf7cb5ca0729df0b0d3226749c693d664679fe030d33a671ea14ee1222"
+        }
+      ],
+      "native_instruction_count": 23639,
+      "runtime_hooks": {
+        "0x4390": "string_data",
+        "0x43ec": "string_data",
+        "0x42ce": "string_assign_pointer_length",
+        "0x5792": "string_destruct",
+        "0x1a0a": "string_append",
+        "0x64b2": "string_concat_r8_r9",
+        "0xb73b0": "bounded_emulated_strlen",
+        "0xb7250": "memory_copy",
+        "0x5dfe": "std_string_copy_constructor",
+        "0x612a": "std_string_append_one_byte",
+        "0x1e24": "std_string_reserve",
+        "0x3cd8": "bounded_emulated_allocator",
+        "0xb5fa0": "validated_security_cookie_check",
+        "0x1478": "string_copy",
+        "0x172e": "string_move",
+        "0x11038": "string_resize",
+        "0x18cc": "valid_hex_decode",
+        "0x663a": "string_insert",
+        "0xb7260": "memory_move",
+        "0xb7270": "memory_set",
+        "0xb7100": "synthetic_clock_ticks",
+        "0x8451": "fixture_explicit_millisecond_clock",
+        "0x634c0": "fixture_enabled_config_pointer",
+        "0x3168c": "std_map_insert_string_pair",
+        "0x63620": "std_map_copy_constructor",
+        "0x32486": "std_map_tree_destroy",
+        "0x4205": "std_node_deallocate"
+      },
+      "imported_runtime_hooks": {
+        "0x50000100": "imported_strpbrk",
+        "0x50000200": "imported_stdio_common_vsprintf",
+        "0x50000300": "imported_calloc",
+        "0x50000400": "imported_free",
+        "0x50000500": "imported_CryptAcquireContextW",
+        "0x50000600": "imported_CryptGenRandom",
+        "0x50000700": "imported_CryptReleaseContext"
+      },
+      "boundaries": [
+        "Starts at 50701 with precomputed RSA Base64 from independent PyCryptodome RSA using explicit PS221 and params from the native outer-AES frame_16_profile_1 output.",
+        "Original nonce formatting, separate millisecond/signing clocks, signing, field selection, string-map ordering/joining and JSON escaping execute.",
+        "Map insertion/copy/tree allocation and string runtime operations are generic hooks; clocks, entropy and signing configuration are explicit synthetic inputs.",
+        "Root reran 23639 native instructions and compared the 593-byte packet exactly with encode_packet; fixture integration independently repeated the exact comparison."
+      ]
+    }
+  },
+  "limitations": [
+    "All vectors are synthetic component or tail baselines; no SDK initialization, deployed configuration, hardware collection, server acceptance or final QIMEI generation is established.",
+    "Ordinary regression tests replay literal outputs and require no DLL, emulator, Unicorn, PyCryptodome, runtime-state files or network."
+  ],
+  "vectors": [
+    {
+      "component": "outer_aes",
+      "name": "frame_0_profile_0",
+      "inner_frame_hex": "",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "AUPbY+5msM3/n2mRdoAVHg=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_0_profile_1",
+      "inner_frame_hex": "",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "CpQLtUFu8EXxw5RYxlPqWg=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_0_profile_2",
+      "inner_frame_hex": "",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "52/7LASq2+SETicx7N3Ymw=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_0_profile_3",
+      "inner_frame_hex": "",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "SJGU+c+nivY16ixdy41iBw=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_1_profile_0",
+      "inner_frame_hex": "00",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "etyZsp6CsbKwplo4vFeKAQ=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_1_profile_1",
+      "inner_frame_hex": "00",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "3Bsb2Jrts5WiywZ9M9Pbcw=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_1_profile_2",
+      "inner_frame_hex": "00",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "f2rv/5c/0Tgl2Ais+vceBw=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_1_profile_3",
+      "inner_frame_hex": "00",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "xEK64MWDbU0g6lZCpq4H4g=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_15_profile_0",
+      "inner_frame_hex": "0034597ea3c8ed80375c81a6cbf0ff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "/GHadjpPWTwLqAk1ZBMTqQ=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_15_profile_1",
+      "inner_frame_hex": "0034597ea3c8ed80375c81a6cbf0ff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "jvEdYxFlJbQj+ch0q4zViQ=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_15_profile_2",
+      "inner_frame_hex": "0034597ea3c8ed80375c81a6cbf0ff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "6Ysc4U8YhTp1wJkKbiyOcg=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_15_profile_3",
+      "inner_frame_hex": "0034597ea3c8ed80375c81a6cbf0ff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "L3G2w9IU6tbVHhcGxj9l6A=="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_16_profile_0",
+      "inner_frame_hex": "00355a7fa4c9ee13805d82a7ccf116ff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "gSgCNDCTBl2MTOvqaVb9FQwG1ils9DYh/L6kH7GWq/U="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_16_profile_1",
+      "inner_frame_hex": "00355a7fa4c9ee13805d82a7ccf116ff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "vPq5kkT7H0TitbcSoHxR2VxwmhQECfQHKC0TJRQPNF8="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_16_profile_2",
+      "inner_frame_hex": "00355a7fa4c9ee13805d82a7ccf116ff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "11m19naD7nzWzsRL0BZXwuWsOo9QdIm4UF8XFTQiOeo="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_16_profile_3",
+      "inner_frame_hex": "00355a7fa4c9ee13805d82a7ccf116ff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "zkQ9npemVV3E/4fkxRs/M22MzaHNybOv2Vj0yRk7thA="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_17_profile_0",
+      "inner_frame_hex": "00365b80a5caef14805e83a8cdf2173cff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "9JIv+D/T8ebaNbjUf2sdMmPV7Hq2UYkRVJR26LsH7Ko="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_17_profile_1",
+      "inner_frame_hex": "00365b80a5caef14805e83a8cdf2173cff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "570zKAj2ybyIaQ0zmmDVxXzttX3kIPads0JyixOGAqM="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_17_profile_2",
+      "inner_frame_hex": "00365b80a5caef14805e83a8cdf2173cff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "UImtfCCI3GLhYeAPeC6DhHrTGOzzaXguhWMeha5FGQA="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_17_profile_3",
+      "inner_frame_hex": "00365b80a5caef14805e83a8cdf2173cff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "aIDgCGT0CANvf5+85R1j5wzAU1Nj4SBhVAef3xoIE8s="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_31_profile_0",
+      "inner_frame_hex": "0044698eb3d8fd22476c91b6db0025806f94b9de03284d7297bce1062b50ff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "sOnf9jietCGAxOx961C2Ti1VBBb7ncGfLX1NJTyjrtA="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_31_profile_1",
+      "inner_frame_hex": "0044698eb3d8fd22476c91b6db0025806f94b9de03284d7297bce1062b50ff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "thi4zRVBR3KmnFGQ99w5Vb2eUkoZFxWDohbpaGvGhW8="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_31_profile_2",
+      "inner_frame_hex": "0044698eb3d8fd22476c91b6db0025806f94b9de03284d7297bce1062b50ff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "UKNdyK/29IYpqtozwjBwEQMCG0QaZCFr3IvgWMh41bs="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_31_profile_3",
+      "inner_frame_hex": "0044698eb3d8fd22476c91b6db0025806f94b9de03284d7297bce1062b50ff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "3DVSFWK7W5jbjFmnhO0cJYWLYTzW6et8ym5mSFE/j3o="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_32_profile_0",
+      "inner_frame_hex": "00456a8fb4d9fe23486d92b7dc01264b8095badf04294e7398bde2072c5176ff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "KFu3ngO4cEhUMXaoDbHdFHUAVSR492O5OR0yRrryL2RG67BrRgKeXuuHXOHo5DLe"
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_32_profile_1",
+      "inner_frame_hex": "00456a8fb4d9fe23486d92b7dc01264b8095badf04294e7398bde2072c5176ff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "3Ltyy1P1rEnlcXo9mpRn487OJ4NJ1pSLsKyiu8k2dd3+NOyjWkOjpi1fWGAFYu0y"
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_32_profile_2",
+      "inner_frame_hex": "00456a8fb4d9fe23486d92b7dc01264b8095badf04294e7398bde2072c5176ff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "VvlwWzET2EUf7QW+lHCGabdKboIgJ474P+Kr3D+anL3yqioPW79FkSwPJbq5OuN4"
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_32_profile_3",
+      "inner_frame_hex": "00456a8fb4d9fe23486d92b7dc01264b8095badf04294e7398bde2072c5176ff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "t87+/y1bvP3tBwKKVEM1E0Pjg4cqcZPXnQGDFYyY1fRqqzVZ65w/QJTNu9c4oXHn"
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_65_profile_0",
+      "inner_frame_hex": "00668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bc80062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375cff",
+      "key_hex": "00000000000000000000000000000000",
+      "iv_hex": "00000000000000000000000000000000",
+      "native_params_base64": "yIqTgYU1bMaUSMaA471/8g/osJtgyksG+NA3E2tlZRamwpJZvq01TEez45cOt4doYSdPuS6QXVlT2AfeRivF7M6F+mYV2Isab3jDy84EW6U="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_65_profile_1",
+      "inner_frame_hex": "00668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bc80062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375cff",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "native_params_base64": "QuG86UOzjxawdg8NkdYAqHwjgy4ucCunSxx/9UHwBDmTvT98ELzPeQeugqUyx2gWxwoUc055Vmirb1g5DDBu6dP4Xkr24puPkiTllHc6Qlw="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_65_profile_2",
+      "inner_frame_hex": "00668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bc80062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375cff",
+      "key_hex": "ff00800102030405060708090a0b0c0d",
+      "iv_hex": "0080ff0102030405060708090a0b0c0d",
+      "native_params_base64": "gyHL57wiLOa0GiBG27l182pfRZ7retwy5vBOEL7Pz8nnHV5ds327TRvmrmg0GrAl73jHY4zrY+Hvd3WFvDbc/s6VS7bI/TK/2eALnhJj2Jo="
+    },
+    {
+      "component": "outer_aes",
+      "name": "frame_65_profile_3",
+      "inner_frame_hex": "00668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bc80062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375cff",
+      "key_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "iv_hex": "0f0e0d0c0b0a09080706050403020100",
+      "native_params_base64": "SjsVS5tspUpBqPka/u7aS8kivvOPEZuCBynms6TGXmF3GaB9Ifd0UsM4GucRzmMkT/tCQ2qs9dOLfY3s77/8j7aIdlteHwqG+3lagILzjpc="
+    },
+    {
+      "component": "rsa_wrap",
+      "name": "default_native_rsa_wrap",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "rsa_padding_hex": "4992db246db6ff4891da236cb5fe4790d9226bb4fd468fd8216ab3fc458ed72069b2fb448dd61f68b1fa438cd51e67b0f9428bd41d66aff8418ad31c65aef74089d21b64adf63f88d11a63acf53e87d01962abf43d86cf1861aaf33c85ce1760a9f23b84cd165fa8f13a83cc155ea7f03982cb145da6ef3881ca135ca5ee3780c9125ba4ed367fc8115aa3ec357ec71059a2eb347dc60f58a1ea337cc50e57a0e9327bc40d569fe8317ac30c559ee73079c20b549de62f78c10a539ce52e77c009529be42d76bf08519ae32c75be075099e22b74bd064f98e12a73bc05",
+      "native_rsa_ciphertext_hex": "9fc394100235f47bcdef1a5b0124c833af1ede80338c45eef13e5567f06ea1f2ea69e8557711fd50c4113d7fbca85903ed10f583475bd98c50bc3bf9eb56513db8457673d75d9611204c0ba7a0f2bfa87eedfb5d7510fb082d371a5e20e4f2ea3a33458a7c949c82e347af49fb9fc392bb15156c5325f5478eebbab6bdf48446af63cb54dbd647b0673de0d86345557f2a0e9bc539c674ec85439a3e55a090798e043eaefa4b7ae47052659f37192a7b5baba4d890bbda6e6971cadc6ae6c6e8bd54a67fe6b4bab2640eaf4569f3a44f41dfbf510f895d2b575812a2f9f1dd2e9afec5919a3a6e0fd6c6de50b149533ceaf99aae49448826bd51204b88f5ddd6"
+    },
+    {
+      "component": "packet_tail",
+      "name": "builder_compatible_native_aes_independent_rsa",
+      "inner_frame_hex": "00355a7fa4c9ee13805d82a7ccf116ff",
+      "app_key_hex": "73796e746865746963225c2f6a6f696e",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "iv_hex": "101112131415161718191a1b1c1d1e1f",
+      "nonce_hex": "2122232425262728",
+      "timestamp_ms": 1700000000456,
+      "ticks_100ns": 17000000007654321,
+      "signing_version": 1,
+      "signing_seed8_hex": "1011121314151617",
+      "signing_tail4_hex": "00445566",
+      "rsa_padding_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdd",
+      "native_packet_json_hex": "7b22637074223a2231222c22657874223a227b5c226170705f6b65795c223a5c2273796e7468657469635c5c5c225c5c5c5c5c5c5c2f6a6f696e5c227d222c226b79223a226a635038783857717236743043436474734363776a34494e325466445a797730766d486c486738786a656363774c3270686c514d63714564485c2f3471686d3631373331752b7030715a556277424d6a6747592b4c584536597732736b5956344467732b6b5433674d46624143736f6f6c3230716456305c2f434c455339564265535a6b4e434279505377704d757745382b5055794f664e68774964526352314c5967465c2f317876356f713036643773756a30356b4349334c564445445842646d495658654f67586f6b384a2b7a3372746b4e35504b446a49383933723736672b44666275524352733746447157784243646475323556736145576a447443346a70346b796d3749597a6f324763515a722b645a385c2f6d336343374d6e6831306b347847367931327a5349634a57433539697842666559464c414244764242724839523770544a4d356d696b584b6f613878544c644346673d3d222c226e6e223a2232313232323332343235323632373238222c22706d73223a22765071356b6b543748305469746263536f487852325678776d685145436651484b4330544a5251504e46383d222c22736e223a223463343338353130653632363030306261646638656362343736663163396262303636373730346539633231626234343163306230303030303030313030343435353636222c22746d223a2231373030303030303030343536227d"
+    }
+  ]
+}

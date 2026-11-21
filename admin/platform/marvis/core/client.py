@@ -309,13 +309,27 @@ STREAM_TIMEOUT = 300.0
 def _acct(credential: dict) -> dict:
     """把落库的凭证规整成 endpoints 期望的形状（snake_case）。"""
     data = credential or {}
-    return {
+    acct = {
         "openid": str(data.get("openid") or data.get("openId") or ""),
         "access_token": str(data.get("access_token") or data.get("accessToken") or ""),
         "guid": str(data.get("guid") or ""),
         "login_type": str(data.get("login_type") or data.get("loginType") or "1"),
         "client_version": str(data.get("client_version") or ""),
     }
+    if (os.getenv("QIMEI_SNAPSHOT_PATH") or "").strip() or os.getenv("QIMEI_MANAGED_IDENTITY") == "1":
+        for key in ("uid", "id", "device"):
+            if key in data:
+                acct[key] = data[key]
+        if os.getenv("QIMEI_MANAGED_IDENTITY") == "1":
+            from . import device_identity
+            try:
+                # Capture once before any signing or authentication request.
+                acct[device_identity.CONTEXT_KEY] = device_identity.resolve(acct)
+            except device_identity.DeviceIdentityError as exc:
+                raise UpstreamError(
+                    "Managed device identity is unavailable; rebind the account",
+                    status=503, code="signer_unavailable", kind="signer_unavailable") from exc
+    return acct
 
 
 def fetch_wallet(credential: dict, realm: str = "cn", *, account_id: int = 0) -> dict:
@@ -787,9 +801,8 @@ def refresh_credentials(refresh_token: str = "", realm: str = "cn", *,
             "请在控制台「授权登录」重新扫码（QQ / 微信）",
             status=401, code="credential_incomplete", kind="auth")
 
-    acct = {"openid": openid, "access_token": token, "refresh_token": refresh,
-            "guid": guid,
-            "login_type": str(data.get("login_type") or data.get("loginType") or "1")}
+    acct = _acct({**data, "openid": openid, "access_token": token, "guid": guid})
+    acct["refresh_token"] = refresh
     # 签名对象是**实际发出的那串字节**：先序列化，再拿同一串去做签名头。
     body = endpoints.refresh_body(acct)
     headers = endpoints.business_headers(acct, query=body, method="POST")

@@ -314,3 +314,22 @@ tools/set_safe_context_limits.py
 
 # ===== 请求体上限（PR-09）：锁「默认 256MiB / 0 关闭 / 超限本地 413」 =====
 !tests/test_marvis_body_limit.py
+
+# Persistent, synthetic QIMEI regression suites and literal SDK vectors.
+!tests/test_marvis_qimei_*.py
+!tests/qimei_*_sdk_vectors.json
+!tests/test_marvis_uskey_qimei_reload.py
+!tests/test_marvis_device_identity.py
+!tests/test_marvis_dev18.py
+
+# Runtime account/device state and local review artifacts stay private.
+/admin/platform/marvis/core/qimei_table.json
+/admin/platform/marvis/core/qimei_pool.json
+/admin/platform/marvis/core/egress_pool.json
+qimei_state.json
+/qimei-state/
+task_plan.md
+findings.md
+progress.md
+.qimei-release-review.md
+.tmp-*

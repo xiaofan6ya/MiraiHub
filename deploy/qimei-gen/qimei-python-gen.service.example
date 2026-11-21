@@ -1,0 +1,38 @@
+# EXPERIMENTAL OPT-IN BENCHMARK SERVICE; NOT THE DEFAULT GENERATOR.
+# Install dependencies into a dedicated venv (httpx and cryptography), create a
+# non-root service user, and supply an explicit protected JSON config matching
+# qimei_generate.py's documented schema. This example contains no app parameter,
+# deployment endpoint, key or hardware profile. It never loads the installed SDK.
+# Compare controlled benchmarks and review account-history migration before
+# changing an existing QIMEI_GEN_URL/command. Existing Wine service is unchanged.
+# The HTTP wrapper has no authentication; bind to loopback and control access.
+
+[Unit]
+Description=MiraiHub experimental Python QIMEI generator benchmark
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<non-root-generator-user>
+Group=<non-root-generator-group>
+WorkingDirectory=<repo-root>
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=QIMEI_PYTHON_GENERATOR_ENABLED=1
+Environment=QIMEI_PYTHON_GENERATOR_CONFIG=<absolute-explicit-config.json>
+Environment=QIMEI_GEN_SHELL=<venv>/bin/python
+Environment=QIMEI_GEN_CMD=<repo-root>/admin/platform/marvis/core/qimei_generate.py
+# Set the wrapper timeout above the config's <=120s HTTP timeout plus cleanup.
+Environment=QIMEI_GEN_TIMEOUT=125
+# Run the existing stdlib wrapper by path, bypassing application package startup.
+ExecStart=<venv>/bin/python <repo-root>/admin/platform/marvis/core/qimei_assign.py --serve-generator --host 127.0.0.1 --port 8793
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

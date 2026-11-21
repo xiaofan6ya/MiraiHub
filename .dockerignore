@@ -27,3 +27,20 @@ private
 internal
 research
 evidence
+
+# Runtime device identities are mounted separately, never baked into an image.
+admin/platform/marvis/core/qimei_table.json
+admin/platform/marvis/core/qimei_pool.json
+admin/platform/marvis/core/egress_pool.json
+**/qimei_state.json
+qimei-state
+
+# Local backups and agent working notes.
+**/*.bak
+**/*.bak-*
+.tmp-*
+.tmp_*
+task_plan.md
+findings.md
+progress.md
+.qimei-release-review.md

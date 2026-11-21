@@ -1,4 +1,4 @@
-"""qimei 自动分配的单测（不碰生产 JSON / DB）。
+"""Persistent regression tests for qimei 自动分配（不碰生产 JSON / DB）。
 
 跑法：
     python3 -m unittest tests.test_marvis_qimei_assign
@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import errno
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -15,28 +17,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 def _load_module():
-    try:
-        from admin.platform.marvis.core import qimei_assign as module
-        return module
-    except Exception:  # 宿主没装 sqlalchemy 时按文件路径加载，保持单测可跑
-        here = Path(__file__).resolve()
-        for candidate in (here.with_name("qimei_assign.py"),
-                          here.parents[1] / "admin" / "platform" / "marvis" / "core" / "qimei_assign.py"):
-            if candidate.exists():
-                spec = importlib.util.spec_from_file_location(
-                    "qimei_assign_under_test", candidate)
-                module = importlib.util.module_from_spec(spec)
-                assert spec.loader is not None
-                spec.loader.exec_module(module)
-                return module
-        raise
+    # Persistent tests load this module without application startup or ORM hooks.
+    path = Path(__file__).resolve().parents[1] / "admin/platform/marvis/core/qimei_assign.py"
+    spec = importlib.util.spec_from_file_location("qimei_assign_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 qa = _load_module()
 
 SEED_Q = "aaaaaaaaaaaaaaaaaaaaaaaa3000bbbbbbbb"
+NEW_Q = "cccccccccccccccccccccccc3000dddddddd"
 SEED_UID = "1" * 32
 UID_A = "A" * 32
 UID_B = "B" * 32
@@ -51,16 +47,27 @@ class QimeiAssignTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="qimei-test-")
         self.dir = Path(self.tmp.name)
+        self.env = patch.dict(os.environ, {"QIMEI_STATE_DIR": str(self.dir),
+                                          "QIMEI_TABLE_PATH": "",
+                                          "QIMEI_POOL_PATH": ""})
+        self.env.start()
+        self.addCleanup(self.env.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _write(self, table: dict, pool: dict | None = None):
-        (self.dir / "qimei_table.json").write_text(
+    def _write(self, table: dict, pool: dict | None = None, *, directory=None):
+        directory = directory or self.dir
+        (directory / "qimei_table.json").write_text(
             json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if pool is not None:
-            (self.dir / "qimei_pool.json").write_text(
+            (directory / "qimei_pool.json").write_text(
                 json.dumps(pool, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _snapshot(self, directory):
+        if not directory.exists():
+            return None
+        return {path.name: path.read_bytes() for path in directory.iterdir()}
 
     def _pool(self):
         return json.loads((self.dir / "qimei_pool.json").read_text("utf-8"))
@@ -171,6 +178,110 @@ class QimeiAssignTest(unittest.TestCase):
         self.assertEqual(result["source"], "existing")
         self.assertEqual(result["qimei36"], SEED_Q)
         self.assertEqual(self._table()[SEED_UID], SEED_Q)
+
+    def test_cli_assign_no_generate_uses_shareable(self):
+        """Persistent regression: --no-generate must use existing capacity."""
+        self._write({SEED_UID: SEED_Q},
+                    {SEED_Q: {"owners": [SEED_UID], "real": True}})
+        output = io.StringIO()
+        with patch.object(qa, "generate_real_qimei", return_value=NEW_Q) as generate:
+            with contextlib.redirect_stdout(output):
+                code = qa.main(["--state-dir", str(self.dir), "--assign", UID_A,
+                                "--no-generate", "--json"])
+            generate.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["source"], "shared")
+        self.assertEqual(self._table()[UID_A], SEED_Q)
+        self.assertEqual(set(self._pool()), {SEED_Q})
+
+    def test_cli_assign_no_generate_rejects_full_pool(self):
+        """Persistent regression: disabled generation cannot add capacity."""
+        self._write({SEED_UID: SEED_Q, UID_A: SEED_Q},
+                    {SEED_Q: {"owners": [SEED_UID, UID_A], "real": True}})
+        before = {name: (self.dir / name).read_bytes()
+                  for name in ("qimei_table.json", "qimei_pool.json")}
+        output = io.StringIO()
+        with patch.object(qa, "generate_real_qimei", return_value=NEW_Q) as generate:
+            with contextlib.redirect_stdout(output):
+                code = qa.main(["--state-dir", str(self.dir), "--assign", UID_B,
+                                "--no-generate", "--json"])
+            generate.assert_not_called()
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue())["kind"], "QimeiCapacityError")
+        for name, value in before.items():
+            self.assertEqual((self.dir / name).read_bytes(), value)
+
+    def _preview_cases(self):
+        return (
+            ("existing", {SEED_UID: SEED_Q}, {}, SEED_UID, False, "existing", 1),
+            ("shareable", {SEED_UID: SEED_Q},
+             {SEED_Q: {"owners": [SEED_UID], "real": True}},
+             UID_A, False, "shared", 2),
+            ("unused", {}, {SEED_Q: {"owners": [], "real": True}},
+             UID_A, False, "shared", 1),
+            ("new", {}, {}, UID_A, False, None, 0),
+            ("derived", {}, {}, UID_A, True, "derived", 0),
+            ("absent", None, None, UID_A, False, None, 0),
+        )
+
+    def test_direct_assign_dry_run_has_no_side_effects(self):
+        """Persistent regression: direct previews never generate, lock or save."""
+        for name, table, pool, uid, allow_derived, source, owners in self._preview_cases():
+            with self.subTest(case=name):
+                directory = self.dir / name
+                if table is not None:
+                    directory.mkdir()
+                    self._write(table, pool, directory=directory)
+                before = self._snapshot(directory)
+                with patch.object(qa, "generate_real_qimei", return_value=NEW_Q) as generate:
+                    with patch.object(qa, "_http_generate", side_effect=AssertionError("HTTP forbidden")) as http:
+                        with patch.object(qa, "_cmd_generate", side_effect=AssertionError("command forbidden")) as command:
+                            if source is None:
+                                with self.assertRaises(qa.QimeiCapacityError):
+                                    qa.assign_ex(uid, generator=generate,
+                                                 state_dir=directory, dry_run=True)
+                            else:
+                                result = qa.assign_ex(uid, generator=generate,
+                                                      state_dir=directory,
+                                                      dry_run=True,
+                                                      allow_derived=allow_derived)
+                                self.assertEqual(result["source"], source)
+                                self.assertEqual(result["owners"], owners)
+                                if source != "derived":
+                                    self.assertEqual(result["qimei36"], SEED_Q)
+                            generate.assert_not_called()
+                            http.assert_not_called()
+                            command.assert_not_called()
+                self.assertEqual(self._snapshot(directory), before)
+
+    def test_cli_assign_dry_run_has_no_side_effects(self):
+        """Persistent regression: CLI previews honor dry-run across capacity states."""
+        for name, table, pool, uid, allow_derived, source, owners in self._preview_cases():
+            with self.subTest(case=name):
+                directory = self.dir / name
+                if table is not None:
+                    directory.mkdir()
+                    self._write(table, pool, directory=directory)
+                before = self._snapshot(directory)
+                argv = ["--state-dir", str(directory), "--assign", uid,
+                        "--dry-run", "--json"]
+                if allow_derived:
+                    argv.append("--allow-derived")
+                output = io.StringIO()
+                with patch.object(qa, "generate_real_qimei", return_value=NEW_Q) as generate:
+                    with contextlib.redirect_stdout(output):
+                        code = qa.main(argv)
+                    generate.assert_not_called()
+                payload = json.loads(output.getvalue())
+                self.assertEqual(code, 2 if source is None else 0)
+                if source is None:
+                    self.assertEqual(payload["kind"], "QimeiCapacityError")
+                else:
+                    self.assertEqual(payload["source"], source)
+                    self.assertEqual(payload["owners"], owners)
+                    if source != "derived":
+                        self.assertEqual(payload["qimei36"], SEED_Q)
+                self.assertEqual(self._snapshot(directory), before)
 
 
 class ShippedStateTest(unittest.TestCase):
