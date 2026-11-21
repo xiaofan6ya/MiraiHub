@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Anthropic `tool_result` 内嵌 image 必须真正送到上游（WorkBuddy 链路）。
+"""Persistent regressions for Anthropic tool-result image forwarding.
 
 ## 背景
 
@@ -21,6 +21,7 @@ Claude Code 的 `Read` 工具读本地图片时，图片是以
 4. 非法 image source 不抛异常、不产生 `[图片]` 占位（宁可无图也不误导模型）。
 """
 import base64
+import copy
 import os
 import sys
 import unittest
@@ -308,6 +309,38 @@ class ToolResultImageAdapterTests(unittest.TestCase):
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0]["content"], "Error: partial [图片 #1]")
         self.assertEqual(len(_image_urls(msgs[-1])), 1)
+
+    def test_invalid_sources_do_not_consume_image_numbers(self):
+        invalid_sources = [None, {}, {"type": "url", "url": " "},
+                           {"type": "base64", "data": ""},
+                           {"type": "unknown", "url": "https://example.com/a.png"}]
+        invalid_images = [{"type": "image", "source": source} for source in invalid_sources]
+        for image in invalid_images:
+            with self.subTest(source=image["source"]):
+                msgs = self._convert([image, IMAGE_BLOCK, image, IMAGE_BLOCK])
+                tool = next(msg for msg in msgs if msg["role"] == "tool")
+                self.assertEqual(tool["content"], "[图片 #1][图片 #2]")
+                self.assertEqual(len(_image_urls(msgs[-1])), 2)
+
+    def test_conversion_preserves_full_image_data_and_does_not_mutate_input(self):
+        image = copy.deepcopy(IMAGE_BLOCK)
+        image["source"]["data"] = PNG_B64 * 100
+        body = build_body([{"type": "text", "text": None}, image])
+        original = copy.deepcopy(body)
+        first = anthropic_request_to_chat(body)
+        self.assertEqual(anthropic_request_to_chat(body), first)
+        self.assertEqual(body, original)
+        self.assertEqual(_image_urls(first["messages"][-1]),
+                         ["data:image/png;base64," + image["source"]["data"]])
+
+    def test_null_assistant_text_keeps_tool_pairing(self):
+        body = build_body([IMAGE_BLOCK])
+        body["messages"][1]["content"].insert(0, {"type": "text", "text": None})
+        messages = anthropic_request_to_chat(body)["messages"]
+        assistant_at = next(i for i, msg in enumerate(messages) if msg.get("tool_calls"))
+        self.assertIsNone(messages[assistant_at]["content"])
+        self.assertEqual(messages[assistant_at + 1]["role"], "tool")
+        self.assertEqual(messages[assistant_at + 2]["role"], "user")
 
 
 if __name__ == "__main__":

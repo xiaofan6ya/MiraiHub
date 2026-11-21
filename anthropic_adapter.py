@@ -261,6 +261,7 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
     # 绝不能 insert 到最前——否则会切断配对，上游报 11148。
     if role == "user":
         tool_msgs: list[dict] = []
+        tool_images: list[dict] = []
         content_parts: list[dict] = []
         has_images = False
         for block in blocks:
@@ -268,22 +269,33 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                 continue
             bt = block.get("type", "")
             if bt == "text":
-                content_parts.append({"type": "text", "text": block.get("text", "")})
+                text = block.get("text") or ""
+                if text:
+                    content_parts.append({"type": "text", "text": text})
             elif bt == "image":
                 content_parts.append(_image_block_to_chat_part(block))
                 has_images = True
             elif bt == "tool_result":
                 # tool_result → 独立的 tool 消息（必须紧随 assistant.tool_calls）
-                tc_id = block.get("tool_use_id") or ""
-                if not tc_id:
+                tc_id = block.get("tool_use_id")
+                if not isinstance(tc_id, str) or not tc_id.strip():
                     # 空 id 无法与 tool_use 配对，上送必触发 11148；直接丢弃
                     _logger.debug("drop tool_result with empty tool_use_id")
                     continue
-                output = _tool_result_to_text(block.get("content", ""))
+                output = _tool_result_to_text(block.get("content", ""), tool_images)
                 if block.get("is_error"):
                     output = f"Error: {output}" if output else "Error: tool execution failed"
                 tool_msgs.append({"role": "tool", "tool_call_id": tc_id, "content": output})
         result = list(tool_msgs)
+        if tool_images:
+            count = len(tool_images)
+            if count > 1 or has_images:
+                note = f"工具结果共 {count} 张图片，前 {count} 张图片按 #1..#{count} 对应工具结果。"
+                if has_images:
+                    note += "其后为用户附带图片。"
+                content_parts.append({"type": "text", "text": note})
+            content_parts = tool_images + content_parts
+            has_images = True
         if content_parts:
             content = content_parts if has_images else "".join(part["text"] for part in content_parts)
             result.append({"role": "user", "content": content})
@@ -298,7 +310,9 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                 continue
             bt = block.get("type", "")
             if bt == "text":
-                text_parts.append(block.get("text", ""))
+                text = block.get("text") or ""
+                if text:
+                    text_parts.append(text)
             elif bt == "tool_use":
                 # 键缺失或值为 null/"" 都要生成新 id，保证与 tool_result 可配对
                 tc = {
@@ -324,11 +338,12 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
     return [{"role": role, "content": text}] if text else []
 
 
-def _tool_result_to_text(output) -> str:
+def _tool_result_to_text(output, images: list[dict]) -> str:
     """把 Anthropic tool_result.content 转成纯文本。
 
     - str → 原样
-    - list → 拼接 text 块；非 text 块序列化为短 JSON，避免静默丢成空串
+    - list → 拼接 text 块；合法图片收集至 images，以编号对应提升后的图片
+    - 其他非 text 块序列化为短 JSON
     - 其它/None → 空串
     """
     if output is None:
@@ -344,6 +359,13 @@ def _tool_result_to_text(output) -> str:
             continue
         if b.get("type") == "text":
             parts.append(b.get("text", "") or "")
+        elif b.get("type") == "image":
+            try:
+                image = _image_block_to_chat_part(b)
+            except ValueError:
+                continue
+            images.append(image)
+            parts.append(f"[图片 #{len(images)}]")
         else:
             try:
                 parts.append(json.dumps(b, ensure_ascii=False)[:500])
