@@ -39,7 +39,10 @@ from unittest import mock
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+_CALLER_STDOUT = sys.stdout
+if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 PASS = 0
 FAIL = 0
@@ -178,6 +181,10 @@ def test_refresh_idempotent() -> None:
     check("签名字节一致（一次性构造，不重复序列化）",
           endpoints.refresh_body({"openid": "o", "refresh_token": "r",
                                   "access_token": "a"}) == body)
+
+
+def test_import_keeps_caller_stdout() -> None:
+    assert sys.stdout is _CALLER_STDOUT
 
 
 if __name__ == "__main__":

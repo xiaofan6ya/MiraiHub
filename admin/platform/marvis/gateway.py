@@ -2550,6 +2550,14 @@ async def _with_keepalive(source, *, interval: float, ping: bytes):
                 await pending
             except BaseException:  # noqa: BLE001 - 取消与收尾异常都不外抛
                 pass
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 清理异常不能覆盖流结果
+                pass
 
 
 def _wrap_keepalive(response, ping: bytes):
@@ -2635,10 +2643,11 @@ async def chat_completions(request: Request):
                     # 会被兜底成整条流的 latency —— 等于把 4ms 的 TTFB 记成
                     # 800ms。下限钉在 1。
                     stats["ttfb_ms"] = max(1, int((first_at - started) * 1000))
-                yield chunk
                 # 只读旁路：解析 usage / finish_reason / 流内错误。
                 # **转发的字节一个都不改**，只记账与收尾需要这些信息。
                 pending = _scan_stream(pending, chunk, state)
+                # 下游协议中继遇到错误会立即关闭本迭代器，先扫描才能保留失败状态。
+                yield chunk
             # EOF：最后一段可能没带换行（裸 `data: [DONE]`），`_scan_stream`
             # 只缓存不成行的尾巴、不判读 —— 补一个分隔符再扫一遍，否则 `done`
             # 认不出来：白白多补一帧终止帧，还会和 `[DONE]` 粘成一行。

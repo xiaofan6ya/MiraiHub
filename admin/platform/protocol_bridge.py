@@ -780,6 +780,37 @@ def openai_to_responses(result: dict, model: str) -> dict:
 # ---------------------------------------------------------------------------
 # SSE 行解析（内层 StreamingResponse → 行）
 # ---------------------------------------------------------------------------
+async def _safe_aclose(iterator) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:  # noqa: BLE001 - 清理异常不能覆盖中继结果
+        pass
+
+
+async def _relay_with_cleanup(source, inner):
+    try:
+        async for piece in source:
+            yield piece
+    finally:
+        try:
+            await _safe_aclose(source)
+        finally:
+            await _safe_aclose(inner.body_iterator)
+
+
+class _RelayStreamingResponse(StreamingResponse):
+    """Close the relay iterator when the client disconnects mid-response."""
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _safe_aclose(self.body_iterator)
+
+
 async def _iter_sse_lines(inner) -> "object":
     """把内层字节流拆成单行（bytes）。
 
@@ -1010,8 +1041,8 @@ def anthropic_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
                 {"type": "error", "error": error}, ensure_ascii=False)).encode()
         yield sse({"type": "message_stop"})
 
-    return StreamingResponse(
-        relay(), media_type="text/event-stream",
+    return _RelayStreamingResponse(
+        _relay_with_cleanup(relay(), inner), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1301,8 +1332,8 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
             yield event("response.completed",
                         {"type": "response.completed", "response": base})
 
-    return StreamingResponse(
-        relay(), media_type="text/event-stream",
+    return _RelayStreamingResponse(
+        _relay_with_cleanup(relay(), inner), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
