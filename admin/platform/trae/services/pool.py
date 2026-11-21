@@ -374,7 +374,12 @@ def record_usage(db: Session, *, key_id: int, account_id: int, model: str,
             row = db.query(ModelConfig).filter(ModelConfig.model_id == (model or ""),
                                                ModelConfig.enabled == 1).first()
         multiplier = float(row.credit_multiplier or 0) if row else 0.0
-        if multiplier and total:
+        # **只有正倍率才是「倍率」**（issue #78）。Trae 整个模型表存的都是
+        # `-1`，那是「本平台按上游 usage 计量、不给倍率」的标记，不是负定价。
+        # 原来判 `if multiplier and total:` → 每次请求都算出
+        # `tokens * -1 / 1000` 的负积分，`credit_used += credits` 让 Key 的
+        # 「已用」越用越小，最终显示成负数余额。
+        if multiplier > 0 and total:
             credits = total * multiplier / 1000.0
     except Exception:  # noqa: BLE001 - 估算失败不该阻断记账
         credits = 0.0
@@ -382,7 +387,7 @@ def record_usage(db: Session, *, key_id: int, account_id: int, model: str,
     try:
         if key_id:
             db.query(ApiKey).filter(ApiKey.id == key_id).update(
-                {ApiKey.credit_used: ApiKey.credit_used + credits},
+                {ApiKey.credit_used: ApiKey.credit_used + abs(credits)},
                 synchronize_session=False)
         account = (db.query(Account).filter(Account.id == account_id)
                    .with_for_update().first() if account_id else None)
@@ -390,7 +395,7 @@ def record_usage(db: Session, *, key_id: int, account_id: int, model: str,
             account.last_used_at = _now()
             if credits:
                 account.balance_remain = max(0, int(account.balance_remain or 0)
-                                             - int(credits))
+                                             - int(abs(credits)))
         log = UsageLog(api_key_id=key_id or 0, account_id=account_id or 0,
                        platform=("trae-cn" if realm == "cn" else
                                  "trae-intl" if realm == "intl" else PLATFORM),

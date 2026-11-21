@@ -278,6 +278,9 @@ def init_db() -> bool:
         # `dispatch.resolve()` 按模型名选平台拿不到候选，请求会掉进
         # 「无头分摊」策略（raccoon）→ 404 `model_not_found`。
         _seed_marvis_main_auto()
+        # 修复历史脏数据：负倍率曾经把 `api_keys.credit_used` 反向冲成负数
+        # （issue #78，「已用 -61.754 / 剩余 1561.75 / 使用率 -4.1%」）。
+        _repair_negative_key_credits()
         # 迁移：视频任务表（OpenAI /v1/videos 的对外 ID ↔ 上游任务 + 账号）。
         # 老库没有这张表时 create_all 会建；此处只为「表已存在但缺字段」的
         # 半升级状态兜底（历史版本曾在同一路径上改过列）。
@@ -475,6 +478,40 @@ def _seed_marvis_main_auto() -> None:
             logger.info("已为 marvis 补上 main-auto 模型配置")
     except Exception as e:  # noqa: BLE001 - 数据迁移失败不该阻塞启动
         logger.warning("marvis/main-auto 种子写入失败（不影响启动）：%s", e)
+
+
+def _repair_negative_key_credits() -> None:
+    """把 `api_keys.credit_used` 里的负值归零（幂等，只改负值行）。
+
+    ## 为什么要这一步（issue #78）
+
+    「已用」在语义上只增不减，负值一定是记账写坏的结果：倍率 `-1` 是
+    「无倍率概念」标记，旧代码把真值判断当「有倍率」，于是每条请求都算出
+    负积分并累加进去。修复写入侧之后，历史行仍然带着负值 ——
+    界面继续显示「已用 -61.754 / 使用率 -4.1%」，用户以为没修。
+
+    归零而不是置成某个正数：负值是**凭空多出来的额度**，没有任何依据能
+    反推出「真实消耗是多少」；归零等于把这一笔错账抹掉，与界面已有的
+    「重置已用额度」按钮同语义，不会凭空扣用户的额度。
+
+    同理修 `accounts.balance_remain` 的上界 —— 旧代码 `balance - int(credits)`
+    在 credits 为负时会把余额**加多**。抬高的部分无法区分「真实的充值」
+    与「错账」，因此这里**不动余额**，只在日志里留一行提示，
+    由运营用同步按钮拉上游真实余额覆盖。
+    """
+    try:
+        with engine.begin() as conn:
+            dialect = engine.dialect.name
+            q = ("UPDATE api_keys SET credit_used = 0 WHERE credit_used < 0"
+                 if dialect == "sqlite" else
+                 "UPDATE `api_keys` SET `credit_used` = 0 WHERE `credit_used` < 0")
+            result = conn.execute(text(q))
+            fixed = int(getattr(result, "rowcount", 0) or 0)
+        if fixed:
+            logger.warning("已修正 %d 个 Key 的负数「已用额度」（负倍率记账事故，issue #78）；"
+                           "账号余额请用「同步余额」拉上游真值覆盖", fixed)
+    except Exception as e:  # noqa: BLE001 - 数据修复失败不该阻塞启动
+        logger.warning("负数「已用额度」修复失败（不影响启动）：%s", e)
 
 
 def _ensure_column(table: str, col: str, col_type: str, default: str = ""):

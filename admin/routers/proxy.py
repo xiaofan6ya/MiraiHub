@@ -447,15 +447,31 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
                         ModelConfig.model_id == _name,
                         ModelConfig.platform == resolved_platform,
                         ModelConfig.enabled == 1).first()
-                    if mc is not None and mc.credit_multiplier:
+                    if mc is not None and (mc.credit_multiplier or 0) > 0:
                         break
+                    # 兜底只认**没有平台归属**的历史行，不能跨平台借用倍率：
+                    # 同一个可读名在 workbuddy 是 0.11、在 marvis 是 -1，
+                    # 借错了算出来差一个数量级、甚至正负相反。
                     mc = db.query(ModelConfig).filter(
                         ModelConfig.model_id == _name,
-                        ModelConfig.enabled == 1).first()
-                    if mc is not None and mc.credit_multiplier:
+                        ModelConfig.enabled == 1,
+                        or_(ModelConfig.platform.is_(None),
+                            ModelConfig.platform == "")).first()
+                    if mc is not None and (mc.credit_multiplier or 0) > 0:
                         break
-                mult = mc.credit_multiplier if mc else 0
-                if mult:
+                # **只有正倍率才是「倍率」**（issue #78）。
+                #
+                # `credit_multiplier < 0` 是约定里的「该平台没有倍率概念、
+                # 按上游 usage 计量」标记（见 `admin/routers/models.py` 的
+                # `_get_free_models`）：Trae 全表、CodeArts、MiniMax、Loomy
+                # 以及 workbuddy 的 hunyuan-chat / kling-video-v3 都是 -1。
+                #
+                # 原来用真值判断 `if mult:`，负值一样过 → 每次请求算出
+                # `tokens * -1 / 1000` 的**负积分** → Key 的「已用」被反向
+                # 冲减，越用越小，最后变成 -61.754 甚至 -106836（等于凭空
+                # 涨额度），剩余额度还会超过限额本身。
+                mult = float(getattr(mc, "credit_multiplier", 0) or 0) if mc else 0.0
+                if mult > 0:
                     toks = total_tokens if total_tokens else completion_tokens
                     credits = float(toks) * mult / 1000.0
                     estimated = True
@@ -464,10 +480,14 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
             _logger.info("记录用量 platform=%s model=%s raw_credits=%s est=%s pt=%s ct=%s tt=%s cached=%s client_ip=%s use_case=%s",
                          resolved_platform, model, original_credits, credits, prompt_tokens, completion_tokens, total_tokens,
                          cached_tokens, client_ip, use_case)
+            # 扣减量一律取绝对值（issue #78）：`credits` 的符号只表达「计量
+            # 方向」，不代表「给用户加额度」。上游偶尔回负的 credit，或历史
+            # 数据里算出负值，直接累加都会把「已用」往回冲。
+            debit = abs(float(credits or 0))
             db.query(ApiKey).filter(ApiKey.id == key_id).update(
-                {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + credits}, synchronize_session=False)
+                {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + debit}, synchronize_session=False)
             if acc is not None:
-                acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(credits))
+                acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(debit))
                 acc.last_used_at = datetime.utcnow()
                 if updated_auth_json and persist_auth:
                     acc.auth_json = updated_auth_json

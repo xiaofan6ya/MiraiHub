@@ -179,6 +179,7 @@ tests/*
 !tests/test_raccoon_quota_surface.py
 !tests/test_platform_rating.py
 !tests/test_workbuddy_credential_codec.py
+!tests/test_negative_credit_repair.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 

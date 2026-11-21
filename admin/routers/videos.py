@@ -662,11 +662,11 @@ async def _bill(task: VideoTask, acc) -> None:
                     return 0
                 if credits:
                     db.query(ApiKey).filter(ApiKey.id == task.api_key_id).update(
-                        {ApiKey.credit_used: (ApiKey.credit_used or 0) + credits},
+                        {ApiKey.credit_used: (ApiKey.credit_used or 0) + abs(credits)},
                         synchronize_session=False)
                     account = db.query(Account).filter(Account.id == task.account_id).first()
                     if account is not None:
-                        account.balance_remain = max(0, int(account.balance_remain or 0) - int(credits))
+                        account.balance_remain = max(0, int(account.balance_remain or 0) - int(abs(credits)))
                 row.credits = credits
                 row.error_kind = 'success'
                 db.commit()
