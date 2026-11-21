@@ -651,7 +651,12 @@ def mint_uskey(qimei36: str, bus_info: str, dev18: bytes = None,
 
 
 def decode_uskey(uskey: str) -> dict:
-    """uskey -> 各层中间值（排障 / 自检用，密钥与本模块同源）。"""
+    """uskey -> 各层中间值（排障 / 自检用，密钥与本模块同源）。
+
+    TLV 长度取自流中 u16-BE 头（剩余长度 + 2），不按默认 320 硬切。
+    声明范围必须完整位于 7 字节流尾之前，否则返回空 TLV；这里只解码，
+    不推断其他长度的字段布局，也不增加相应的签发形态。
+    """
     raw = b64_custom_decode(uskey)
     header, body = raw[:24], raw[24:]
     dev18 = header[6:24]
@@ -659,9 +664,11 @@ def decode_uskey(uskey: str) -> dict:
     payload = aes128_cbc_decrypt(K_AES, K_AES, body)
     scrambled = bytes(x ^ ks[i % 16] for i, x in enumerate(payload))
     stream = tea_dualfeedback_decrypt(scrambled)
+    declared = int.from_bytes(stream[9:11], "big") + 2 if len(stream) >= 11 else 0
+    end = 9 + declared
+    tlv = stream[9:end] if declared and end <= len(stream) - 7 else b""
     return {"raw": raw, "header": header, "dev18": dev18, "payload": payload,
-            "p224": payload, "stream": stream,
-            "tlv": stream[9:9 + TLV_BYTES] if len(stream) >= 329 else b""}
+            "p224": payload, "stream": stream, "tlv": tlv, "tlv_len": len(tlv)}
 
 # ---------------------------------------------------------------------------
 # KAT：固定输入 -> 固定字节

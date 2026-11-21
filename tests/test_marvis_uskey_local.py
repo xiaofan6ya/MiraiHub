@@ -1,14 +1,31 @@
-"""uskey 纯 Python 实现的回归测试：KAT + 结构 + 长度。零 mock，零网络。"""
+"""持久回归测试：uskey 的 KAT、结构和声明长度。零 mock，零网络。"""
 import hashlib
+import importlib.util
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
-from admin.platform.marvis.core import uskey_local as U
+# Direct-file loading avoids the admin package's startup/configuration side effects.
+SOURCE = Path(__file__).resolve().parents[1] / "admin/platform/marvis/core/uskey_local.py"
+_spec = importlib.util.spec_from_file_location("_marvis_uskey_local_regression", SOURCE)
+U = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(U)
 
 #: 合成夹具设备串（36 hex = 18 字节）。**不是任何真实设备。**
 FIX_Q = "0123456789abcdef012345673000deadbeef"
 FIX_Q_BYTES = bytes.fromhex(FIX_Q)
+
+# Frozen synthetic KAT from base 04f9171, also matching 7b6f6f3's recorded raw
+# SHA-256 16ad0880020f5775c5157e0e19a4bc39c3ead7dff461f2833e714c5a20550aea.
+DEFAULT_KAT = (
+    "CsDVDCERCCEACsQFDieHAQkLBC0MBtCRibEhWxx0JIk25rLlnDo5/WjuA9/nTprfdduuMi7sLtmRgxxEspCN"
+    "80xQkgL+TFOygtEQ/Hhs9Kx5SZ0Q30A5d+8pqSom+E/kOvCP7w9gXPRqFWRaG18dJPDd0bHV/Y5Jsh7N0ICS"
+    "BDt2nAfd/qDpaeLV+f4h5QQDklVOjqZlQzMInbNTQEdhIdjzIkKuH2TBXvTfLWfp5076Qgg0n3xEu1TkOMDX"
+    "IjEBTEk2AthfkiZUUSdXhjPnKPW5Xbd+BLv6WivdYdMQTnddbJYzmJsA0bzMXzECshTyCQAyveaaFq9hvpYy"
+    "+2WFsOgGmEM2O0Uvnx9E+ibx01HU+1+RRpSuHlSGURHTULtsUnApy2SB7nCxXZP0uF5Ih87iZ9TkQ4TVMRK/"
+    "vJs8APP0gTxz2uX2Xn7AOuEpMLmO4qnDZMY1HXu9wY+6dLkFFnUMvGyMsfLVfzy0R/5G4Bhyl+VWZzeVpi=="
+)
 
 BUS = (
     "marvisAgentTag=main&marvisConversationID=conv_" + "a" * 32 +
@@ -119,6 +136,9 @@ class KatTests(unittest.TestCase):
         self.assertEqual(U.kat_mint(), U.kat_mint(),
                          "固定输入必须得到固定字节，否则 KAT 没有意义")
 
+    def test_default_320_kat_stays_byte_for_byte_unchanged(self):
+        self.assertEqual(U.kat_mint(FIX_Q), DEFAULT_KAT)
+
     def test_default_fixture_is_synthetic(self):
         self.assertEqual(U.KAT_FIXTURE_QIMEI36, U.SYNTHETIC_QIMEI36,
                          "不带 MARVIS_KAT_QIMEI36 时夹具必须是合成值")
@@ -132,19 +152,76 @@ class KatTests(unittest.TestCase):
         # 用子进程隔离 env，别污染本进程已 import 的模块状态。
         fixture = "ffeeddccbbaa998877665544" + "3000" + "11223344"
         code = (
-            "import os;"
-            "os.environ['MARVIS_KAT_QIMEI36']=%r;"
-            "from admin.platform.marvis.core import uskey_local as U;"
+            "import importlib.util;"
+            "s=importlib.util.spec_from_file_location('_uskey_fixture',%r);"
+            "U=importlib.util.module_from_spec(s);s.loader.exec_module(U);"
             "print(U.KAT_FIXTURE_QIMEI36);"
-            "print(U.selfcheck()['ok'])" % fixture
+            "print(U.selfcheck()['ok'])" % str(SOURCE)
         )
-        out = subprocess.run([sys.executable, "-X", "utf8", "-c", code],
+        out = subprocess.run([sys.executable, "-B", "-X", "utf8", "-c", code],
                              capture_output=True, text=True,
-                             encoding="utf-8", errors="replace")
+                             encoding="utf-8", errors="replace",
+                             env={"MARVIS_KAT_QIMEI36": fixture,
+                                  "PYTHONDONTWRITEBYTECODE": "1"})
         self.assertEqual(out.returncode, 0, (out.stderr or "")[-2000:])
         lines = out.stdout.strip().splitlines()
         self.assertEqual(lines[0], fixture)
         self.assertEqual(lines[-1], "True")
+
+
+class DeclaredTlvLengthTests(unittest.TestCase):
+    """Persistent regression: decode opaque TLVs by the wire length, not 320.
+
+    The 336-byte case is deliberately synthetic parser input. It is not a
+    captured SDK layout or evidence for a 336-byte minting implementation.
+    """
+
+    @staticmethod
+    def _encode_stream(stream):
+        dev18 = bytes(range(18))
+        payload = U.build_payload(stream, dev18)
+        encrypted = U.aes128_cbc_encrypt(U.K_AES, U.K_AES, payload)
+        return U.b64_custom_encode(bytes.fromhex("030057040111") + dev18 + encrypted)
+
+    @classmethod
+    def _opaque_token(cls, size, declared=None):
+        rest = bytes(i % 256 for i in range(size - 2))
+        tlv = ((size if declared is None else declared) - 2).to_bytes(2, "big") + rest
+        stream = bytes.fromhex("06000000000000005a") + tlv + bytes(7)
+        return cls._encode_stream(stream), tlv
+
+    def test_decodes_existing_short_208_tlv(self):
+        token = U.mint_uskey(
+            FIX_Q, BUS, dev18=bytes(range(18)), now_ms=1730000000000,
+            rnd8=bytes(8), blob=bytes(15), head8=bytes(8), short=True)
+        info = U.decode_uskey(token)
+        self.assertEqual(len(info["tlv"]), 208)
+        self.assertEqual(info["tlv"][:2], b"\x00\xce")
+        self.assertEqual(info["tlv_len"], 208)
+
+    def test_decodes_complete_synthetic_336_tlv(self):
+        token, tlv = self._opaque_token(336)
+        info = U.decode_uskey(token)
+        self.assertEqual(info["tlv"], tlv)
+        self.assertEqual(info["tlv_len"], 336)
+
+    def test_declared_length_cannot_consume_seven_byte_envelope_tail(self):
+        token, _ = self._opaque_token(320, declared=321)
+        info = U.decode_uskey(token)
+        self.assertEqual(info["tlv"], b"")
+        self.assertEqual(info["tlv_len"], 0)
+
+    def test_oversized_declared_length_is_not_silently_truncated(self):
+        token, _ = self._opaque_token(320, declared=400)
+        info = U.decode_uskey(token)
+        self.assertEqual(info["tlv"], b"")
+        self.assertEqual(info["tlv_len"], 0)
+
+    def test_stream_without_complete_tlv_length_header_has_no_tlv(self):
+        token = self._encode_stream(bytes.fromhex("0600000000000000"))
+        info = U.decode_uskey(token)
+        self.assertEqual(info["tlv"], b"")
+        self.assertEqual(info["tlv_len"], 0)
 
 
 if __name__ == "__main__":
