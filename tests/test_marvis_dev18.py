@@ -47,6 +47,20 @@ class StableDev18Regression(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.u.dev18_for("", Q1)
 
+    def test_legacy_global_qimei_caller_can_use_its_required_openid(self):
+        # sign() has always made account_key optional. Preserve that contract
+        # for legacy explicit-QIMEI callers while keeping dev18 account-scoped.
+        arguments = dict(agent_tag="main", conversation_id="conv-a",
+                         response_id="rid-a", scene="agent_chat", model="main-auto",
+                         nonce="nonce-a", openid="synthetic-openid")
+        with patch.dict(os.environ, {"MARVIS_QIMEI36": Q1,
+                                    "QIMEI_SNAPSHOT_PATH": "",
+                                    "MARVIS_USKEY_FORCE_SIDECAR": "0"}):
+            with patch.object(self.u, "_http_sign", side_effect=AssertionError("no sidecar")):
+                signed = self.u.sign(**arguments)
+        decoded = self.local.decode_uskey(signed["uskey"])
+        self.assertEqual(decoded["dev18"], self.u.dev18_for(arguments["openid"], Q1))
+
     def test_real_mint_uses_stable_dev18_but_fresh_request_signature(self):
         kwargs = dict(agent_tag="main", conversation_id="conv-a",
                       response_id="rid-a", scene="agent_chat", model="main-auto",
