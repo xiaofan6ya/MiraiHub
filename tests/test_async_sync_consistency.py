@@ -169,12 +169,17 @@ def _awaited(call, parents) -> bool:
     return isinstance(cur, ast.Await)
 
 
-def _handed_to(call, parents) -> bool:
+def _handed_to(call, parents, alias) -> bool:
     cur = parents.get(call)
     if isinstance(cur, ast.Call):
         name = getattr(cur.func, "attr", None) or getattr(cur.func, "id", None)
         if name in PASS_THROUGH:
             return True
+        if cur.args and cur.args[0] is call:
+            chain = _dotted(cur.func)
+            if chain and chain[0] in alias:
+                target = ".".join([alias[chain[0]]] + chain[1:])
+                return target == "asyncio.run"
     return False
 
 
@@ -228,7 +233,7 @@ def scan_file(path: pathlib.Path, index: dict) -> list:
         if kind == "asyncgen":
             continue
         if kind == "async":
-            if _awaited(node, parents) or _handed_to(node, parents):
+            if _awaited(node, parents) or _handed_to(node, parents, alias):
                 continue
             if _is_method_return(node, parents):
                 continue
@@ -302,6 +307,52 @@ class AsyncSyncConsistencyTests(unittest.TestCase):
             findings = scan_file(path, {})
         self.assertEqual(["unawaited"], [f[0] for f in findings],
                          "扫描器没抓到 a, b = async_fn()：%r" % (findings,))
+
+
+class ScannerCoroutineRunnerRegressionTests(unittest.TestCase):
+    """持久回归测试：只认可导入的 asyncio.run 的首个位置参数。"""
+
+    def _scan(self, imports, invocation):
+        source = (imports + "\n\nasync def task():\n    return 1\n\n"
+                  "def main():\n    " + invocation + "\n")
+        with tempfile.TemporaryDirectory(prefix="async-scanner-regression-") as tmp:
+            path = pathlib.Path(tmp) / "runner.py"
+            path.write_text(source, encoding="utf-8")
+            return [kind for kind, _line, _message in scan_file(path, {})]
+
+    def test_asyncio_run_consumes_its_first_positional_coroutine(self):
+        cases = (
+            ("import asyncio", "asyncio.run(task())"),
+            ("import asyncio as aio", "aio.run(task())"),
+            ("from asyncio import run", "run(task())"),
+            ("from asyncio import run as drive", "drive(task())"),
+        )
+        for imports, invocation in cases:
+            with self.subTest(imports=imports, invocation=invocation):
+                self.assertEqual(self._scan(imports, invocation), [])
+
+    def test_custom_run_does_not_hide_unawaited_coroutines(self):
+        cases = (
+            ("", "runner.run(task())"),
+            ("def run(value):\n    return value", "run(task())"),
+            ("import custom_runner as aio", "aio.run(task())"),
+        )
+        for imports, invocation in cases:
+            with self.subTest(imports=imports, invocation=invocation):
+                self.assertEqual(self._scan(imports, invocation), ["unawaited"])
+
+    def test_asyncio_run_does_not_consume_other_arguments(self):
+        for invocation in ("asyncio.run(None, task())",
+                           "asyncio.run(None, debug=task())",
+                           "asyncio.run(main=task())"):
+            with self.subTest(invocation=invocation):
+                self.assertEqual(self._scan("import asyncio", invocation),
+                                 ["unawaited"])
+
+    def test_asyncio_run_does_not_hide_to_thread_misuse(self):
+        self.assertEqual(
+            self._scan("import asyncio", "asyncio.run(asyncio.to_thread(task()))"),
+            ["to_thread"])
 
 
 class MarvisShapeTests(unittest.TestCase):
