@@ -1,6 +1,7 @@
 """持久回归测试：uskey 的 KAT、结构和声明长度。零 mock，零网络。"""
 import hashlib
 import importlib.util
+import os
 import subprocess
 import sys
 import unittest
@@ -161,7 +162,8 @@ class KatTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-B", "-X", "utf8", "-c", code],
                              capture_output=True, text=True,
                              encoding="utf-8", errors="replace",
-                             env={"MARVIS_KAT_QIMEI36": fixture,
+                             env={**os.environ,
+                                  "MARVIS_KAT_QIMEI36": fixture,
                                   "PYTHONDONTWRITEBYTECODE": "1"})
         self.assertEqual(out.returncode, 0, (out.stderr or "")[-2000:])
         lines = out.stdout.strip().splitlines()
