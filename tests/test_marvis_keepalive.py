@@ -29,7 +29,9 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from admin.platform.marvis import gateway as gw  # noqa: E402
 from admin.platform.marvis.core import client as mc  # noqa: E402

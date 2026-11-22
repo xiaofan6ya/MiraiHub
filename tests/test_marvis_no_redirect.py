@@ -16,7 +16,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, ".")
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 ok = fail = 0
 
