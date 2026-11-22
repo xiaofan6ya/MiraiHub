@@ -193,5 +193,5 @@ async def _transcribe(request, db, key, audio, filename, mime, response_format):
                 if sess is not None:
                     sess.close()
             finally:
-                POOL.release(acc.uid or "")
+                POOL.release(acc)
     return error(last_status, "语音识别暂不可用，请稍后重试", "transcription_unavailable")

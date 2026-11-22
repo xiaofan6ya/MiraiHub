@@ -17,9 +17,10 @@ Qoder，29 个号），请求落到那边，上游不认这个词 → 404，用�
 
 ## 修法
 
-`_reroute_target()` 与 `_platform_for_model()` 认 `_GENERIC_MODEL_NAMES`
-就返回 None：不改道、不按模型选平台，交给当前平台自己解释（默认平台由主
-应用 `proxy.py` 的自动选模型接住）。
+`_reroute_target()` 与 `resolve()` 的归属步骤
+（`_route_by_model_ownership()`）认 `_GENERIC_MODEL_NAMES` 就不接管：
+不改道、不按模型选平台，交给当前平台自己解释（默认平台由主应用
+`proxy.py` 的自动选模型接住）。
 
 运行：
   python tests/test_dispatch_generic_models.py
@@ -92,7 +93,7 @@ def test_normal_models_still_reroute(db) -> None:
 
 
 def test_resolve_keeps_generic_on_default(db) -> None:
-    print("\n== 开「无头分摊」时 auto 也固定落默认平台 ==")
+    print("\n== 归属不接管时的策略兜底：auto 固定落默认平台，普通模型交给分摊 ==")
     import json
 
     from admin.platform import registry
@@ -103,25 +104,28 @@ def test_resolve_keeps_generic_on_default(db) -> None:
             self.query_params = {}
             self.scope = {"_wb_body": json.dumps({"model": model}).encode()}
 
+    # 本用例只锁「归属查询不接管（返回 None）」之后的兜底契约：真实归属查询
+    # 由 tests/test_dispatch_model_ownership.py 覆盖，不在这里重复。不 stub 它的话，
+    # 已初始化的库会真的按 model_configs 选中平台（auto 之外的模型就落不到策略了）。
     saved = (dispatch._key_of, dispatch._disabled_platforms,
              dispatch._spread_unbound, dispatch._strategy_pick,
-             dispatch._platform_for_model)
+             dispatch._route_by_model_ownership)
     dispatch._key_of = lambda _r: None
     dispatch._disabled_platforms = lambda: set()
     dispatch._spread_unbound = lambda: True
     dispatch._strategy_pick = lambda: ("loomy", "")
-    dispatch._platform_for_model = lambda _m, _k: None
+    dispatch._route_by_model_ownership = lambda _model, _key, _disabled: None
     try:
-        check("auto -> 默认平台",
+        check("auto -> 默认平台（通用名不走无头分摊）",
               dispatch.resolve(_Req("auto")) == (registry.DEFAULT_PLATFORM, ""),
               dispatch.resolve(_Req("auto")))
-        check("普通模型仍按策略分摊",
+        check("归属不接管时普通模型按策略分摊 -> loomy",
               dispatch.resolve(_Req("deepseek-v4.1-flash")) == ("loomy", ""),
               dispatch.resolve(_Req("deepseek-v4.1-flash")))
     finally:
         (dispatch._key_of, dispatch._disabled_platforms,
          dispatch._spread_unbound, dispatch._strategy_pick,
-         dispatch._platform_for_model) = saved
+         dispatch._route_by_model_ownership) = saved
 
 
 def main() -> int:

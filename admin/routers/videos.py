@@ -473,7 +473,7 @@ async def _create(request, db, key, body, model):
                 row = await proxy._blocking_call(
                     _store_task, db, key, acc, model, str(task_id), body, outgoing)
                 # 上游已入队 → 释放账号在途租约，生成在上游队列里进行。
-                POOL.release(acc.uid or '')
+                POOL.release(acc)
                 held = False
                 log_id = await proxy._blocking_call(
                     proxy._record_usage, key.id, acc.id, model, 0.0, None,
@@ -504,7 +504,7 @@ async def _create(request, db, key, body, model):
                     sess.close()
             finally:
                 if held:
-                    POOL.release(acc.uid or '')
+                    POOL.release(acc)
     status = 503 if kind == 'no_account' else status if status in (400, 413, 422, 429) else 502
     return error(status, '创建视频任务失败，请检查模型参数或稍后重试', 'video_creation_failed',
                  type_='server_error' if status >= 500 else 'invalid_request_error')

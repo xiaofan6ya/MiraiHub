@@ -180,6 +180,10 @@ tests/*
 !tests/test_platform_rating.py
 !tests/test_workbuddy_credential_codec.py
 !tests/test_negative_credit_repair.py
+# gateway 可靠性长期回归（PERSISTENT REGRESSION TESTS，见各文件头）
+!tests/test_gateway_reliability_pool.py
+!tests/test_gateway_reliability_dispatch.py
+!tests/test_gateway_reliability_models.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 

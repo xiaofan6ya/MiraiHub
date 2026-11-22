@@ -249,7 +249,7 @@ async def _generate(request, db, key, body, edit):
                     total_tokens=usage.get('total_tokens'), error_kind='success',
                     latency_ms=int((time.perf_counter()-started)*1000))
                 # Download/encoding no longer consumes upstream inference capacity.
-                POOL.release(acc.uid or '')
+                POOL.release(acc)
                 held = False
                 rows = [{k: row[k] for k in ('url', 'b64_json', 'revised_prompt') if k in row} for row in result['data']]
                 if body.get('response_format') == 'b64_json':
@@ -287,7 +287,7 @@ async def _generate(request, db, key, body, edit):
                     sess.close()
             finally:
                 if held:
-                    POOL.release(acc.uid or '')
+                    POOL.release(acc)
     await proxy._blocking_call(proxy._record_usage, key.id, 0, model, 0.0, None,
         client_ip=proxy._client_ip(request), use_case='images/edits' if edit else 'images/generations', error_kind=kind,
         latency_ms=int((time.perf_counter()-started)*1000))

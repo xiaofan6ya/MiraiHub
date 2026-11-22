@@ -803,8 +803,10 @@ def select_account(db: Session, *, storage: str, realm: str = "",
     #      会混着一些其实是 0 积分的号，每次选中都白撞一个 402。
     #      把「已知有余额」排前面，未知的当兜底，失败率立刻降下来。
     #   3. 最久没用过的优先；最后按 id 稳定排序。
+    #   在途数走 `POOL.key_for()`（= pool.account_key）：空 UID 账号按 "id:<id>"
+    #   计数，否则它们的在途恒为 0 —— 永远被当成「最闲」，并发全砸在它们身上。
     account = min(rows, key=lambda row: (
-        POOL.inflight.count(row.uid or ""),
+        POOL.inflight.count(POOL.key_for(row)),
         0 if row.balance_remain is not None else 1,
         row.last_used_at or datetime.min,
         row.id))
@@ -821,12 +823,18 @@ def lease(account: Account | None) -> bool:
 
 
 def release(account: Account | None) -> None:
+    """释放 `lease()` 占的在途名额（幂等）。
+
+    键必须与 `lease()` 一致：走 `POOL.key_for()`，空 UID 账号用 "id:<id>"。
+    原来传 `account.uid or ""` 会让这些号在空串上释放 —— 计数扣不回来，
+    几次之后这个号就被永久判满、彻底选不到。
+    """
     from admin.pool import POOL
 
     if account is None:
         return
     try:
-        POOL.release(account.uid or "")
+        POOL.release(POOL.key_for(account))
     except Exception:  # noqa: BLE001
         pass
 

@@ -112,7 +112,7 @@ def select(db: Session, *, realm: str = "", model: str = "", exclude_ids=None,
 
     strategy = routing_policy.selection_mode(db)
     if strategy == "throughput":
-        loads = {a.id: POOL.inflight.count(a.uid or "") / max(1, POOL.limit_for(a))
+        loads = {a.id: POOL.inflight.count(POOL.key_for(a)) / max(1, POOL.limit_for(a))
                  for a in rows}
         lowest = min(loads.values())
         rows = [a for a in rows if loads[a.id] == lowest]
@@ -131,7 +131,7 @@ def select(db: Session, *, realm: str = "", model: str = "", exclude_ids=None,
     fresh = [a for a in candidates if POOL.recent.fresh(a.uid or "")]
     candidates = fresh or candidates
     POOL.recent.prune()
-    load_key = lambda a: (POOL.inflight.count(a.uid or ""),
+    load_key = lambda a: (POOL.inflight.count(POOL.key_for(a)),
                           a.last_used_at or datetime.min, a.id)
     if strategy == "expiry_weighted":
         account = _weighted_pick(candidates, now) or min(candidates, key=load_key)

@@ -32,35 +32,43 @@ logger = logging.getLogger("admin.platform.models_router")
 
 #: 缓存（秒）：模型表不会秒级变化，而这里要查全库
 _TTL = 10.0
-_cache: dict = {"at": 0.0, "payload": {}, "signature": ""}
+#: **每个 slot（view + 分组）各存一份**：{slot: {"payload", "at", "signature"}}。
+#:
+#: 以前是一个全局的 at/signature 加一个 payload 字典 —— 只要任意一个 slot
+#: 被重建，全局 at 就被刷新，另一个已经过期的 slot 也被判成「新鲜」，
+#: 于是「聚合视图」的请求会把「全量视图 / 其它分组」的旧清单一起续命 10 秒
+#: （改完分组还是老内容）。TTL 与指纹必须跟着各自的 slot 走。
+_cache: dict = {}
 
 
 def _signature(db) -> str:
-    """模型配置的指纹：启用数 + 最大 id + **分组内容**，变了就重建缓存。
+    """模型配置的指纹：启用数 + 最大 id + max(updated_at)，变了就重建缓存。
 
-    ## 为什么要算上分组
+    ## 分组内容不在这里
 
-    缓存是「一次算、多 Key 复用」的。如果指纹只反映 `model_configs`，
-    那么用户**改了分组里的模型**（比如从 8 个减到 4 个）、但模型总数没变时，
-    指纹不变 -> 缓存不失效 -> 分组 Key 仍然拿到旧清单。
-    那就是「改了限制不生效」的另一种表现。
+    分组成员是**结构性身份**：`build_payload` 把 `frozenset(group_models(...))`
+    和这个指纹一起放进缓存 key 的元组里（不拼字符串 —— 模型 id 里可能有逗号）。
+    分组相关数据全部由成员集合覆盖，所以这里**不再**做
+    count / max(id) / max(updated_at) 那三个全表聚合：它们既是每次分组请求的
+    额外开销，又看不出「delete+insert 复用 rowid」的变化。
+
+    ## 为什么要算上 updated_at
+
+    改展示名（upstream_metadata.name）/ 能力覆盖（_override）/ 备注时，
+    **行数、最大 id、启用数都不变** —— 旧的指纹看不出任何变化，缓存继续命中，
+    客户端要等 10 秒 TTL 才看到新名字与新上下文长度（PATCH /{config_id}
+    改的正是这些字段）。ModelConfig.updated_at 有 onupdate，
+    把它的 max 聚合进来就能感知任何一次行更新。
     """
     from sqlalchemy import func
 
-    from admin.models import ModelConfig, ModelGroupItem
+    from admin.models import ModelConfig
 
     row = (db.query(func.count(ModelConfig.id), func.max(ModelConfig.id),
-                    func.sum(ModelConfig.enabled))
+                    func.sum(ModelConfig.enabled),
+                    func.max(ModelConfig.updated_at))
            .filter(ModelConfig.enabled == 1).one())
-    group_sig = ""
-    try:
-        grows = (db.query(func.count(ModelGroupItem.id),
-                          func.max(ModelGroupItem.id))
-                 .one())
-        group_sig = "|%s|%s" % (grows[0] or 0, grows[1] or 0)
-    except Exception:  # noqa: BLE001 - 没有分组表也不该让清单挂掉
-        group_sig = "|0|0"
-    return "%s|%s|%s%s" % (row[0], row[1], row[2], group_sig)
+    return "%s|%s|%s|%s" % (row[0], row[1], row[2], row[3] or "")
 
 
 #: 各平台的上游没有给能力字段时的兜底值。
@@ -614,35 +622,47 @@ def build_payload(db, *, aggregate_only: bool = False,
     from admin.platform import model_suffix
 
     now = time.time()
-    signature = _signature(db)
-    # 缓存 key 必须带分组：否则第一个请求的过滤结果会被所有分组复用
-    slot_key = ("agg" if aggregate_only else "full") + (":g%d" % group_id
-                                                        if group_id else "")
-    cached = (_cache["payload"].get(slot_key)
-              if isinstance(_cache["payload"], dict) else None)
-    if (cached is not None and _cache["signature"] == signature
-            and now - _cache["at"] < _TTL):
-        return cached
-
-    query = (db.query(ModelConfig)
-             .filter(ModelConfig.enabled == 1))
-    # 分组限制：只在 SQL 层收窄，后续逻辑完全不变
+    # 分组限制：**先**读真实成员，同一个集合既用于 SQL 过滤也参与缓存校验。
+    # 不能指望 _signature() 感知成员变化：成员表是 delete+insert，sqlite 会复用
+    # 被删行的 rowid，分组名/备注不变时聚合值全都不变 —— 没处理这次改动的
+    # worker 会一直命中旧清单。用**裸成员**（组内 id）而不是
+    # effective_group_models：后者为了和「启用」求交要物化全部 ModelConfig，
+    # 而下面的查询本来就带 enabled == 1，求交是重复劳动。
     allowed_ids = None
     if group_id:
         try:
-            from admin.routers.groups import effective_group_models
+            from admin.routers.groups import group_models
 
-            allowed_ids = effective_group_models(db, int(group_id))
-        except Exception:  # noqa: BLE001 - 读不到分组就按「不限制」退化
-            allowed_ids = None
-        if allowed_ids is not None:
-            if not allowed_ids:
-                # 分组存在但一个可用模型都没有 -> 明确返回空清单，
-                # 而不是退化成「全量」（那正是越权的成因）。
-                empty = {"object": "list", "data": []}
-                _store(slot_key, empty, now, signature)
-                return empty
-            query = query.filter(ModelConfig.model_id.in_(sorted(allowed_ids)))
+            allowed_ids = frozenset(group_models(db, int(group_id)))
+        except Exception:  # noqa: BLE001 - 受限清单的成员读不到：fail closed
+            logger.warning("分组 %s 成员读取失败，按空清单返回且不写缓存", group_id,
+                           exc_info=True)
+            return {"object": "list", "data": []}
+
+    # 结构性身份：元组 + frozenset，不做字符串拼接（模型 id 里可能有逗号，
+    # "a,b" 与 {"a","b"} 拼出来一模一样）。
+    signature = (_signature(db), allowed_ids)
+    # 缓存 key 必须带分组：否则第一个请求的过滤结果会被所有分组复用
+    slot_key = ("agg" if aggregate_only else "full") + (":g%d" % group_id
+                                                        if group_id else "")
+    # **只读本 slot 的 at/signature**：别的 view 何时刷新与这里无关。
+    entry = _cache.get(slot_key)
+    if (isinstance(entry, dict) and entry.get("payload") is not None
+            and entry.get("signature") == signature
+            and now - float(entry.get("at") or 0.0) < _TTL):
+        return entry["payload"]
+
+    query = (db.query(ModelConfig)
+             .filter(ModelConfig.enabled == 1))
+    # 分组限制：只在 SQL 层收窄，后续逻辑完全不变；成员集合复用上面那份
+    if allowed_ids is not None:
+        if not allowed_ids:
+            # 分组存在但一个可用模型都没有 -> 明确返回空清单，
+            # 而不是退化成「全量」（那正是越权的成因）。
+            empty = {"object": "list", "data": []}
+            _store(slot_key, empty, now, signature)
+            return empty
+        query = query.filter(ModelConfig.model_id.in_(sorted(allowed_ids)))
 
     rows = query.order_by(ModelConfig.platform.asc(),
                           ModelConfig.model_id.asc()).all()
@@ -1051,14 +1071,15 @@ def to_openai_strict(payload: dict, readable: bool = True) -> dict:
     return {"object": "list", "data": out}
 
 
-def _store(slot: str, payload: dict, now: float, signature: str) -> None:
-    """写入缓存（两种视图分开存，互不覆盖）。"""
-    if not isinstance(_cache["payload"], dict):
-        _cache["payload"] = {}
-    _cache["payload"][slot] = payload
-    _cache.update({"at": now, "signature": signature})
+def _store(slot: str, payload: dict, now: float, signature: tuple) -> None:
+    """写入**本 slot 自己**的缓存条目（view/分组互不覆盖，也不共享时间戳）。
+
+    关键点：这里**只**更新 slot 的 at/signature —— 全局刷新时间戳会让
+    另一个早已过期的 slot 被误判成新鲜（旧清单续命）。
+    """
+    _cache[slot] = {"payload": payload, "at": now, "signature": signature}
 
 
 def invalidate() -> None:
-    """模型配置变化后调用。"""
-    _cache.update({"at": 0.0, "payload": {}, "signature": ""})
+    """模型配置变化后调用：清空所有 slot（每个 view/分组都必须重建）。"""
+    _cache.clear()

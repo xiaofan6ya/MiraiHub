@@ -147,7 +147,7 @@ def _model_pool_stats_agg(db: Session, model: str):
         usable = (a.status == "active" and not cooling and row is None
                   and not _looks_login_dead(a, now)
                   and (free or (a.balance_remain or 0) > 0)
-                  and not POOL.inflight.full(a.uid or "", settings.MAX_IN_FLIGHT))
+                  and not POOL.inflight.full(POOL.key_for(a), POOL.limit_for(a)))
         entry = {"id": a.id, "name": a.name or a.uid or f"#{a.id}",
                  "uid": (a.uid or "")[:12], "status": a.status,
                  "usable": usable, "cooling": cooling,

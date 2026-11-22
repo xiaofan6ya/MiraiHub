@@ -205,7 +205,9 @@ def check_account(db, account: Account) -> dict:
         return {"account_id": account.id, "account": label, "ok": False,
                 "healthy": False, "status": "skipped", "reason": "出口保护期间暂停健康检查"}
 
-    uid = account.uid or f"account:{account.id}"
+    # 键必须与会话租约（POOL.acquire_account）一致：空 UID 账号是 "id:<id>"，
+    # 否则 acquire_maintenance 看到的在途数是另一个键，永远「看不见」真实请求。
+    uid = POOL.key_for(account)
     lock = maintenance._batch_lock
     if not lock.acquire(blocking=False):
         return {"account_id": account.id, "account": label, "ok": False,

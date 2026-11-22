@@ -320,7 +320,7 @@ def _run(db: Session, *, realm: str, model: str, body: dict, key,
             creds = trae_pool.credentials(db, account)
             resp = client.open_chat(creds, realm, body, timeout=_timeout())
         except client.UpstreamError as exc:
-            POOL.release(account.uid or "")
+            POOL.release(account)
             outcome = trae_pool.note_failure(db, account, exc, model=model)
             last_error = exc
             exclude.add(account.id)
@@ -330,19 +330,22 @@ def _run(db: Session, *, realm: str, model: str, body: dict, key,
                 break
             continue
         except Exception as exc:  # noqa: BLE001 - 传输层意外
-            POOL.release(account.uid or "")
+            POOL.release(account)
             last_error = client.UpstreamError("network", str(exc), None, kind="network")
             exclude.add(account.id)
             continue
 
         holder = {"requested_model": model, "idle_timeout": _timeout(),
-                  "account_id": account.id, "uid": account.uid, "realm": realm,
+                  "account_id": account.id, "uid": account.uid,
+                  # 租约键必须与 POOL.acquire_account 用的键一致：空 UID 账号是
+                  # "id:<id>"，只存 uid 的话 _release() 会在空串上释放，名额只借不还。
+                  "key": POOL.key_for(account), "realm": realm,
                   "credentials": creds, "_resp": resp}
         iterator = render(resp, holder)
         try:
             first = next(iterator, None)
         except client.UpstreamError as exc:
-            POOL.release(account.uid or "")
+            POOL.release(account)
             _close(resp)
             outcome = trae_pool.note_failure(db, account, exc, model=model)
             last_error = exc
@@ -351,7 +354,7 @@ def _run(db: Session, *, realm: str, model: str, body: dict, key,
                 break
             continue
         except Exception as exc:  # noqa: BLE001
-            POOL.release(account.uid or "")
+            POOL.release(account)
             _close(resp)
             logger.exception("trae 渲染异常 acc=%s: %s", account.id, exc)
             last_error = client.UpstreamError("render", str(exc), None, kind="network")
@@ -394,8 +397,10 @@ def _tail(holder, first, *, stream: bool):
 
 
 def _release(holder) -> None:
+    # 优先用 acquire 时记下的租约键（空 UID 账号 = "id:<id>"），
+    # 老 holder（没有 key）才回落 uid。
     try:
-        POOL.release(holder.get("uid") or "")
+        POOL.release(holder.get("key") or holder.get("uid") or "")
     except Exception:  # noqa: BLE001
         pass
 

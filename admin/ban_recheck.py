@@ -304,7 +304,8 @@ def run_ban_recheck(db) -> dict:
     unbanned, still_banned, dead, skipped = [], [], 0, 0
     gap = min(60.0, max(0.0, settings.KEEPALIVE_ACCOUNT_GAP))
     for acc, why in candidates:
-        uid = acc.uid or f"account:{acc.id}"
+        # 与 POOL.acquire_account 同一身份键（空 UID 账号 = "id:<id>"）。
+        uid = POOL.key_for(acc)
         if not POOL.inflight.acquire_maintenance(uid):
             skipped += 1
             continue

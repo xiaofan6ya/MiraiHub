@@ -33,6 +33,7 @@ workbuddy 的请求原样穿过，行为零变化。
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -64,6 +65,29 @@ _BODY_HARD_CAP = 32 * 1024 * 1024
 
 #: 这些状态表示「这个平台做不了」，值得换下一个平台再试。
 _RETRYABLE_STATUS = frozenset({404, 502, 503})
+
+#: 「平台内部异常、这次请求结果不确定」的私有标记（只挂在 Response 对象上）。
+#:
+#: 为什么不能只看状态码：`_run_platform` 把普通异常也转成 502，而 502 恰好
+#: 在 `_RETRYABLE_STATUS` 里 —— 候选循环于是把**同一个请求**再交给下一个平台。
+#: 但异常发生时第一个平台可能已经向上游发出了请求（副作用已产生：双倍计费、
+#: 群里收到两条消息）。平台**明确**返回的 502/503/404 说明它自己有把握没做成，
+#: 换平台是安全的；异常的语义恰恰相反。所以标记只打在异常分支上。
+_UNCERTAIN_ATTR = "_wb_platform_result_uncertain"
+
+
+def _mark_uncertain(response):
+    """标记「这次平台调用的结果不确定」（异常路径专用）。"""
+    try:
+        setattr(response, _UNCERTAIN_ATTR, True)
+    except Exception:  # noqa: BLE001 - 标记失败不能影响响应本身
+        pass
+    return response
+
+
+def _is_uncertain(response) -> bool:
+    """该响应是否来自「平台内部异常」（结果不确定，不许换平台重放）。"""
+    return bool(getattr(response, _UNCERTAIN_ATTR, False))
 
 #: 通用路由名：任何平台都可能自己实现，跨平台拒绝时要放行
 _GENERIC_MODEL_NAMES = frozenset({
@@ -338,18 +362,15 @@ def _model_of_body(body: bytes) -> str:
 def _should_peek(request) -> bool:
     """只对**带 body 的写请求**预读；GET/HEAD 读了会让下游卡死。
 
-    ## 为什么不能只看 `Content-Length`
+    预读只做两件事：读模型名做后缀路由、本进程内存保护。契约（不对称是故意的，
+    `_BODY_HARD_CAP` 是预读/选路上限，不是全局请求体上限）：
 
-    预读承担的是**读模型名做后缀路由**（`xxx-raccoon` → 走小浣熊网关）。
-    原实现要求「必须带 Content-Length 且 ≤ 256KB」才预读，于是两种情况
-    会**静默退化**成「不预读 → raw_model 为空 → 落到默认平台」：
-
-      * 客户端用 **chunked** 上传（没有 Content-Length）；
-      * 对话变长后请求体超过 256KB（长上下文 / 带图 / 多轮工具调用）。
-
-    表现就是用户说的「明明能用，用一会儿就 400：
-    模型 'sn-deepseek-v4-1-flash-1017-raccoon' 不存在或已被禁用」——
-    主应用（WorkBuddy）白名单里当然没有这个带平台后缀的名字。
+      * 已声明 Content-Length 且 > cap -> False：不预读、不 413，交给下游自己的
+        体积检查；没读到模型名最多是「不做后缀路由」。
+      * 没有 Content-Length（chunked）-> True：边读边判，读至 cap 由
+        `_read_body` 抛 `BodyTooLarge`，中间件回 413。
+      * 无长度也要读：只认 Content-Length ≤ 上限会让 chunked 和长上下文静默
+        退化成「不做后缀路由」（带平台后缀的名字落到默认平台 → 400）。
     """
     try:
         if request.scope.get("method", "").upper() not in _BODY_METHODS:
@@ -375,14 +396,39 @@ def _should_peek(request) -> bool:
         return False
 
 
+class BodyTooLarge(Exception):
+    """请求体在**读取过程中**就越过了上限（未知长度 / chunked 路径）。
+
+    抛异常而不是返回空串：receive 已被消费，越线后既不能回放完整 body 也不该
+    继续读，唯一正确的处理是让中间件直接回 413。
+    """
+
+    def __init__(self, total: int, limit: int):
+        self.total = int(total)
+        self.limit = int(limit)
+        super().__init__("请求体超过上限 %d 字节（已读 %d）" % (self.limit, self.total))
+
+
+class BodyReadError(Exception):
+    """预读请求体失败。receive 已被消费，已读到的部分不能再交给下游。"""
+
+
+class ClientDisconnected(BodyReadError):
+    """预读阶段客户端断开：body 可能为空，也可能只有半截。"""
+
+
 async def _read_body(receive, limit: int = _BODY_HARD_CAP) -> bytes:
     """把请求体整段读出来（最多 `limit` 字节），供回放给下游。
 
-    ⚠️ 这个函数**消费**了 receive，所以只要调用了就必须用 `_replay_receive`
-    把 body 还给下游，否则下游拿到空 body 直接 400「bad json」。
-    因此「超限返回空串」这种降级是**不能用**的（旧实现的坑）；
-    超限时保留已读部分并记日志，路由按拿到的部分判断，下游仍能收到完整
-    前缀 —— 真正的完整 body 由 `_read_body` 一次性读完，不会截断。
+    ⚠️ **消费** receive：只要调用了就必须用 `_replay_receive` 还给下游，
+    否则下游拿到空 body 直接 400「bad json」。
+
+    异常：越线抛 `BodyTooLarge`；预读期断开抛 `ClientDisconnected`
+    （断开**不是** EOF，返回值会被当成完整 body 回放）；其它读失败原样抛出。
+
+    上限必须边读边判：先整段缓存再比大小等于没有上限。越线即停、不再调用
+    receive，由中间件回 413。声明长度超 cap 的请求不会走到这里
+    （`_should_peek` 返回 False，交给下游的体积检查）。
     """
     chunks: list[bytes] = []
     total = 0
@@ -390,32 +436,32 @@ async def _read_body(receive, limit: int = _BODY_HARD_CAP) -> bytes:
         message = await receive()
         kind = message.get("type")
         if kind == "http.disconnect":
-            break
+            # 断开不是 EOF：已收的 chunk 可能少于 Content-Length / 半截 JSON。
+            raise ClientDisconnected("客户端在请求体读完前断开")
         if kind != "http.request":
             continue
         chunk = message.get("body") or b""
         if chunk:
             chunks.append(chunk)
             total += len(chunk)
+            if total > limit:
+                # 越线即停：剩余 body 一个字节都不再读。
+                raise BodyTooLarge(total, limit)
         if not message.get("more_body"):
             break
-    if total > limit:
-        logger.warning("请求体 %d 字节（上限 %d）仍完整回放给下游", total, limit)
     return b"".join(chunks)
 
 
 def _replay_receive(body: bytes, tail=None):
-    """构造一个只回放 `body` 的 receive。
+    """构造一个回放 `body` 的 receive：首调给 body，之后委托 `tail`。
 
-    第一次调用返回 body，之后**委托给原始 receive**（通常是等待
-    `http.disconnect`）。
+    预读消费掉了原始 receive，回放完必须回到它：`StreamingResponse` 的
+    `listen_for_disconnect` 靠 `tail` 拿到真实的 `http.disconnect`，否则
+    生成器跑满全程，上游连接 / 在途租约 / 断开统计都被拖住。
 
-    ⚠️ 两件事都不能省：
-      * 不能返回 `http.disconnect` —— 下游会认为客户端断开、不产出响应
-        （`RuntimeError: No response returned.`）；
-      * 不能立即返回空 `http.request` —— `StreamingResponse` 的
-        `listen_for_disconnect` 会**忙循环**把事件循环占满，表现为
-        流式请求 60 秒 0 字节（实测踩过）。
+    `tail is None`（单测直调）才兜底等待：不能立刻回 `http.disconnect`
+    （下游「No response returned」），也不能立刻回空 `http.request`
+    （`listen_for_disconnect` 忙循环，流式请求 0 字节）。
     """
     state = {"sent": False}
 
@@ -423,9 +469,9 @@ def _replay_receive(body: bytes, tail=None):
         if not state["sent"]:
             state["sent"] = True
             return {"type": "http.request", "body": body, "more_body": False}
-        # 真正的 disconnect 监听交给上层的 send 通道（写失败会让 StreamingResponse
-        # 自行退出）。这里若立即返回 http.request，会让 listen_for_disconnect
-        # 空转；返回 disconnect 又会被当成客户端断开而不产出响应。
+        # 回放完成：把后续读取**原样交给原始 receive**（真实断连由此透传）。
+        if tail is not None:
+            return await tail()
         import asyncio
 
         await asyncio.sleep(3600)
@@ -1337,11 +1383,13 @@ async def _run_platform(dispatch, request, path: str, platform_id: str):
         response = await dispatch(request, path)
     except Exception as exc:  # noqa: BLE001 - 平台内部异常不该变成 500 裸奔
         logger.exception("平台 %s 处理 %s 失败", platform_id, path)
-        return JSONResponse(
+        # **打上"结果不确定"标记**：异常可能发生在已经打过上游之后，
+        # 候选循环看到它就直接返回，不再把同一请求重放到下一个平台。
+        return _mark_uncertain(JSONResponse(
             status_code=502,
             content={"error": {"message": f"上游平台异常：{exc}",
                                "type": "server_error",
-                               "code": "platform_error"}})
+                               "code": "platform_error"}}))
     if response is None:
         return JSONResponse(
             status_code=503,
@@ -1465,14 +1513,51 @@ class PlatformDispatchMiddleware:
         body = b""
         if _should_peek(request):
             try:
-                body = await _read_body(receive)
+                # 显式传上限：`_read_body` 的默认参数在定义时就绑定死了，
+                # 显式传才能让上限成为可观测/可测试的单一来源。
+                body = await _read_body(receive, _BODY_HARD_CAP)
+            except BodyTooLarge as exc:
+                # 未知长度（chunked）请求体已经越线：立刻停读并回 413。
+                # **不能**降级成空 body 继续转发 —— 那会让下游收到残缺请求，
+                # 也等于把"超限"变成了一次正常的平台调用。
+                logger.warning("dispatch 请求体超过上限已拒绝 bytes=%d limit=%d",
+                               exc.total, exc.limit)
+                return await JSONResponse(
+                    status_code=413,
+                    content={"error": {
+                        "message": "请求体超过网关预读上限（%d 字节），"
+                                   "本次请求未被转发" % exc.limit,
+                        "type": "invalid_request_error",
+                        "code": "body_too_large",
+                    }})(scope, receive, send)
+            except ClientDisconnected:
+                # 预读期断开：body 可能空、可能半截。既不能当 EOF 回放，也不能
+                # 转发；客户端多半已经走了，回复尽力而为。
+                logger.info("dispatch 预读前客户端断开，放弃本次请求 path=%s", path)
+                with contextlib.suppress(Exception):
+                    await JSONResponse(status_code=400, content={"error": {
+                        "message": "客户端在请求体发送完成前断开，本次请求未被转发",
+                        "type": "invalid_request_error",
+                        "code": "client_disconnected",
+                    }})(scope, receive, send)
+                return
             except Exception:  # noqa: BLE001
-                logger.debug("预读请求体失败", exc_info=True)
-                body = b""
+                # 普通读失败：receive 已被消费掉一部分，交回下游等于转发半截
+                # 请求（下游可能把残缺 JSON 当完整 body）。
+                logger.warning("dispatch 预读请求体失败，请求不转发 path=%s", path,
+                               exc_info=True)
+                return await JSONResponse(status_code=400, content={"error": {
+                    "message": "读取请求体失败，本次请求未被转发",
+                    "type": "invalid_request_error",
+                    "code": "body_read_failed",
+                }})(scope, receive, send)
+            # 预读成功就必须回放（**包括空 body**）：receive 已被消费，不回放
+            # 下游就等不到 http.request。CancelledError 不在此列，照常上抛。
+            scope["_wb_body"] = body
+            receive = _replay_receive(body, tail)
+            request = Request(scope, receive)
             if body:
-                scope["_wb_body"] = body
-                receive = _replay_receive(body, tail)
-                request = Request(scope, receive)
+                # 指标 / 实时流量只在**有 body** 时记（空 body 没有模型可记）。
                 # 让请求指标 / 实时流量知道这次请求的模型（平台网关不会
                 # 经过 WorkBuddy 的 `_request_json`，否则面板上模型一栏是空的）。
                 try:
@@ -1977,6 +2062,12 @@ class PlatformDispatchMiddleware:
             response = await _run_platform(target_dispatch, attempt_request,
                                             path, target)
             status = int(getattr(response, "status_code", 200) or 200)
+            if _is_uncertain(response):
+                # 平台内部异常：副作用可能已经发生，**不许**换平台重放。
+                # 哪怕状态码是「可重试」的 502，这次也和"平台明确说做不了"不同。
+                logger.warning(
+                    "平台 %s 内部异常，结果不确定，停止尝试其它候选平台", target)
+                return await response(scope, receive, send)
             if status not in _RETRYABLE_STATUS or index == len(candidates) - 1:
                 return await response(scope, receive, send)
             last_response = response

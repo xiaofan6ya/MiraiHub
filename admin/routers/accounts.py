@@ -1345,7 +1345,7 @@ def model_limits(_: bool = Depends(require_admin), db: Session = Depends(get_db)
                      and _gateway_fields(a, now)["gateway_state"] == "ready"
                      and not _looks_login_dead(a, now) and not POOL.waf.active()
                      and (free or (a.balance_remain or 0) > 0)
-                     and not POOL.inflight.full(a.uid or "", settings.MAX_IN_FLIGHT)]
+                     and not POOL.inflight.full(POOL.key_for(a), POOL.limit_for(a))]
         summary.append({"model": model, "free": free,
                         "available_accounts": len(available), "limited_accounts": len(blocked),
                         "requests_today": sum(v["requests_today"] for (_, m), v in usage.items() if m == model),

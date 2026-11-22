@@ -43,6 +43,7 @@ import time
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.requests import ClientDisconnect
 
 from admin.platform import shared
 from admin.platform.marvis.core import client, endpoints
@@ -460,12 +461,29 @@ def _too_large(size: int, limit: int) -> JSONResponse:
         status_code=413)
 
 
-async def _reject_oversized(request: Request):
-    """体积检查：超限返回 413 响应，否则返回 None。
+def _unreadable_body(code: str, message: str) -> JSONResponse:
+    """400：预读就失败了。receive 已被消费，绝不能再读一次。
 
-    上限 <= 0（`MIRAIHUB_MARVIS_MAX_BODY_BYTES=0` 或负数）表示**关闭检查**，
-    直接放行。先看 `Content-Length`（不读 body，零成本）；缺这个头时才把 body
-    读出来量（Starlette 会缓存已读的 body，后续 `request.json()` 不会重复读流）。
+    再读只会把「读不出 body」伪装成 400 invalid_request「缺少 messages」，
+    让人误以为是客户端少发了字段。
+    """
+    logger.warning("Marvis 请求体预读失败已本地拒绝 code=%s（未打上游）", code)
+    return JSONResponse(
+        {"error": {"type": "invalid_request_error", "code": code,
+                   "message": message + "（请求未转发上游）"}},
+        status_code=400)
+
+
+async def _reject_oversized(request: Request):
+    """体积检查：超限 413，预读失败 400，否则 None。
+
+    上限 <= 0（`MIRAIHUB_MARVIS_MAX_BODY_BYTES=0` 或负数）关闭检查；先看
+    `Content-Length`（不读 body、零成本）。没有 Content-Length 时必须增量读：
+    整段缓存再比大小等于没有上限。越线立刻 413，剩余 body 不再读；
+    未超限则把读到的内容写回 `request._body`（流已被消费，`body()`/`json()`
+    只认这个缓存），`_body_of` 读到的仍是完整原文。读失败 / `http.disconnect`
+    就地 400（`body_read_failed` / `client_disconnected`），不重读、不进业务逻辑；
+    `asyncio.CancelledError` 属 BaseException，照常上抛。
     """
     limit = _max_body_bytes()
     if limit <= 0:              # 0 / 负数 = 不限制
@@ -477,11 +495,27 @@ async def _reject_oversized(request: Request):
         except (TypeError, ValueError):
             size = 0
         return _too_large(size, limit) if size > limit else None
+    # 未知长度：增量读，越线即停（不把整段先缓存下来再判断）。
+    chunks: list[bytes] = []
+    total = 0
     try:
-        raw = await request.body()
-    except Exception:  # noqa: BLE001 - 读不出来就交给下游按原逻辑报错
-        return None
-    return _too_large(len(raw), limit) if len(raw) > limit else None
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > limit:
+                return _too_large(total, limit)
+            chunks.append(chunk)
+    except ClientDisconnect:
+        # 断开不是 EOF：已读部分可能只是半截 JSON，交给业务逻辑就会静默截断。
+        return _unreadable_body("client_disconnected",
+                                "客户端在请求体发送完成前断开")
+    except Exception:  # noqa: BLE001 - 读失败：receive 已消费，不能再读一次
+        logger.warning("Marvis 请求体增量读取失败", exc_info=True)
+        return _unreadable_body("body_read_failed", "读取请求体失败")
+    # 已消费的 body 必须回写，否则下游 `_body_of` 读不到任何东西。
+    request._body = b"".join(chunks)  # noqa: SLF001 - Starlette 的官方缓存位
+    return None
 
 
 async def _body_of(request: Request) -> dict:
@@ -2577,7 +2611,7 @@ def _wrap_keepalive(response, ping: bytes):
 
 async def chat_completions(request: Request):
     """OpenAI 兼容入口 —— 本平台的唯一主路径。"""
-    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    # 体积兜底先行：超限 413 / 预读失败 400，就地返回，不打上游、不占账号。
     oversized = await _reject_oversized(request)
     if oversized is not None:
         return oversized
@@ -2853,7 +2887,7 @@ async def _run_normalized(request: Request, normalized: dict, *, protocol: str):
 
 async def messages(request: Request):
     """Anthropic 入口 → 转成 OpenAI 请求跑主路径 → 响应翻回 Anthropic。"""
-    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    # 体积兜底先行：超限 413 / 预读失败 400，就地返回，不打上游、不占账号。
     oversized = await _reject_oversized(request)
     if oversized is not None:
         return oversized
@@ -2864,7 +2898,7 @@ async def messages(request: Request):
 
 async def responses(request: Request):
     """Responses 入口 → 折叠成 chat/completions → 响应翻回 Responses。"""
-    # 体积兜底放在**最前面**：早于任何上游动作，超限就地 413，不打上游、不占账号。
+    # 体积兜底先行：超限 413 / 预读失败 400，就地返回，不打上游、不占账号。
     oversized = await _reject_oversized(request)
     if oversized is not None:
         return oversized

@@ -2023,12 +2023,12 @@ async def _select_account_with_wait(db, **kwargs):
                 release_connection(db)
             except BaseException:
                 if leased is not None:
-                    POOL.release(leased.uid or '')
+                    POOL.release(leased)
                 raise
 
     def cancelled(result):
         if result and result[0] is not None:
-            POOL.release(result[0].uid or '')
+            POOL.release(result[0])
 
     async def select():
         result = await _blocking_call(attempt, on_cancel=cancelled)
@@ -2371,7 +2371,7 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     if strategy == 'throughput':
         # Read each load once: releases from other threads must not change the
         # minimum between ranking and filtering and leave an empty shortlist.
-        loads = {a.id: POOL.inflight.count(a.uid or '') / max(1, POOL.limit_for(a)) for a in rows}
+        loads = {a.id: POOL.inflight.count(POOL.key_for(a)) / max(1, POOL.limit_for(a)) for a in rows}
         lowest = min(loads.values())
         rows = [a for a in rows if loads[a.id] == lowest]
 
@@ -2425,7 +2425,7 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     def _picked_at(a):
         return getattr(a, "last_picked_at", None) or datetime.min
 
-    load_key = lambda a: (POOL.inflight.count(a.uid or ''),
+    load_key = lambda a: (POOL.inflight.count(POOL.key_for(a)),
                           _picked_at(a),
                           a.last_used_at or datetime.min,
                           a.id)
@@ -3053,7 +3053,7 @@ async def chat_completions(
                         tried_accounts += 1
                         # The fair selector already owns this account lease.
                         tried_ids.add(acc_i.id)
-                        held_uid = acc_i.uid or ""
+                        held_uid = POOL.key_for(acc_i)
                         retry_budget.consume()
                         request_metrics.mark_attempt(acc_i.id, m)
                         upstream_http.select_account(request.scope, acc_i)
@@ -3307,8 +3307,11 @@ async def chat_completions(
                                                 status_out, total_toks, error_kind="success")
                             # 粘性跟随最终成功号：让多轮对话收敛到「对该会话持续成功」
                             # 的那个账号，而不是每轮重新抽签。
-                            if sticky_key and held_uid:
-                                POOL.sticky.bind(sticky_key, held_uid)
+                            # 粘性绑定必须用**原始 UID**：resolve 侧传的是
+                            # {a.uid or ""}（原始 UID 集合），绑 LeaseKey（"uid:…"/"id:…"）
+                            # 永远匹配不上，会话亲和会被打断。held_uid 只用于 release。
+                            if sticky_key and (acc_i.uid or ""):
+                                POOL.sticky.bind(sticky_key, acc_i.uid or "")
                             updated = sess_i.updated_json()
                             sess_i.close()
                             POOL.release(held_uid)
@@ -3621,7 +3624,7 @@ async def responses_proxy(
                     if not acc_i:
                         break
                     tried_ids.add(acc_i.id)
-                    held_uid = acc_i.uid or ""
+                    held_uid = POOL.key_for(acc_i)
                     retry_budget.consume()
                     request_metrics.mark_attempt(acc_i.id, m)
                     upstream_http.select_account(request.scope, acc_i)
@@ -3704,8 +3707,11 @@ async def responses_proxy(
                             total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
                             seq = _log_chat_row(ttfb_ms, latency_ms, m, "resp", acc_i.uid or "-", 200, total_toks, error_kind="success")
                             sess_i.close()
-                            if sticky_key and held_uid:
-                                POOL.sticky.bind(sticky_key, held_uid)
+                            # 粘性绑定必须用**原始 UID**：resolve 侧传的是
+                            # {a.uid or ""}（原始 UID 集合），绑 LeaseKey（"uid:…"/"id:…"）
+                            # 永远匹配不上，会话亲和会被打断。held_uid 只用于 release。
+                            if sticky_key and (acc_i.uid or ""):
+                                POOL.sticky.bind(sticky_key, acc_i.uid or "")
                             POOL.release(held_uid)
                             held_uid = ""
                             await _blocking_call(_record_usage, key.id, acc_i.id, m, cost_info["credits"], updated,
@@ -3798,7 +3804,7 @@ async def responses_proxy(
                         if not acc_i:
                             break
                         tried_ids.add(acc_i.id)
-                        held_uid = acc_i.uid or ""
+                        held_uid = POOL.key_for(acc_i)
                         retry_budget.consume()
                         request_metrics.mark_attempt(acc_i.id, m)
                         upstream_http.select_account(request.scope, acc_i)
@@ -3911,8 +3917,11 @@ async def responses_proxy(
                             seq = _log_chat_row(ttfb_ms, latency_ms, final_model, "resp", final_uid, 200, total_toks, error_kind="success")
                             updated = sess_i.updated_json()
                             sess_i.close()
-                            if sticky_key and held_uid:
-                                POOL.sticky.bind(sticky_key, held_uid)
+                            # 粘性绑定必须用**原始 UID**：resolve 侧传的是
+                            # {a.uid or ""}（原始 UID 集合），绑 LeaseKey（"uid:…"/"id:…"）
+                            # 永远匹配不上，会话亲和会被打断。held_uid 只用于 release。
+                            if sticky_key and (acc_i.uid or ""):
+                                POOL.sticky.bind(sticky_key, acc_i.uid or "")
                             POOL.release(held_uid)
                             held_uid = ""
                             await _blocking_call(_record_usage, key.id, final_acc_id, final_model, usage["credits"], updated,
@@ -4108,7 +4117,7 @@ async def anthropic_messages(
                     if not acc_i:
                         break
                     tried_ids.add(acc_i.id)
-                    held_uid = acc_i.uid or ""
+                    held_uid = POOL.key_for(acc_i)
                     retry_budget.consume()
                     request_metrics.mark_attempt(acc_i.id, m)
                     upstream_http.select_account(request.scope, acc_i)
@@ -4195,8 +4204,11 @@ async def anthropic_messages(
                             seq = _log_chat_row(ttfb_ms, latency_ms, m, "anthropic", acc_i.uid or "-", 200,
                                                 total_toks, error_kind="success")
                             sess_i.close()
-                            if sticky_key and held_uid:
-                                POOL.sticky.bind(sticky_key, held_uid)
+                            # 粘性绑定必须用**原始 UID**：resolve 侧传的是
+                            # {a.uid or ""}（原始 UID 集合），绑 LeaseKey（"uid:…"/"id:…"）
+                            # 永远匹配不上，会话亲和会被打断。held_uid 只用于 release。
+                            if sticky_key and (acc_i.uid or ""):
+                                POOL.sticky.bind(sticky_key, acc_i.uid or "")
                             POOL.release(held_uid)
                             held_uid = ""
                             await _blocking_call(_record_usage, key.id, acc_i.id, m, cost_info["credits"], updated,
@@ -4290,7 +4302,7 @@ async def anthropic_messages(
                         if not acc_i:
                             break
                         tried_ids.add(acc_i.id)
-                        held_uid = acc_i.uid or ""
+                        held_uid = POOL.key_for(acc_i)
                         retry_budget.consume()
                         request_metrics.mark_attempt(acc_i.id, m)
                         upstream_http.select_account(request.scope, acc_i)
@@ -4421,8 +4433,11 @@ async def anthropic_messages(
                                                 total_toks, error_kind="success")
                             updated = sess_i.updated_json()
                             sess_i.close()
-                            if sticky_key and held_uid:
-                                POOL.sticky.bind(sticky_key, held_uid)
+                            # 粘性绑定必须用**原始 UID**：resolve 侧传的是
+                            # {a.uid or ""}（原始 UID 集合），绑 LeaseKey（"uid:…"/"id:…"）
+                            # 永远匹配不上，会话亲和会被打断。held_uid 只用于 release。
+                            if sticky_key and (acc_i.uid or ""):
+                                POOL.sticky.bind(sticky_key, acc_i.uid or "")
                             POOL.release(held_uid)
                             held_uid = ""
                             await _blocking_call(_record_usage, key.id, final_acc_id, final_model, usage["credits"], updated,

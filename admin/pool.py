@@ -167,6 +167,85 @@ def _as_utc(dt: datetime | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 # 在途租约
 # ---------------------------------------------------------------------------
+#: 计数键的**命名空间前缀**，两类键永不互相污染：
+#:   * "uid:<上游 uid>" —— 有上游身份（重复 uid 共享，代表同一个上游身份）；
+#:   * "id:<本地主键>"  —— 没有上游 UID 的 fallback 身份。
+#:
+#: 必须分命名空间：否则字面量就是 "id:42" 的合法 UID 会与「uid 空、id=42」撞键，
+#: 两个账号共用一份在途计数/闸门。加前缀后是 "uid:id:42" 与 "id:42"，不可能相等。
+#:
+#: 维护链路（account_health / ban_recheck / maintenance）也走 :func:`account_key`：
+#: 未迁移时它们记的键与真实在途数不一致，drain 会「看不见」在途请求。
+ACCOUNT_KEY_UID_PREFIX = "uid:"
+ACCOUNT_KEY_ID_PREFIX = "id:"
+
+
+class LeaseKey(str):
+    """**计算出来的**租约键类型标记（"uid:<uid>" / "id:<id>"）。
+
+    光靠前缀猜「这已经是键」有洞：原始 uid 恰好是 `"id:42"` 时会被当成 fallback
+    键放行，与「uid 空、id=42」的账号撞键。类型不参与猜：`account_key()` /
+    `normalize_key()` 返回 `LeaseKey`，`PoolRuntime.release` 只认类型；普通 str
+    一律按旧式原始 uid 补 "uid:" 前缀（`"uid:id:42"`），永远进不了 fallback 命名空间。
+
+    继承 `str` 是刻意的：日志、dict、f-string、比较全部透明，计数字典仍按字符串工作。
+    """
+
+    __slots__ = ()
+
+
+def account_key(account: Any) -> LeaseKey | str:
+    """账号在途租约的**身份键**（InFlight 的计数键）。
+
+    不能直接用 `account.uid`：InFlight 对空键的语义是「不计数」，而调用侧过去
+    一律写 `account.uid or ""`，于是所有空 UID 账号共用同一个空键、一起掉进旁路 ——
+    并发无上限、永远显示「最闲」、释放也扣不回来。空 UID 在库里是真实存在的。
+
+    口径（双命名空间，见 ACCOUNT_KEY_*_PREFIX）：
+
+      * uid 非空      -> `"uid:<uid>"`（重复 UID 共享同一键，同 UID 的记录本就是
+        同一个上游身份）；
+      * uid 空、id 有 -> `"id:<id>"`：一账号一键、稳定、不共享；
+      * 两者都空      -> `""`：保持「不计数」的旧语义。
+
+    键对同一账号稳定，acquire / full / count / release 都过这个函数（或
+    :func:`normalize_key`）就能自然对齐；返回值带 :class:`LeaseKey` 标记（空串除外）。
+    """
+    if account is None:
+        return ""
+    uid = getattr(account, "uid", None)
+    if uid is not None:
+        uid = str(uid)
+        if uid:
+            return LeaseKey(ACCOUNT_KEY_UID_PREFIX + uid)
+    aid = getattr(account, "id", None)
+    if aid is None or aid == "":
+        return ""
+    return LeaseKey(ACCOUNT_KEY_ID_PREFIX + str(aid))
+
+
+def normalize_key(key: Any) -> LeaseKey | str:
+    """把调用方给的 key 归一成计数键（**按类型**判断，不猜前缀）。
+
+      * :class:`LeaseKey`（`account_key` / `PoolRuntime.key_for` 算出）—— 原样用；
+      * 其它非空字符串 —— 视为旧式原始 uid（`POOL.release(acc.uid or "")` 这类
+        调用点），补 "uid:" 前缀；`"id:42"` 会变成 `"uid:id:42"`，不会被误当成
+        fallback 键；
+      * None / 空串 —— `""`，即「不计数」的旧语义。
+
+    于是按原始 uid 释放的调用点计数也能对上（不会只借不还），而 fallback 键只能
+    由 `account_key` 产生。
+    """
+    if isinstance(key, LeaseKey):
+        return key
+    if key is None:
+        return ""
+    text = str(key)
+    if not text:
+        return ""
+    return LeaseKey(ACCOUNT_KEY_UID_PREFIX + text)
+
+
 class InFlight:
     """单账号在途请求计数：占满的账号不参与选号。
 
@@ -630,7 +709,7 @@ def expiry_weighted_pick(accounts, *, inflight=None, rand=None, now=None):
             end += 1
         rank = (start + 1 + end) / 2
         for account in ordered[start:end]:
-            busy = inflight.count(account.uid or '') if inflight else 0
+            busy = inflight.count(account_key(account)) if inflight else 0
             # 同一到期档内，再用活跃度调一次：久未调用的号权重更低，
             # 但它仍在**同一紧迫度档**里，不会抢掉「快过期要先烧」的位置。
             factor = activity_factor(getattr(account, "last_used_at", None), now,
@@ -908,9 +987,18 @@ class PoolRuntime:
 
     max_in_flight: int = 0
 
+    def key_for(self, account: Any) -> str:
+        """该账号的在途计数键（见 :func:`account_key`）。
+
+        所有「按账号」的在途查询都必须经过它，别再用 `account.uid or ""` ——
+        空 UID 账号会因此共用同一个空键，一起绕过闸门。
+        """
+        return account_key(account)
+
     def available(self, accounts: Iterable[Any]) -> list[Any]:
         """Exclude full or maintenance-reserved identities, even without a cap."""
-        return [a for a in accounts if not self.inflight.full(getattr(a, "uid", "") or "", self.limit_for(a))]
+        return [a for a in accounts
+                if not self.inflight.full(self.key_for(a), self.limit_for(a))]
 
     def limit_for(self, account: Any) -> int:
         value = getattr(account, "max_in_flight", None)
@@ -925,13 +1013,34 @@ class PoolRuntime:
         return base
 
     def acquire_account(self, account: Any) -> bool:
-        return self.inflight.acquire(account.uid or "", self.limit_for(account))
+        return self.inflight.acquire(self.key_for(account), self.limit_for(account))
 
     def acquire(self, uid: str) -> bool:
-        return self.inflight.acquire(uid or "", getattr(self, "max_in_flight", 0) or 0)
+        # `uid` 既可能是 LeaseKey（key_for 算好的键），也可能是原始 uid 字符串：
+        # 前者原样用，后者按原始 uid 语义补 "uid:" 前缀（见 normalize_key）。
+        return self.inflight.acquire(normalize_key(uid),
+                                     getattr(self, "max_in_flight", 0) or 0)
 
-    def release(self, uid: str) -> None:
-        self.inflight.release(uid or "")
+    def release(self, target: Any) -> None:
+        """释放在途名额。`target` 可以是账号对象，也可以是原始计数键（uid / "id:<id>"）。
+
+        计数键必须与 acquire 用的键**完全一致**，否则空 UID 账号会「借了不还」：
+        它按 "id:<id>" 记账，却在空串上释放，计数永远回不到 0（账号被永久判满）。
+        因此本方法接受账号对象（`release(account)`，走 key_for），也继续接受字符串：
+        :class:`LeaseKey`（如 `POOL.key_for(account)` 的返回值）原样用；
+        **普通字符串一律按旧式原始 uid 处理**，由 :func:`normalize_key` 补 "uid:" 前缀
+        —— 注意这意味着 `release("id:42")` 释放的是 `"uid:id:42"`，而不是 fallback
+        账号的 `"id:42"`。空串仍是空操作。
+
+        识别靠类型、不靠前缀：字符串前缀无法区分「算好的键」与「恰好像键的合法 uid」。
+
+        幂等：非法/空键、以及重复释放都只做一次减法（见 InFlight.release）。
+        """
+        if isinstance(target, str):
+            key = normalize_key(target)
+        else:
+            key = self.key_for(target)
+        self.inflight.release(key or "")
 
     def status(self) -> dict:
         return {

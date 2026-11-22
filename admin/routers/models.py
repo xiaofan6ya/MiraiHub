@@ -81,6 +81,15 @@ def save_model_display(body: ModelDisplayIn, _: bool = Depends(require_admin), d
         db.add(row)
     row.value = json.dumps(body.dict())
     db.commit()
+    # 展示开关会改变 `/v1/models` 的条目形状（倍率 / 忙碌 / 官方可见性）。
+    # 默认平台那条路径是每次现算的，但聚合清单有自己的缓存 —— 统一在这里
+    # 清一次，避免以后把展示字段并进聚合 payload 时出现「开关不生效」。
+    try:
+        from admin.platform import models_router
+
+        models_router.invalidate()
+    except Exception:  # noqa: BLE001 - 缓存清理失败不影响保存
+        pass
     return body.dict()
 
 
@@ -90,11 +99,22 @@ def _invalidate_routing_cache() -> None:
     网关按模型选平台时会缓存 `model_configs`（10 秒）——
     不主动失效的话，「刚同步完新模型 → 马上调用」会得到 404
     `model_not_found`，看起来像同步失败。
+
+    **同时清空 `/v1/models` 的聚合清单缓存**（models_router）：
+    那条缓存的指纹现在包含 `updated_at`，改展示名 / 能力覆盖 / 备注都会
+    让它失效，但 PATCH 之后本来就应该「下一次请求立刻是新内容」，
+    不该再赌指纹是否覆盖到本次改动。
     """
     try:
         from admin.platform import dispatch
 
         dispatch.invalidate_model_cache()
+    except Exception:  # noqa: BLE001 - 缓存清理失败不影响保存
+        pass
+    try:
+        from admin.platform import models_router
+
+        models_router.invalidate()
     except Exception:  # noqa: BLE001 - 缓存清理失败不影响保存
         pass
 
@@ -1632,7 +1652,9 @@ async def _speed_test_run(body, request, db):
     if POOL.waf.active():
         raise HTTPException(503, "出口保护中，稍后检测", headers={"Retry-After": str(max(1, POOL.waf.remaining()))})
     acc = await _blocking_call(_select_account, db, model=model, mark_picked=False)
-    if not acc or not POOL.acquire(acc.uid or ""):
+    # 走 acquire_account：空 UID 账号按 id:<id> 记账（account_key），
+    # 用 acc.uid or "" 会落进 InFlight 的「空键不计数」旁路，闸门形同不存在。
+    if not acc or not POOL.acquire_account(acc):
         raise HTTPException(503, "当前没有可检测账号（冷却或正在使用），稍后重试", headers={"Retry-After": "3"})
     from admin import upstream_http
     sess = None
@@ -1642,7 +1664,9 @@ async def _speed_test_run(body, request, db):
     except BaseException:
         if sess is not None:
             sess.close()
-        POOL.release(acc.uid or "")
+        # 必须用账号对象释放：空 UID 账号按 id:<id> 记的账，
+        # 在空串上释放等于「借了不还」，该号会被永久判满。
+        POOL.release(acc)
         raise
     url = f"{settings.BACKEND}/v2/chat/completions"
     payload = {
@@ -1762,7 +1786,8 @@ async def _speed_test_run(body, request, db):
                 await _blocking_call(_persist)
             finally:
                 sess.close()
-                POOL.release(acc.uid or "")
+                # 同上：按账号对象释放，键与 acquire_account 完全一致。
+                POOL.release(acc)
         from admin.post_login import enqueue_resources
         enqueue_resources(acc.id)
 

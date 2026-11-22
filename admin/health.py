@@ -88,7 +88,8 @@ def _model_health_uncached(db, hours=24):
         cooling = [r for r in limits if r.model == model]
         blocked = {r.account_id for r in cooling}
         eligible = [a for a in healthy if a.id not in blocked and (free or (a.balance_remain or 0) > 0)]
-        available = [a for a in eligible if not POOL.inflight.full(a.uid or "", settings.MAX_IN_FLIGHT)]
+        available = [a for a in eligible
+                     if not POOL.inflight.full(POOL.key_for(a), POOL.limit_for(a))]
         distribution = counts.get(model, Counter())
         total = sum(distribution.values())
         ok = distribution.get("success", 0) + distribution.get("", 0)

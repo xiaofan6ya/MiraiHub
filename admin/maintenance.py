@@ -55,7 +55,7 @@ def account_slot(account, db=None):
     reason = _reason(account)
     locked = False
     reserved = False
-    uid = account.uid or ""
+    uid = POOL.key_for(account)
     try:
         if reason is None:
             locked = _batch_lock.acquire(blocking=False)
@@ -135,7 +135,8 @@ def token_slot(account, db, wait_seconds=30):
     global _last_finished
     locked = _batch_lock.acquire(timeout=wait_seconds)
     reserved = False
-    uid = account.uid or f"account:{account.id}"
+    # drain 等的就是「这个账号还有没有在途请求」，键必须与会话租约一致。
+    uid = POOL.key_for(account)
     try:
         if not locked:
             yield "background_busy"

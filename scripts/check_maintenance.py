@@ -66,10 +66,13 @@ class Checks(unittest.TestCase):
         self.assertFalse(pool.acquire_account(one))
         self.assertNotIn(one, pool.available([one]))
         self.assertEqual(pool.limit_for(inherited),3)
-        self.assertTrue(pool.inflight.acquire_maintenance(unlimited.uid))
+        # 维护预留必须用与 acquire_account/available 相同的租约键：
+        # 非空 UID 的 key 是 LeaseKey("uid:<uid>")，裸 uid 对不上。
+        unlimited_key = pool.key_for(unlimited)
+        self.assertTrue(pool.inflight.acquire_maintenance(unlimited_key))
         self.assertNotIn(unlimited, pool.available([unlimited]))
         self.assertFalse(pool.acquire_account(unlimited))
-        pool.inflight.release_maintenance(unlimited.uid)
+        pool.inflight.release_maintenance(unlimited_key)
         for _ in range(20): self.assertTrue(pool.acquire_account(unlimited))
         pool.release(one.uid)
         self.assertTrue(pool.acquire_account(one))
@@ -88,18 +91,26 @@ class Checks(unittest.TestCase):
         from admin.routers import proxy
         pool=PoolRuntime();pool.max_in_flight=3
         self.account.max_in_flight=1;self.db.commit()
+        # 在途键必须与 acquire_account 一致：非空 UID 是 LeaseKey("uid:<uid>")。
+        account_key = pool.key_for(self.account)
+        seen_busy = []
         self.assertTrue(pool.acquire_account(self.account))
         def select(*args,**kwargs):
-            return self.account if pool.inflight.count(self.account.uid)==0 else None
+            busy = pool.inflight.count(account_key)
+            if busy:
+                seen_busy.append(busy)
+                return None
+            return self.account
         async def run():
             async def release():
-                await asyncio.sleep(.05);pool.release(self.account.uid)
+                await asyncio.sleep(.05);pool.release(account_key)
             task=asyncio.create_task(release())
             with patch.object(proxy,"POOL",pool),patch.object(proxy,"_select_account",side_effect=select):
                 result=await proxy._select_account_with_wait(self.db,model="synthetic")
             await task
             return result
         self.assertIs(asyncio.run(run()),self.account)
+        self.assertTrue(seen_busy, "测试必须先观察到在途计数为 1，才能证明等待释放后复用")
 
     def test_reward_split_dedup_and_observation(self):
         record_result(self.db,self.account.id,{"ok":False,"credit":12,"steps":[
@@ -188,7 +199,9 @@ class Checks(unittest.TestCase):
         from admin.server import app as server
         client=TestClient(server)
         self.addCleanup(client.close)
-        self.assertIn("javascript",client.get("/static/review-improvements.js").headers["content-type"])
+        js=client.get("/static/vendor/marked-12.0.2.min.js")
+        self.assertEqual(js.status_code,200)
+        self.assertIn("javascript",js.headers["content-type"])
         self.assertEqual(client.get("/api/accounts").status_code,401)
         self.assertEqual(client.get("/api/accounts",headers=self.headers).status_code,200)
 
