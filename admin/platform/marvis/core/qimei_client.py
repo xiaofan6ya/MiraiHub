@@ -5,7 +5,9 @@ requires an injected HTTPX client and explicit HTTPS endpoint and headers. The
 caller owns the client's connection and logging configuration. This module
 supplies no SDK host or header defaults, collects no device metadata, and emits
 no logs. The response decoder uses the exact AES key and IV carried by the
-request context.
+request context. ``asyncio.timeout`` and ``sys.exception`` are used when the
+interpreter provides them and emulated locally otherwise, so this module does
+not silently require 3.11 or turn a missing runtime API into a generic failure.
 """
 from __future__ import annotations
 
@@ -34,6 +36,57 @@ class QimeiClientError(RuntimeError):
 
 def _reject(message: str) -> None:
     raise QimeiClientError(message) from None
+
+
+class _Deadline:
+    """Local ``asyncio.timeout`` equivalent for interpreters that predate 3.11.
+
+    Cancels the current task at the deadline and reports that internal
+    cancellation as ``TimeoutError``, mirroring the standard scope. Cancellation
+    requested by anyone else passes through unchanged. Interpreters providing
+    ``asyncio.timeout`` never use this class.
+    """
+
+    def __init__(self, delay: float):
+        self._delay = delay
+        self._task = None
+        self._handle = None
+        self._expired = False
+
+    async def __aenter__(self):
+        self._task = asyncio.current_task()
+        self._handle = asyncio.get_running_loop().call_later(self._delay, self._expire)
+        return self
+
+    def _cancel_handle(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            handle.cancel()
+
+    def _expire(self) -> None:
+        # Reaching the deadline is the only reason this scope cancels by itself.
+        self._handle = None
+        self._expired = True
+        if self._task is not None:
+            self._task.cancel()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self._cancel_handle()
+        if self._expired and exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
+            raise TimeoutError from None
+        return False
+
+
+def _timeout_scope(delay: float):
+    """Return the native deadline scope, or its local equivalent below 3.11."""
+    native = getattr(asyncio, "timeout", None)
+    return native(delay) if native is not None else _Deadline(delay)
+
+
+def _current_exception():
+    """Return the exception being handled, without requiring ``sys.exception``."""
+    native = getattr(sys, "exception", None)
+    return native() if native is not None else sys.exc_info()[1]
 
 
 @dataclass(frozen=True)
@@ -175,7 +228,7 @@ async def send_request(prepared: PreparedQimeiRequest, *, endpoint: str,
             extensions={"timeout": httpx.Timeout(timeout).as_dict()},
         )
         try:
-            async with asyncio.timeout(timeout):
+            async with _timeout_scope(timeout):
                 response = await client.send(request, stream=True, auth=None, follow_redirects=False)
                 declared = _response_limit(response)
                 buffer = bytearray()
@@ -192,9 +245,9 @@ async def send_request(prepared: PreparedQimeiRequest, *, endpoint: str,
             if response is not None:
                 # The I/O timeout has exited, so its timer cannot replace an
                 # active interruption while the independent cleanup timer runs.
-                active_error = sys.exception()
+                active_error = _current_exception()
                 try:
-                    async with asyncio.timeout(min(timeout, _MAX_CLEANUP_GRACE_SECONDS)):
+                    async with _timeout_scope(min(timeout, _MAX_CLEANUP_GRACE_SECONDS)):
                         await response.aclose()
                 except Exception:
                     if active_error is None:
@@ -203,6 +256,11 @@ async def send_request(prepared: PreparedQimeiRequest, *, endpoint: str,
         raise
     except (TimeoutError, httpx.TimeoutException):
         _reject("QIMEI transport timed out")
+    except AttributeError:
+        # A missing interpreter or library attribute must not be flattened into
+        # a generic transport failure; name the class so the cause stays visible
+        # without exposing caller or remote values.
+        _reject("QIMEI transport hit an unavailable runtime API (AttributeError)")
     except Exception:
         _reject("QIMEI transport failed")
     try:

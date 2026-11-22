@@ -4,7 +4,7 @@
 
 ## 运行契约
 
-使用 Python **3.11+**；独立虚拟环境只需 `httpx`、`cryptography`，两者已在仓库 `requirements.txt`。按文件路径运行，避免加载 `admin` 包的应用启动逻辑：
+使用 Python **3.10+**（容器内为 3.12；低于 3.11 时运输层自动改用等价的本地截止实现）；独立虚拟环境只需 `httpx`、`cryptography`，两者已在仓库 `requirements.txt`。按文件路径运行，避免加载 `admin` 包的应用启动逻辑：
 
 ```text
 python admin/platform/marvis/core/qimei_generate.py MAC TAG PORT OCTET
