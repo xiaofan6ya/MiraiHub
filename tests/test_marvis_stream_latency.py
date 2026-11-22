@@ -249,6 +249,14 @@ class _Req:
     async def json(self):
         return self._payload
 
+    async def stream(self):
+        """体积预检（gateway._reject_oversized）按 ASGI 语义增量读 body。
+
+        真 Request 从 receive 收块；替身对象只给一份完整 JSON 即可，
+        否则未知长度分支读不到 body 会就地 400，流式路径根本走不到。
+        """
+        yield json.dumps(self._payload).encode()
+
 
 billed = {}
 
