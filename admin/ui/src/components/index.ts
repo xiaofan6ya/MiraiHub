@@ -1,0 +1,68 @@
+/**
+ * 公共组件库统一出口（S05）。
+ * 页面只从这里 import，不要在页面里写散装样式的按钮 / 卡片 / 徽章。
+ */
+
+/* ---------- base ---------- */
+export { default as Btn } from './base/Btn.vue'
+export { default as IconBtn } from './base/IconBtn.vue'
+export { default as Card } from './base/Card.vue'
+export { default as Section } from './base/Section.vue'
+export { default as Badge } from './base/Badge.vue'
+export { default as StatusDot } from './base/StatusDot.vue'
+export { default as Chip } from './base/Chip.vue'
+export { default as Copyable } from './base/Copyable.vue'
+export { default as HelpTip } from './base/HelpTip.vue'
+export { default as Empty } from './base/Empty.vue'
+export { default as ErrorBlock } from './base/ErrorBlock.vue'
+export { default as Segmented } from './base/Segmented.vue'
+export { default as KV } from './base/KV.vue'
+export { default as CodeBlock } from './base/CodeBlock.vue'
+export * from './base/badge'
+export * from './base/btn'
+export * from './base/segmented'
+export * from './base/kv'
+
+/* ---------- data ---------- */
+export { default as StatCard } from './data/StatCard.vue'
+export { default as StatStrip } from './data/StatStrip.vue'
+export { default as DataTable } from './data/DataTable.vue'
+export { default as BulkBar } from './data/BulkBar.vue'
+export { default as FilterBar } from './data/FilterBar.vue'
+export { default as Meter } from './data/Meter.vue'
+export { default as StackMeter } from './data/StackMeter.vue'
+export { default as Ring } from './data/Ring.vue'
+export { default as BarList } from './data/BarList.vue'
+export * from './data/stat'
+export * from './data/table'
+export * from './data/barlist'
+export * from './data/filter'
+export * from './data/rowActions'
+export { default as RowActions } from './data/RowActions.vue'
+export * from './data/stackmeter'
+
+/* ---------- charts ---------- */
+export { default as Chart } from './charts/Chart.vue'
+export { default as RouteRibbon } from './charts/RouteRibbon.vue'
+export * from './charts/routeRibbon'
+export * from './charts/options'
+
+/* ---------- overlay ---------- */
+export { default as FormDrawer } from './overlay/FormDrawer.vue'
+export { default as FormField } from './overlay/FormField.vue'
+export { default as ConfirmDialog } from './overlay/ConfirmDialog.vue'
+export { default as DetailDrawer } from './overlay/DetailDrawer.vue'
+export { default as JobProgress } from './overlay/JobProgress.vue'
+export { default as DateRange } from './overlay/DateRange.vue'
+export * from './overlay/confirmGate'
+export * from './overlay/dateRange'
+export * from './overlay/job'
+
+/* ---------- identity ---------- */
+export { default as PlatformLogo } from './identity/PlatformLogo.vue'
+export { default as ModelIcon } from './identity/ModelIcon.vue'
+export * from './identity/platformLogo'
+export * from './identity/modelIconResolve'
+export { MODEL_ICONS } from './identity/modelIcons'
+export type { ModelIconEntry } from './identity/modelIcons'
+export { logoUrl } from './identity/assetUrl'

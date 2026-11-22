@@ -1,0 +1,1 @@
+import{a6 as i,a7 as t,A as a}from"./useTheme-CLljcE39.js";i();t({render:()=>a("main",{style:"padding: 48px; max-width: 420px"},[a("h1",{style:"font-size: var(--fs-h1); font-weight: 600"},"登录 · MiraiHub"),a("p",{style:"margin-top: 12px; color: var(--fg-muted)"},"新版登录页建设中。当前登录仍由旧控制台处理：/admin")])}).mount("#login-app");

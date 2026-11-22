@@ -1,0 +1,129 @@
+/* MiraiHub UI v2 设计令牌。复制到 admin/ui/src/styles/tokens.css，原样使用，不要改值。
+   主题切换：<html data-theme="light|dark">。默认跟随系统。 */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #F3F5F8;
+  --surface: #FFFFFF;
+  --surface-2: #F8F9FB;      /* 表头、输入框底、次级区块 */
+  --surface-hover: #F1F3F7;  /* 行悬停、菜单项悬停 */
+  --border: #E3E6EC;
+  --border-soft: #EDEFF3;
+  --border-strong: #CDD2DB;
+
+  --fg: #171A21;
+  --fg-2: #454B57;           /* 次级正文 */
+  --fg-muted: #6B7280;       /* 说明、表头 */
+  --fg-faint: #9AA1AD;       /* 占位符、禁用 */
+
+  --brand: #3148C8;
+  --brand-hover: #2839A6;
+  --brand-soft: rgba(49, 72, 200, .10);
+  --brand-fg: #FFFFFF;
+
+  --ok: #14866A;
+  --ok-soft: rgba(20, 134, 106, .11);
+  --warn: #B7791F;
+  --warn-soft: rgba(183, 121, 31, .13);
+  --danger: #C8382B;
+  --danger-soft: rgba(200, 56, 43, .10);
+  --neutral-soft: rgba(107, 114, 128, .12);
+
+  /* 图表分类色（按顺序取用，最多 8 个系列） */
+  --chart-1: #3148C8;
+  --chart-2: #14866A;
+  --chart-3: #B7791F;
+  --chart-4: #8A4FC7;
+  --chart-5: #1F8FB3;
+  --chart-6: #C8382B;
+  --chart-7: #6B7A2E;
+  --chart-8: #9AA1AD;
+
+  --shadow-pop: 0 8px 28px rgba(23, 26, 33, .12), 0 1px 3px rgba(23, 26, 33, .08);
+  --scrim: rgba(18, 21, 27, .38);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #12151B;
+  --surface: #1A1E26;
+  --surface-2: #20242D;
+  --surface-hover: #252A34;
+  --border: #2B303B;
+  --border-soft: #242833;
+  --border-strong: #3A404D;
+
+  --fg: #E6E9EF;
+  --fg-2: #BCC2CD;
+  --fg-muted: #8D95A3;
+  --fg-faint: #636B78;
+
+  --brand: #7D8FFF;
+  --brand-hover: #98A6FF;
+  --brand-soft: rgba(125, 143, 255, .14);
+  --brand-fg: #0E1230;
+
+  --ok: #3CC497;
+  --ok-soft: rgba(60, 196, 151, .14);
+  --warn: #E0A743;
+  --warn-soft: rgba(224, 167, 67, .15);
+  --danger: #F0675A;
+  --danger-soft: rgba(240, 103, 90, .14);
+  --neutral-soft: rgba(141, 149, 163, .16);
+
+  --chart-1: #7D8FFF;
+  --chart-2: #3CC497;
+  --chart-3: #E0A743;
+  --chart-4: #B98AF0;
+  --chart-5: #4FB8DA;
+  --chart-6: #F0675A;
+  --chart-7: #A8B65A;
+  --chart-8: #636B78;
+
+  --shadow-pop: 0 10px 32px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
+  --scrim: rgba(0, 0, 0, .55);
+}
+
+:root {
+  --font-sans: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "MiSans",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --fs-display: 40px; --lh-display: 44px;
+  --fs-h1: 22px;      --lh-h1: 30px;
+  --fs-h2: 15px;      --lh-h2: 22px;
+  --fs-stat: 26px;    --lh-stat: 32px;
+  --fs-body: 14px;    --lh-body: 22px;
+  --fs-small: 12px;   --lh-small: 18px;
+  --fs-tiny: 11px;    --lh-tiny: 16px;
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px;
+  --sp-6: 24px; --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
+
+  --r-card: 10px;
+  --r-ctl: 7px;
+  --r-chip: 5px;
+
+  --side-w: 224px;
+  --side-w-collapsed: 64px;
+  --topbar-h: 56px;
+  --content-max: 1440px;
+
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --t-fast: 120ms;
+  --t-base: 160ms;
+  --t-slow: 200ms;
+}
+
+html { font-family: var(--font-sans); font-size: var(--fs-body); line-height: var(--lh-body);
+  background: var(--bg); color: var(--fg); -webkit-font-smoothing: antialiased; scrollbar-gutter: stable; }
+.tnum, td, .stat-value { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); font-size: 12.5px; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: var(--r-ctl); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0ms !important; transition-duration: 0ms !important; }
+}
