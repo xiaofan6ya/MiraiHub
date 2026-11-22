@@ -998,12 +998,67 @@ def _cmd_generate(cmd: str, mac: str) -> str:
     return value
 
 
+#: 进程内生成的开关：直接调用 qimei_generate，省掉每次 spawn 子进程 + 重新
+#: 导入 httpx/密码学的开销（实测 7~12 s -> 0.3~1.4 s）。
+INPROCESS_ENV = "QIMEI_GEN_INPROCESS"
+
+
+def _inprocess_generate(mac: str) -> str:
+    """在独立线程里跑 qimei_generate.generate()，不 spawn 子进程。
+
+    生成器是 async 的，而分配可能正发生在事件循环线程里，所以用一次性线程跑
+    自己的 loop —— 直接 asyncio.run 会撞上已有 loop。线程带 daemon，超时后
+    调用方拿到 QimeiGenError，不会把分配卡死。
+    """
+    if (os.environ.get("QIMEI_PYTHON_GENERATOR_ENABLED") or "").strip() != "1":
+        raise QimeiGenError("进程内生成需要 QIMEI_PYTHON_GENERATOR_ENABLED=1")
+    config_path = (os.environ.get("QIMEI_PYTHON_GENERATOR_CONFIG") or "").strip()
+    if not config_path:
+        raise QimeiGenError("进程内生成需要 QIMEI_PYTHON_GENERATOR_CONFIG 指向配置文件")
+    try:
+        from . import qimei_generate as generator
+        config = generator.load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        raise QimeiGenError("进程内生成器不可用：%s" % type(exc).__name__) from exc
+
+    outcome: dict = {}
+
+    def worker() -> None:
+        import asyncio
+
+        async def once():
+            import httpx as _httpx
+            async with _httpx.AsyncClient(trust_env=False) as client:
+                return await generator.generate(mac, config, client=client)
+
+        try:
+            outcome["value"] = asyncio.run(once())
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    timeout = _gen_timeout()
+    thread = threading.Thread(target=worker, name="qimei-inprocess", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise QimeiGenError("进程内生成超时（>%.0fs）" % timeout)
+    error = outcome.get("error")
+    if error is not None:
+        raise QimeiGenError("进程内生成失败：%s" % type(error).__name__)
+    value = normalize_qimei(outcome.get("value"))
+    if not QIMEI_RE.match(value):
+        raise QimeiGenError("进程内生成的 qimei36 形态不合法：%r" % value)
+    return value
+
+
 def generate_real_qimei(*, mac: str | None = None) -> str:
-    """走宿主生成器：优先 HTTP 生成服务，其次本机脚本。"""
+    """生成一台设备的真品 qimei36：HTTP 服务 > 进程内生成 > 本机脚本。"""
     mac = mac or random_mac()
     url = (os.environ.get("QIMEI_GEN_URL") or "").strip()
     if url:
         return _http_generate(url, mac)
+    if (os.environ.get(INPROCESS_ENV) or "").strip() == "1":
+        return _inprocess_generate(mac)
     cmd = (os.environ.get("QIMEI_GEN_CMD") or DEFAULT_GEN_CMD).strip()
     if not cmd or not os.path.exists(cmd):
         raise QimeiGenError(

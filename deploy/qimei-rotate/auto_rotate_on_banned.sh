@@ -51,7 +51,17 @@ LOCK=$QIMEI_LOG_DIR/.qimei-autorotate.lock
 SUDO=""
 if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
-[ -x "$ROT" ] || [ "$DRYRUN" = "1" ] || [ -r "$ROT" ] || { echo "[x] 轮换脚本不可执行：$ROT" >&2; exit 2; }
+[ -f "$ROT" ] || { echo "[x] 轮换脚本不存在：$ROT" >&2; exit 2; }
+[ -x "$ROT" ] || echo "[!] 轮换脚本没有 exec 位（$ROT），按 bash \"\$ROT\" 调用，继续" >&2
+
+# 数值参数会被拼进容器内 python（timedelta(minutes=$WINDOW_MIN) / cut -f1-$WALLET_TRIES），
+# 非数字不是「跑不对」而是语法错；在这里一次性拦掉。
+for _num in "$WINDOW_MIN" "$MIN_HITS" "$COOLDOWN" "$POST_WATCH" "$WALLET_TRIES"; do
+  case "$_num" in
+    ''|*[!0-9]*) echo "[x] 数值参数含非数字：'$_num'（检查 QIMEI_WINDOW_MIN / QIMEI_MIN_HITS / QIMEI_COOLDOWN_SEC / QIMEI_POST_WATCH_SEC / QIMEI_WALLET_TRIES）" >&2
+                 exit 2 ;;
+  esac
+done
 mkdir -p "$QIMEI_LOG_DIR" 2>/dev/null || true
 [ -w "$QIMEI_LOG_DIR" ] || { echo "[x] 日志目录不可写：$QIMEI_LOG_DIR" >&2; exit 2; }
 

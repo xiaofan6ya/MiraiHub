@@ -13,6 +13,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -115,6 +116,82 @@ class StickySelect(unittest.TestCase):
         marvis_gateway._bind_sticky(KEY, None)
         marvis_gateway._bind_sticky("", self.accounts["u2"])
         self.assertIsNone(POOL.sticky.resolve(KEY, {"u0", "u1", "u2"}))
+
+
+class StreamAttemptBindsSession(unittest.TestCase):
+    """流式请求也必须建立会话亲和绑定。
+
+    回归：`_bind_sticky` 曾经只在非流式分支调用，流式分支在
+    `open_chat_stream()` 之后直接 `return`，于是**每一次 SSE 请求都是
+    sticky miss** —— 同一段对话在号池里逐请求轮换账号。此时 agent 类客户端
+    （全程流式）永远享受不到亲和，而只用非流式验证的测试完全看不到这个问题。
+    """
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.db = Session(self.engine)
+        self.db.add_all([
+            Account(platform="marvis", uid=uid, name=uid, auth_json="{}",
+                    status="active", balance_remain=10)
+            for uid in ("u0", "u1", "u2")
+        ])
+        self.db.commit()
+        POOL.sticky = StickyRouter()
+
+    def tearDown(self):
+        self.db.close()
+        POOL.sticky = StickyRouter()
+
+    def test_stream_path_binds_sticky(self):
+        body = {"model": "main-auto",
+                "messages": [{"role": "user", "content": "一段固定的对话"}]}
+        sticky_key = marvis_gateway._sticky_key_for(body)
+        self.assertTrue(sticky_key, "首条 user 文本相同 → 必须算得出会话键")
+
+        picked = []
+
+        def fake_stream(data, realm, payload, *, account_id=0):
+            picked.append(account_id)
+            return object()
+
+        with mock.patch.object(marvis_gateway.marvis_accounts, "ensure_token",
+                               lambda db, account: {}), \
+             mock.patch.object(marvis_gateway.client, "open_chat_stream",
+                               fake_stream), \
+             mock.patch.object(marvis_gateway, "risk_backoff_remaining",
+                               lambda: 0):
+            marvis_gateway._attempt(self.db, None, None, dict(body), "", stream=True)
+
+        self.assertEqual(len(picked), 1, "流式只发一次上游")
+        used = self.db.get(Account, picked[0])
+        self.assertIsNotNone(used)
+        self.assertEqual(
+            POOL.sticky.resolve(sticky_key, {"u0", "u1", "u2"}), used.uid,
+            "流式成功后必须把会话绑到刚成功的账号上")
+
+    def test_stream_bind_is_not_shared_across_sessions(self):
+        """不同对话绑不同号：不能因为都走流式就退化成全局单号。"""
+        def stream_body(text):
+            return {"model": "main-auto",
+                    "messages": [{"role": "user", "content": text}]}
+
+        def run(b):
+            with mock.patch.object(marvis_gateway.marvis_accounts, "ensure_token",
+                                   lambda db, account: {}), \
+                 mock.patch.object(marvis_gateway.client, "open_chat_stream",
+                                   lambda data, realm, payload, *, account_id=0: object()), \
+                 mock.patch.object(marvis_gateway, "risk_backoff_remaining",
+                                   lambda: 0):
+                marvis_gateway._attempt(self.db, None, None, dict(b), "", stream=True)
+
+        run(stream_body("对话甲"))
+        run(stream_body("对话乙"))
+        ka = marvis_gateway._sticky_key_for(stream_body("对话甲"))
+        kb = marvis_gateway._sticky_key_for(stream_body("对话乙"))
+        self.assertNotEqual(ka, kb)
+        self.assertIsNotNone(POOL.sticky.resolve(ka, {"u0", "u1", "u2"}))
+        self.assertIsNotNone(POOL.sticky.resolve(kb, {"u0", "u1", "u2"}))
 
 
 if __name__ == "__main__":

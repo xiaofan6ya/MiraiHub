@@ -284,6 +284,27 @@ class QimeiAssignTest(unittest.TestCase):
                 self.assertEqual(self._snapshot(directory), before)
 
 
+    def test_inprocess_generator_requires_switch_and_config(self):
+        mac = "02:11:22:33:44:55"
+        with patch.dict(os.environ, {qa.INPROCESS_ENV: "1"}):
+            with self.assertRaises(qa.QimeiGenError) as ctx:
+                qa.generate_real_qimei(mac=mac)
+        self.assertIn("QIMEI_PYTHON_GENERATOR_ENABLED", str(ctx.exception))
+        with patch.dict(os.environ, {qa.INPROCESS_ENV: "1",
+                                     "QIMEI_PYTHON_GENERATOR_ENABLED": "1"}):
+            with self.assertRaises(qa.QimeiGenError) as ctx2:
+                qa.generate_real_qimei(mac=mac)
+        self.assertIn("QIMEI_PYTHON_GENERATOR_CONFIG", str(ctx2.exception))
+
+    def test_inprocess_generator_fails_before_the_command_path(self):
+        """开关打开时必须在「找不到命令」之前就报配置问题，不能回落到子进程。"""
+        with patch.dict(os.environ, {qa.INPROCESS_ENV: "1",
+                                     "QIMEI_PYTHON_GENERATOR_ENABLED": "1",
+                                     "QIMEI_PYTHON_GENERATOR_CONFIG": str(self.dir / "missing.json")}):
+            with self.assertRaises(qa.QimeiGenError) as ctx:
+                qa.generate_real_qimei(mac="02:11:22:33:44:55")
+        self.assertIn("进程内生成器不可用", str(ctx.exception))
+
     def test_owner_limit_only_accepts_one_or_two(self):
         os.environ.pop(qa.OWNER_LIMIT_ENV, None)
         self.assertEqual(qa.owner_limit(), qa.MAX_OWNERS_PER_QIMEI)
