@@ -1,0 +1,866 @@
+{
+  "persistent_regression_fixture": true,
+  "scope": "native body serializer/writer only, with explicit post-Windows-conversion bytes",
+  "sdk_build": "Marvis 1.60.3400.35 win32-native/qimei.dll",
+  "sdk_dll_sha256": "5b284a088f848801c58003cfad742df5d47737f7619da44fc6000632464f10f4",
+  "cpu_emulator": "Unicorn 2.1.4 x86_64",
+  "native_start_rva": "0x41b8d",
+  "native_stop": "native ret to synthetic sentinel",
+  "native_ranges": [
+    [
+      "0x41b8d",
+      "0x41cdd"
+    ],
+    [
+      "0x40f94",
+      "0x40f9b"
+    ],
+    [
+      "0x4100a",
+      "0x41066"
+    ],
+    [
+      "0x41066",
+      "0x410b7"
+    ],
+    [
+      "0x41116",
+      "0x41127"
+    ],
+    [
+      "0x41128",
+      "0x41180"
+    ],
+    [
+      "0x41180",
+      "0x411ba"
+    ]
+  ],
+  "native_serializer_writer_instructions": 48525,
+  "runtime_hooks": {
+    "0x4390": "string_data",
+    "0x43ec": "string_data",
+    "0x42ce": "string_assign_pointer_length",
+    "0x5792": "string_destruct",
+    "0x1a0a": "string_append",
+    "0xb73b0": "bounded_emulated_strlen",
+    "0x612a": "string_append_one_byte",
+    "0xb5fa0": "security_cookie_check",
+    "0x7b082": "fixture_post_windows_conversion_bytes",
+    "0x7ad9b": "fixture_int32_box_value"
+  },
+  "limitations": [
+    "7B082 is bypassed: fixture values are post-Windows-ACP-to-UTF8-conversion bytes, not asserted original Windows strings",
+    "ff80 is an opaque post-conversion byte stress vector; this does not prove real Windows conversion can produce it",
+    "box pointers and int32 values are explicit synthetic semantic hooks; no real boxed SDK allocator is invoked",
+    "initial empty bytes are deliberately represented as null slots; hardware/profile builder behavior is not executed",
+    "only kinds1/4 and documented profile slots are tested; holes31/52 remain absent",
+    "no Python encode_device_payload candidate implementation or generated expected output is used"
+  ],
+  "vectors": [
+    {
+      "name": "all_slots_absent",
+      "fields": {},
+      "types": {},
+      "native_body_hex": ""
+    },
+    {
+      "name": "initial_empty_bytes_omit",
+      "fields": {
+        "57": "",
+        "2": "",
+        "32": ""
+      },
+      "types": {
+        "57": "post_conversion_bytes",
+        "2": "post_conversion_bytes",
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": ""
+    },
+    {
+      "name": "wire_2_ascii",
+      "fields": {
+        "2": "78"
+      },
+      "types": {
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "120178"
+    },
+    {
+      "name": "wire_32_ascii",
+      "fields": {
+        "32": "78"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "82020178"
+    },
+    {
+      "name": "wire_57_ascii",
+      "fields": {
+        "57": "78"
+      },
+      "types": {
+        "57": "post_conversion_bytes"
+      },
+      "native_body_hex": "ca030178"
+    },
+    {
+      "name": "wire_2_leading_nul",
+      "fields": {
+        "2": "0078"
+      },
+      "types": {
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "1200"
+    },
+    {
+      "name": "wire_32_leading_nul",
+      "fields": {
+        "32": "0078"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "820200"
+    },
+    {
+      "name": "wire_57_leading_nul",
+      "fields": {
+        "57": "0078"
+      },
+      "types": {
+        "57": "post_conversion_bytes"
+      },
+      "native_body_hex": "ca0300"
+    },
+    {
+      "name": "wire_2_middle_nul",
+      "fields": {
+        "2": "610062"
+      },
+      "types": {
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "120161"
+    },
+    {
+      "name": "wire_32_middle_nul",
+      "fields": {
+        "32": "610062"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "82020161"
+    },
+    {
+      "name": "wire_57_middle_nul",
+      "fields": {
+        "57": "610062"
+      },
+      "types": {
+        "57": "post_conversion_bytes"
+      },
+      "native_body_hex": "ca030161"
+    },
+    {
+      "name": "wire_2_opaque_high_bytes",
+      "fields": {
+        "2": "ff80"
+      },
+      "types": {
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "1202ff80"
+    },
+    {
+      "name": "wire_32_opaque_high_bytes",
+      "fields": {
+        "32": "ff80"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "820202ff80"
+    },
+    {
+      "name": "wire_57_opaque_high_bytes",
+      "fields": {
+        "57": "ff80"
+      },
+      "types": {
+        "57": "post_conversion_bytes"
+      },
+      "native_body_hex": "ca0302ff80"
+    },
+    {
+      "name": "wire_32_length_127",
+      "fields": {
+        "32": "78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "82027f78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "name": "wire_32_length_128",
+      "fields": {
+        "32": "7878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "820280017878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "name": "wire_32_length_255",
+      "fields": {
+        "32": "787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+      },
+      "types": {
+        "32": "post_conversion_bytes"
+      },
+      "native_body_hex": "8202ff01787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "name": "mixed_reverse_mapping_order",
+      "fields": {
+        "57": "5a",
+        "53": 128,
+        "49": 0,
+        "32": "ff80",
+        "2": "610062"
+      },
+      "types": {
+        "57": "post_conversion_bytes",
+        "53": "int32",
+        "49": "int32",
+        "32": "post_conversion_bytes",
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "120161820202ff80880300a8038001ca03015a"
+    },
+    {
+      "name": "wire_49_uint32_0",
+      "fields": {
+        "49": 0
+      },
+      "types": {
+        "49": "int32"
+      },
+      "native_body_hex": "880300"
+    },
+    {
+      "name": "wire_49_uint32_1",
+      "fields": {
+        "49": 1
+      },
+      "types": {
+        "49": "int32"
+      },
+      "native_body_hex": "880301"
+    },
+    {
+      "name": "wire_49_uint32_127",
+      "fields": {
+        "49": 127
+      },
+      "types": {
+        "49": "int32"
+      },
+      "native_body_hex": "88037f"
+    },
+    {
+      "name": "wire_49_uint32_128",
+      "fields": {
+        "49": 128
+      },
+      "types": {
+        "49": "int32"
+      },
+      "native_body_hex": "88038001"
+    },
+    {
+      "name": "wire_49_uint32_4294967295",
+      "fields": {
+        "49": 4294967295
+      },
+      "types": {
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0f"
+    },
+    {
+      "name": "wire_53_uint32_0",
+      "fields": {
+        "53": 0
+      },
+      "types": {
+        "53": "int32"
+      },
+      "native_body_hex": "a80300"
+    },
+    {
+      "name": "wire_53_uint32_1",
+      "fields": {
+        "53": 1
+      },
+      "types": {
+        "53": "int32"
+      },
+      "native_body_hex": "a80301"
+    },
+    {
+      "name": "wire_53_uint32_127",
+      "fields": {
+        "53": 127
+      },
+      "types": {
+        "53": "int32"
+      },
+      "native_body_hex": "a8037f"
+    },
+    {
+      "name": "wire_53_uint32_128",
+      "fields": {
+        "53": 128
+      },
+      "types": {
+        "53": "int32"
+      },
+      "native_body_hex": "a8038001"
+    },
+    {
+      "name": "wire_53_uint32_4294967295",
+      "fields": {
+        "53": 4294967295
+      },
+      "types": {
+        "53": "int32"
+      },
+      "native_body_hex": "a803ffffffff0f"
+    },
+    {
+      "name": "both_ints_0_0",
+      "fields": {
+        "53": 0,
+        "49": 0
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880300a80300"
+    },
+    {
+      "name": "both_ints_0_1",
+      "fields": {
+        "53": 1,
+        "49": 0
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880300a80301"
+    },
+    {
+      "name": "both_ints_0_127",
+      "fields": {
+        "53": 127,
+        "49": 0
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880300a8037f"
+    },
+    {
+      "name": "both_ints_0_128",
+      "fields": {
+        "53": 128,
+        "49": 0
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880300a8038001"
+    },
+    {
+      "name": "both_ints_0_4294967295",
+      "fields": {
+        "53": 4294967295,
+        "49": 0
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880300a803ffffffff0f"
+    },
+    {
+      "name": "both_ints_1_0",
+      "fields": {
+        "53": 0,
+        "49": 1
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880301a80300"
+    },
+    {
+      "name": "both_ints_1_1",
+      "fields": {
+        "53": 1,
+        "49": 1
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880301a80301"
+    },
+    {
+      "name": "both_ints_1_127",
+      "fields": {
+        "53": 127,
+        "49": 1
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880301a8037f"
+    },
+    {
+      "name": "both_ints_1_128",
+      "fields": {
+        "53": 128,
+        "49": 1
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880301a8038001"
+    },
+    {
+      "name": "both_ints_1_4294967295",
+      "fields": {
+        "53": 4294967295,
+        "49": 1
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "880301a803ffffffff0f"
+    },
+    {
+      "name": "both_ints_127_0",
+      "fields": {
+        "53": 0,
+        "49": 127
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88037fa80300"
+    },
+    {
+      "name": "both_ints_127_1",
+      "fields": {
+        "53": 1,
+        "49": 127
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88037fa80301"
+    },
+    {
+      "name": "both_ints_127_127",
+      "fields": {
+        "53": 127,
+        "49": 127
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88037fa8037f"
+    },
+    {
+      "name": "both_ints_127_128",
+      "fields": {
+        "53": 128,
+        "49": 127
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88037fa8038001"
+    },
+    {
+      "name": "both_ints_127_4294967295",
+      "fields": {
+        "53": 4294967295,
+        "49": 127
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88037fa803ffffffff0f"
+    },
+    {
+      "name": "both_ints_128_0",
+      "fields": {
+        "53": 0,
+        "49": 128
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88038001a80300"
+    },
+    {
+      "name": "both_ints_128_1",
+      "fields": {
+        "53": 1,
+        "49": 128
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88038001a80301"
+    },
+    {
+      "name": "both_ints_128_127",
+      "fields": {
+        "53": 127,
+        "49": 128
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88038001a8037f"
+    },
+    {
+      "name": "both_ints_128_128",
+      "fields": {
+        "53": 128,
+        "49": 128
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88038001a8038001"
+    },
+    {
+      "name": "both_ints_128_4294967295",
+      "fields": {
+        "53": 4294967295,
+        "49": 128
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "88038001a803ffffffff0f"
+    },
+    {
+      "name": "both_ints_4294967295_0",
+      "fields": {
+        "53": 0,
+        "49": 4294967295
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0fa80300"
+    },
+    {
+      "name": "both_ints_4294967295_1",
+      "fields": {
+        "53": 1,
+        "49": 4294967295
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0fa80301"
+    },
+    {
+      "name": "both_ints_4294967295_127",
+      "fields": {
+        "53": 127,
+        "49": 4294967295
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0fa8037f"
+    },
+    {
+      "name": "both_ints_4294967295_128",
+      "fields": {
+        "53": 128,
+        "49": 4294967295
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0fa8038001"
+    },
+    {
+      "name": "both_ints_4294967295_4294967295",
+      "fields": {
+        "53": 4294967295,
+        "49": 4294967295
+      },
+      "types": {
+        "53": "int32",
+        "49": "int32"
+      },
+      "native_body_hex": "8803ffffffff0fa803ffffffff0f"
+    },
+    {
+      "name": "all_known_fields_synthetic_profile_reverse_order",
+      "fields": {
+        "57": "73796e7468657469632d736c6f742d3537",
+        "56": "0073796e746865746963",
+        "55": "",
+        "54": "73796e7468657469632d736c6f742d3534",
+        "53": 4294967295,
+        "51": "73796e7468657469632d736c6f742d3531",
+        "49": 0,
+        "48": "73796e7468657469632d736c6f742d3438",
+        "47": "73796e7468657469632d736c6f742d3437",
+        "46": "73796e7468657469632d736c6f742d3436",
+        "45": "73796e7468657469632d736c6f742d3435",
+        "44": "",
+        "43": "73796e7468657469632d736c6f742d3433",
+        "42": "0073796e746865746963",
+        "41": "73796e7468657469632d736c6f742d3431",
+        "40": "73796e7468657469632d736c6f742d3430",
+        "39": "73796e7468657469632d736c6f742d3339",
+        "38": "73796e7468657469632d736c6f742d3338",
+        "37": "73796e7468657469632d736c6f742d3337",
+        "36": "73796e7468657469632d736c6f742d3336",
+        "35": "0073796e746865746963",
+        "34": "73796e7468657469632d736c6f742d3334",
+        "33": "",
+        "32": "73796e7468657469632d736c6f742d3332",
+        "30": "73796e7468657469632d736c6f742d3330",
+        "29": "73796e7468657469632d736c6f742d3239",
+        "28": "0073796e746865746963",
+        "27": "73796e7468657469632d736c6f742d3237",
+        "26": "73796e7468657469632d736c6f742d3236",
+        "25": "73796e7468657469632d736c6f742d3235",
+        "24": "73796e7468657469632d736c6f742d3234",
+        "23": "73796e7468657469632d736c6f742d3233",
+        "22": "",
+        "21": "0073796e746865746963",
+        "20": "73796e7468657469632d736c6f742d3230",
+        "19": "73796e7468657469632d736c6f742d3139",
+        "18": "73796e7468657469632d736c6f742d3138",
+        "17": "73796e7468657469632d736c6f742d3137",
+        "16": "73796e7468657469632d736c6f742d3136",
+        "15": "73796e7468657469632d736c6f742d3135",
+        "14": "0073796e746865746963",
+        "13": "73796e7468657469632d736c6f742d3133",
+        "12": "73796e7468657469632d736c6f742d3132",
+        "11": "",
+        "10": "73796e7468657469632d736c6f742d3130",
+        "9": "73796e7468657469632d736c6f742d39",
+        "8": "73796e7468657469632d736c6f742d38",
+        "7": "0073796e746865746963",
+        "6": "73796e7468657469632d736c6f742d36",
+        "5": "73796e7468657469632d736c6f742d35",
+        "4": "73796e7468657469632d736c6f742d34",
+        "3": "73796e7468657469632d736c6f742d33",
+        "2": "73796e7468657469632d736c6f742d32"
+      },
+      "types": {
+        "57": "post_conversion_bytes",
+        "56": "post_conversion_bytes",
+        "55": "post_conversion_bytes",
+        "54": "post_conversion_bytes",
+        "53": "int32",
+        "51": "post_conversion_bytes",
+        "49": "int32",
+        "48": "post_conversion_bytes",
+        "47": "post_conversion_bytes",
+        "46": "post_conversion_bytes",
+        "45": "post_conversion_bytes",
+        "44": "post_conversion_bytes",
+        "43": "post_conversion_bytes",
+        "42": "post_conversion_bytes",
+        "41": "post_conversion_bytes",
+        "40": "post_conversion_bytes",
+        "39": "post_conversion_bytes",
+        "38": "post_conversion_bytes",
+        "37": "post_conversion_bytes",
+        "36": "post_conversion_bytes",
+        "35": "post_conversion_bytes",
+        "34": "post_conversion_bytes",
+        "33": "post_conversion_bytes",
+        "32": "post_conversion_bytes",
+        "30": "post_conversion_bytes",
+        "29": "post_conversion_bytes",
+        "28": "post_conversion_bytes",
+        "27": "post_conversion_bytes",
+        "26": "post_conversion_bytes",
+        "25": "post_conversion_bytes",
+        "24": "post_conversion_bytes",
+        "23": "post_conversion_bytes",
+        "22": "post_conversion_bytes",
+        "21": "post_conversion_bytes",
+        "20": "post_conversion_bytes",
+        "19": "post_conversion_bytes",
+        "18": "post_conversion_bytes",
+        "17": "post_conversion_bytes",
+        "16": "post_conversion_bytes",
+        "15": "post_conversion_bytes",
+        "14": "post_conversion_bytes",
+        "13": "post_conversion_bytes",
+        "12": "post_conversion_bytes",
+        "11": "post_conversion_bytes",
+        "10": "post_conversion_bytes",
+        "9": "post_conversion_bytes",
+        "8": "post_conversion_bytes",
+        "7": "post_conversion_bytes",
+        "6": "post_conversion_bytes",
+        "5": "post_conversion_bytes",
+        "4": "post_conversion_bytes",
+        "3": "post_conversion_bytes",
+        "2": "post_conversion_bytes"
+      },
+      "native_body_hex": "121073796e7468657469632d736c6f742d321a1073796e7468657469632d736c6f742d33221073796e7468657469632d736c6f742d342a1073796e7468657469632d736c6f742d35321073796e7468657469632d736c6f742d363a00421073796e7468657469632d736c6f742d384a1073796e7468657469632d736c6f742d39521173796e7468657469632d736c6f742d3130621173796e7468657469632d736c6f742d31326a1173796e7468657469632d736c6f742d313372007a1173796e7468657469632d736c6f742d313582011173796e7468657469632d736c6f742d31368a011173796e7468657469632d736c6f742d313792011173796e7468657469632d736c6f742d31389a011173796e7468657469632d736c6f742d3139a2011173796e7468657469632d736c6f742d3230aa0100ba011173796e7468657469632d736c6f742d3233c2011173796e7468657469632d736c6f742d3234ca011173796e7468657469632d736c6f742d3235d2011173796e7468657469632d736c6f742d3236da011173796e7468657469632d736c6f742d3237e20100ea011173796e7468657469632d736c6f742d3239f2011173796e7468657469632d736c6f742d333082021173796e7468657469632d736c6f742d333292021173796e7468657469632d736c6f742d33349a0200a2021173796e7468657469632d736c6f742d3336aa021173796e7468657469632d736c6f742d3337b2021173796e7468657469632d736c6f742d3338ba021173796e7468657469632d736c6f742d3339c2021173796e7468657469632d736c6f742d3430ca021173796e7468657469632d736c6f742d3431d20200da021173796e7468657469632d736c6f742d3433ea021173796e7468657469632d736c6f742d3435f2021173796e7468657469632d736c6f742d3436fa021173796e7468657469632d736c6f742d343782031173796e7468657469632d736c6f742d34388803009a031173796e7468657469632d736c6f742d3531a803ffffffff0fb2031173796e7468657469632d736c6f742d3534c20300ca031173796e7468657469632d736c6f742d3537"
+    },
+    {
+      "name": "wire_1_synthetic_pid_text",
+      "fields": {
+        "1": "31323334"
+      },
+      "types": {
+        "1": "post_conversion_bytes"
+      },
+      "native_body_hex": "0a0431323334"
+    },
+    {
+      "name": "wire_1_leading_nul",
+      "fields": {
+        "1": "00706964"
+      },
+      "types": {
+        "1": "post_conversion_bytes"
+      },
+      "native_body_hex": "0a00"
+    },
+    {
+      "name": "wire_1_initial_empty_omit",
+      "fields": {
+        "1": ""
+      },
+      "types": {
+        "1": "post_conversion_bytes"
+      },
+      "native_body_hex": ""
+    },
+    {
+      "name": "wire_50_synthetic_extras_json",
+      "fields": {
+        "50": "7b2273796e746865746963223a2278227d"
+      },
+      "types": {
+        "50": "post_conversion_bytes"
+      },
+      "native_body_hex": "9203117b2273796e746865746963223a2278227d"
+    },
+    {
+      "name": "wire_50_leading_nul",
+      "fields": {
+        "50": "00657874726173"
+      },
+      "types": {
+        "50": "post_conversion_bytes"
+      },
+      "native_body_hex": "920300"
+    },
+    {
+      "name": "wire_50_initial_empty_omit",
+      "fields": {
+        "50": ""
+      },
+      "types": {
+        "50": "post_conversion_bytes"
+      },
+      "native_body_hex": ""
+    }
+  ],
+  "wire_1_validation": {
+    "persistent_regression_fixture": true,
+    "source": "Builder 921F6 retains output array RDX as R14 then RBX; configuration gate index 1 at 92B6F..92B86; GetCurrentProcessId import BCB80 at 92D96; signed32 decimal setter 41707 at 92DA1 writes output slot +0 as kind1 text.",
+    "serializer": "Original 41B8D..41CDD enumerates kind1 slot index 0 and native writer emits wire tag 0A; no target collector or actual host PID runs.",
+    "runtime_fixture_setup": "Existing reviewed DeviceOracle generic runtime; only in-memory obsolete HOLES validation removes 1, with no oracle source edit. Values are explicit post-Windows-conversion bytes.",
+    "native_serializer_writer_instructions": 1920,
+    "cases": [
+      {
+        "name": "wire_1_synthetic_pid_text",
+        "native_serializer_writer_instructions": 682
+      },
+      {
+        "name": "wire_1_leading_nul",
+        "native_serializer_writer_instructions": 682
+      },
+      {
+        "name": "wire_1_initial_empty_omit",
+        "native_serializer_writer_instructions": 556
+      }
+    ]
+  },
+  "wire_50_validation": {
+    "persistent_regression_fixture": true,
+    "source": "Builder 93A7B..93A86 serializes the extra map via 315C; 93A8B adds 310 to output array RBX, and 93A99..93A9C passes the slot to 41668 kind1 text setter. Wire number is slot index 49 + 1 = 50.",
+    "serializer": "Original 41B8D..41CDD serializes explicit synthetic post-conversion kind1 slot 49 using native varint tag 9203; no target collector or SDK lifecycle runs.",
+    "runtime_fixture_setup": "Existing reviewed DeviceOracle generic runtime; only in-memory obsolete HOLES validation removes 50, with no oracle source edit.",
+    "native_serializer_writer_instructions": 1924,
+    "cases": [
+      {
+        "name": "wire_50_synthetic_extras_json",
+        "native_serializer_writer_instructions": 684
+      },
+      {
+        "name": "wire_50_leading_nul",
+        "native_serializer_writer_instructions": 684
+      },
+      {
+        "name": "wire_50_initial_empty_omit",
+        "native_serializer_writer_instructions": 556
+      }
+    ]
+  }
+}

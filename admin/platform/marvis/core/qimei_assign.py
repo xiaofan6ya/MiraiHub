@@ -7,7 +7,8 @@
   这是「一台设备挂几个号」的唯一权威台账。
 
 两个文件都放在本模块同目录（可用 QIMEI_STATE_DIR / QIMEI_TABLE_PATH /
-QIMEI_POOL_PATH 覆盖，测试用临时目录）。
+QIMEI_POOL_PATH 覆盖，测试用临时目录）。显式设置 QIMEI_SNAPSHOT_PATH 时，
+改用一个带 revision 的权威快照；不能同时设置旧表/池文件覆盖路径。
 
 硬约束
 ------
@@ -26,14 +27,13 @@ validate_or_raise()，所以带病状态会让容器起不来，而不是带病�
 5. 派生（source=derived）只在显式 allow_derived=True / CLI --allow-derived
    时作为救灾出口，且不落表、只打 WARNING。
 
-原子写
-------
-同一目录 tmp + os.replace，indent=2, sort_keys=True，权限 0600。
-容器部署时这两个 JSON 是单文件 bind mount，rename 覆盖挂载点会 EBUSY，
-此时退回「就地写同一个 inode」（tmp 先写全并 fsync，再回填 + ftruncate）；
-就地写还保证宿主与容器始终指向同一个 inode，不会因为换 inode 读到旧表。
-先写 pool（先占名额）再写 table（再让读路径生效）；两步之间崩溃最多留下
-「名额已占但表未挂」，加载时会把 table 里的 uid 合并回 pool，容量只会更保守。
+状态持久化
+----------
+QIMEI_SNAPSHOT_PATH 模式将表/池一起写入同目录临时文件并原子替换，序列化
+全部写事务，校验 revision 拒绝旧快照覆盖，读路径不创建锁。必须挂载外部目录；
+单文件挂载导致的替换失败会报错，绝不在此模式下就地覆盖。
+旧双文件模式保留用于兼容和迁移：pool 后 table 的两次写入不是原子事务，
+单文件挂载时的就地覆盖分支也不具备崩溃原子性；迁移前不要把它当作原子快照。
 
 CLI
 ---
@@ -51,8 +51,11 @@ import contextlib
 import datetime as _dt
 import errno
 import hashlib
+import importlib.util
+import itertools
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -64,7 +67,7 @@ import sys
 import threading
 from pathlib import Path
 
-try:  # Linux 生产环境；Windows 单测没有 fcntl，退化为进程内锁。
+try:  # 旧双文件模式的 Linux 锁；快照模式由独立后端提供跨平台锁。
     import fcntl  # type: ignore
 except Exception:  # noqa: BLE001
     fcntl = None  # type: ignore
@@ -73,6 +76,7 @@ logger = logging.getLogger("admin.platform.marvis.qimei_assign")
 
 #: 硬约束：一台设备最多挂几个账号。改这个数字之前先看模块 docstring。
 MAX_OWNERS_PER_QIMEI = 2
+MAX_EXPORT_BYTES = 16 * 1024 * 1024
 
 #: qimei36 的合法形态：24 hex 摘要 + '3000' 格式标记 + 8 hex 尾段。
 QIMEI_MARK = "3000"
@@ -92,6 +96,8 @@ STATE_LOCK_NAME = "qimei_state.lock"
 
 _ORM_HOOKS_INSTALLED = False
 _SERVE_LOCK = threading.Lock()
+_REQUEST_STATE_LOCK = threading.Lock()
+_request_state_cache = None
 #: rename 的间接引用：容器里状态文件是单文件 bind mount，rename 会 EBUSY，
 #: 单测用它可以精确模拟那一步失败（不改全局 os.replace）。
 _REPLACE = os.replace
@@ -105,6 +111,10 @@ class QimeiPoolError(QimeiError):
     """池台账不合法（硬约束被破坏）。启动时必须直接失败。"""
 
 
+class QimeiCommitUncertain(QimeiPoolError):
+    """A complete snapshot may be committed; reload before retrying a write."""
+
+
 class QimeiCapacityError(QimeiError):
     """所有真品都满 2 个号，拒绝继续分配。"""
 
@@ -116,15 +126,20 @@ class QimeiGenError(QimeiError):
 class State:
     """table + pool 的内存快照。dirty 表示加载时做过归一化。"""
 
-    __slots__ = ("table", "pool", "dirty", "table_path", "pool_path")
+    __slots__ = ("table", "pool", "dirty", "table_path", "pool_path",
+                 "snapshot_path", "revision", "metadata")
 
     def __init__(self, table: dict, pool: dict, dirty: bool,
-                 table_path: Path, pool_path: Path) -> None:
+                 table_path: Path, pool_path: Path, *, snapshot_path=None,
+                 revision: int = 0, metadata=None) -> None:
         self.table = table
         self.pool = pool
         self.dirty = dirty
         self.table_path = table_path
         self.pool_path = pool_path
+        self.snapshot_path = snapshot_path
+        self.revision = revision
+        self.metadata = metadata or {}
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +214,44 @@ def _pool_path(state_dir=None, pool_path=None) -> Path:
     if env:
         return Path(env).expanduser().resolve()
     return _state_dir(state_dir) / "qimei_pool.json"
+
+
+def _snapshot_path(*, table_path=None, pool_path=None):
+    """Strict snapshot mode is explicit and cannot mix legacy file overrides."""
+    value = (os.environ.get("QIMEI_SNAPSHOT_PATH") or "").strip()
+    if not value:
+        return None
+    if (table_path or pool_path or
+            (os.environ.get("QIMEI_TABLE_PATH") or "").strip() or
+            (os.environ.get("QIMEI_POOL_PATH") or "").strip()):
+        raise QimeiPoolError("QIMEI_SNAPSHOT_PATH cannot mix legacy file overrides")
+    support = _snapshot_support()
+    try:
+        return support._canonical(value)
+    except support.SnapshotError as exc:
+        raise QimeiPoolError(str(exc)) from exc
+
+
+def _snapshot_support():
+    """Load the standard-library backend for package and standalone CLI use."""
+    if __package__:
+        from . import qimei_snapshot
+        return qimei_snapshot
+    name = "_miraihub_qimei_snapshot"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).with_name("qimei_snapshot.py"))
+        if spec is None or spec.loader is None:
+            raise QimeiPoolError("QIMEI snapshot backend is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(name, None)
+            raise
+    return module
 
 
 def _read_json(path: Path) -> dict:
@@ -277,6 +330,15 @@ def _dump_json(path: Path, data: dict) -> None:
 @contextlib.contextmanager
 def _locked(state_dir: Path):
     """跨进程串行化分配（容器里多线程 / 宿主 CLI 同时跑）。"""
+    snapshot = _snapshot_path()
+    if snapshot is not None:
+        support = _snapshot_support()
+        try:
+            with support.snapshot_lock(snapshot):
+                yield
+        except support.SnapshotError as exc:
+            raise QimeiPoolError(str(exc)) from exc
+        return
     path = state_dir / STATE_LOCK_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
@@ -340,15 +402,96 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
       并把 dirty 置真，下一次写回时落盘。
     - 文件不存在视为空（首次部署时 pool 由 table 迁移出来）。
     """
+    snapshot = _snapshot_path(table_path=table_path, pool_path=pool_path)
+    if snapshot is not None:
+        support = _snapshot_support()
+        try:
+            payload = support.read_snapshot(snapshot)
+        except support.SnapshotError as exc:
+            raise QimeiPoolError(str(exc)) from exc
+        return _normalise_state(
+            payload["table"], payload["pool"], table_path=snapshot,
+            pool_path=snapshot, default_ts=_now(), snapshot_path=snapshot,
+            revision=payload["revision"], metadata=payload.get("metadata"))
     tp = _table_path(state_dir, table_path)
     pp = _pool_path(state_dir, pool_path)
-    default_ts = _mtime_iso(tp) or _now()
-    dirty_flag: list[str] = []
+    return _normalise_state(_read_json(tp), _read_json(pp), table_path=tp,
+                            pool_path=pp, default_ts=_mtime_iso(tp) or _now())
 
-    raw_pool = _read_json(pp)
+
+def _file_version(path: Path, *, missing_ok: bool) -> tuple:
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        if missing_ok:
+            return (path, None)
+        raise
+    # Legacy bind mounts permit in-place writes. On Windows an equal-sized
+    # overwrite can retain all stat fields, so legacy cache keys include bytes.
+    content_digest = None
+    if missing_ok:
+        content_digest = hashlib.sha256(path.read_bytes()).digest()
+    return (path, status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns, content_digest)
+
+
+def _request_state() -> State:
+    """Share validated request state until any source file version changes.
+
+    The returned state is private and read-only to callers. Writers and startup
+    validation use load_state instead, so mutations never affect this cache.
+    Each lookup stats the resolved source paths. Changed files validate again
+    and a failed refresh evicts the previous entry. Optional legacy files may
+    appear or disappear, while an explicit snapshot always remains required.
+    """
+    global _request_state_cache
+    snapshot = _snapshot_path()
+    paths = (snapshot,) if snapshot is not None else (_table_path(), _pool_path())
+    with _REQUEST_STATE_LOCK:
+        try:
+            for _ in range(3):
+                version = tuple(_file_version(path, missing_ok=snapshot is None)
+                                for path in paths)
+                if _request_state_cache is not None:
+                    cached_version, state = _request_state_cache
+                    if version == cached_version:
+                        return state
+                _request_state_cache = None
+                state = load_state()
+                loaded_paths = ((state.snapshot_path,) if state.snapshot_path is not None
+                                else (state.table_path, state.pool_path))
+                after = tuple(_file_version(path, missing_ok=snapshot is None)
+                              for path in paths)
+                if loaded_paths == paths and version == after:
+                    _request_state_cache = (version, state)
+                    return state
+        except OSError:
+            _request_state_cache = None
+            if snapshot is None:
+                return load_state()
+            raise QimeiPoolError("QIMEI snapshot could not be loaded") from None
+        raise QimeiPoolError("QIMEI state changed during request capture")
+
+
+def _normalise_state(raw_table, raw_pool, *, table_path, pool_path, default_ts,
+                     snapshot_path=None, revision=0, metadata=None,
+                     quiet=False) -> State:
+    tp, pp = table_path, pool_path
+    if snapshot_path is not None:
+        quiet = True
+        if any(not isinstance(value, str) or not QIMEI_RE.fullmatch(value)
+               for value in raw_table.values()):
+            raise QimeiPoolError("snapshot table contains an invalid device identity")
+        if any(not QIMEI_RE.fullmatch(key) for key in raw_pool):
+            raise QimeiPoolError("snapshot pool contains an invalid device identity")
+        if any(not isinstance(entry, dict) or
+               ("real" in entry and type(entry["real"]) is not bool)
+               for entry in raw_pool.values()):
+            raise QimeiPoolError("snapshot pool contains invalid metadata types")
+    warning = logger.warning if not quiet else (lambda *_args, **_kwargs: None)
+    dirty_flag: list[str] = []
     #: 先读表：表里**引用到**的值即使形态不合法也必须保留（历史真值就长那样），
     #: 所以 pool 的键过滤要拿它当白名单。读一次两处复用，别读两遍。
-    raw_table = _read_json(tp)
     referenced = {normalize_qimei(value) for value in raw_table.values()
                   if normalize_qimei(value)}
     pool: dict[str, dict] = {}
@@ -361,7 +504,7 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
             # 关键在于**不能把非设备键当成设备**：一台"设备"如果谁都能挑到，
             # 容量账本（2 号/台）就形同虚设，_pick_shareable 会把假设备发出去。
             if not q.startswith("_"):
-                logger.warning("qimei_pool 里的键不是合法 qimei36（已忽略）：%s",
+                warning("qimei_pool 里的键不是合法 qimei36（已忽略）：%s",
                                mask_qimei(q))
             continue
         if q in pool:
@@ -375,7 +518,7 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
         kept = []
         for uid in entry["owners"]:
             if uid in owner_to_q and owner_to_q[uid] != q:
-                logger.warning("qimei_pool 漂移：uid=%s 同时挂在 %s 和 %s，保留前者",
+                warning("qimei_pool 漂移：uid=%s 同时挂在 %s 和 %s，保留前者",
                                mask_uid(uid), mask_qimei(owner_to_q[uid]),
                                mask_qimei(q))
                 dirty_flag.append(q)
@@ -393,12 +536,12 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
         if uid.startswith("_"):
             continue  # 注释键（`_comment` / `_example`），uid 不可能是这种形态
         if uid in table and table[uid] != q:
-            logger.warning("qimei_table 漂移：uid=%s 有多个值，保留字典序靠前的",
+            warning("qimei_table 漂移：uid=%s 有多个值，保留字典序靠前的",
                            mask_uid(uid))
             continue
         table[uid] = q
         if not QIMEI_RE.match(q):
-            logger.warning("qimei_table 里的值形态不合法（仍按真值使用）：uid=%s qimei=%s",
+            warning("qimei_table 里的值形态不合法（仍按真值使用）：uid=%s qimei=%s",
                            mask_uid(uid), mask_qimei(q))
         entry = pool.get(q)
         if entry is None:
@@ -428,7 +571,7 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
         for uid in entry["owners"]:
             target = table.get(uid)
             if target is not None and target != q:
-                logger.warning("qimei_pool 漂移：uid=%s 应从 %s 摘除（表里指向 %s）",
+                warning("qimei_pool 漂移：uid=%s 应从 %s 摘除（表里指向 %s）",
                                mask_uid(uid), mask_qimei(q), mask_qimei(target))
                 dirty_flag.append(q)
                 continue
@@ -440,11 +583,14 @@ def load_state(state_dir=None, *, table_path=None, pool_path=None) -> State:
     for q in sorted(pool):
         for uid in pool[q]["owners"]:
             if uid not in table:
-                logger.warning("qimei_pool 有名额但 qimei_table 缺映射：uid=%s qimei=%s（reconcile 可修）",
+                warning("qimei_pool 有名额但 qimei_table 缺映射：uid=%s qimei=%s（reconcile 可修）",
                                mask_uid(uid), mask_qimei(q))
 
+    if snapshot_path is not None and (table != raw_table or pool != raw_pool):
+        raise QimeiPoolError("QIMEI snapshot is not canonical; review migration")
     state = State(table=table, pool=pool, dirty=bool(dirty_flag),
-                  table_path=tp, pool_path=pp)
+                  table_path=tp, pool_path=pp, snapshot_path=snapshot_path,
+                  revision=revision, metadata=metadata)
     return state
 
 
@@ -457,10 +603,242 @@ def validate_or_raise(state_dir=None) -> State:
 
 
 def save_state(state: State) -> None:
-    """先 pool（占名额）再 table（读路径生效）。"""
+    """快照模式比较 revision 后整体提交；旧模式先 pool 后 table。"""
+    if state.snapshot_path is not None:
+        support = _snapshot_support()
+        _normalise_state(state.table, state.pool, table_path=state.snapshot_path,
+                         pool_path=state.snapshot_path, default_ts=_now(),
+                         snapshot_path=state.snapshot_path)
+        try:
+            payload = support.write_snapshot(
+                state.snapshot_path, table=state.table, pool=state.pool,
+                expected_revision=state.revision, metadata=state.metadata)
+        except support.SnapshotCommitUncertain as exc:
+            raise QimeiCommitUncertain(str(exc)) from exc
+        except support.SnapshotError as exc:
+            raise QimeiPoolError(str(exc)) from exc
+        state.revision = payload["revision"]
+        state.dirty = False
+        return
     _dump_json(state.pool_path, state.pool)
     _dump_json(state.table_path, state.table)
     state.dirty = False
+
+
+def _read_import_object(path: Path) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError("nonfinite number")
+
+    try:
+        with path.open(encoding="utf-8") as stream:
+            value = json.load(stream, object_pairs_hook=unique,
+                              parse_constant=invalid_constant)
+        if not isinstance(value, dict):
+            raise ValueError("object required")
+        return value
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        raise QimeiPoolError("legacy import requires two valid JSON objects") from None
+
+
+def _state_summary(state: State, *, dry_run=False, status="valid") -> dict:
+    return {"ok": True, "status": status, "dry_run": bool(dry_run),
+            "revision": state.revision, "bindings": len(state.table),
+            "devices": len(state.pool)}
+
+
+def migrate_state(source_dir, *, dry_run=False) -> dict:
+    """Import legacy state without generation, source writes or lossy healing."""
+    destination = _snapshot_path()
+    if destination is None:
+        raise QimeiPoolError("migration requires QIMEI_SNAPSHOT_PATH")
+    source = Path(source_dir).expanduser().resolve()
+    tp, pp = source / "qimei_table.json", source / "qimei_pool.json"
+    if destination in (tp, pp):
+        raise QimeiPoolError("snapshot destination cannot replace a legacy source")
+    table_input, pool_input = _read_import_object(tp), _read_import_object(pp)
+    comments = {"table": {}, "pool": {}}
+    table, pool = {}, {}
+    for key, value in table_input.items():
+        if key.startswith("_"):
+            comments["table"][key] = value
+            continue
+        if (not isinstance(value, str) or not normalize_uid(key) or
+                not QIMEI_RE.fullmatch(normalize_qimei(value))):
+            raise QimeiPoolError("legacy table requires manual migration review")
+        uid, qimei = normalize_uid(key), normalize_qimei(value)
+        if uid in table:
+            raise QimeiPoolError("legacy table contains duplicate normalized identities")
+        table[uid] = qimei
+    allowed = {"owners", "real", "source", "created_at", "last_rotated", "last_used_at"}
+    for key, value in pool_input.items():
+        if key.startswith("_"):
+            comments["pool"][key] = value
+            continue
+        qimei = normalize_qimei(key)
+        if (not QIMEI_RE.fullmatch(qimei) or qimei in pool or
+                not isinstance(value, dict) or set(value) - allowed or
+                not isinstance(value.get("owners"), list) or
+                any(not isinstance(uid, str) or not normalize_uid(uid)
+                    for uid in value["owners"])):
+            raise QimeiPoolError("legacy pool requires manual migration review")
+        pool[qimei] = {**value, "owners": [normalize_uid(uid) for uid in value["owners"]]}
+    state = _normalise_state(table, pool, table_path=tp, pool_path=pp,
+                             default_ts=_mtime_iso(tp) or _now(), quiet=True)
+    if state.table != table or set(state.pool) != set(pool):
+        raise QimeiPoolError("migration would change bindings or device records")
+    for qimei, entry in pool.items():
+        if any(type(state.pool[qimei].get(key)) is not type(value) or
+               state.pool[qimei].get(key) != value for key, value in entry.items()):
+            raise QimeiPoolError("migration would change ownership or known metadata")
+    metadata = {"legacy_comments": comments}
+    state.snapshot_path, state.revision, state.metadata = destination, 1, metadata
+    support = _snapshot_support()
+    try:
+        if destination.exists():
+            existing = support.read_snapshot(destination)
+            if (existing["table"] != state.table or existing["pool"] != state.pool or
+                    existing.get("metadata", {}) != metadata):
+                raise QimeiPoolError("snapshot destination conflicts with legacy import")
+            state.revision = existing["revision"]
+            return _state_summary(state, dry_run=dry_run, status="unchanged")
+        if not dry_run:
+            payload = support.write_snapshot(destination, table=state.table,
+                                             pool=state.pool, expected_revision=0,
+                                             metadata=metadata)
+            state.revision = payload["revision"]
+    except support.SnapshotError as exc:
+        raise QimeiPoolError(str(exc)) from exc
+    return _state_summary(state, dry_run=dry_run,
+                          status="ready" if dry_run else "migrated")
+
+
+def _export_destination(value, snapshot: Path) -> Path:
+    if not isinstance(value, (str, Path)) or (isinstance(value, str) and not value):
+        raise QimeiPoolError("export requires a new explicit destination directory")
+    raw = Path(value).expanduser().absolute()
+    if not raw.name or raw.name in (".", "..") or raw.exists() or raw.is_symlink():
+        raise QimeiPoolError("export destination must not already exist")
+    parent = raw.parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise QimeiPoolError("export destination parent must already be a directory")
+    destination = parent / raw.name
+    if destination == snapshot or destination in snapshot.parents:
+        raise QimeiPoolError("export destination cannot replace snapshot storage")
+    return destination
+
+
+def _export_json_size(value: dict, remaining: int) -> int:
+    encoder = json.JSONEncoder(indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
+    size = 1  # trailing newline
+    for chunk in encoder.iterencode(value):
+        size += len(chunk)
+        if size > remaining:
+            raise QimeiPoolError("export data exceeds the byte budget")
+    return size
+
+
+def _write_export_json(path: Path, value: dict, remaining: int) -> int:
+    """Create one private file exclusively, bounding aggregate encoded bytes."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+        encoder = json.JSONEncoder(indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
+        written = 0
+        for chunk in encoder.iterencode(value):
+            written += len(chunk)  # ensure_ascii makes character/byte counts equal.
+            if written + 1 > remaining:
+                raise QimeiPoolError("export data exceeds the byte budget")
+            stream.write(chunk)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return written + 1
+
+
+def export_state(to_legacy_dir, *, dry_run=False) -> dict:
+    """Export the latest validated snapshot into an exclusively created directory.
+
+    The source snapshot is never changed. Actual export holds its writer lock;
+    preview does not lock, sample a clock, create paths or write. Destination
+    parents must already exist, and existing directories/files/symlinks are never
+    reused. Snapshot input and aggregate ASCII JSON output each have a 16 MiB
+    cap. Table/pool values are copied semantically without normalization loss.
+    Present snapshot metadata is retained in _qimei_snapshot_metadata.json;
+    legacy readers ignore it, so operators must keep it when rolling back or
+    later remigrating. No automatic metadata reimport is performed here.
+
+    This is not an atomic directory publication. A partial export is preserved
+    for inspection after failure, without deleting or replacing evidence. Both
+    data files and any metadata sidecar are fsynced and read back before the
+    count-only _qimei_export_complete.json marker is written last. Operators
+    must require BOTH a successful process result and that marker before use.
+    A final marker/directory sync failure can leave a marker with uncertain
+    durability; marker presence alone never authorizes rollback. Quiescing the
+    old writer and applying an export remain separate operator actions.
+    """
+    try:
+        snapshot = _snapshot_path()
+        if snapshot is None:
+            raise QimeiPoolError("export requires QIMEI_SNAPSHOT_PATH")
+        destination = _export_destination(to_legacy_dir, snapshot)
+        if not snapshot.is_file():
+            raise QimeiPoolError("export snapshot is missing")
+        support = _snapshot_support()
+        with contextlib.nullcontext() if dry_run else _locked(_state_dir()):
+            if snapshot.stat().st_size > MAX_EXPORT_BYTES:
+                raise QimeiPoolError("export snapshot exceeds the byte budget")
+            payload = support.read_snapshot(snapshot)
+            # Validate the domain without a clock read or mutation of raw data.
+            _normalise_state(payload["table"], payload["pool"], table_path=snapshot,
+                             pool_path=snapshot, default_ts="", snapshot_path=snapshot,
+                             revision=payload["revision"], metadata=payload.get("metadata"))
+            has_metadata = "metadata" in payload
+            report = {"ok": True, "status": "ready" if dry_run else "exported",
+                      "dry_run": bool(dry_run), "revision": payload["revision"],
+                      "bindings": len(payload["table"]), "devices": len(payload["pool"]),
+                      "has_metadata": has_metadata}
+            files = [("qimei_table.json", payload["table"]),
+                     ("qimei_pool.json", payload["pool"])]
+            if has_metadata:
+                files.append(("_qimei_snapshot_metadata.json", payload["metadata"]))
+            marker = {"schema": 1, "revision": report["revision"],
+                      "bindings": report["bindings"], "devices": report["devices"],
+                      "has_metadata": has_metadata}
+            remaining = MAX_EXPORT_BYTES
+            for _name, value in [*files, ("_qimei_export_complete.json", marker)]:
+                remaining -= _export_json_size(value, remaining)
+            if dry_run:
+                return report
+            destination.mkdir(mode=0o700)
+            remaining = MAX_EXPORT_BYTES
+            for name, value in files:
+                remaining -= _write_export_json(destination / name, value, remaining)
+            for name, value in files:
+                path = destination / name
+                if path.stat().st_size > MAX_EXPORT_BYTES:
+                    raise QimeiPoolError("export read-back exceeds the byte budget")
+                actual = _read_import_object(path)
+                encoder = json.JSONEncoder(sort_keys=True, ensure_ascii=True,
+                                           allow_nan=False, separators=(",", ":"))
+                # Python equality merges True/1 and 1/1.0. Canonical JSON streams
+                # preserve these distinctions without two whole encoded copies.
+                if any(expected_chunk != actual_chunk for expected_chunk, actual_chunk in
+                       itertools.zip_longest(encoder.iterencode(value), encoder.iterencode(actual))):
+                    raise QimeiPoolError("export read-back verification failed")
+            support._fsync_directory(destination)
+            support._fsync_directory(destination.parent)
+            _write_export_json(destination / "_qimei_export_complete.json", marker, remaining)
+            support._fsync_directory(destination)
+            return report
+    except Exception:
+        raise QimeiPoolError("snapshot export failed; destination may be incomplete or durability uncertain") from None
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +941,29 @@ def generate_real_qimei(*, mac: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 # 分配 / 回收
 # ---------------------------------------------------------------------------
+def _managed_accounts(state: State) -> dict:
+    """Recognize the opt-in namespace without importing request-time code."""
+    if "marvis_managed_identity_v1" not in state.metadata:
+        return {}
+    namespace = state.metadata["marvis_managed_identity_v1"]
+    if (type(namespace) is not dict or set(namespace) != {"schema", "accounts"}
+            or type(namespace["schema"]) is not int or namespace["schema"] != 1
+            or type(namespace["accounts"]) is not dict):
+        raise QimeiPoolError("managed device identity metadata is invalid")
+    return namespace["accounts"]
+
+
+def _forget_managed_account(state: State, uid: str) -> bool:
+    accounts = _managed_accounts(state)
+    if uid not in accounts:
+        return False
+    remaining = dict(accounts)
+    del remaining[uid]
+    state.metadata["marvis_managed_identity_v1"] = {"schema": 1, "accounts": remaining}
+    state.dirty = True
+    return True
+
+
 def _pick_shareable(state: State, uid: str) -> str:
     """挑一台可复用的真品。
 
@@ -577,10 +978,13 @@ def _pick_shareable(state: State, uid: str) -> str:
     是账号级日志），拿不到可信数据；等以后加了 per-qimei 风险列再插到第一排序位。
     """
     candidates = []
+    managed = _managed_accounts(state)
     for qimei, entry in state.pool.items():
         if not entry.get("real", True):
             continue
         owners = entry.get("owners") or []
+        if any(owner in managed for owner in owners) and uid not in owners:
+            continue  # Managed devices remain exclusive, even for legacy callers.
         if uid in owners:
             return qimei
         if len(owners) >= MAX_OWNERS_PER_QIMEI:
@@ -595,16 +999,21 @@ def _pick_shareable(state: State, uid: str) -> str:
 
 def assign_ex(uid, *, generator=None, state_dir=None, allow_derived: bool = False,
               dry_run: bool = False) -> dict:
-    """分配（详细版）：返回 uid / qimei36 / source / owners。"""
+    """分配（详细版）：返回 uid / qimei36 / source / owners。
+
+    dry_run 只预览当前快照中的容量，不生成、不写盘，也不创建锁文件。
+    """
     user = normalize_uid(uid)
     if not user:
         raise ValueError("uid 不能为空")
     sd = _state_dir(state_dir)
-    with _locked(sd):
+    with (contextlib.nullcontext() if dry_run else _locked(sd)):
         state = load_state(sd)
         now = _now()
 
         qimei = state.table.get(user)
+        if user in _managed_accounts(state) and not qimei:
+            raise QimeiPoolError("managed account assignment requires explicit rebinding")
         if qimei:
             entry = state.pool.setdefault(qimei, {
                 "owners": [], "real": True, "source": "migrated",
@@ -629,7 +1038,7 @@ def assign_ex(uid, *, generator=None, state_dir=None, allow_derived: bool = Fals
 
         generated = ""
         gen_error = None
-        if generator is not False:
+        if not dry_run and generator is not False:
             try:
                 generated = (generator() if callable(generator)
                              else generate_real_qimei())
@@ -703,6 +1112,7 @@ def release(uid, *, state_dir=None, reason: str = "") -> dict:
     sd = _state_dir(state_dir)
     with _locked(sd):
         state = load_state(sd)
+        _forget_managed_account(state, user)
         old = state.table.pop(user, None)
         freed = []
         for qimei, entry in state.pool.items():
@@ -722,6 +1132,153 @@ def release(uid, *, state_dir=None, reason: str = "") -> dict:
         return {"uid": user, "released": bool(old or freed),
                 "qimei36": old or "", "owners": owners,
                 "freed": [mask_qimei(q) for q in freed]}
+
+
+# ---------------------------------------------------------------------------
+# 显式快照轮换：不影响旧双文件分配/回收，也不自动安排任务。
+# ---------------------------------------------------------------------------
+def _rotation_mode() -> None:
+    if _snapshot_path() is None:
+        raise QimeiPoolError("rotation requires QIMEI_SNAPSHOT_PATH")
+
+
+def _rotation_commit(state: State, users: list[str], *, generator, dry_run: bool,
+                     eligible: int, timestamp=None) -> dict:
+    """Generate the complete batch before mutating it; save one revision only."""
+    managed = _managed_accounts(state)
+    if any(user in managed for user in users):
+        raise QimeiPoolError("managed accounts require a full device identity reset")
+    report = {"ok": True, "status": "ready" if dry_run and users else "unchanged",
+              "dry_run": bool(dry_run), "revision": state.revision,
+              "bindings": len(state.table), "devices": len(state.pool),
+              "eligible": eligible, "selected": len(users), "rotated": 0,
+              "uids": list(users), "rotations": []}
+    if dry_run or not users:
+        return report
+    if generator is not None and not callable(generator):
+        raise QimeiGenError("rotation requires an enabled generator")
+    generate = generate_real_qimei if generator is None else generator
+    used = set(state.pool)
+    replacements = []
+    for user in users:
+        try:
+            value = generate()
+            if type(value) is not str:
+                raise ValueError("invalid generated type")
+            value = normalize_qimei(value)
+            if QIMEI_RE.fullmatch(value) is None or value in used:
+                raise ValueError("invalid or existing generated identity")
+        except Exception:
+            raise QimeiGenError("rotation generation failed or returned an existing identity") from None
+        used.add(value)
+        replacements.append((user, state.table[user], value))
+    timestamp = _now() if timestamp is None else timestamp
+    for user, old, value in replacements:
+        state.pool[old]["owners"].remove(user)
+        state.pool[value] = {
+            "owners": [user], "real": True, "source": "generated",
+            "created_at": timestamp, "last_rotated": timestamp, "last_used_at": timestamp}
+        state.table[user] = value
+    state.dirty = True
+    save_state(state)
+    report.update(status="rotated", revision=state.revision, devices=len(state.pool),
+                  rotated=len(users),
+                  rotations=[{"uid": user, "previous_qimei36": old, "qimei36": value}
+                             for user, old, value in replacements])
+    logger.info("qimei rotation accounts=%d revision=%d", len(users), state.revision)
+    return report
+
+
+def rotate_ex(uid, *, generator=None, state_dir=None, dry_run: bool = False) -> dict:
+    """Rotate one existing real binding atomically in explicit snapshot mode.
+
+    No sharing or derived fallback is permitted. The old device and its metadata
+    remain in the pool, preserving other owners. Preview only reports eligibility
+    and never creates locks, calls a generator or saves. Generation happens under
+    the writer lock, matching assignment's serialization contract.
+    """
+    _rotation_mode()
+    user = normalize_uid(uid)
+    if not user or user.startswith("_"):
+        raise QimeiPoolError("rotation requires an existing real assignment")
+    sd = _state_dir(state_dir)
+    with contextlib.nullcontext() if dry_run else _locked(sd):
+        state = load_state(sd)
+        old = state.table.get(user)
+        if old is None or state.pool[old]["real"] is not True:
+            raise QimeiPoolError("rotation requires an existing real assignment")
+        report = _rotation_commit(state, [user], generator=generator,
+                                  dry_run=dry_run, eligible=1)
+        report["uid"] = user
+        if report["rotated"]:
+            report["qimei36"] = state.table[user]
+        return report
+
+
+def _rotation_clock(now):
+    if now is None:
+        return _dt.datetime.now(_dt.timezone.utc)
+    if type(now) is not _dt.datetime or now.tzinfo is None:
+        raise QimeiPoolError("rotation clock requires a timezone-aware datetime")
+    try:
+        if now.utcoffset() is None:
+            raise ValueError("naive clock")
+        return now.astimezone(_dt.timezone.utc)
+    except Exception:
+        raise QimeiPoolError("rotation clock requires a timezone-aware datetime") from None
+
+
+def _rotation_timestamp(value):
+    try:
+        if type(value) is not str or not value:
+            raise ValueError("missing timestamp")
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("naive timestamp")
+        return parsed.astimezone(_dt.timezone.utc)
+    except Exception:
+        raise QimeiPoolError("rotation requires valid timezone-aware last_rotated timestamps") from None
+
+
+def rotate_due(*, older_than_days, generator=None, state_dir=None,
+               dry_run: bool = False, max_accounts: int = 10, now=None) -> dict:
+    """Atomically rotate a bounded batch ordered by UTC age, then normalized UID.
+
+    The positive day threshold is explicit. ``now`` may be an explicit aware
+    datetime for deterministic operation; otherwise UTC is sampled once. Only
+    assigned real entries participate. Their timestamps must be valid and aware;
+    malformed age data fails closed. The inclusive cutoff is ``now - days``.
+    All selected identities must be fresh against the entire pool and batch.
+    Generation runs under the writer lock, so bound max_accounts (1..1000) and
+    generator latency. No timer, database access or scheduling is installed.
+    """
+    _rotation_mode()
+    if (type(older_than_days) not in (int, float) or not 0 < older_than_days
+            or (type(older_than_days) is float and not math.isfinite(older_than_days))):
+        raise QimeiPoolError("rotation age must be an exact finite positive day threshold")
+    if type(max_accounts) is not int or not 1 <= max_accounts <= 1000:
+        raise QimeiPoolError("rotation account limit must be an exact integer from 1 to 1000")
+    clock = _rotation_clock(now)
+    try:
+        cutoff = clock - _dt.timedelta(days=older_than_days)
+    except (OverflowError, ValueError):
+        raise QimeiPoolError("rotation age exceeds the supported UTC range") from None
+    sd = _state_dir(state_dir)
+    with contextlib.nullcontext() if dry_run else _locked(sd):
+        state = load_state(sd)
+        candidates = []
+        for user, value in state.table.items():
+            entry = state.pool[value]
+            if entry["real"] is not True:
+                continue
+            rotated = _rotation_timestamp(entry["last_rotated"])
+            if rotated <= cutoff:
+                candidates.append((rotated, user))
+        candidates.sort()
+        users = [user for _rotated, user in candidates[:max_accounts]]
+        stamp = clock.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return _rotation_commit(state, users, generator=generator, dry_run=dry_run,
+                                eligible=len(candidates), timestamp=stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +1317,18 @@ def _db_rows(db_path: str, *, active_only: bool) -> list[tuple[int, str]]:
 
 def reconcile(*, db_path: str | None = None, dry_run: bool = False,
               prune: bool = False, generator=None, state_dir=None) -> dict:
+    """对账；快照模式将完整操作串行化，预览保持只读。"""
+    # Snapshot mode has a reentrant lock covering every read/mutate/save path.
+    transaction = (_locked(_state_dir(state_dir))
+                   if _snapshot_path() is not None and not dry_run
+                   else contextlib.nullcontext())
+    with transaction:
+        return _reconcile_impl(db_path=db_path, dry_run=dry_run, prune=prune,
+                               generator=generator, state_dir=state_dir)
+
+
+def _reconcile_impl(*, db_path: str | None = None, dry_run: bool = False,
+                    prune: bool = False, generator=None, state_dir=None) -> dict:
     """扫描 active 且未绑定的 Marvis 账号，逐个分配。
 
     dry_run 只读、不生成、不写盘；prune 额外回收「账号已不存在」的名额。
@@ -830,6 +1399,10 @@ def reconcile(*, db_path: str | None = None, dry_run: bool = False,
                 report["pruned"].append({"uid": uid,
                                          "qimei36": state.table[uid]})
                 del state.table[uid]
+                changed = True
+        for uid in list(_managed_accounts(state)):
+            if uid not in all_uids:
+                _forget_managed_account(state, uid)
                 changed = True
     if changed:
         save_state(state)
@@ -980,8 +1553,14 @@ def serve_generator(host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+class _SummaryOnlyArgumentParser(argparse.ArgumentParser):
+    def error(self, _message):
+        raise QimeiError("snapshot summary arguments are invalid") from None
+
+
+def _build_parser(*, summary_only=False) -> argparse.ArgumentParser:
+    parser_class = _SummaryOnlyArgumentParser if summary_only else argparse.ArgumentParser
+    parser = parser_class(
         prog="python3 -m admin.platform.marvis.core.qimei_assign",
         description="qimei 自动分配 / 回收 / 对账（一台设备最多 2 个号）")
     parser.add_argument("--state-dir", default="", help="qimei_table/pool 所在目录")
@@ -1000,6 +1579,19 @@ def _build_parser() -> argparse.ArgumentParser:
     action.add_argument("--release", default="", metavar="UID", help="回收单个 uid 名额")
     action.add_argument("--sync-pool", action="store_true", help="只把 table 迁移成 pool")
     action.add_argument("--serve-generator", action="store_true", help="起宿主生成服务")
+    action.add_argument("--migrate-state", action="store_true",
+                        help="从旧表/池迁入 QIMEI_SNAPSHOT_PATH，不生成或轮换")
+    action.add_argument("--validate-state", action="store_true", help="校验原子快照")
+    action.add_argument("--export-state", action="store_true",
+                        help="导出最新快照到全新旧表/池目录（需成功结果和完成标记）")
+    action.add_argument("--rotate", default=None, metavar="UID", help="原子轮换单个现有真机绑定（仅快照）")
+    action.add_argument("--rotate-due-days", type=float, default=None, metavar="DAYS",
+                        help="原子轮换达到显式天数的绑定（仅快照）")
+    parser.add_argument("--max-rotate-accounts", type=int, default=10,
+                        help="单次轮换上限 1..1000（默认 10）")
+    parser.add_argument("--from-legacy-dir", default="", help="迁移来源目录")
+    parser.add_argument("--to-legacy-dir", default="", help="导出目的目录（必须不存在且父目录已存在）")
+    parser.add_argument("--summary-only", action="store_true", help="状态操作只输出计数和状态")
     parser.add_argument("--dry-run", action="store_true", help="只读演练，不生成不写盘")
     parser.add_argument("--prune", action="store_true", help="回收账号已不存在的名额")
     parser.add_argument("--host", default="127.0.0.1",
@@ -1034,11 +1626,60 @@ def _print_report(report: dict, as_json: bool) -> None:
 
 
 def main(argv=None) -> int:
-    args = _build_parser().parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    # argparse accepts long-option abbreviations, and can reject an attached
+    # value before it reaches the summary flag. Cover both forms before parsing.
+    summary_requested = any(type(value) is str and value.startswith("--")
+                            and len(value.split("=", 1)[0]) > 2
+                            and "--summary-only".startswith(value.split("=", 1)[0])
+                            for value in arguments)
+    try:
+        args = _build_parser(summary_only=summary_requested).parse_args(arguments)
+    except QimeiError:
+        print(json.dumps({"ok": False, "status": "argument_error"}, sort_keys=True))
+        return 2
+    rotation_action = args.rotate is not None or args.rotate_due_days is not None
+    if args.summary_only and not (args.migrate_state or args.validate_state or args.export_state or rotation_action):
+        _build_parser().error("--summary-only requires a snapshot state operation")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     sd = args.state_dir or None
+    if rotation_action:
+        try:
+            if args.rotate is not None:
+                report = rotate_ex(args.rotate, generator=False if args.no_generate else None,
+                                   state_dir=sd, dry_run=args.dry_run)
+            else:
+                report = rotate_due(older_than_days=args.rotate_due_days,
+                                    generator=False if args.no_generate else None, state_dir=sd,
+                                    dry_run=args.dry_run, max_accounts=args.max_rotate_accounts)
+        except QimeiError:
+            print(json.dumps({"ok": False, "status": "rotation_failed"}, sort_keys=True))
+            return 3
+        if args.summary_only:
+            report = {name: report[name] for name in ("ok", "status", "dry_run", "revision",
+                                                       "bindings", "devices", "eligible", "selected", "rotated")}
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    if args.migrate_state or args.validate_state or args.export_state:
+        try:
+            if args.migrate_state:
+                if not args.from_legacy_dir:
+                    raise QimeiPoolError("migration source directory is required")
+                report = migrate_state(args.from_legacy_dir, dry_run=args.dry_run)
+            elif args.export_state:
+                report = export_state(args.to_legacy_dir, dry_run=args.dry_run)
+            else:
+                if _snapshot_path() is None:
+                    raise QimeiPoolError("validation requires QIMEI_SNAPSHOT_PATH")
+                report = _state_summary(load_state(sd))
+        except QimeiError:
+            print(json.dumps({"ok": False, "status": "state_operation_failed",
+                              "kind": "QimeiPoolError"}, sort_keys=True))
+            return 3
+        print(json.dumps(report, sort_keys=True))
+        return 0
     try:
         if args.serve_generator:
             serve_generator(args.host, args.port)
@@ -1052,7 +1693,9 @@ def main(argv=None) -> int:
             return 0 if report["ok"] else 2
         if args.assign:
             result = assign_ex(args.assign, state_dir=sd,
-                               allow_derived=args.allow_derived)
+                               allow_derived=args.allow_derived,
+                               generator=False if args.no_generate else None,
+                               dry_run=args.dry_run)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2,
                                  sort_keys=True))
@@ -1072,8 +1715,9 @@ def main(argv=None) -> int:
                          mask_qimei(result["qimei36"]), result["owners"]))
             return 0
         if args.sync_pool:
-            state = load_state(sd)
-            save_state(state)
+            with _locked(_state_dir(sd)):
+                state = load_state(sd)
+                save_state(state)
             print("qimei pool 已同步：设备 %d 台 / 绑定 %d 个"
                   % (len(state.pool), len(state.table)))
             return 0
