@@ -77,21 +77,16 @@ export { PLATFORM_ONLY_TABS as PLATFORM_ONLY_PAGES } from '@/stores/platform'
 /**
  * 顶栏显示「平台上下文选择器」而不是面包屑的页面（03-shell §2.2）。
  *
- * 依据旧版「切平台后这些页面会重取数」的证据：
- * · console-app.js:3314 的 `wb-platform-change` 监听：overview / platforms / accounts /
- *   usage / logs / credits / keys / models / schedules / sync；
- * · 06-pages-b.md:3「账号组所有页面都依赖顶栏的平台上下文」：+ journal / growth；
- * · 06-pages-d.md:64「客户端参数依赖平台上下文」：+ client；
- * · contracts/{sentinel,stats,gateway,model-market}.md 的「平台上下文」小节：+ sentinel / stats / gateway / market。
- * 其余页面（ip / groups / sync / alerts / agent / openentry / settings / maintenance）与其他平台无关。
- * 待 contracts/platform-context.md 落地后如有出入，只改这一处。
+ * 唯一真值：docs/ui-v2/contracts/platform-context.md §8「顶栏平台选择器的显示范围」。
+ * 该表由 S03 从旧版 `wb-platform-change` 的实际重载清单（console-app.js:3314-3350）
+ * 与各页契约逐项核对得出：sync 随平台重载；gateway / client / groups 不随平台重载。
+ * 如有出入只改这一处，导航、平台选择器、命令面板会自动跟随。
  */
 export const PLATFORM_SCOPED_KEYS = [
   'overview',
   'sentinel',
   'stats',
   'platforms',
-  'gateway',
   'accounts',
   'credits',
   'journal',
@@ -102,7 +97,7 @@ export const PLATFORM_SCOPED_KEYS = [
   'models',
   'market',
   'schedules',
-  'client',
+  'sync',
 ] as const satisfies readonly PageKey[]
 
 const PLATFORM_SCOPED = new Set<string>(PLATFORM_SCOPED_KEYS)
