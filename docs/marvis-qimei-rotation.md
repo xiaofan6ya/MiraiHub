@@ -26,8 +26,10 @@ python3 -m admin.platform.marvis.core.qimei_assign --state-dir tmp/qimei-state -
 
 - 漏 `--state-dir` / `QIMEI_STATE_DIR` 的 `assign_ex` / `reconcile` 试验会直接写线上台账；
   已发生过的痕迹：pool 里出现 `owners=["A1"]` 这类测试值、目录残留 `qimei_state.lock`。
-- 恢复手段只有整份还原：`git checkout -- admin/platform/marvis/core/qimei_table.json
-  admin/platform/marvis/core/qimei_pool.json`，并删掉 `qimei_state.lock`。
+- 恢复手段：这两个文件被 `.gitignore` 忽略（`.gitignore:338-339`）且未跟踪，`git checkout --`
+  对它们无效（会报 pathspec）。表用轮换脚本自己留的整份备份还原：
+  `cp -p /var/log/qimei-rotate/backup/qimei_table.<batch>.json admin/platform/marvis/core/qimei_table.json`；
+  pool 没有自动备份，只能从部署机的快照还原。最后删掉 `qimei_state.lock`。
 - 跑 `tests/test_qimei_rotation.py` 前确认 shell 无 `QIMEI_STATE_DIR` 指向 core 目录；
   该测试**只读文件**（不写盘、不设 env、不碰 `qimei_assign`）。
 
@@ -143,7 +145,8 @@ sudo deploy/qimei-rotate/rotate_all_qimei.sh --accounts 189 --dry-run
    另外两条闸门同样致命：批内不重复、不与表里旧值相同（撞车就当失败，别上线一台「同一台设备」）。
 3. **备份**：`cp -p` 到 `$QIMEI_LOG_DIR/backup/qimei_table.<batch>.json`（batch 形如
    `20261122T161500-12345`）。
-4. **写表**：默认 `QIMEI_WRITE_MODE=inplace` —— `truncate(0)` + 写回**同一 inode**。
+4. **写表**：默认 `QIMEI_WRITE_MODE=inplace` —— 先写正文、再截旧尾巴，**同一 inode**；
+   写完立刻回读校验，解析不了或条目数不对就用本次备份整份还原（不留 0 字节表）。
    原因见 §6：表在容器里是单文件 bind mount，换 inode 等于容器永远读旧值。
 5. **部署**：只有 `--deploy` 才做（§6）。
 6. **流水**：每行一条 `action=rotate acc=.. uid=.. mac=.. old=.. new=..` 落到

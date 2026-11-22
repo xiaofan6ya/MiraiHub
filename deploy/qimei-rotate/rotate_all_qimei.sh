@@ -61,6 +61,10 @@ TAG=""
 SUDO=""
 if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
+# 流水（qimei-rotations.txt）与备份里落的是 uid / mac / qimei —— 设备真值。
+# 默认 022 会让同机其它用户读到，这里只给自己看。
+umask 077
+
 usage() {
   cat <<'USAGE'
 rotate_all_qimei.sh [--accounts id1,id2,...] [--all] [--deploy] [--dry-run] [--tag TAG]
@@ -160,12 +164,14 @@ say "== 批量轮换 qimei =="
 say "batch=$BATCH accounts=[$ACC_LIST] deploy=$DEPLOY dry-run=$DRYRUN gen=$([ -n "$QIMEI_GEN_URL" ] && echo http || echo cmd)"
 
 uid_of() {
+  # 输出必须与 qimei_assign.normalize_uid() 同形（strip + 大写）：
+  # 表的主键就是这个规范形，大小写不一致时 upsert 不是「更新」而是「新增一条设备记录」。
   $SUDO docker exec "$CONTAINER" python3 -c "
 import sqlite3,sys
 c=sqlite3.connect('file:/data/workbuddy.db?mode=ro',uri=True)
 r=c.execute(\"select uid from accounts where id=? and platform='marvis'\",(int(sys.argv[1]),)).fetchone()
 print(r[0] if r else '')
-" "$1" 2>/dev/null | tr -d '\r\n'
+" "$1" 2>/dev/null | tr -d '\r\n' | tr '[:lower:]' '[:upper:]'
 }
 
 # ---------- 2) 逐个生成（先攒） ----------
@@ -226,9 +232,10 @@ fi
 # ---------- 4) 一次性 upsert（先备份，再就地写同一 inode） ----------
 if [ ! -d "$BACKUP_DIR" ]; then mkdir -p "$BACKUP_DIR" || { echo "[x] 建不了备份目录 $BACKUP_DIR" >&2; exit 6; }; fi
 cp -p "$TABLE" "$BACKUP_DIR/qimei_table.$BATCH.json" || { echo "[x] 备份失败" >&2; exit 6; }
-python3 - "$TABLE" "$WORK/pairs.txt" "$QIMEI_WRITE_MODE" <<'PYEOF'
+python3 - "$TABLE" "$WORK/pairs.txt" "$QIMEI_WRITE_MODE" "$BACKUP_DIR/qimei_table.$BATCH.json" <<'PYEOF'
 import io, json, os, sys
 table_path, pairs_path, write_mode = sys.argv[1], sys.argv[2], sys.argv[3]
+backup_path = sys.argv[4] if len(sys.argv) > 4 else ""
 
 with io.open(table_path, encoding="utf-8") as fh:
     table = json.load(fh)
@@ -253,13 +260,30 @@ if write_mode == "rename":
         os.fsync(fh.fileno())
     os.replace(tmp, table_path)
 else:
-    # 默认路径：就地写同一个 inode（truncate + 写回），否则热重载看不到新表。
+    # 默认路径：就地写同一个 inode（否则热重载看不到新表）。
+    # 顺序是「先写正文，再截掉旧尾巴」，不是「先 truncate(0)」：
+    # 后者被 kill -9 / OOM / TimeoutStopSec 卡在两步之间就是**0 字节表**，
+    # 读端立刻 500；前者最坏是「新内容 + 旧尾巴」，至少还能从备份认出来。
     with io.open(table_path, "r+", encoding="utf-8", newline="\n") as fh:
-        fh.truncate(0)
         fh.seek(0)
         fh.write(text)
+        fh.truncate()
         fh.flush()
         os.fsync(fh.fileno())
+    # 写完立刻回读：解析不了或条目数不对，就用本次备份整份还原，别把坏表留给进程。
+    try:
+        with io.open(table_path, encoding="utf-8") as fh:
+            check = json.load(fh)
+        if len(check) != len(table):
+            raise ValueError("entries %d != %d" % (len(check), len(table)))
+    except Exception as exc:  # noqa: BLE001 - 任何异常都按「表坏了」处理
+        if backup_path and os.path.isfile(backup_path):
+            with io.open(backup_path, "rb") as src, io.open(table_path, "wb") as dst:
+                dst.write(src.read())
+                dst.flush()
+                os.fsync(dst.fileno())
+            print("restore=backup reason=%s" % str(exc)[:120], file=sys.stderr)
+        raise SystemExit(1)
 
 print("entries before=%d after=%d mode=%s" % (before, len(table), write_mode))
 for acc, uid, old, q in changed:
@@ -300,12 +324,13 @@ verify_table() {
   local fail=0 a u m q o got
   say "== 校验容器内真值 =="
   while IFS='|' read -r a u m q o; do
-    got=$($SUDO docker exec "$CONTAINER" python3 -c "
+    # uid 走 argv，不拼进源码：拼进去的话 uid 带引号就是一个容器内代码执行点。
+    got=$($SUDO docker exec "$CONTAINER" python3 -c '
 import sys
-sys.path.insert(0,'/app')
+sys.path.insert(0,"/app")
 from admin.platform.marvis.core import uskey
-print(uskey.qimei36('$u'))
-" 2>/dev/null | tr -d '\r\n')
+print(uskey.qimei36(sys.argv[1]))
+' "$u" 2>/dev/null | tr -d '\r\n')
     if [ "$got" = "$q" ]; then
       say "  acc=$a OK  $got"
     else
@@ -355,6 +380,9 @@ deploy_once() {
 
   say "== 部署：up -d --no-build admin（秒级切换）=="
   ( cd "$MIRAIHUB_DIR" && $SUDO docker compose up -d --no-build admin ) 2>&1 | tail -5 | sed 's/^/    /' | tee -a "$ROTLOG"
+  rc=${PIPESTATUS[0]}
+  # 不查这条退出码就等于「up 失败也报 deploy ok」：表已经写了，容器还跑着旧进程。
+  [ "$rc" -eq 0 ] || { echo "[x] up -d 失败（表已写，旧容器仍在跑）" >&2; return 7; }
 
   say "== 等健康 =="
   st=unknown
@@ -366,6 +394,13 @@ deploy_once() {
   done
   say "health=$st"
   log "action=restart done health=$st"
+  # healthy 才算成功；unhealthy 明确失败。unknown 只告警：容器可能没配 HEALTHCHECK，
+  # 这不是部署失败，硬判会让「没有健康检查」的部署永远退出 7。
+  if [ "$st" = "unhealthy" ]; then
+    echo "[x] 容器已启动但健康检查失败（health=unhealthy）：$SUDO docker logs --tail 50 $CONTAINER" >&2
+    return 7
+  fi
+  [ "$st" = "healthy" ] || log "warn=health_not_healthy value=$st reason=no_healthcheck_or_slow_start"
   return 0
 }
 
