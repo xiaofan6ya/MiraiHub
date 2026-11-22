@@ -1908,6 +1908,13 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                         resp = client.open_chat_stream(
                             data, realm, body, account_id=int(account.id or 0))
                         clear_risk_hits()
+                        # 流式同样要建立会话亲和：上游已经接下这次请求（拿到
+                        # 响应对象）就算一次成功，必须把会话绑到这个号上。
+                        # 不绑的话「每一次 SSE 请求都是 sticky miss」，同一段
+                        # 对话会在号池里逐请求轮转 —— 上游前缀缓存和会话连续性
+                        # 都保不住，多号部署下尤其明显。非流式在下面绑一次，
+                        # 这里是对称补齐。
+                        _bind_sticky(sticky_key, account)
                         return resp, account, started
                     result = client.chat_completions(
                         data, realm, body, account_id=int(account.id or 0))
