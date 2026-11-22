@@ -978,12 +978,26 @@ def upstream_of(slug: str, db=None) -> str:
         from admin.models import ModelConfig
 
         rows = db.query(ModelConfig).filter(ModelConfig.enabled == 1).all()
+        # 第一轮：**精确 model_id 优先**（2026-11-22 线上故障修复）。
+        #
+        # 原实现把「精确 id」「归一 slug」「可读名还原」塞在同一个循环里，
+        # 谁先被扫到就返回。结果 marvis 的槽位行 `main-auto` —— 它的
+        # readable_model_id('marvis','main-auto') 正是 `deepseek-v4.1-flash` ——
+        # 抢在 workbuddy 的真实 id `deepseek-v4.1-flash` 之前命中，返回
+        # `main-auto`。这个值随后被写进请求体发给 workbuddy 上游，上游回
+        # 11102「model [main-auto] service info not found」，网关再把
+        # (账号 × main-auto) 记成 model_block 冷却，整个 workbuddy 池瞬间
+        # 变成 no_account（账号本身完全正常，余额/状态都没问题）。
+        #
+        # 名字本身就对得上时没有任何理由改写，所以精确匹配必须先扫一轮。
+        for row in rows:
+            raw = str(row.model_id or "")
+            if raw and raw.lower() == target:
+                return raw
         for row in rows:
             raw = str(row.model_id or "")
             if not raw:
                 continue
-            if raw.lower() == target:
-                return raw
             if slugify_model_id(raw) == target:
                 return raw
             # 缩写映射后的名字也要能命中（`deepseek-flash` -> `dfmodel`）
