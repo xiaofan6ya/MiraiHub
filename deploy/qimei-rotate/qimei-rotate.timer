@@ -1,0 +1,18 @@
+[Unit]
+Description=Periodic MiraiHub qimei rotation check (every 6h, plus 5min after boot)
+
+[Timer]
+# 每 6 小时一次：00:17 / 06:17 / 12:17 / 18:17（错开整点，避免和整点任务撞车）。
+OnCalendar=*-*-* 00/6:17:00
+# 开机 5 分钟后补一次：Persistent 的补跑要等 OnCalendar 的下一个到点，
+# 机器刚起来时更需要先判一次。
+OnBootSec=5min
+# 抖动：多机部署时不要同一秒一起 docker logs / build。
+RandomizedDelaySec=180
+AccuracySec=1min
+# 关机期间错过的触发点，起来后补跑一次（不补跑会让设备封禁多拖半天）。
+Persistent=true
+Unit=qimei-rotate.service
+
+[Install]
+WantedBy=timers.target
