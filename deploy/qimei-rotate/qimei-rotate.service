@@ -1,0 +1,49 @@
+[Unit]
+Description=MiraiHub qimei rotation judge (4100404 -> rotate_all_qimei.sh)
+Documentation=file:///home/admin/MiraiHub/docs/marvis-qimei-rotation.md
+# 判定要用 docker（容器日志 + 容器内 sqlite）与 compose（回落部署），先等它们起来。
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# 脚本不在就不启动（仓库没部署到这一层时静默跳过，不要刷失败告警）。
+ConditionPathExists=/home/admin/MiraiHub/deploy/qimei-rotate/auto_rotate_on_banned.sh
+
+[Service]
+# oneshot：判一次就退出，由 qimei-rotate.timer 周期拉起。
+Type=oneshot
+# 判据要读 docker logs / docker exec，部署要 build+up；用 root 跑，脚本内部会跳过 sudo。
+User=root
+Group=root
+# 必须与 Environment 里的 MIRAIHUB_DIR 一致（systemd 不在 WorkingDirectory 里展开 Environment）。
+WorkingDirectory=/home/admin/MiraiHub
+# 站点本地覆盖放这里（生成器地址、热重载命令等）；不存在也不算错。
+EnvironmentFile=-/etc/miraihub/qimei-rotate.env
+Environment=MIRAIHUB_DIR=/home/admin/MiraiHub
+Environment=CONTAINER=miraihub-admin-1
+Environment=QIMEI_STATE_DIR=/home/admin/MiraiHub/admin/platform/marvis/core
+Environment=QIMEI_LOG_DIR=/var/log/qimei-rotate
+Environment=QIMEI_WINDOW_MIN=10
+Environment=QIMEI_MIN_HITS=2
+Environment=QIMEI_COOLDOWN_SEC=7200
+Environment=QIMEI_POST_WATCH_SEC=300
+Environment=QIMEI_WALLET_TRIES=3
+# 演练：置 1 = 只走 rotate_all_qimei.sh --dry-run（不写表、不部署、不观察）。
+Environment=QIMEI_AUTOROTATE_DRY_RUN=0
+# 生成器二选一，**不要**在仓库里钉死路径（部署数据）：
+#   · 纯 Python 生成服务：QIMEI_GEN_URL=http://172.17.0.1:8792/qimei
+#   · 本机采值脚本：QIMEI_GEN_CMD=<脚本绝对路径>
+#Environment=QIMEI_GEN_URL=http://172.17.0.1:8792/qimei
+#Environment=QIMEI_GEN_CMD=/deploy-data/qimei/gen_qimei_for_mac.sh
+# 热重载：配好并在容器侧生效后，换表不必重启 admin（见文档 §6）。
+#Environment="QIMEI_RELOAD_CMD=curl -fsS -X POST http://127.0.0.1:8790/<重载入口>"
+# 用 /usr/bin/env 找 bash：不依赖仓库里脚本的 exec 位（Windows 上提交的 0755 容易丢）。
+ExecStart=/usr/bin/env bash /home/admin/MiraiHub/deploy/qimei-rotate/auto_rotate_on_banned.sh
+# 观察期 300s + 单轮生成 60~120s/号：给足 30 分钟，别让 systemd 在轮换中途 kill。
+TimeoutStartSec=1800
+TimeoutStopSec=60
+# 不比 nginx 之类的交互服务更急。
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

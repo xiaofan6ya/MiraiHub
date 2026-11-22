@@ -163,13 +163,19 @@ admin/data/agent_assets/
 # 临时工作目录（asar 分析、外部项目副本），不入库
 tmp/
 
+# 本地放置的真实 SDK 二进制（4.6 MB PE），不进 git
+/vendor/beacon/*.dll
+
 # ===== 旧项目产物（换名后不再上传，避免干扰）=====
 docs/**
+# 轮换 SOP 属于本次交付（部署方要照着做），必须入库
+!docs/marvis-qimei-rotation.md
 # 测试目录整体不入库（历史约定：本地私有的探针/样本太多）。
 # 但**锁真实 bug 的回归用例必须入库**，否则改动静默把它吞掉时毫无知觉。
 !tests/
 tests/*
 !tests/test_android_signing.py
+!tests/test_qimei_rotation.py
 !tests/test_anthropic_tool_result_image.py
 !tests/test_marvis_content_fingerprint.py
 !tests/test_marvis_device_binding.py

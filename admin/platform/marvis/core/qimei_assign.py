@@ -634,8 +634,51 @@ def validate_or_raise(state_dir=None) -> State:
     return state
 
 
+def _git_worktree_root(path: Path):
+    """往上找 `.git`（目录，或 worktree 的 gitdir 文件）；找到返回该层目录。"""
+    current = Path(path)
+    while True:
+        try:
+            if (current / ".git").exists():
+                return current
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def _guard_state_write(target: Path) -> None:
+    """禁止把状态写回仓库内的默认目录（2026-11-22 事故）。
+
+    开发机上 `qimei_assign.py` 住在 git 工作树里，同目录的 `qimei_table.json` /
+    `qimei_pool.json` 曾经是**线上真值**。`_state_dir()` 在既没给 `state_dir`
+    也没设 `QIMEI_STATE_DIR` 时回落到这个目录，于是任何漏传 state_dir 的
+    assign / release / reconcile 都会直接改真表（已发生过两次）。
+
+    这里只拦**默认回落**这一种情况：目标父目录就是模块目录、且模块目录在
+    git 工作树内 → 抛错；显式给的 tmp 目录不受影响。容器镜像不带 `.git`
+    （`.dockerignore` 有 `.git`），生产行为不变。
+    """
+    try:
+        resolved = Path(target).resolve()
+    except OSError:
+        return
+    module_dir = Path(__file__).resolve().parent
+    if resolved.parent != module_dir:
+        return
+    if _git_worktree_root(module_dir) is None:
+        return
+    raise QimeiError(
+        "拒绝写入仓库内的默认 qimei 状态目录（%s）：该目录里的 "
+        "qimei_table.json / qimei_pool.json 是部署真值。请显式指定 "
+        "QIMEI_STATE_DIR 或 --state-dir 指向仓库外/tmp 目录。" % module_dir)
+
+
 def save_state(state: State) -> None:
     """快照模式比较 revision 后整体提交；旧模式先 pool 后 table。"""
+    _guard_state_write(state.snapshot_path or state.table_path)
     if state.snapshot_path is not None:
         support = _snapshot_support()
         _normalise_state(state.table, state.pool, table_path=state.snapshot_path,
