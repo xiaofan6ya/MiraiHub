@@ -1,0 +1,68 @@
+/* 全局基线：只做浏览器默认值归一，不放业务样式。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#app,
+#login-app {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--brand-hover);
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+/* 细滚动条：颜色跟随主题令牌。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: var(--brand-soft);
+}

@@ -195,6 +195,34 @@ async def _join_gate_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+#: 后台页面统一 CSP —— 旧版 `/admin` 与新版 `/admin/v2` 共用这一条。
+#:
+#: 为什么抽成常量、而不是各写一套：这份策略是「够用且不宽松」的交集，
+#: 新版 Vite 产物的每一项依赖它都能满足 ——
+#:   * module script / CSS：`script-src 'self'`、`style-src 'self'`；
+#:   * woff2/woff 字体：`font-src 'self'`（同源，构建后 CSS 里是
+#:     `/admin/v2/assets/*.woff2` 绝对路径，没有外链字体）；
+#:   * 图标 png/svg 与图表截图：`img-src 'self' data: blob:`；
+#:   * Naive UI 运行时注入的 `<style>`：`style-src` 的 `'unsafe-inline'`；
+#:   * ECharts canvas：canvas 不受 CSP 约束，不需要额外指令。
+#: 构建产物里**没有** eval / new Function / Worker（构建后逐文件 grep 过），
+#: 所以不需要 `'unsafe-eval'`，也不需要单独的 `worker-src`。
+#:
+#: 抽成常量的另一个原因：新版路由在响应上**显式**带上它，这样即使以后有人
+#: 改了中间件的路径分支，新版页面也不会静默丢掉 CSP。
+_ADMIN_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "media-src 'self' blob:; "
+    "object-src 'none'; base-uri 'self'; "
+    "frame-ancestors 'none'; form-action 'self'"
+)
+
+
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     """统一安全响应头：防点击劫持 / MIME 嗅探 / 敏感头泄露。"""
@@ -224,8 +252,14 @@ async def _security_headers(request: Request, call_next):
     # 只放行内联代码，**不会**放行 chrome-extension:// 这类跨源 src。
     # 我们自己没有任何 eval / new Function（已逐文件核查），故不需要 'unsafe-eval'。
     _p = request.url.path
+    # 「后台资源」与「后台页面」的区别对待：旧版是 `/admin/assets/*`，
+    # 新版是 `/admin/v2/assets/*`（Vite 产物，同样是纯静态文件）。
+    # 两条前缀必须**一起**排除 —— 否则新版的 JS/CSS/woff2 会被当成 HTML
+    # 文档挂上 CSP，安全上没坏事，但会让人误以为这些响应是文档。
+    _is_admin_asset = (_p.startswith("/admin/assets")
+                       or _p.startswith("/admin/v2/assets"))
     _is_html_doc = (
-        (_p.startswith("/admin") and not _p.startswith("/admin/assets"))
+        (_p.startswith("/admin") and not _is_admin_asset)
         or _p in ("/join", "/join/", "/", "/j")
         or (_p.startswith("/static/") and _p.endswith(".html"))
     )
@@ -242,18 +276,7 @@ async def _security_headers(request: Request, call_next):
     _script_src = ("script-src 'self' 'unsafe-inline' 'unsafe-eval'"
                    if _desktop_shell else "script-src 'self' 'unsafe-inline'")
     if _is_html_doc:
-        response.headers.setdefault(
-            "Content-Security-Policy",
-            "default-src 'self'; "
-            + _script_src + "; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
-            "font-src 'self' data:; "
-            "connect-src 'self'; "
-            "media-src 'self' blob:; "
-            "object-src 'none'; base-uri 'self'; "
-            "frame-ancestors 'none'; form-action 'self'",
-        )
+        response.headers.setdefault("Content-Security-Policy", _ADMIN_CSP)
     return response
 
 
@@ -1258,6 +1281,105 @@ def console_asset(file_path: str, request: Request):
         headers = {"Cache-Control": "public, max-age=31536000, immutable"}
     else:
         headers = {"Cache-Control": "no-cache"}
+    return FileResponse(target, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# 新版控制台（Vue 3 + Vite 构建产物）—— `/admin/v2`
+# ---------------------------------------------------------------------------
+#
+# 与旧版**并行**：`/admin` 与 `/admin/assets/*` 继续由 admin_index /
+# console_asset 服务（admin/console/ 下是手写 JS，改一次要全量自测），
+# 新版只读 `admin/ui/dist`，源码在 `admin/ui`（`npm run build` 产出）。
+# 好处是切换只影响这两条路由，旧版随时可以回退，见 docs/ui-v2/README.md。
+UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
+
+#: 入口 HTML（含 SPA 回退）的响应头：**一律不缓存**。
+#:
+#: 新版把 JS/CSS 换成了内容哈希文件名，但入口 HTML 里引用的是**构建时**
+#: 写死的那几个哈希；一旦发版，浏览器缓存里的旧 index.html 指向的 chunk
+#: 已经被删，用户看到的是白屏 + 一堆 404。所以 HTML 必须每次回源校验。
+_UI_V2_HTML_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Content-Security-Policy": _ADMIN_CSP,
+}
+
+#: `assets/` 下的文件名自带内容哈希（Vite 生成），改一个字节文件名就变，
+#: 于是可以放心长缓存一年：不存在「改完没生效」的可能。
+_UI_V2_ASSET_HEADERS = {
+    "Cache-Control": "public, max-age=31536000, immutable",
+}
+
+
+def _log_ui_v2_missing() -> None:
+    """新版构建缺失时的统一日志。
+
+    没有这一条，运维看到的只是一个 404 —— 分不清是「路由没挂」「没登录」
+    还是「部署包漏了 dist 目录」。这里把话说明白，并给出补救命令。
+    """
+    logger.warning("新版控制台未构建：%s 不存在（在 admin/ui 下执行 npm run build）",
+                   UI_DIST / "index.html")
+
+
+@app.get("/admin/v2")
+@app.get("/admin/v2/")
+def ui_v2_index(request: Request):
+    """新版控制台入口：有会话 → 发 `admin/ui/dist/index.html`。
+
+    未通过 `_console_allowed()` 时**不**在这里发登录页，而是 303 回旧版
+    `/admin`：登录页只有一份（admin/static/login.html），两张皮迟早会漂移。
+    `/admin` 自己的门禁不变，跳转不会放宽任何东西。
+    """
+    if not _console_allowed(request):
+        return RedirectResponse(url="/admin", status_code=303)
+    index = UI_DIST / "index.html"
+    if not index.is_file():
+        _log_ui_v2_missing()
+        raise HTTPException(status_code=404)
+    return FileResponse(index, headers=dict(_UI_V2_HTML_HEADERS))
+
+
+@app.get("/admin/v2/{file_path:path}")
+def ui_v2_asset(file_path: str, request: Request):
+    """新版控制台的静态资源 + SPA 回退。
+
+    与 `console_asset` 对齐的两条：
+
+      * **未登录一律 404**，不告诉探测者「文件存在，只是你没权限」；
+      * 路径穿越用同样的 `resolve()` + 前缀校验挡掉（`../server.py` 之类），
+        且越界直接 404，不参与后面的 SPA 回退。
+
+    额外一条是缓存分层：`assets/` 下是 Vite 的**内容哈希**产物 → immutable
+    长缓存；其余（`login.html` 等）→ `no-cache`，每次用 ETag 校验。
+
+    前端用的是 hash 路由（`/admin/v2/#/accounts`），正常不会把深链打到服务端；
+    但 `login.html` 是独立入口，未来也可能改成 history 模式，所以非
+    `assets/` 的未知路径统一回入口页，不让刷新直接吃 404。
+    """
+    if not _console_allowed(request):
+        raise HTTPException(status_code=404)
+    root = UI_DIST.resolve()
+    try:
+        target = (root / file_path).resolve()
+    except OSError:
+        raise HTTPException(status_code=404) from None
+    # 统一按 URL 语义判断前缀：Windows 上 file_path 可能带反斜杠。
+    is_asset = file_path.replace("\\", "/").startswith("assets/")
+    escaped = not str(target).startswith(str(root) + os.sep)
+    if escaped or not target.is_file():
+        # 资源缺失就是「构建不完整」，直说 404 比给一个入口页更好排查。
+        if is_asset:
+            raise HTTPException(status_code=404)
+        if escaped:
+            # 穿越到 dist 之外：不回退，避免把任意路径都伪装成 200。
+            raise HTTPException(status_code=404)
+        index = root / "index.html"
+        if not index.is_file():
+            _log_ui_v2_missing()
+            raise HTTPException(status_code=404)
+        return FileResponse(index, headers=dict(_UI_V2_HTML_HEADERS))
+    headers = (dict(_UI_V2_ASSET_HEADERS) if is_asset
+               else {"Cache-Control": "no-cache"})
     return FileResponse(target, headers=headers)
 
 
