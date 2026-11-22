@@ -104,6 +104,10 @@ def _invalidate_routing_cache() -> None:
     那条缓存的指纹现在包含 `updated_at`，改展示名 / 能力覆盖 / 备注都会
     让它失效，但 PATCH 之后本来就应该「下一次请求立刻是新内容」，
     不该再赌指纹是否覆盖到本次改动。
+
+    `models_router.invalidate()` 现在连 `is_native_model_id` 的 10 秒索引
+    一起清（它只装 `{storage: {model_id}}`）—— 否则新增模型后本进程仍把它
+    当「非原生 id」，可读名会被当成别名改写发给上游。
     """
     try:
         from admin.platform import dispatch
@@ -543,6 +547,8 @@ def list_aggregate(level: Optional[str] = None,
         mid = str(row.get("model_id") or "")
         if ":" in mid and mid.rsplit(":", 1)[-1].lower() in ("cn", "intl"):
             realm_aware.add(row["platform"])
+    from admin.platform import models_router as _mr
+
     for item in result["items"]:
         _expand_realms(item, registry, realm_aware)
         for entry in item["platforms"]:
@@ -554,6 +560,21 @@ def list_aggregate(level: Optional[str] = None,
             entry["client_id"] = _client_call_id(
                 entry.get("model_id"), entry.get("platform"),
                 entry.get("platform_id") or entry.get("platform") or "")
+    # **聚合视图会发布的那个调用 ID**：管理台把它和 client_id 并列展示，
+    # 用户才知道「复制哪个能跨平台调度、复制哪个能固定落点」。
+    # 计算由 models_router 统一提供（同一个模型组 = 同一个 ID），这里只补字段。
+    for item in result["items"]:
+        head = (item["platforms"] or [{}])[0]
+        readable = _mr.readable_model_id(
+            str(head.get("platform") or ""), str(head.get("model_id") or ""))
+        public_id = _mr.public_model_id(
+            str(item.get("key") or ""),
+            readable or str(head.get("model_id") or ""))
+        item["public_id"] = public_id
+        for entry in item["platforms"]:
+            # 组内每个平台明细都指向同一个聚合 ID（落点交给网关调度）
+            entry["public_id"] = public_id
+
     # 展开区之后平台数会变（Qoder 国内 + 国际算两个可调度目标），要重算
     for item in result["items"]:
         item["platform_count"] = len(item["platforms"])

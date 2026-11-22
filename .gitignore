@@ -190,6 +190,15 @@ tests/*
 !tests/test_gateway_reliability_pool.py
 !tests/test_gateway_reliability_dispatch.py
 !tests/test_gateway_reliability_models.py
+# 恢复：2026-11-23 队长误合并后回滚时误删的其他 team 白名单（这些文件在回滚前就已存在）
+!tests/lifecycle-shell.test.cjs
+!tests/test_deploy_waiting_page.py
+!tests/test_desktop_lifecycle.py
+!tests/test_gateway_reliability_scheduling.py
+!tests/test_graceful_lifecycle.py
+!tests/test_lifecycle_control.py
+!tests/test_lifecycle_resume.py
+!tests/test_platform_model_routing.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 
@@ -345,3 +354,18 @@ findings.md
 progress.md
 .qimei-release-review.md
 .tmp-*
+!tests/test_dispatch_retry_degraded.py
+# ===== 计划交付物（2026-11-22 platform-scoped model resolution）：文档必须可入库 =====
+!docs/superpowers/plans/*.md
+!docs/superpowers/
+!docs/superpowers/plans/
+!docs/superpowers/plans/*.md
+# ===== 2026-11-22 platform-scoped model resolution: 持久回归与度量脚本必须可入库 =====
+!tests/test_platform_model_routing.py
+!tests/test_gateway_reliability_scheduling.py
+!tests/test_dispatch_retry_degraded.py
+!scripts/bench_dispatch_hotpath.py
+
+# ===== 优雅退出（任务 8）：端到端验收夹具是交付物，必须可入库 =====
+# 与 tests/* 的默认忽略规则配套：只放行本功能的具体测试文件。
+!tests/test_e2e_graceful.py

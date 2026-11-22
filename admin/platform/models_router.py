@@ -317,6 +317,72 @@ def _caps_flat(caps: dict, display_name: str = "") -> dict:
     return out
 
 
+def _intersect_caps(items) -> dict:
+    """聚合项的**能力下限**：只发布所有成员共同支持的能力。
+
+    ## 为什么不能取「首个成员」（§六 第 83 行）
+
+    聚合项代表「这一组模型，落点交给网关调度」。只要 A 支持图片/B 只支持
+    文本，取 A 的 caps 就等于对用户承诺「发图一定行」—— 落到 B 就失败。
+    上下文/输出同理：报 A 的 1M，落到只有 64K 的 B 会直接超限。
+
+    规则（宁可少报，不可高报）：
+
+      * 数值（context_window / max_output_tokens）：取**已确认值的下限**；
+        完全没数据才省略（省略 = 未知，不能当成「够大」）。
+      * 布尔（supports_images / supports_reasoning / supports_tools）：
+        任一成员明确 False -> False；所有成员都明确 True 才 True；
+        有人没给值 -> 省略（未知不当作支持）。
+      * reasoning_efforts：取交集；supports_reasoning 不是 True 就不下发
+        —— 否则客户端会显示一个组里至少一半成员不接受的档位，请求在本地
+        就被拦掉（UNSUPPORTED_REASONING_EFFORT）。
+      * default_reasoning_effort / can_disable_thinking：成员全一致才下发。
+    """
+    caps_list = [item.get("caps") or {} for item in (items or [])]
+    caps_list = [caps for caps in caps_list
+                 if isinstance(caps, dict) and caps]
+    if not caps_list:
+        return {}
+
+    out: dict = {}
+    for key in ("context_window", "max_output_tokens"):
+        values = [caps[key] for caps in caps_list
+                  if isinstance(caps.get(key), int) and caps[key] > 0]
+        if values:
+            out[key] = min(values)
+
+    for key in ("supports_images", "supports_reasoning", "supports_tools"):
+        present = [caps[key] for caps in caps_list
+                   if isinstance(caps.get(key), bool)]
+        if any(value is False for value in present):
+            out[key] = False
+        elif present and len(present) == len(caps_list):
+            out[key] = True
+
+    if out.get("supports_reasoning") is True:
+        efforts: list[str] | None = None
+        for caps in caps_list:
+            current = [str(x) for x in (caps.get("reasoning_efforts") or [])
+                       if str(x).strip()]
+            efforts = current if efforts is None else [
+                x for x in efforts if x in current]
+        if efforts:
+            out["reasoning_efforts"] = efforts
+        defaults = {str(caps.get("default_reasoning_effort") or "")
+                    for caps in caps_list}
+        if len(defaults) == 1:
+            only = next(iter(defaults))
+            if only:
+                out["default_reasoning_effort"] = only
+        disable = [caps.get("can_disable_thinking") for caps in caps_list]
+        if all(isinstance(value, bool) for value in disable):
+            out["can_disable_thinking"] = all(disable)
+
+    if any(caps.get("overridden") for caps in caps_list):
+        out["overridden"] = True
+    return out
+
+
 def _default_efforts_for(name: str) -> list[str]:
     """按模型名给一组合理的推理档位（上游没公布时的兜底）。
 
@@ -507,6 +573,229 @@ def _entry_targets(row: dict) -> list[tuple[str, str]]:
     return [(_realm_platform_id(storage, r), r) for r in realms]
 
 
+
+def _field_of(row, name: str):
+    """读一行的字段：ORM 行用属性，dict 行（dispatch 的查询结果）用键。"""
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
+def _display_of(row) -> str:
+    """这一行的官方展示名（dict 行读 display / display_name）。"""
+    from admin.model_alias import model_display
+
+    if isinstance(row, dict):
+        return str(row.get("display") or row.get("display_name") or "")
+    return model_display(getattr(row, "upstream_metadata", None))
+
+
+def intl_twins(rows) -> set:
+    """哪些 (storage, 去掉 :intl 的 model_id) 存在国际区孪生记录。
+
+    有孪生说明该平台**分两套模型表**（Trae：xxx 国内、xxx:intl 国际）；
+    没有就是共用一份（Qoder：dfmodel 两区同名）。:intl 是 5 个字符，
+    所以切掉尾部的 5 位就是国内区那条的 model_id。
+    """
+    twins = set()
+    for row in rows or []:
+        model_id = str(_field_of(row, "model_id") or "")
+        if model_id.endswith(":intl"):
+            twins.add((str(_field_of(row, "platform") or "").lower(),
+                       model_id[:-5]))
+    return twins
+
+
+def _model_group(row) -> str:
+    """一行 model_configs 属于哪个模型组（与目录聚合、分组成员同一个 key）。
+
+    key 用**可读名**算：Marvis 存的是上游槽位名（main-auto），按它的 slug
+    （mainauto）会自成一组，于是「同一模型」永远聚不到一起。
+    """
+    from admin.model_alias import canonical_key
+
+    storage = str(_field_of(row, "platform") or "").lower()
+    raw = str(_field_of(row, "model_id") or "")
+    readable = readable_model_id(storage, raw) or raw
+    return canonical_key(readable, _display_of(row)) or readable or raw
+
+
+def _known_group_of(name: str) -> str:
+    """这个名字属于哪个**已人工确认**的模型组（没登记过返回空串）。
+
+    只认 KNOWN_ALIASES 里登记过的等价关系 —— 相似展示名（V4 与 V4.1）
+    绝不能被当成同一个模型。
+    """
+    from admin.model_alias import KNOWN_ALIASES, canonical_key
+
+    key = canonical_key(str(name or ""))
+    return key if key in KNOWN_ALIASES else ""
+
+
+def public_model_id(group: str, fallback: str = "") -> str:
+    """模型组 -> **稳定的公开调用 ID**。
+
+    有明确等价关系的组（DISPLAY_NAMES 登记过）用规范展示名生成，
+    与「哪一行排在前面」「哪个平台先入库」无关：
+
+        deepseekv41flash -> DeepSeek-V4.1-Flash -> deepseek-v4.1-flash
+
+    旧实现用 slugify(head.readable)，head 取决于行顺序与平台字母序 ——
+    只有 WorkBuddy 时是 deepseek-v4.1-flash，加入 Qoder 的 dfmodel
+    （可读名 deepseek-flash）后就变成 deepseek-flash，客户端两边都配不齐。
+
+    没有明确名称的组保持现有可调用 ID（不按相似展示名强行改名）。
+    """
+    from admin.model_alias import DISPLAY_NAMES
+
+    canonical = DISPLAY_NAMES.get(str(group or ""))
+    if canonical:
+        slug = slugify_model_id(canonical)
+        if slug:
+            return slug
+    return slugify_model_id(fallback)
+
+
+def public_targets(rows, *, twins=None) -> list[dict]:
+    """每条 model_configs 记录 -> 它对外发布的落点。
+
+    这是「同一行有哪些公开平台/区域、属于哪个模型组」的**唯一实现**，
+    目录（build_payload）、管理台与 dispatch 都复用这一份：
+
+      * platform / realm 走 _entry_targets（:intl 孪生规则）；
+      * readable 走 readable_model_id（Marvis 槽位 -> 真实模型名）；
+      * group 走 canonical_key（同一模型跨平台同组）；
+      * caps 只在拿到真实行时算（dict 行不读 metadata）。
+
+    输出顺序 = 输入行顺序 × _entry_targets 的顺序，因此可复现。
+    """
+    rows = list(rows or [])
+    if twins is None:
+        twins = intl_twins(rows)
+    out: list[dict] = []
+    for row in rows:
+        storage = str(_field_of(row, "platform") or "").lower()
+        model_id = str(_field_of(row, "model_id") or "")
+        if not storage or not model_id:
+            continue
+        display = _display_of(row)
+        readable = readable_model_id(storage, model_id) or model_id
+        group = _model_group(row)
+        caps = {} if isinstance(row, dict) else _capabilities_of(row)
+        for pid, realm in _entry_targets({
+                "platform": storage, "model_id": model_id,
+                "_has_intl_twin": (storage, model_id) in twins}):
+            out.append({
+                "platform": pid,
+                "storage": storage,
+                "realm": realm,
+                "model_id": model_id,
+                "readable": readable,
+                # 没有官方展示名时退回可读名（否则槽位名会被当成展示名）
+                "display": display or readable,
+                "group": group,
+                "caps": caps,
+            })
+    return out
+
+
+def resolve_public_targets(name: str, db=None, *,
+                           allowed_ids=None) -> list[dict]:
+    """客户端发来的**调用名** -> 它能落到哪些目录落点（网关解析入口）。
+
+    接受的形式（与 /v1/models 下发的 id 一一对应）：
+
+      * 精确 id（dfmodel / deepseek-v4.1-flash）；
+      * 带平台后缀的精确 id（deepseek-flash-qoder，后缀由
+        model_suffix.resolve 剥掉并锁定平台）；
+      * 可读名与 slug（DeepSeek-Flash / deepseek-v41-flash）；
+      * **已人工确认**的历史公开拼写（KNOWN_ALIASES，例如裸名
+        deepseek-flash 在 Qoder 下线后仍要能调 WorkBuddy 的同款模型）。
+
+    allowed_ids 是分组限制（组内登记的 model_configs.model_id 集合）：
+    给了就**只用组内行**参与解析 —— 手输别名、固定后缀都不能扩大范围。
+
+    返回顺序稳定：先精确/可读命中，再组内别名命中。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return []
+
+    bare, want_pid = text, ""
+    try:
+        from admin.platform import model_suffix
+
+        pid, clean, matched = model_suffix.resolve(text)
+        if matched and clean:
+            bare, want_pid = clean, pid
+    except Exception:  # noqa: BLE001 - 后缀解析失败按裸名处理
+        logger.debug("resolve_public_targets 后缀解析失败 %s", text, exc_info=True)
+
+    target = bare.strip().lower()
+    if not target:
+        return []
+    target_slug = slugify_model_id(bare)
+    target_group = _known_group_of(bare)
+
+    want_storage = ""
+    if want_pid:
+        try:
+            from admin.platform import registry
+
+            spec = registry.get(want_pid)
+            want_storage = str(spec.storage()).lower() if spec else ""
+        except Exception:  # noqa: BLE001
+            want_storage = ""
+
+    own_db = db is None
+    try:
+        if own_db:
+            from admin.db import SessionLocal
+
+            db = SessionLocal()
+        from admin.models import ModelConfig
+
+        query = db.query(ModelConfig).filter(ModelConfig.enabled == 1)
+        if allowed_ids is not None:
+            ids = sorted({str(x) for x in allowed_ids})
+            if not ids:
+                return []
+            query = query.filter(ModelConfig.model_id.in_(ids))
+        rows = _drop_retired_rows(
+            query.order_by(ModelConfig.platform.asc(),
+                           ModelConfig.model_id.asc()).all())
+
+        exact: list[dict] = []
+        alias: list[dict] = []
+        for item in public_targets(rows):
+            if want_storage and item["storage"] != want_storage:
+                continue
+            if want_pid and item["platform"] != want_pid:
+                continue
+            raw = str(item["model_id"] or "")
+            readable = str(item["readable"] or raw)
+            if (raw.lower() == target
+                    or (target_slug and slugify_model_id(raw) == target_slug)
+                    or readable.lower() == target
+                    or (target_slug
+                        and slugify_model_id(readable) == target_slug)):
+                exact.append(item)
+            elif target_group and item["group"] == target_group:
+                alias.append(item)
+        # 一个公开 ID 代表的就是整组（落点交给网关调度），所以组内别名命中
+        # 也一起保留，但精确命中排在前面。
+        return exact + [item for item in alias if item not in exact]
+    except Exception:  # noqa: BLE001
+        logger.debug("resolve_public_targets 失败 name=%s", name, exc_info=True)
+        return []
+    finally:
+        if own_db and db is not None:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def is_native_model_id(storage: str, name: str, db=None) -> bool:
     """这个名字是不是该平台 `model_configs` 里**已经存在的 model_id**。
 
@@ -617,7 +906,6 @@ def build_payload(db, *, aggregate_only: bool = False,
     过滤放在**入口**（SQL 的 where）而不是出口，避免把不该给的模型
     先算出来再丢弃。
     """
-    from admin.model_alias import canonical_key, model_display
     from admin.models import ModelConfig
     from admin.platform import model_suffix
 
@@ -625,15 +913,23 @@ def build_payload(db, *, aggregate_only: bool = False,
     # 分组限制：**先**读真实成员，同一个集合既用于 SQL 过滤也参与缓存校验。
     # 不能指望 _signature() 感知成员变化：成员表是 delete+insert，sqlite 会复用
     # 被删行的 rowid，分组名/备注不变时聚合值全都不变 —— 没处理这次改动的
-    # worker 会一直命中旧清单。用**裸成员**（组内 id）而不是
-    # effective_group_models：后者为了和「启用」求交要物化全部 ModelConfig，
-    # 而下面的查询本来就带 enabled == 1，求交是重复劳动。
+    # worker 会一直命中旧清单。
+    #
+    # 用 **effective_group_models()**（组内 **归一到目录拼写** ∩ 启用），
+    # 不是 group_models() 的原始登记字符串：控制台展示的是可读名
+    # （DeepSeek-V4.1-Flash），库里那行是 deepseek-v4.1-flash —— 拿原始字符串
+    # 做 model_id IN (...) 会让「能调用」的模型在清单里**看不到、选不了**
+    # （交付目标第 3 行那一环没闭环）。它与授权侧（proxy 的 allowed 求交）
+    # 用的是同一个函数，清单与调用不会各说一套。
+    # 「启用」被求交两次（SQL 也带 enabled == 1）是幂等的；空组仍然明确返回
+    # 空清单，绝不退化成全量。代价只有缓存未命中时多一次三列窄读，不是按请求
+    # 的全表扫描。缓存指纹同样吃这份**归一后**的集合，改组内写法即可自愈。
     allowed_ids = None
     if group_id:
         try:
-            from admin.routers.groups import group_models
+            from admin.routers.groups import effective_group_models
 
-            allowed_ids = frozenset(group_models(db, int(group_id)))
+            allowed_ids = frozenset(effective_group_models(db, int(group_id)))
         except Exception:  # noqa: BLE001 - 受限清单的成员读不到：fail closed
             logger.warning("分组 %s 成员读取失败，按空清单返回且不写缓存", group_id,
                            exc_info=True)
@@ -668,52 +964,17 @@ def build_payload(db, *, aggregate_only: bool = False,
                           ModelConfig.model_id.asc()).all()
     rows = _drop_retired_rows(rows)
 
-    # 先算出「哪些 (storage, model_id) 存在 :intl 孪生」——
-    # 有孪生说明这个平台**分两套模型表**（Trae），无孪生是共用一份（Qoder）。
-    # 注意 `mid[:-5]` 去掉的是 `:intl`（5 个字符）
-    twins = {(str(r.platform or "").lower(), str(r.model_id or "")[:-5])
-             for r in rows if str(r.model_id or "").endswith(":intl")}
+    # 每条记录 -> 公开落点（平台/区/可读名/模型组/能力）。
+    # 这份计算抽在 public_targets 里，目录、管理台与 dispatch 共用同一份；
+    # 里面的 key 用**可读名**算（Marvis 存槽位名 `main-auto`，按它的 slug
+    # `mainauto` 会自成一组，于是 multi=False、不加平台后缀 —— 结果就是
+    # 截图上那条孤零零的 `deepseek-v4.1-flash`）。
+    expanded = public_targets(rows)
 
-    # 先把每条记录展开成 (platform_id, realm, model_id, display)
-    expanded: list[dict] = []
-    for row in rows:
-        storage = str(row.platform or "").lower()
-        if not storage:
-            continue
-        display = model_display(getattr(row, "upstream_metadata", None))
-        mid = str(row.model_id or "")
-        # **可读名**（2026-11-15）：Marvis 的 model_id 是上游槽位名
-        # （`main-auto`），对外必须换成真实模型名（`deepseek-v4.1-flash`）。
-        # 它同时决定三件事：跨平台分组、`/v1/models` 的 id、要不要加平台后缀。
-        readable = readable_model_id(storage, mid) or mid
-        for pid, realm in _entry_targets({
-                "platform": storage, "model_id": mid,
-                "_has_intl_twin": (storage, mid) in twins}):
-            expanded.append({
-                "platform": pid,
-                "storage": storage,
-                "realm": realm,
-                "model_id": str(row.model_id or ""),
-                "readable": readable,
-                # display 只在有官方展示名时才用；没有就退回可读名
-                # （否则槽位名会被当成展示名，卡片上又是 `main-auto`）
-                "display": display or readable,
-                # 能力信息（上下文/输出/图片/推理）来自上游 metadata，
-                # 之前完全没输出，客户端只能看到模型名 —— 于是所有模型
-                # 都显示成「文本 / 256K / 不支持推理」。
-                "caps": _capabilities_of(row),
-            })
-
-    # 按归一 key 分组（用于判断「是否跨平台同名」）
-    #
-    # ⚠️ key 必须用**可读名**算：Marvis 存的是槽位名 `main-auto`，
-    # 用它的 key（`mainauto`）会自成一组，于是 `multi=False`、
-    # 不加平台后缀 —— 结果就是截图上那条孤零零的 `deepseek-v4.1-flash`，
-    # 和别的平台的 `deepseek-v4.1-flash-loomy` 并不了列。
+    # 按模型组分组（用于判断「是否跨平台同名」）
     groups: dict[str, list[dict]] = {}
     for item in expanded:
-        key = (canonical_key(item["readable"] or item["model_id"], item["display"])
-               or item["readable"] or item["model_id"])
+        key = item["group"] or item["readable"] or item["model_id"]
         groups.setdefault(key, []).append(item)
 
     entries: list[dict] = []
@@ -725,12 +986,15 @@ def build_payload(db, *, aggregate_only: bool = False,
             for item in members:
                 by_platform.setdefault(item["platform"], item)
             head = next(iter(by_platform.values()))
-            # 聚合视图的 id 也用**可读名**（`deepseek-v4.1-flash`），
-            # 不能用 `model_id`（Marvis 那边是槽位名 `main-auto`）。
-            agg_id = slugify_model_id(head["readable"] or head["model_id"])
+            # 聚合视图的 id 用**模型组的规范公开名**（DISPLAY_NAMES 登记过
+            # 的等价关系），与行顺序/平台字母序无关：这一组永远是
+            # `deepseek-v4.1-flash`。未登记的组沿用可读名 slug。
+            agg_id = public_model_id(key_, head["readable"] or head["model_id"])
             if not agg_id or agg_id in seen:
                 continue
             seen.add(agg_id)
+            # 能力只发布**所有成员共同支持**的部分（不能按首个成员高报）
+            caps = _intersect_caps(list(by_platform.values()))
             entries.append({
                 "id": agg_id,
                 "object": "model",
@@ -741,12 +1005,11 @@ def build_payload(db, *, aggregate_only: bool = False,
                 "base_model": head["model_id"],
                 "display_name": head["display"],
                 "platforms": sorted(by_platform.keys()),
-                # 能力信息（取组内第一条有数据的）
-                **next(({"caps": it["caps"]} for it in by_platform.values()
-                        if it.get("caps")), {}),
-                **_caps_flat(
-                    next((it["caps"] for it in by_platform.values()
-                          if it.get("caps")), None) or {}, head["display"]),
+                # 归一 key：管理台/日志用它把「同一模型」的条目对起来
+                "group": key_,
+                # 能力信息：组内共同下限
+                "caps": caps,
+                **_caps_flat(caps, head["display"]),
             })
     else:
         for key_, members in groups.items():
@@ -851,6 +1114,7 @@ def platform_of_model(name: str, db=None) -> str:
         from admin.models import ModelConfig
 
         rows = db.query(ModelConfig).filter(ModelConfig.enabled == 1).all()
+        matched = None
         for row in rows:
             raw = str(row.model_id or "")
             if not raw:
@@ -876,13 +1140,28 @@ def platform_of_model(name: str, db=None) -> str:
                 target_matched = target in candidates
             if not target_matched:
                 continue
-            # 该 storage 有多个区时无法确定是哪个区 —— 交给后缀，
-            # 这里只处理单区或默认区
-            realms = _storage_realms().get(storage) or [""]
-            realm = "cn" if len(realms) > 1 else (realms[0] if realms else "")
-            pid = _realm_platform_id(storage, realm)
-            return pid or storage
-        return ""
+            matched = row
+            break
+        if matched is None:
+            # 第二趟：**已人工确认**的模型组别名（历史公开拼写）。
+            # 放到第二趟而不是并进上面，是为了不让别名抢走精确登记：
+            # 裸名 deepseek-flash 在 Qoder 有行时仍归 Qoder（上游只认 dfmodel），
+            # 只有在没有任何精确命中时才按组兜底到别家同款模型。
+            group_target = _known_group_of(target)
+            if group_target:
+                for row in rows:
+                    if _model_group(row) == group_target:
+                        matched = row
+                        break
+        if matched is None:
+            return ""
+        storage = str(matched.platform or "").lower()
+        # 该 storage 有多个区时无法确定是哪个区 —— 交给后缀，
+        # 这里只处理单区或默认区
+        realms = _storage_realms().get(storage) or [""]
+        realm = "cn" if len(realms) > 1 else (realms[0] if realms else "")
+        pid = _realm_platform_id(storage, realm)
+        return pid or storage
     except Exception:  # noqa: BLE001
         logger.debug("platform_of_model 失败 name=%s", name, exc_info=True)
         return ""
@@ -943,6 +1222,15 @@ def upstream_of_in_platform(slug: str, storage: str, db=None) -> str:
                 return raw
             if slugify_model_id(raw) == slugify_model_id(target):
                 return raw
+        # 3) 组内**已人工确认**的写法：聚合视图的规范公开名
+        #    （deepseek-v4.1-flash）在 Qoder 上要还原成它自己的缩写
+        #    （dfmodel）。只认 KNOWN_ALIASES 登记过的等价关系 ——
+        #    相似展示名（V4 与 V4.1）之间绝不互认。
+        group_target = _known_group_of(target)
+        if group_target:
+            for row in rows:
+                if _model_group(row) == group_target:
+                    return str(row.model_id or "")
         return ""
     except Exception:  # noqa: BLE001
         logger.debug("平台内模型还原失败 storage=%s slug=%s", store, slug, exc_info=True)
@@ -991,6 +1279,14 @@ def upstream_of(slug: str, db=None) -> str:
             readable = readable_model_id(storage, raw)
             if slugify_model_id(readable) == target:
                 return raw
+        # 第二趟：**已人工确认**的组内历史拼写（如裸名 `deepseek-flash`）。
+        # 放在精确/可读命中之后，保证「Qoder 有行时仍还原成 dfmodel」这条
+        # 老行为不变；只有整表都精确命中不到时才按组兜底。
+        group_target = _known_group_of(target)
+        if group_target:
+            for row in rows:
+                if _model_group(row) == group_target:
+                    return str(row.model_id or "")
         return ""
     except Exception:  # noqa: BLE001
         logger.debug("slug 还原上游 id 失败 target=%s", slug, exc_info=True)
@@ -1081,5 +1377,18 @@ def _store(slot: str, payload: dict, now: float, signature: tuple) -> None:
 
 
 def invalidate() -> None:
-    """模型配置变化后调用：清空所有 slot（每个 view/分组都必须重建）。"""
+    """模型配置变化后调用：清单 slot 与**派生索引**一起失效。
+
+    ## 为什么还要清 `_native_cache`
+
+    `is_native_model_id()` 有一份 10 秒的索引（热路径每个请求都要问）。
+    只清清单 slot 时，新增/删除模型的**本进程**在下一次请求里仍然拿到旧
+    结论：刚加的模型被判成「不是原生 id」→ 可读名被当成别名改写 → 上游
+    400；刚删掉的行照样被当成原生 id → 该改写的不改写。
+
+    清它是安全的：那份索引**只装** `{storage: {model_id}}`，
+    不含 Key 专属候选、账号×模型冷却或账号可用性 —— 那些是每次请求都要
+    重新计算的东西，放进全局模型名缓存会把一个账号的状态广播给所有人。
+    """
     _cache.clear()
+    _native_cache.update({"at": 0.0, "ids": {}})

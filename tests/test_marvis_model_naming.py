@@ -22,17 +22,92 @@
 """
 from __future__ import annotations
 
+import atexit
+import contextlib
 import os
+import shutil
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, str(ROOT))
 
+# ---------------------------------------------------------------------------
+# 数据库引导（2026-11-22）：这个脚本做的是纯函数断言，却间接依赖 model_configs
+#
+#   · `is_native_model_id()` 不传 db 时自开 `admin.db.SessionLocal()`；
+#   · `alias_to_upstream()` 的「原生 id 优先」判定用它；
+#   · 裸名分支还要 `platform_of_model()` 查同一张表。
+#
+# 本机没有 MySQL 时那条查询直接抛 OperationalError，被 except 吞掉后**静默
+# 返回 False** —— 「原生 id 优先」于是被误判成失败（长期 16/18）。
+#
+# 这里在 import admin.db **之前**把 URL 指到本轮专属临时 SQLite（直接赋值，
+# 不用 setdefault，避免继承外部配置），建表并插入脚本假定的目录行。
+# 断言一个字都没改，只是把环境补齐。
+# ---------------------------------------------------------------------------
+_TMP_DIR = Path(tempfile.mkdtemp(prefix="marvis_model_naming_"))
+os.environ["ADMIN_DATABASE_URL"] = "sqlite:///" + (
+    _TMP_DIR / "naming.db").as_posix()
+
+#: 脚本断言所假定的目录 `(platform, model_id)`。
+#: Marvis 是**槽位名**版目录（线上 model_configs 存的就是槽位），
+#: Qoder 存缩写 id，Loomy / Trae 存它们自己的写法。
+_CATALOG = (
+    ("marvis", "main-auto"),
+    ("marvis", "deepseek-v4-pro-external"),
+    ("marvis", "hy3-preview-agent-real"),
+    ("qoder", "dfmodel"),
+    ("qoder", "dmodel"),
+    ("qoder", "kmodel"),
+    ("qoder", "auto"),
+    ("loomy", "spark-x2.6"),
+    ("trae", "glm-5.3"),
+)
+
 from admin.platform import model_suffix  # noqa: E402
 
 PASS = 0
 FAIL = 0
+
+
+def _bootstrap_catalog() -> None:
+    """建表 + 插入脚本假定的目录行（幂等：先清后插）。
+
+    必须在 `admin.db` 已经绑定到本轮临时 SQLite **之后**调用；
+    `admin.db` 是在这里才第一次 import 的，环境变量已经设好了。
+    """
+    from admin import db as admin_db
+    from admin.models import ModelConfig
+
+    admin_db.Base.metadata.create_all(bind=admin_db.engine)
+    with admin_db.SessionLocal() as db:
+        db.query(ModelConfig).delete()
+        for platform, model_id in _CATALOG:
+            db.add(ModelConfig(platform=platform, model_id=model_id,
+                               enabled=1, credit_multiplier=1.0,
+                               upstream_metadata=""))
+        db.commit()
+
+
+def _teardown() -> None:
+    """释放引擎并删临时目录（Windows 上 sqlite 文件被持有时先 dispose 再删）。"""
+    with contextlib.suppress(Exception):
+        from admin import db as admin_db
+
+        admin_db.engine.dispose()
+    for _attempt in range(10):
+        shutil.rmtree(_TMP_DIR, ignore_errors=True)
+        if not _TMP_DIR.exists():
+            return
+        time.sleep(0.1)
+
+
+# 模块导入即建目录：这样 `python tests/xxx.py` 与 pytest 收集两种入口都能跑。
+_bootstrap_catalog()
+atexit.register(_teardown)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -124,10 +199,13 @@ def test_guard_source() -> None:
 
 
 if __name__ == "__main__":
-    test_marvis_no_rewrite()
-    test_marvis_suffix()
-    test_other_platforms_intact()
-    test_guard_source()
+    try:
+        test_marvis_no_rewrite()
+        test_marvis_suffix()
+        test_other_platforms_intact()
+        test_guard_source()
+    finally:
+        _teardown()
     print()
     print(f"通过 {PASS} / {PASS + FAIL}")
     sys.exit(1 if FAIL else 0)

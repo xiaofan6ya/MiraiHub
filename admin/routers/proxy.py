@@ -2548,6 +2548,63 @@ def strip_model_context_suffix(model: str) -> str:
     return stripped or model
 
 
+
+def _resolve_group_model_alias(db: Session, requested_model: str,
+                               allowed: set[str]) -> str | None:
+    """分组 Key 的**清单往返**：把公开调用名换算成组内登记的原生 ID。
+
+    ## 为什么需要（计划 §六 第 82 行 / 交付目标第 3 条）
+
+    /v1/models 给客户端的是**可读公开 ID**（聚合视图一条
+    deepseek-v4.1-flash），而分组登记的是 model_configs.model_id
+    —— 平台自己的原生 ID（Qoder 的 dfmodel、Marvis 的 main-auto）。
+    两者不相等，于是一个「在客户端里能选」的模型，一发就
+    403 model_not_in_group。这正是要消灭的形态。
+
+    只在**精确命中失败**之后才被调用（那时今天的结果就是 403），
+    所以常见请求零额外开销。
+
+    ## 绝不扩权
+
+    换算结果仍然必须落在 allowed 里：
+
+      * 手输别名（deepseek-flash）→ 只有它属于同一模型组、且组内真有那一行时才算；
+      * 固定后缀（deepseek-flash-qoder）→ 后缀把候选收窄到那个平台，
+        组里没有该平台的行就还是 None；
+      * 指向组外平台的写法 → 同样 None。
+
+    返回顺序稳定：先「原串相等」，再按 (platform, realm) 排序，最后取原生 ID
+    （同一 storage 的 cn/intl 两个区返回同一个原生 ID，无歧义）。
+
+    ## 失败即拒绝
+
+    目录读不到 / 解析抛异常时返回 None（fail closed），不要 500。
+    """
+    name = str(requested_model or "").strip()
+    if not name or not allowed:
+        return None
+    try:
+        from admin.platform import models_router
+
+        candidates = models_router.resolve_public_targets(name, db) or []
+    except Exception:  # noqa: BLE001 - 目录异常按「无权」处理，不冒泡
+        _logger.debug("分组模型别名解析失败 model=%s", name, exc_info=True)
+        return None
+
+    ranked = []
+    for item in candidates:
+        native = str(item.get("model_id") or "")
+        if not native or native not in allowed:
+            continue
+        ranked.append((0 if native == name else 1,
+                       str(item.get("platform") or ""),
+                       str(item.get("realm") or ""),
+                       native))
+    if not ranked:
+        return None
+    return sorted(ranked)[0][3]
+
+
 def _pick_best_model(db: Session, requested_model: str,
                      allowed: set[str] | None = None) -> str | None:
     """根据请求模型和可用配置，选出最优实际使用的模型 ID。
@@ -2574,8 +2631,15 @@ def _pick_best_model(db: Session, requested_model: str,
     if requested_model and requested_model != "auto":
         if allowed is not None:
             # 绑定了分组：只认组内模型，优先于全局白名单判定，
-            # 组内没有就是没权限（比白名单更严格，语义更明确）
-            return requested_model if requested_model in allowed else None
+            # 组内没有就是没权限（比白名单更严格，语义更明确）。
+            #
+            # 精确命中就直接放行（热路径零额外开销）。命中不了才做一次
+            # **等价换算**：清单下发的公开 ID / 历史裸名 / 平台后缀写法
+            # 换算成组内登记的原生 ID（deepseek-v4.1-flash -> dfmodel）。
+            # 换算结果仍必须落在 allowed 里，绝不扩权。
+            if requested_model in allowed:
+                return requested_model
+            return _resolve_group_model_alias(db, requested_model, allowed)
         if not has_any_config:
             return requested_model  # 无配置，放行
         if _is_model_allowed(db, requested_model):

@@ -48,6 +48,7 @@ import logging
 import random
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -213,6 +214,19 @@ def health(db: Session, platform_id: str) -> dict:
 
     指标都是**已有数据**的汇总，不做额外的上游请求
     （那会让「打开页面」变成一次探测风暴）。
+
+    ## 统计口径（2026-11-22 修）
+
+    | 字段 | 含义 |
+    |---|---|
+    | accounts | 该平台（若固定了区，则只算该区）的全部账号行数 |
+    | active   | status == active 的行数 |
+    | cooling  | cool_until 未到期的行数，**任意 status 都算** |
+    | usable   | **active 且未冷却**的行数 —— 可用数只看这一项 |
+
+    usable 与 cooling **不再相减**：两者分母不同（前者只含 active，后者含全部
+    行）。旧公式 len(active) - cooling 会让一行「已停用但仍在冷却」的账号
+    抵消一行健康的 active，平台被判成不可用（ok=False、调度直接跳过它）。
     """
     from admin.models import Account
     from admin.platform import registry
@@ -226,15 +240,36 @@ def health(db: Session, platform_id: str) -> dict:
     if spec.realm:
         rows = [r for r in rows if (r.domain or "") == spec.realm]
 
-    now = time.time()
-    active = [r for r in rows if (getattr(r, "status", "") or "") == "active"]
+    # 时间口径：cool_until / credits_soonest_expire_at 都是**朴素 UTC**
+    # （写入方用 datetime.utcnow()，选号侧也用 utcnow 比较 —— 见
+    # shared.select_account 的 cool_until <= now）。所以这里必须用 utcnow 比较。
+    #
+    # ⚠️ 2026-11-22 修：原来用 cool_until.timestamp() > time.time() ——
+    # 朴素 datetime 的 .timestamp() 先**按本地时区**解释再转 epoch，
+    # 在 UTC+8 下整个冷却窗口被提前了 8 小时：10 分钟级的软冷却永远统计不到
+    # （实测同一份数据 cooling 恒为 0），8 小时以上的长冷却则多算 8 小时。
+    now = datetime.utcnow()
+    active = 0
     cooling = 0
+    usable = 0
     remain = 0
     limit = 0
     soonest = None
     for row in rows:
+        is_active = (getattr(row, "status", "") or "") == "active"
         cool_until = getattr(row, "cool_until", None)
-        if cool_until and cool_until.timestamp() > now:
+        is_cooling = bool(cool_until is not None and cool_until > now)
+        if is_active:
+            active += 1
+            # 可用数**直接按行**算：active 且通过本统计承诺的冷却条件
+            # （cool_until 未到期）。这样「非 active 但正在冷却」的行不会
+            # 抵消一行健康的 active —— 旧实现的 len(active) - cooling
+            # 减的是**全部行**的冷却数，把那行健康号也减掉了。
+            if not is_cooling:
+                usable += 1
+        if is_cooling:
+            # cooling 仍统计**全部行**（界面要看「有多少号在冷却」），
+            # 与 usable 分开：两者不再相减。
             cooling += 1
         remain += int(getattr(row, "balance_remain", 0) or 0)
         limit += int(getattr(row, "balance_total", 0) or 0)
@@ -242,19 +277,21 @@ def health(db: Session, platform_id: str) -> dict:
         if expiring > 0:
             ts = getattr(row, "credits_soonest_expire_at", None)
             if ts is not None:
-                secs = ts.timestamp()
+                # 同一口径：朴素 UTC -> 真实 epoch（aware 值原样用）
+                secs = (ts if ts.tzinfo is not None
+                        else ts.replace(tzinfo=timezone.utc)).timestamp()
                 if soonest is None or secs < soonest:
                     soonest = secs
-
-    usable = len(active) - cooling
     return {
         "platform": platform_id,
         "label": spec.label,
         "ok": usable > 0,
         "accounts": len(rows),
-        "active": len(active),
+        "active": active,
         "cooling": cooling,
-        "usable": max(0, usable),
+        # 可用 = active 且不在冷却；不可能为负
+        # （旧实现的 max(0, ...) 是在掩盖"减出负数"这个错误统计）
+        "usable": usable,
         "balance_remain": remain,
         "balance_total": limit,
         # 剩余比例：策略排序用；总额为 0 时给 None（不冒充 0%）
@@ -292,12 +329,35 @@ def order(db: Session, platform_ids: list[str] | None = None, *,
     所以调度与展示各用各的：调度保持严格过滤，展示用 include_unavailable=True。
 
     返回值是 `[{platform, label, reason, available, ...health}]`。
+
+    ## 参数语义（2026-11-22 修：空列表不再扩成全平台）
+
+    * platform_ids=None -> 全部已登记平台；
+    * platform_ids=[]   -> **空**，直接返回 []。旧实现是
+      "platform_ids or list(registry.ids())"：空列表是假值，于是被判成
+      「没传」而扩成全平台。调用方用空候选表达「本次没有任何平台可排」，
+      却被静默解读成「排全部」—— 这正是「排序把被排除者加回来」的入口
+      （计划 §五 第 73 行末、§七 第 89 行）。
+    * 传入非空集合 -> **只在该集合内**排序。下面每个策略分支都只在池内重排，
+      不会补进池外的平台；include_unavailable 仍只决定「池内的不可用项
+      是否保留」，不影响池的边界。
     """
     from admin.platform import registry
     from admin.platform.loader import load_platforms
 
     load_platforms()
-    targets = platform_ids or list(registry.ids())
+    if platform_ids is None:
+        targets = list(registry.ids())
+    else:
+        # 保留调用方给的顺序，去掉空白项与重复项；**空列表就是空**
+        targets = []
+        for pid in platform_ids:
+            text = str(pid or "").strip()
+            if not text or text in targets:
+                continue
+            targets.append(text)
+    if not targets:
+        return []
     cfg = routing_config(db)
     disabled = cfg["disabled"]
     strategy = cfg["strategy"]
@@ -380,9 +440,18 @@ def order(db: Session, platform_ids: list[str] | None = None, *,
                 if ts else "无临期额度")
     elif strategy == "throughput":
         # 在途少的先。`usable` 是可用账号数，作为简单近似（避免引入额外锁）
-        pool.sort(key=lambda i: (-i.get("usable") or 0, _priority_key(i)))
+        # ⚠️ 2026-11-22 修：原来是 (-i.get("usable") or 0)，靠运算优先级等于
+        # -(usable) or 0 —— usable 为 None（统计缺字段 / 平台实现没给这一项）
+        # 时一元负号直接抛 TypeError: bad operand type for unary -: 'NoneType'，
+        # 把整个 order()（进而 pick() / 调度）打挂。改成先兜 0 再取负：
+        #   * usable 是 int 时排序结果与改前逐项相同（-usable or 0 == -usable）；
+        #   * usable 是 None 时按 0 处理 —— 排在「有可用账号」的平台之后。
+        pool.sort(key=lambda i: (-(i.get("usable") or 0), _priority_key(i)))
         for item in pool:
-            item["reason"] = "%d 个可用账号" % item.get("usable", 0)
+            # 同一处隐患的第二半：格式串用 %d，usable 为 None 时同样抛
+            # "TypeError: %d format: a real number is required, not NoneType"。
+            # 兜 0 对 int 值逐字符等价（只是把缺字段的那个平台标成 0 个可用号）。
+            item["reason"] = "%d 个可用账号" % (item.get("usable") or 0)
 
     elif strategy == "round_robin":
         # 用「分钟数 % 平台数」做确定性轮转，避免每次请求都变
