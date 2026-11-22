@@ -253,10 +253,13 @@ def group_models(rows: list[dict]) -> list[dict]:
         for item in bucket["platforms"]:
             model_id = str(item.get("model_id") or "")
             realm = "intl" if model_id.rstrip().endswith(":intl") else "cn"
-            key = (str(item["platform"]), realm)
-            current = by_platform.get(key)
+            # ⚠️ 变量名**不能**叫 key：外层循环的 `key` 是这一组的归一 key，
+            # 内层覆盖它会让 `out.append({"key": key, ...})` 把 (平台, 区)
+            # 元组当成组 key 序列化出去（管理台两个不同模型拿到同一个数组 key）。
+            slot = (str(item["platform"]), realm)
+            current = by_platform.get(slot)
             if current is None:
-                by_platform[key] = item
+                by_platform[slot] = item
                 continue
 
             def rank(entry: dict) -> tuple:
@@ -267,7 +270,7 @@ def group_models(rows: list[dict]) -> list[dict]:
                 )
 
             if rank(item) < rank(current):
-                by_platform[key] = item
+                by_platform[slot] = item
 
         platforms = list(by_platform.values())
         multipliers = [p["multiplier"] for p in platforms

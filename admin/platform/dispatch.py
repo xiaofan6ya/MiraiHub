@@ -172,6 +172,32 @@ def _disabled_platforms() -> set[str]:
     return result
 
 
+#: 历史测试替身 / 外部调用方可能仍是三参签名：按签名决定要不要传 scope。
+_ROUTE_SCOPE_SUPPORT: dict = {}
+
+
+def _route_with_scope(model, key, disabled, scope):
+    """调用 `_route_by_model_ownership`，兼容只接受三参的替身。
+
+    生产实现接受 `scope=`（用来把候选与排序结果缓存到本次请求里，避免
+    选择/改道/重试三个阶段各算一次）。签名判定结果按函数对象缓存，热路径
+    只是一次字典查找。
+    """
+    import inspect
+
+    fn = _route_by_model_ownership
+    takes_scope = _ROUTE_SCOPE_SUPPORT.get(fn)
+    if takes_scope is None:
+        try:
+            takes_scope = "scope" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            takes_scope = False
+        _ROUTE_SCOPE_SUPPORT[fn] = takes_scope
+    if takes_scope:
+        return fn(model, key, disabled, scope=scope)
+    return fn(model, key, disabled)
+
+
 def resolve(request: Request) -> tuple[str, str]:
     """解析本次请求的目标 `(platform, realm)`。
 
@@ -217,7 +243,7 @@ def resolve(request: Request) -> tuple[str, str]:
     # 不存在「P 平台失败就改走 Q 平台」的运行期改道（用户明确禁止过）。
     model = _model_of(request)
     if model:
-        picked = _route_by_model_ownership(model, key, disabled)
+        picked = _route_with_scope(model, key, disabled, request.scope)
         if picked is not None:
             return picked[0], picked[1]
 
@@ -727,83 +753,187 @@ def _retired_platform_of(model: str) -> str:
     return ""
 
 
+def _realm_of_model_id(model_id: str) -> str:
+    """`xxx:intl` -> `intl`；没有区域后缀返回空串（共用行 / 默认区）。"""
+    text = str(model_id or "")
+    if ":" not in text:
+        return ""
+    suffix = text.rsplit(":", 1)[-1].strip().lower()
+    return suffix if suffix in ("cn", "intl") else ""
+
+
+def _strip_realm_suffix(storage: str, model_id: str) -> str:
+    """转发前去掉区域标记：上游只认裸名（目前只有 Trae 用 `:intl` 这套）。"""
+    text = str(model_id or "")
+    if str(storage or "").lower() == "trae" and ":" in text:
+        return text.split(":", 1)[0]
+    return text
+
+
+def _catalog_rows_in_target(db, storage: str, realm: str = "") -> list[dict]:
+    """目标平台（可再按区域收窄）登记的目录行，顺序与数据库行迭代无关。
+
+    `_catalog_maps()` 的 `by_storage` 保持数据库返回顺序 —— 那是执行计划，
+    不是约定（计划 §一 第 3 行）。这里按 `model_id` 排序，让「同 key 多行」
+    的消歧结果可复现：同一份配置换一次插入顺序不该改变转发出去的名字。
+    """
+    store = str(storage or "").strip().lower()
+    if not store:
+        return []
+    by_storage, _ = _catalog_maps(db)
+    rows = [row for row in (by_storage.get(store) or [])
+            if str(row.get("model_id") or "")]
+    if not rows:
+        return []
+    # 同一 storage 存在 `xxx:intl` 时，同名无后缀那条只属于国内区。
+    # 孪生规则**不在这里重新实现**：直接问 models_router.intl_twins()，
+    # 与目录（build_payload / _entry_targets）共用同一份判断，避免两处漂移
+    # （计划 §六 第 81 行）。
+    try:
+        from admin.platform import models_router as _mr_twins
+
+        twins = _mr_twins.intl_twins(rows)
+    except Exception:  # noqa: BLE001 - 退回「没有孪生」的保守判断
+        twins = set()
+    intl_bases = {base for store_name, base in twins
+                  if store_name == store}
+    realm_key = str(realm or "").strip().lower()
+    picked: list[tuple[int, str, dict]] = []
+    for row in rows:
+        model_id = str(row["model_id"])
+        row_realm = _realm_of_model_id(model_id)
+        if not row_realm and model_id in intl_bases:
+            row_realm = "cn"
+        # 区域收窄：共用行（""）对任何区都成立；有孪生时无后缀行只算国内区
+        if realm_key and row_realm not in ("", realm_key):
+            continue
+        rank = 0 if (realm_key and row_realm == realm_key) else 1
+        picked.append((rank, model_id, row))
+    picked.sort(key=lambda item: (item[0], item[1]))
+    return [row for _rank, _model_id, row in picked]
+
+
+def _model_id_in_target(db, platform_id: str, storage: str, realm: str,
+                        model: str) -> str:
+    """把逻辑模型名映射成**目标平台（含区域）自己的目录拼写**。
+
+    `platform_id` **只用于诊断/回溯**（debug 日志与调用点可读性）：真正的判别
+    依据是 `storage` + `realm` —— 一个 storage 可能对应两个对外平台 id
+    （qoder / qoder-intl），它们本来就是同一份目录。
+
+    一次映射的入参就是「最终落点」的四元组（计划 §四 第 55 行）：
+    `public platform id + storage + realm + 逻辑模型名`。命中顺序：
+
+      1) 原串相等              -> 目录里那个 `model_id`（原样）
+      2) 忽略大小写相等        -> 目录里的**原拼写**（Loomy 的
+                                 `DeepSeek-V4.1-Flash` 按库内写法发出去）
+      3) 本平台登记的可读名    -> 目录里的 `model_id`
+                                 （Marvis 槽位 `main-auto`、Qoder `dfmodel`）
+      4) 「槽位 -> 可读名」反查（老配置写槽位名，目录已改成可读名）
+      5) 归一 key              -> 目录里的 `model_id`
+                                 （公开 ID 落到别名平台：`deepseek-v4.1-flash`
+                                 -> Qoder 的 `dfmodel`）；同 key 多行时优先
+                                 「已登记的规范公开名」那一行，其余按区域与
+                                 `model_id` 定序（不依赖行顺序）
+      6) 平台 canonical 钩子   -> **只认确实登记在该目标的 `model_id`**
+
+    返回空串 = **该目标没有这个模型**。调用方沿用入口原有行为（通用名 /
+    未知模型 / 未同步目录），绝不拿别的平台原生 id 兜底。
+    """
+    text = str(model or "").strip()
+    store = str(storage or "").strip().lower()
+    if not text or not store:
+        return ""
+    try:
+        rows = _catalog_rows_in_target(db, store, realm)
+    except Exception:  # noqa: BLE001 - 目录读不到就按未命中处理（原样转发）
+        logger.debug("目标目录读取失败 storage=%s platform=%s", store,
+                     platform_id, exc_info=True)
+        return ""
+    if not rows:
+        return ""
+    lowered = text.lower()
+
+    def _done(model_id: str) -> str:
+        # 上游只认裸名：区域标记（Trae 的 `:intl`）在这里统一剥掉
+        return _strip_realm_suffix(store, model_id)
+
+    # 1) 原串相等
+    for row in rows:
+        if row["model_id"] == text:
+            return _done(row["model_id"])
+    # 2) 忽略大小写 -> 目录原拼写
+    for row in rows:
+        if str(row["model_id"]).strip().lower() == lowered:
+            return _done(row["model_id"])
+    # 3) 本平台登记的可读名（Qoder 缩写 -> 可读名、Marvis 槽位 -> 可读名）
+    for row in rows:
+        readable = str(row.get("readable") or "")
+        if readable and readable.strip().lower() == lowered:
+            return _done(row["model_id"])
+    # 4) 「槽位 -> 可读名」反查：老客户端还写着槽位名，而目录已改成可读名
+    try:
+        from admin.platform import models_router as _mr_readable
+
+        readable = str(_mr_readable.readable_model_id(store, text) or "")
+    except Exception:  # noqa: BLE001
+        readable = ""
+    if readable and readable.strip().lower() != lowered:
+        for row in rows:
+            if str(row["model_id"]).strip().lower() == readable.strip().lower():
+                return _done(row["model_id"])
+    # 5) 归一 key（只用于**比较**，返回的仍是目录里的写法）
+    try:
+        from admin.model_alias import canonical_key
+
+        alias = canonical_key(text)
+    except Exception:  # noqa: BLE001
+        alias = ""
+    if alias:
+        matched = [row for row in rows if row.get("key") == alias]
+        if matched:
+            # 同平台多行同一 key：优先「已登记的规范公开名」那一行
+            canonical_public = ""
+            try:
+                from admin.platform import models_router as _mr_public
+
+                canonical_public = str(_mr_public.public_model_id(alias) or "")
+            except Exception:  # noqa: BLE001
+                canonical_public = ""
+            canonical_public = canonical_public.strip().lower()
+            if canonical_public:
+                for row in matched:
+                    if str(row["model_id"]).strip().lower() == canonical_public:
+                        return _done(row["model_id"])
+            return _done(matched[0]["model_id"])
+    # 6) 平台的 canonical 钩子：只有当它给出的名字**确实是本目标登记的
+    #    model_id** 时才采用。Marvis 认槽位 / 上游真名 / 可读名，但槽位不是
+    #    目录拼写时不能拿来转发（归属校验会 404）；槽位换算交给它的网关
+    #    `_validate_model`。
+    canonical = _platform_canonical(store, text)
+    canonical_lower = canonical.strip().lower()
+    if canonical_lower:
+        for row in rows:
+            model_id = str(row["model_id"])
+            if (model_id.strip().lower() == canonical_lower
+                    or _strip_realm_suffix(store, model_id).strip().lower()
+                    == canonical_lower):
+                return _done(model_id)
+    return ""
+
+
 def _model_id_for(db, storage: str, model: str) -> str:
-    """把请求里的模型名映射成**目标平台自己的 model_id**。
+    """把请求里的模型名映射成**目标平台自己的 model_id**（未命中返回原名）。
 
     同一模型在不同平台叫不同名字（`deepseek-v4.1-flash` / `dfmodel` /
     `DeepSeek-V4.1-Flash`）。按归一 key 选到平台后，如果继续把原名字转发过去，
     目标平台只会回「模型不存在」—— 这正是「聚合转发看起来通了，实际全 404」
-    的原因。这里按 `model_configs` 找该平台对应的 model_id。
+    的原因。
 
-    Trae 的配置里带 `:intl` 区后缀，转发前要剥掉（上游认裸名）。
+    口径统一在 `_model_id_in_target()`：这里只带落库平台（调用点拿不到区），
+    Trae 的 `:intl` 由它剥掉，上游只认裸名。
     """
-    from admin.model_alias import canonical_key
-
-    alias = canonical_key(model)
-    if not alias:
-        return model
-    by_storage, _ = _catalog_maps(db)
-    rows = by_storage.get(storage) or []
-    lowered = str(model or "").strip().lower()
-
-    # 1) 精确 id
-    for row in rows:
-        if row["model_id"] == model:
-            exact = row["model_id"]
-            break
-    else:
-        exact = None
-
-    # 2) 归一 key
-    if not exact:
-        for row in rows:
-            if row["key"] == alias:
-                exact = row["model_id"]
-                break
-
-    # 3) **大小写不敏感兜底**。
-    #    上游对模型名大小写敏感：发 `DeepSeek-V4.1-Flash` 会回
-    #    11102「service info not found」，还被负缓存 6 小时。
-    #    客户端从 `/v1/models` 拿到的是小写 slug，但历史配置 / 手动输入
-    #    可能是别的大小写形态，这里统一纠回库里登记的那个写法。
-    if not exact:
-        for row in rows:
-            if str(row["model_id"] or "").strip().lower() == lowered:
-                exact = row["model_id"]
-                break
-
-    # 4) **平台自己的归一钩子**（2026-11-15）。
-    #    有些平台的上游 id 与对外名完全不同（Marvis：槽位 `main-auto` ↔
-    #    真实 `deepseek-v4-1-flash-261017` ↔ 可读 `deepseek-v4.1-flash`），
-    #    `model_configs` 只存槽位名，按 id/key 都查不到另外两种写法。
-    #    平台若在自己模块里提供了 `canonical_model_id()`，就交它兜底 ——
-    #    这样新增平台不必改 dispatch。
-    if not exact:
-        normalized = _platform_canonical(storage, model)
-        if normalized and normalized != model:
-            exact = normalized
-
-    # 5) **槽位名 → 可读名**（2026-11-15 向后兼容）。
-    #
-    # Marvis 早期对外发的是槽位名（`main-auto`），不少客户端配置里留的就是它；
-    # 后来目录改成可读名后 `model_configs` 只存 `deepseek-v4.1-flash`，
-    # 槽位名就查不到了 —— 老配置会突然全 404。
-    #
-    # 这里按平台的「槽位 → 可读名」映射反查一次：映射结果确实是该平台的原生
-    # id 才改（`readable_model_id` 对别的平台是恒等，不会误伤）。
-    if not exact:
-        try:
-            from admin.platform import models_router as _mr
-
-            readable = _mr.readable_model_id(storage, model)
-            if readable and readable != model and _mr.is_native_model_id(storage, readable):
-                exact = readable
-        except Exception:  # noqa: BLE001 - 兜底失败就按原样
-            pass
-
-    if not exact:
-        return model
-    return exact.split(":", 1)[0] if storage == "trae" else exact
+    return _model_id_in_target(db, "", storage, "", model) or model
 
 
 def _platform_canonical(storage: str, model: str) -> str:
@@ -852,7 +982,8 @@ def _disabled_model_id(db, storage: str, model: str) -> str:
     return ""
 
 
-def _model_for_platform(db, storage: str, model: str) -> tuple[str, dict | None]:
+def _model_for_platform(db, storage: str, model: str,
+                        realm: str = "") -> tuple[str, dict | None]:
     """显式指定平台时，把聚合名映射成该平台的 model_id；跨平台误用直接拒绝。
 
     为什么必须在**显式指定平台**时也映射：
@@ -881,7 +1012,7 @@ def _model_for_platform(db, storage: str, model: str) -> tuple[str, dict | None]
             "status": 403,
         }
 
-    mapped = _model_id_for(db, storage, model)
+    mapped = _model_id_in_target(db, "", storage, realm, model) or model
     if mapped != model:
         return mapped, None
     # 通用路由名：每个平台都可能自己实现（Loomy 的 auto 就是让上游挑），
@@ -997,10 +1128,31 @@ def _model_health_ok(db, storage: str, model: str) -> bool:
 
 
 def _candidates_for_model(db, model: str, key) -> list[tuple[str, str, str]]:
-    """按策略顺序返回可服务该模型的 `(public_platform, realm, target_model)`。"""
+    """按策略顺序返回可服务该模型的 `(public_platform, realm, target_model)`。
+
+    **全部硬限制在这里做完**（计划 §五 第 72 行）：平台/区域停用、管理员禁用
+    （含 storage 禁用）、模型归属（该目标目录里真有这个模型）、Key 可用账号
+    范围、账号×模型冷却、平台暂停。`_platform_order()` 只在**已合格**的集合
+    内排序 —— 排序没有资格把被排除者加回来。
+    """
+    servable, degraded = _candidates_detail(db, model, key)
+    # 所有候选都「只有历史失败记录」时不能直接放弃：仍按顺序试一遍，
+    # 因为负缓存可能来自一次配置错误，现在可能已经修好。
+    return servable or degraded
+
+
+def _candidates_detail(db, model: str, key) -> tuple[list, list]:
+    """`(servable, degraded)`：能服务的 / 只有历史失败记录的。
+
+    `degraded` 里的目标**同样已经过了全部硬限制**（禁用、暂停、归属、
+    Key 账号范围、账号×模型冷却），只是 24h 失败率偏高 —— 软健康降级只允许
+    发生在这些集合内（计划 §五 第 73 行）。两者都为空才是「真没候选」。
+    """
     platforms = _model_platforms(db, model)
     if not platforms:
-        return []
+        return [], []
+    disabled = _disabled_platforms()
+    allowed = _key_group_models(db, key)
     specs = []
     for storage, realm_hint in platforms:
         matches = [spec for spec in registry.all_platforms()
@@ -1013,28 +1165,60 @@ def _candidates_for_model(db, model: str, key) -> list[tuple[str, str, str]]:
             if spec not in specs:
                 specs.append(spec)
     if not specs:
-        return []
+        return [], []
     ranked = [pid for pid in _platform_order()
               if pid in {spec.id for spec in specs}]
+    # 未出现在策略顺序里的 spec 追加到尾部 —— 它们仍要逐条过下面的硬限制
     ranked += [spec.id for spec in specs if spec.id not in ranked]
-    out: list[tuple[str, str, str]] = []
-    unhealthy: list[tuple[str, str, str]] = []
+    servable: list[tuple[str, str, str]] = []
+    degraded: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for pid in ranked:
         spec = registry.get(pid)
         if spec is None or not spec.enabled:
             continue
+        realm = str(getattr(spec, "realm", "") or "")
+        if (pid, realm) in seen:
+            continue
+        if _is_disabled(pid, disabled):
+            continue
         if _platform_paused(pid):
             continue
-        mapped = _model_id_for(db, spec.storage(), model)
+        mapped = _model_id_in_target(db, pid, spec.storage(), realm, model)
+        if not mapped:
+            # 该目标（含区域）的目录里没有这个模型 —— 归属不符，不参与重试
+            continue
+        in_group, _group_mapped = _group_allows(
+            db, pid, spec.storage(), realm, model, allowed)
+        if not in_group:
+            continue
         if not _has_account(db, spec, key, mapped):
             continue
+        seen.add((pid, realm))
         if not _model_health_ok(db, spec.storage(), mapped):
-            unhealthy.append((pid, spec.realm, mapped))
+            degraded.append((pid, realm, mapped))
             continue
-        out.append((pid, spec.realm, mapped))
-    # 所有候选都「只有失败记录」时不能直接放弃：仍按顺序试一遍，
-    # 因为负缓存可能来自一次配置错误，现在可能已经修好。
-    return out or unhealthy
+        servable.append((pid, realm, mapped))
+    return servable, degraded
+
+
+def _candidates_cached(db, model: str, key, scope=None) -> tuple[list, list]:
+    """本请求内复用候选与排序结果（计划 §五 第 75 行）。
+
+    「选择 / 改道 / 重试」三个阶段必须用**同一份决定**：`random` /
+    `round_robin` 不能各自重新挑首选。缓存挂在 request scope 上，
+    **不是**全局缓存 —— 账号与冷却状态是动态的，跨请求复用会让刚恢复的
+    平台一直排在后面。
+    """
+    text = str(model or "")
+    if scope is not None and text:
+        cached = scope.get("_wb_model_candidates")
+        if isinstance(cached, tuple) and len(cached) == 3 and cached[0] == text:
+            return list(cached[1]), list(cached[2])
+    servable, degraded = _candidates_detail(db, model, key)
+    if scope is not None and text:
+        scope["_wb_model_candidates"] = (text, list(servable), list(degraded))
+    return servable, degraded
 
 
 def _platform_paused(platform: str) -> bool:
@@ -1067,7 +1251,9 @@ def _storage_has_model(db, storage: str, model: str) -> bool:
     return False
 
 
-def _reroute_target(db, model: str, key, disabled: set[str] | None = None) -> tuple[str, str, str] | None:
+def _reroute_target(db, model: str, key, disabled: set[str] | None = None,
+                    current: tuple[str, str] | None = None,
+                    scope=None) -> tuple[str, str, str] | None:
     """模型不属于「用户想要的平台」时，返回该改道到的 `(平台id, realm, 依据)`。
 
     返回 `None` = **不该改道**，保持当前选路结果（默认平台 / Key 绑定平台）。
@@ -1102,10 +1288,17 @@ def _reroute_target(db, model: str, key, disabled: set[str] | None = None) -> tu
     if text.lower() in _GENERIC_MODEL_NAMES:
         return None
     bound = str(getattr(key, "platform", "") or "").strip() if key is not None else ""
-    want = _storage_of(bound or registry.DEFAULT_PLATFORM)
+    # **以「当前已选目标」为准**（计划 §五 第 71 行）：调用方可能已经按模型
+    # 归属选中了别的平台，这里再按「想要的平台 = Key 绑定 / 默认平台」重算，
+    # 等于把已经做出的决定推翻。`current` 为空才退回旧口径。
+    if current and str(current[0] or "").strip():
+        want = _storage_of(str(current[0]).strip())
+    else:
+        want = _storage_of(bound or registry.DEFAULT_PLATFORM)
     disabled = disabled or set()
 
-    candidates = _candidates_for_model(db, text, _KeyView(key) if key is not None else None)
+    candidates, _degraded = _candidates_cached(
+        db, text, _KeyView(key) if key is not None else None, scope)
     if candidates:
         if any(_storage_of(pid) == want for pid, _realm, _mapped in candidates):
             return None
@@ -1192,6 +1385,96 @@ class ModelUnknownOnAnyPlatform(Exception):
         self.platforms = list(platforms or [])
         self.available = list(available or [])
         super().__init__(self.model)
+
+
+class ModelNotInGroup(Exception):
+    """模型不在该 Key 绑定分组的组内清单里（403 model_not_in_group）。
+
+    为什么必须在 **dispatch** 就判（计划 §五 第 73 行 / t8 集成）：
+    分组授权原先只在主应用（proxy）里做，平台网关路径不做。一旦 dispatch
+    把请求判给了默认平台，proxy 会把组内登记的**原生 ID**（例如 Qoder 的
+    `dfmodel`）写进 body 的 model 再发上游 —— WorkBuddy 收到别家的名字只会回
+    400「模型不存在」，而不是 403。归属在这里就收窄，授权错误才不会伪装成
+    模型错误。
+    """
+
+    def __init__(self, model: str):
+        self.model = str(model or "")
+        super().__init__(self.model)
+
+
+def _key_group_models(db, key) -> set[str] | None:
+    """Key 绑定分组的有效模型集合；None = 不限制（未绑 / 读不到）。
+
+    读不到时**按不限制**处理：分组表异常不该把正常请求打成 403 ——
+    主应用那一层仍会按分组拦，这里只是提前收窄归属。
+    """
+    gid = int(getattr(key, "group_id", 0) or 0) if key is not None else 0
+    # **没有分组就直接返回，不查库**：无 group_id 的 Key 行为一个字节都不能变，
+    # 更不能为它多出任何查询（t17 硬约束）。
+    if not gid or db is None:
+        return None
+    # 同一请求最多查一次组内集合：`_key_of()` 把 Key 行缓存在 scope 里，所以把
+    # 结果挂在这一个对象上即可覆盖「选路 / 候选 / 发送前」三处判定。
+    cached = getattr(key, "_wb_group_models", None)
+    if isinstance(cached, tuple) and cached[0] == gid:
+        return set(cached[1])
+    try:
+        from admin.routers.groups import effective_group_models
+
+        models = set(effective_group_models(db, gid) or ())
+    except Exception:  # noqa: BLE001 - 读不到按不限制
+        logger.debug("读取分组模型失败 group_id=%s", gid, exc_info=True)
+        return None
+    with contextlib.suppress(Exception):
+        setattr(key, "_wb_group_models", (gid, frozenset(models)))
+    return models
+
+
+def _group_allows(db, platform_id: str, storage: str, realm: str, model: str,
+                  allowed) -> tuple[bool, str]:
+    """该目标是否被分组允许，并返回它要转发的原生 id。
+
+    分组登记的是 `model_configs.model_id`（平台原生 ID）：先精确比对，
+    再放宽到大小写不敏感（大小写不是授权语义）。
+    """
+    if allowed is None:
+        return True, ""
+    mapped = _model_id_in_target(db, platform_id, storage, realm, model)
+    if not mapped:
+        # 该目标（本区）根本没有这个模型：交给「模型不属于该平台」那条路，
+        # 不要在这里判成「不在分组」。
+        return False, ""
+    # 分组登记的是 model_configs.model_id 的**原始字符串**：授权必须精确比对。
+    # 放宽大小写会让「DEMO-MODEL」这种组外行借大小写混进组内（扩权）。
+    # **按「本区」的目录行比对**：Trae 的 `xxx` 与 `xxx:intl` 是两行，
+    # 转发前都要剥成裸名，但授权必须认原始那一条 —— 否则「组里只登记国内行」
+    # 会被国际区借同样的裸名扩权（§六 第 82 行）。
+    try:
+        rows = _catalog_rows_in_target(db, storage, realm)
+    except Exception:  # noqa: BLE001 - 读不到目录就按 mapped 比对
+        rows = []
+    hit = False
+    for row in rows:
+        raw_id = str(row.get("model_id") or "")
+        if _strip_realm_suffix(storage, raw_id).strip().lower() != mapped.strip().lower():
+            continue
+        hit = True
+        if raw_id in allowed:
+            return True, mapped
+    if hit:
+        return False, mapped
+    # 目录里没有对应行（例如平台 canonical 钩子给出的名字）：退回按 mapped 比对
+    return mapped in allowed, mapped
+
+
+def model_not_in_group_payload(model: str) -> dict:
+    """`ModelNotInGroup` -> 403 错误体（与主应用同 code，客户端行为一致）。"""
+    return {"error": {
+        "message": "模型 '%s' 不在该 API Key 绑定的分组内" % model,
+        "type": "model_not_in_group",
+        "code": "model_not_in_group",
+    }}
 
 
 def _exact_declarers(db, model: str) -> set[str]:
@@ -1313,7 +1596,8 @@ def _strategy_pick_within(platform_ids) -> tuple[str, str] | None:
     return pid, (str(getattr(spec, "realm", "") or "") if spec is not None else "")
 
 
-def _route_by_model_ownership(model: str, key, disabled: set[str]):
+def _route_by_model_ownership(model: str, key, disabled: set[str],
+                              scope=None):
     """按「哪些平台声明了这个模型」选平台（**选择阶段**，不存在运行期改道）。
 
     分支（严格按顺序）：
@@ -1335,7 +1619,23 @@ def _route_by_model_ownership(model: str, key, disabled: set[str]):
         with _db() as db:
             declared = _model_membership(db, text)
             exact = _exact_declarers(db, text)
-            candidates = _candidates_for_model(db, text, key)
+            # 一次请求只算一次候选与排序结果（选择 / 改道 / 重试共用）
+            servable, degraded = _candidates_cached(db, text, key, scope)
+            # **分组授权在选路阶段就收窄**：组内没有这个平台的行，它就没有
+            # 资格承接（t8 的集成缺口：授权只在主应用做，会变成 400）
+            allowed = _key_group_models(db, key)
+            if allowed is not None and declared:
+                in_group = []
+                for pid, realm, storage in declared:
+                    ok, _mapped = _group_allows(
+                        db, pid, storage, realm, text, allowed)
+                    if ok:
+                        in_group.append((pid, realm, storage))
+                if not in_group:
+                    raise ModelNotInGroup(text)
+                declared = in_group
+    except ModelNotInGroup:
+        raise
     except Exception:  # noqa: BLE001 - 归属查询失败不接管，走既有路径
         logger.debug("按模型归属选平台失败 model=%s", text, exc_info=True)
         return None
@@ -1348,10 +1648,21 @@ def _route_by_model_ownership(model: str, key, disabled: set[str]):
         raise PlatformDisabled(declared[0][0])
 
     # 命中集合再收窄到「当前真能服务这个模型」的平台（有号 + 未按模型冷却 + 健康）。
-    # 全都不可用时仍回到声明集合：让那个平台自己给出它的错误，比在这里
-    # 编一个 503 更可诊断（也不会把「没号」说成「没这个模型」）。
-    servable = {str(pid) for pid, _realm, _mapped in candidates}
-    pool = [item for item in live if item[0] in servable] or live
+    # 四类结论分别可诊断（计划 §五 第 73 行）：
+    #   无可用账号 -> 仍回声明集合，让平台的账号池给出它自己的可用性错误；
+    #   只有历史失败记录 -> 在**已过硬限制**的集内做软降级重试；
+    #   全被禁用 -> 上面已经 403；无人登记 -> 上面已经 404。
+    servable_ids = {str(pid) for pid, _realm, _mapped in servable}
+    pool = [item for item in live if item[0] in servable_ids]
+    if not pool:
+        degraded_ids = {str(pid) for pid, _realm, _mapped in degraded}
+        if degraded_ids:
+            pool = [item for item in live if item[0] in degraded_ids]
+            logger.info("模型存在但候选仅有历史失败记录 model=%s -> 软降级重试", text)
+        else:
+            pool = live
+            logger.info("模型存在但当前无可用账号 model=%s（交给平台自己的可用性错误）",
+                        text)
     exact_pool = [item for item in pool if item[2] in exact]
     if exact_pool:
         pool = exact_pool
@@ -1586,10 +1897,11 @@ class PlatformDispatchMiddleware:
                     if record is not None and model_name:
                         record["requested_model"] = model_name[:120]
                     # 记原始请求体里的 model，用于定位「客户端到底发了什么名字」
-                    logger.info("dispatch 收到 | path=%s model=%r body_head=%r",
-                                path, model_name,
-                                (body[:220].decode("utf-8", "replace")
-                                 if body else ""))
+                    # **只记路由字段**（计划 §八 行6）：请求正文、凭证、
+                    # 账号令牌都不许进日志。以前这里打的是 body 前 220 字节，
+                    # 等于把 messages 正文写进 INFO 日志。
+                    logger.info("dispatch 收到 | path=%s model=%r bytes=%d",
+                                path, model_name, len(body))
                     # **请求一开始就在实时面板里出现一行 running**：
                     # 否则一个跑 30 秒的任务，前 28 秒面板什么都看不到。
                     #
@@ -1687,6 +1999,33 @@ class PlatformDispatchMiddleware:
                 except Exception:  # noqa: BLE001
                     pass
 
+        # ---- 1.4) 原始字节快照 + 统一的 body 替换口 ----
+        #
+        # 计划 §四 第 57 行：所有真实发送点（默认主应用、非默认首选、每个
+        # 额外候选）都用**原始 body** 生成该次目标独有的 body；原名与目标名
+        # 相同就复用原字节。`scope["_wb_body"]` 与 `_replay_receive(...)`
+        # 必须是**同一份字节** —— 否则下一个 hop / 指标读到的是上一跳的名字，
+        # 面板上看到的模型和上游实际收到的不一致。
+        original_body = body
+        original_model = _model_of_body(original_body)
+
+        def _send_body(new_body: bytes) -> None:
+            """换上本次目标独有的 body（scope 缓存与回放用同一份字节）。
+
+            顺手补上**原始请求名**的回显值：只要本次改写换掉了 model，就把
+            客户端原本写的名字记进 `scope["_wb_requested_model"]`
+            （`setdefault`：带后缀的请求已经在上面记过带后缀的原名）。
+            否则 `x-gateway-model` 与请求指标在裸名被映射成目标拼写时是空的
+            （计划 §四 第 57 行「原始 model 留给请求指标及既有回显头」）。
+            """
+            nonlocal body, receive, request
+            body = new_body
+            if original_model and _model_of_body(body) != original_model:
+                scope.setdefault("_wb_requested_model", original_model)
+            scope["_wb_body"] = body
+            receive = _replay_receive(body, tail)
+            request = Request(scope, receive)
+
         # ---- 1.5) `/v1/models` 不走单平台：直接聚合全平台返回 ----
         # 之前它只返回默认平台的模型（17 个），其它平台的模型在客户端
         # 里根本看不到。聚合后带平台后缀（`xxx-workbuddy`），
@@ -1739,41 +2078,27 @@ class PlatformDispatchMiddleware:
                 from admin.platform import model_suffix
 
                 suffix_platform, bare_model, has_suffix = model_suffix.resolve(raw_model)
-                # **可读名还原**：`deepseek-flash-qoder` 的上游 id 是 `dfmodel`。
-                # 看到的是可读名，转发前必须换回上游认的 id，否则 400。
-                alias_storage, alias_upstream = model_suffix.alias_to_upstream(raw_model)
-                if alias_upstream and alias_storage:
-                    bare_model = alias_upstream
-                    has_suffix = has_suffix or bool(suffix_platform)
-                    scope["_wb_requested_model"] = raw_model
-                    body = _replace_model(body, bare_model)
-                    receive = _replay_receive(body, tail)
-                    request = Request(scope, receive)
-                elif not has_suffix:
-                    # **slug 还原**：`/v1/models` 对外给的是规范 id
-                    # （`deepseek-v4-flash`），上游只认自己的写法
-                    # （`DeepSeek-V4-Flash`）。这里做一次反查，
-                    # 命中就换回上游 id，没命中按原样转发（让上游自己报错）。
-                    try:
-                        from admin.platform import models_router
-
-                        with _db() as _rdb:
-                            real = models_router.upstream_of(raw_model, _rdb)
-                        if real and real != raw_model:
-                            body = _replace_model(body, real)
-                            receive = _replay_receive(body, tail)
-                            request = Request(scope, receive)
-                            scope["_wb_requested_model"] = raw_model
-                    except Exception:  # noqa: BLE001
-                        logger.debug("slug 还原失败 model=%s", raw_model, exc_info=True)
                 if has_suffix:
                     # 响应里要把**用户请求的那个名字**回显出来，
                     # 否则 `xxx-loomy` 调完只剩 `xxx`，客户端分不清落点。
                     scope["_wb_requested_model"] = raw_model
-                    if bare_model != raw_model:
-                        body = _replace_model(body, bare_model)
-                        receive = _replay_receive(body, tail)
-                        request = Request(scope, receive)
+                    # **可读名还原**：`deepseek-flash-qoder` 的上游 id 是
+                    # `dfmodel`。别名表本来就带平台口径，这里再按 storage 校
+                    # 一次，防止把 A 平台的缩写发给 B 平台。
+                    alias_storage, alias_upstream = model_suffix.alias_to_upstream(
+                        raw_model)
+                    if (alias_upstream and alias_storage
+                            and _storage_of(suffix_platform) == alias_storage):
+                        bare_model = alias_upstream
+                    if bare_model and bare_model != raw_model:
+                        _send_body(_replace_model(original_body, bare_model))
+        # **不要在这里做全局反查**（原来的 `models_router.upstream_of()`）。
+        # 目标还没定，而它是按行序返回「第一个匹配行的 raw id」：目录里先插
+        # 了 Marvis 的槽位行（raw `main-auto`、可读名同样是
+        # `deepseek-v4.1-flash`）时，WorkBuddy 的公开名就被反查成别人的槽位名，
+        # 于是 WorkBuddy 上游收到 `main-auto`（计划 §一 截图那条）。
+        # 「到哪个平台用哪个拼写」由下面的 (platform, storage, realm) 收窄映射
+        # 负责，这里保持客户端原始拼写。
 
         try:
             if suffix_platform:
@@ -1792,6 +2117,14 @@ class PlatformDispatchMiddleware:
                     "code": "platform_disabled",
                     "platform": exc.platform,
                 }})(scope, receive, send)
+        except ModelNotInGroup as exc:
+            # 分组里没有这个模型：选路阶段就拒绝，别让默认平台拿组内原生 ID
+            # 去上游换回一个 400（t8 的结构性缺口）。
+            logger.info("模型不在 Key 绑定的分组内 | model=%r", exc.model)
+            return await JSONResponse(
+                status_code=403,
+                content=model_not_in_group_payload(exc.model))(
+                    scope, receive, send)
         except ModelUnknownOnAnyPlatform as exc:
             # 选择阶段就判定「谁都没有这个模型」：给 404，并把
             # 「模型在哪些平台存在」与当时可选平台写进错误体，
@@ -1815,32 +2148,66 @@ class PlatformDispatchMiddleware:
 
         _set_state(scope, platform_id, realm)
 
+        # ---- 2.4) 固定目标也要过**分组授权** ----
+        #
+        # 分组只在「按模型选路」里判是不够的：模型后缀 / X-Platform / 绑定平台
+        # 都能把请求钉到一个组外平台，授权一旦只覆盖自动选路，手输后缀就是
+        # 绕过通道（§六 第 82 行）。这里对**已定目标**再核一次：
+        #   * 只看「该目标本区真有这个模型」的情形（否则交给下面的
+        #     _model_for_platform 报 model_not_on_platform / 404）；
+        #   * 拒绝就发生在 dispatch，别让主应用拿组内的原生 ID 去上游换 400。
+        if body:
+            _pin_model = _model_of_body(body)
+            _pin_key = _key_of(request)
+            if (_pin_model and _pin_key is not None
+                    and _pin_model.strip().lower() not in _GENERIC_MODEL_NAMES
+                    and int(getattr(_pin_key, "group_id", 0) or 0)):
+                _pin_allowed = None
+                _pin_ok = True
+                try:
+                    with _db() as _gdb:
+                        _pin_allowed = _key_group_models(_gdb, _pin_key)
+                        # 只有「这个模型确实登记在某处」时才按分组拒绝：
+                        # 谁都没登记的名字仍交给下面的选路给 404 / 未同步提示，
+                        # 免得把「名字写错了」说成「不在分组」。
+                        _pin_declared = bool(_model_platforms(_gdb, _pin_model))
+                        if _pin_allowed is not None and _pin_declared:
+                            _pin_ok = _group_allows(
+                                _gdb, platform_id, _storage_of(platform_id),
+                                realm, _pin_model, _pin_allowed)[0]
+                except Exception:  # noqa: BLE001 - 判不了就不误杀
+                    _pin_ok = True
+                if _pin_allowed is not None and not _pin_ok:
+                    logger.info("模型不在 Key 绑定的分组内（固定目标）| "
+                                "model=%r platform=%r realm=%r",
+                                _pin_model, platform_id, realm)
+                    return await JSONResponse(
+                        status_code=403,
+                        content=model_not_in_group_payload(_pin_model))(
+                            scope, receive, send)
+
         # ---- 2.5) 模型名对到**目标平台自己的**真实 id ----
         #
         # 同一个模型在不同平台的写法不同：
         #     GLM-5.3-Flash   WorkBuddy: glm-5.3-flash | Loomy: GLM-5.3-Flash
         # `/v1/models` 为了跨平台一致，对外统一发小写 slug（可加平台后缀）。
-        # 上游只认自己的写法，直接把 slug 转过去就是「模型不存在」400；
-        # 而全局的 `upstream_of()` 在**同名冲突**时可能返回别家的拼法。
-        # 所以平台定下来之后，按 (platform, model) 收窄还原一次。
+        # 上游只认自己的写法，直接把 slug 转过去就是「模型不存在」400。
+        # 所以平台定下来之后，按 (public platform id, storage, realm, model)
+        # 收窄还原一次 —— 收窄是必须的：全局扫描同名时可能返回别家的拼法。
         if body:
             try:
-                from admin.platform import models_router as _mr
-
                 _spec_mp = registry.get(platform_id)
                 _storage_mp = (str(_spec_mp.storage()).lower()
                                if _spec_mp is not None else "")
                 _cur_mp = _model_of_body(body)
                 if _cur_mp and _storage_mp:
                     with _db() as _rdb:
-                        _real_mp = _mr.upstream_of_in_platform(
-                            _cur_mp, _storage_mp, _rdb)
+                        _real_mp = _model_id_in_target(
+                            _rdb, platform_id, _storage_mp, realm, _cur_mp)
                     if _real_mp and _real_mp != _cur_mp:
-                        body = _replace_model(body, _real_mp)
-                        receive = _replay_receive(body, tail)
-                        request = Request(scope, receive)
-                        logger.debug("模型名按平台还原 | %s -> %s (%s)",
-                                     _cur_mp, _real_mp, _storage_mp)
+                        _send_body(_replace_model(original_body, _real_mp))
+                        logger.debug("模型名按平台还原 | %s -> %s (%s/%s)",
+                                     _cur_mp, _real_mp, _storage_mp, realm)
             except Exception:  # noqa: BLE001 - 还原失败就按原样转发
                 logger.debug("平台内模型还原失败 model=%s", _model_of_body(body),
                              exc_info=True)
@@ -1880,7 +2247,9 @@ class PlatformDispatchMiddleware:
                 if _m:
                     _dis0 = _disabled_platforms()
                     with _db() as _rdb:
-                        _target = _reroute_target(_rdb, _m, _key_of(request), _dis0)
+                        _target = _reroute_target(
+                            _rdb, _m, _key_of(request), _dis0,
+                            current=(platform_id, realm), scope=scope)
                     if _target is not None:
                         platform_id, realm = _target[0], _target[1] or realm
                         explicit_platform = True
@@ -1916,11 +2285,14 @@ class PlatformDispatchMiddleware:
             explicit_platform = False
 
         # 每次请求都记一条分叉决策：出问题时能直接看出「为什么落到了主应用」。
-        logger.info("dispatch 分叉 | raw_model=%r -> platform=%r explicit=%s "
-                    "has_gw=%s default=%r suffix_platform=%r",
-                    (_model_of_body(body) if body else ""), platform_id,
-                    explicit_platform, _has_gateway, registry.DEFAULT_PLATFORM,
-                    suffix_platform)
+        # **一次请求一条可核对的路由记录**（计划 §八 行6）：原始请求名 ->
+        # 目标模型名 + 平台 + 区。只放路由字段，不含正文/凭证。
+        logger.info("dispatch 分叉 | requested=%r target_model=%r platform=%r "
+                    "realm=%r explicit=%s has_gw=%s default=%r "
+                    "suffix_platform=%r",
+                    original_model, (_model_of_body(body) if body else ""),
+                    platform_id, realm, explicit_platform, _has_gateway,
+                    registry.DEFAULT_PLATFORM, suffix_platform)
 
         if platform_id == registry.DEFAULT_PLATFORM and not explicit_platform:
             # **已下线平台的模型名：直接 404，不许漏进主应用。**
@@ -1940,41 +2312,23 @@ class PlatformDispatchMiddleware:
                             "type": "invalid_request_error",
                             "code": "model_not_found",
                         }})(scope, receive, send)
-            # 默认平台走主应用。但**聚合名要先映射成它自己的 model_id**：
-            # 主应用只认白名单里的 id，`deepseek-flash` 这类聚合名会被
-            # 直接 400「模型不存在」。之前只有非默认平台做映射，
-            # 于是把调度策略切到「优先级」（WorkBuddy 排第一）后，
-            # 所有聚合名请求都挂了 —— 这是必须补上的一步。
+            # 默认平台走主应用。但**模型名要先按本平台目录收窄**：
+            # 主应用只认白名单里的 id，`deepseek-flash` 这类聚合名会被直接
+            # 400「模型不存在」。这里用**目标平台限定**的映射
+            # （storage + realm）从原始字节生成 body，不再做全局反查 ——
+            # 全局 `upstream_of()` 会按行序把 Marvis 的可读名反查成它的槽位
+            # `main-auto`，于是 WorkBuddy 主应用收到的是别人的模型名
+            # （计划 §一 截图那条，这是第二处同样的错）。
             if body:
                 try:
                     spec0 = registry.get(platform_id)
                     storage0 = spec0.storage() if spec0 else platform_id
                     model0 = _model_of_body(body)
-                    # **sluge 反查优先**：`/v1/models` 给客户端的是规范 slug
-                    # （`deepseek-v4.1-flash`），但上游对**大小写敏感** ——
-                    # 发 `DeepSeek-V4.1-Flash` 会回 11102
-                    # 「model [...] service info not found」，而且这个负缓存
-                    # 会把 (账号, 模型) 封 6 小时，所有请求都被挡住。
-                    # 先按 slug 反查成上游真实 id，再走原来的映射。
-                    fixed0 = model0
-                    if model0:
-                        try:
-                            from admin.platform import models_router
-                            with _db() as _rdb:
-                                real0 = models_router.upstream_of(model0, _rdb)
-                            if real0 and real0 != model0:
-                                fixed0 = real0
-                        except Exception:  # noqa: BLE001
-                            fixed0 = model0
-                        if fixed0 != model0:
-                            body = _replace_model(body, fixed0)
-                            receive = _replay_receive(body, tail)
-                            request = Request(scope, receive)
-                    mapped0 = _model_id_for(_db(), storage0, fixed0) if fixed0 else ""
+                    with _db() as db0:
+                        mapped0 = _model_id_in_target(
+                            db0, platform_id, storage0, realm, model0)
                     if mapped0 and mapped0 != model0:
-                        body = _replace_model(body, mapped0)
-                        receive = _replay_receive(body, tail)
-                        request = Request(scope, receive)
+                        _send_body(_replace_model(original_body, mapped0))
                 except Exception:  # noqa: BLE001 - 映射失败按原样转发
                     logger.debug("默认平台模型映射失败", exc_info=True)
             # 默认平台也回显落点：不带后缀的请求同样需要知道「这次落在哪」。
@@ -2014,10 +2368,27 @@ class PlatformDispatchMiddleware:
                     "message": f"平台 {platform_id} 未装配网关实现",
                     "type": "server_error", "code": "platform_unavailable"}})(scope, receive, send)
 
-        explicit = bool(_explicit_selector(request))
+        # ---- 2.7) 本次请求的「意图事实」----
+        #
+        # 旧实现用 `explicit_platform` 一个变量承担三种含义（「回显后缀」/
+        # 「不许回主应用」/「用户指定了平台」），而 `auto_route` 只看
+        # `_explicit_selector()` 加**当时的** Key —— 改道后 scope 里的 Key 换成
+        # 了 platform 已脱空的 `_ReroutedKey`，同一个请求会突然变成「可以跨平台
+        # 重试」。这里把三个事实分开保存，并**在改道之前**取值：
+        #
+        #   client_platform  客户端用 X-Platform / ?platform= 指定了平台
+        #   bound_platform   **原始** Key 绑定的平台
+        #   suffix_platform  模型名自带的平台后缀
+        #
+        # 三者任一成立 = 目标已固定，换平台就是违背用户意图；再加聚合开关，
+        # 才是「允许跨平台重试」的完整条件（计划 §五 第 70 行）。
         key = _key_of(request)
-        bound = bool(str(getattr(key, "platform", "") or "").strip()) if key else False
-        auto_route = bool(body) and not explicit and not bound and _aggregate_enabled(key)
+        client_platform = _explicit_selector(request)
+        bound_platform = (str(getattr(key, "platform", "") or "").strip()
+                          if key is not None else "")
+        aggregate = _aggregate_enabled(key)
+        auto_route = (bool(body) and not client_platform and not bound_platform
+                      and not suffix_platform and aggregate)
         model = _model_of_body(body) if body else ""
 
         # 显式指定平台（或 Key 绑定平台）时也要做模型名映射：见 _model_for_platform
@@ -2025,73 +2396,170 @@ class PlatformDispatchMiddleware:
         if model and not auto_route and spec is not None:
             try:
                 with _db() as db:
-                    mapped, error = _model_for_platform(db, spec.storage(), model)
+                    mapped, error = _model_for_platform(
+                        db, spec.storage(), model, realm=realm)
             except Exception:  # noqa: BLE001 - 映射失败就按原样转发
                 mapped, error = model, None
             if error is not None:
                 logger.info("模型不属于目标平台 model=%s platform=%s", model, platform_id)
-                return await JSONResponse(status_code=404,
-                                          content={"error": error})(scope, receive, send)
+                # error 自带 status（被禁用是 403，找不到才是 404）。写死 404 会
+                # 让「模型已禁用」伪装成「名字写错了」，客户端只会去改名字。
+                code = 404
+                payload_error = error
+                if isinstance(error, dict):
+                    code = int(error.get("status") or 404)
+                    payload_error = {key: value for key, value in error.items()
+                                     if key != "status"}
+                return await JSONResponse(status_code=code,
+                                          content={"error": payload_error})(scope, receive, send)
             if mapped != model:
-                body = _replace_model(body, mapped)
-                scope["_wb_body"] = body
+                _send_body(_replace_model(original_body, mapped))
 
-        candidates: list[tuple[str, str, bytes]] = [(platform_id, realm, body)]
-        # 只有「按模型自动选路」才允许多平台重试：
-        # 用户显式指定平台 / Key 绑定了平台时，换平台等于违背用户意图。
+        # **每个候选用自己的目录拼写，且都从原始字节派生**（计划 §四 第 57 行）：
+        # 拿「已经改写过的 body」当输入，会把前一个平台的拼写带到下一个平台。
+        def _body_for_target(target_model: str) -> bytes:
+            if not target_model or target_model == original_model:
+                return original_body
+            return _replace_model(original_body, target_model)
+
+        # 首选目标自己的写法：显式目标已在 2.6) 映射过（幂等），自动选路那段
+        # 被跳过，所以这里无条件再按 (platform, storage, realm) 收窄一次。
+        primary_model = _model_of_body(body) or original_model
+        if body:
+            try:
+                with _db() as db:
+                    primary_model = _model_id_in_target(
+                        db, platform_id, _storage_of(platform_id), realm,
+                        primary_model) or primary_model
+            except Exception:  # noqa: BLE001 - 映射失败按原样转发
+                logger.debug("首选目标模型映射失败 platform=%s", platform_id,
+                             exc_info=True)
+        # 候选的 (public id, realm, 该目标自己的 model) 三元组。
+        # 首选目标自己的写法：显式目标已在 2.6) 映射过（幂等），自动选路那段
+        # 被跳过，所以这里无条件再按 (platform, storage, realm) 收窄一次。
+        typed: list[tuple[str, str, str]] = [(platform_id, realm, primary_model)]
+        # 「只有历史失败记录」的候选（软健康降级）。它们的**资格**与健康候选
+        # 完全一样（都过了硬限制），区别只在**顺序**（计划 §五 第 73 行）。
+        degraded_targets: set[tuple[str, str]] = set()
+        # 只有「按模型自动选路」才允许多平台重试（计划 §五 第 70 行）：
+        # 后缀 / 客户端头或查询参数 / Key 绑定平台，任一成立都换平台就是违背
+        # 用户意图；聚合开关关闭时同样不跨平台。
         if auto_route and model:
             try:
                 with _db() as db:
-                    extra = _candidates_for_model(db, model, key)
+                    servable, degraded = _candidates_cached(db, model, key, scope)
             except Exception:  # noqa: BLE001
-                extra = []
-            seen = {platform_id}
-            for pid, target_realm, mapped in extra:
-                if pid in seen:
+                servable, degraded = [], []
+            degraded_targets = {(str(pid), str(realm))
+                                for pid, realm, _mapped in degraded}
+            seen = {(platform_id, realm)}
+            # **软降级只影响顺序**：健康的排前面，degraded 追加在后面。
+            # 两者都已过硬限制（禁用/暂停/归属/账号范围/冷却），所以把
+            # degraded 放到尾部既不会把被排除者「加回来」，又让
+            # 「唯一候选只有历史失败记录」仍有一次机会。
+            for pid, target_realm, mapped in list(servable) + list(degraded):
+                if (pid, target_realm) in seen:
                     continue
-                seen.add(pid)
-                candidates.append((pid, target_realm, _replace_model(body, mapped)))
-            # 首个候选也按目标平台的 model_id 改写（例如
-            # `deepseek-flash` -> Loomy 的 `DeepSeek-V4.1-Flash`）。
-            try:
-                with _db() as db:
-                    mapped = _model_id_for(db, spec.storage(), model) if spec else model
-            except Exception:  # noqa: BLE001
-                mapped = model
-            candidates[0] = (platform_id, realm, _replace_model(body, mapped))
+                seen.add((pid, target_realm))
+                typed.append((pid, target_realm, mapped))
 
-        last_response = None
-        for index, (target, target_realm, target_body) in enumerate(candidates[:3]):
-            # 同样走兜底：`trae` 这类存储平台没有自己的 spec，
-            # 直接 get 会得到 None -> 被 continue 跳过 -> 最后报 no_platform。
-            target_spec = _spec_with_gateway(target, target_realm)
+        # **只保留当前分支真能调用的目标**（计划 §五 第 74 行）：缺 adapter 的
+        # 条目不能占掉重试名额 —— 否则「最后一次尝试」（index == len-1）永远
+        # 落不到真正可用的最后一项上，可重试的 503 会被当成终态返回。
+        usable: list[tuple[str, str, bytes, str, object]] = []
+        for pid, target_realm, mapped in typed:
+            target_spec = _spec_with_gateway(pid, target_realm)
             target_module = _module_of(target_spec)
             target_dispatch = (getattr(target_module, "dispatch", None)
                                if target_module is not None else None)
             if target_dispatch is None:
+                logger.debug("候选平台 %s 未装配网关实现，跳过", pid)
                 continue
             # 回显用 **spec.id**（`trae-cn`）而不是存储名（`trae`）：
             # 面板上看到的是「Trae 国内版」，`x-gateway-platform`
             # 回 `trae` 对不上，排查时会以为落错平台。
-            _set_state(scope, (target_spec.id if target_spec else target),
-                       target_realm)
+            usable.append((pid, target_realm, _body_for_target(mapped),
+                           str(getattr(target_spec, "id", "") or pid),
+                           target_dispatch))
+        usable = usable[:3]
+        if not usable:
+            return await JSONResponse(
+                status_code=503,
+                content={"error": {"message": "没有可用的上游平台",
+                                   "type": "server_error",
+                                   "code": "no_platform"}})(scope, receive, send)
+
+        # 本次请求**实际尝试**过的目标与状态：既是 §五 第 75 行的诊断依据，
+        # 也是「所有候选只有历史失败记录」这一分类的判据。
+        all_degraded = bool(usable) and all(
+            (str(pid), str(target_realm)) in degraded_targets
+            for pid, target_realm, _body, _public, _dispatch in usable)
+        attempts: list[dict] = []
+
+        async def _degraded_only():
+            """「所有候选只有历史失败记录」的终态响应（四类结论之一）。
+
+            只在**本次尝试全部是 degraded 目标**且都明确失败时使用：它必须与
+            「无人登记 404」「全被禁用 403」「无可用账号（平台的可用性错误）」
+            区分开，否则运维分不清该补账号、该解禁、还是该等冷却。
+            """
+            logger.info("候选平台都只有历史失败记录 model=%s attempts=%r",
+                        model, attempts)
+            return await JSONResponse(
+                status_code=503,
+                content={"error": {
+                    "message": "模型 %s 的候选平台都只有历史失败记录"
+                               "（已尝试 %d 个），请稍后重试或换平台"
+                               % (model, len(attempts)),
+                    "type": "server_error",
+                    "code": "candidates_degraded",
+                    "attempts": attempts,
+                }})(scope, receive, send)
+
+        last_response = None
+        for index, (target, target_realm, target_body, public_id,
+                    target_dispatch) in enumerate(usable):
+            # 每个**待发的后续候选**再核一次禁用/暂停（计划 §五 第 72 行）：
+            # 禁用集合与平台暂停都是 3 秒缓存/动态状态，选路之后可能变化。
+            if index and (_is_disabled(target, _disabled_platforms())
+                          or _platform_paused(target)):
+                logger.info("候选平台 %s 已被禁用或暂停，跳过", public_id)
+                continue
+            # 一行日志读出「本次调用的 public id / 区 / 模型 / 尝试序号」
+            # （计划 §五 第 75 行）。**不放请求正文、凭证、账号令牌。**
+            logger.info("dispatch 尝试 | attempt=%d/%d public_platform=%r "
+                        "realm=%r model=%r requested=%r",
+                        index + 1, len(usable), public_id, target_realm,
+                        _model_of_body(target_body), original_model)
+            _set_state(scope, public_id, target_realm)
             scope["_wb_body"] = target_body
-            attempt_request = Request(scope, _replay_receive(target_body, tail)) if target_body else request
+            # `target_body` 与 `scope["_wb_body"]` 是**同一份字节**。只有空 body 的
+            # 请求才会回落到 `request`：多候选必然带 body（`auto_route` 要求有
+            # 模型名），所以这里不存在「沿用上一跳 body」的窗口。
+            attempt_request = (Request(scope, _replay_receive(target_body, tail))
+                               if target_body else request)
             response = await _run_platform(target_dispatch, attempt_request,
-                                            path, target)
+                                            path, public_id)
             status = int(getattr(response, "status_code", 200) or 200)
+            attempts.append({"platform": public_id, "status": status})
             if _is_uncertain(response):
                 # 平台内部异常：副作用可能已经发生，**不许**换平台重放。
                 # 哪怕状态码是「可重试」的 502，这次也和"平台明确说做不了"不同。
                 logger.warning(
-                    "平台 %s 内部异常，结果不确定，停止尝试其它候选平台", target)
+                    "平台 %s 内部异常，结果不确定，停止尝试其它候选平台", public_id)
                 return await response(scope, receive, send)
-            if status not in _RETRYABLE_STATUS or index == len(candidates) - 1:
+            if status not in _RETRYABLE_STATUS or index == len(usable) - 1:
+                # 最后一跳：全部候选都是 degraded 且给出可重试状态时，换成
+                # 本次请求独有的诊断码（平台原始 503 正文里没有这个信息）。
+                if all_degraded and status in _RETRYABLE_STATUS:
+                    return await _degraded_only()
                 return await response(scope, receive, send)
             last_response = response
-            logger.info("平台 %s 返回 %s，尝试下一个候选平台", target, status)
+            logger.info("平台 %s 返回 %s，尝试下一个候选平台", public_id, status)
 
         if last_response is not None:
+            if all_degraded:
+                return await _degraded_only()
             return await last_response(scope, receive, send)
         return await JSONResponse(
             status_code=503,
