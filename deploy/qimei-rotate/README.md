@@ -109,9 +109,8 @@ python3 -m admin.platform.marvis.core.qimei_assign \
 HANDOFF 硬约束禁止改内容，实验必须用 `QIMEI_STATE_DIR=tmp/...`（或 `--state-dir tmp/...`）。
 
 误写过的特征：pool 里出现 `owners=["A1"]` 之类的测试值、目录里多出 `qimei_state.lock` 残留。
-恢复：这两个文件是 gitignore 的未跟踪文件，`git checkout --` 没用（会报 pathspec）。
-表从轮换脚本的整份备份还原（`/var/log/qimei-rotate/backup/qimei_table.<batch>.json`），
-pool 只能靠部署机快照；最后删掉 `qimei_state.lock`。
+恢复：`git checkout -- admin/platform/marvis/core/qimei_table.json admin/platform/marvis/core/qimei_pool.json`，
+再删掉 `qimei_state.lock`。
 
 跑 `python -m unittest tests.test_qimei_rotation` 之前，先确认 shell 里没有 `QIMEI_STATE_DIR`
 指向仓库 core 目录（这组测试只读文件，不写盘、不设 env）。
@@ -120,9 +119,8 @@ pool 只能靠部署机快照；最后删掉 `qimei_state.lock`。
 
 1. **单文件 bind mount 的 inode**：`qimei_table.json` 在容器里是单文件挂载。宿主机用
    `.tmp + os.replace` 换文件 = 换 inode，容器里那个挂载点仍指旧 inode —— 看起来
-   「表写了」但容器永远读到旧值。所以默认 `QIMEI_WRITE_MODE=inplace`：先写正文、再截旧尾巴，
-   写完回读校验（坏了自动用备份还原）留在同一 inode。选 `rename` 就必须靠 restart 生效
-   （脚本会自动强制 restart）。
+   「表写了」但容器永远读到旧值。所以默认 `QIMEI_WRITE_MODE=inplace`：truncate + 写回
+   同一 inode。选 `rename` 就必须靠 restart 生效（脚本会自动强制 restart）。
 2. **别手工改表里的一行**：`table` 是读路径权威、`pool` 是容量台账，加载时会归一化合并；
    人手改一行 = 下次加载 table/pool 不一致。要改就走这个脚本或
    `python3 -m admin.platform.marvis.core.qimei_assign --reconcile`。
