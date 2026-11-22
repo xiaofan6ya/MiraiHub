@@ -126,10 +126,26 @@ describe('路由表', () => {
       expect(typeof page.platformScoped).toBe('boolean')
     }
     const scoped = PAGES.filter((page) => page.platformScoped).map((page) => page.key)
-    // 账号组所有页面 + 概览/平台/调用（除 IP）+ 配置（除分组）+ 客户端参数
-    expect(scoped).toContain('accounts')
-    expect(scoped).toContain('growth')
-    expect(scoped).toContain('client')
+    // 唯一真值：contracts/platform-context.md §8。
+    expect(scoped).toEqual([
+      'overview',
+      'sentinel',
+      'stats',
+      'platforms',
+      'accounts',
+      'credits',
+      'journal',
+      'growth',
+      'usage',
+      'logs',
+      'keys',
+      'models',
+      'market',
+      'schedules',
+      'sync',
+    ])
+    expect(scoped).not.toContain('gateway')
+    expect(scoped).not.toContain('client')
     expect(scoped).not.toContain('settings')
     expect(scoped).not.toContain('maintenance')
   })
