@@ -16,6 +16,10 @@ MAX_OWNERS_PER_QIMEI = 2。加载时任何一台设备的 owners 超过 2 个，
 QimeiPoolError。admin.platform.marvis.install() 在进程启动时调用
 validate_or_raise()，所以带病状态会让容器起不来，而不是带病跑。
 
+部署可用 QIMEI_MAX_OWNERS_PER_DEVICE 把上限**往下收紧**到 1（一号一设备）：
+此时 1-owner 设备不再参与复用，生成失败直接抛 QimeiCapacityError，加载时发现
+多账号设备同样拒绝启动 —— 只允许收紧，不允许放宽到 2 以上。
+
 分配顺序（assign）
 ------------------
 1. 表里已有该 uid -> 原样返回（source=existing），只补池台账。
@@ -76,7 +80,26 @@ logger = logging.getLogger("admin.platform.marvis.qimei_assign")
 
 #: 硬约束：一台设备最多挂几个账号。改这个数字之前先看模块 docstring。
 MAX_OWNERS_PER_QIMEI = 2
+#: 部署可把单设备账号数**往下收紧**：`QIMEI_MAX_OWNERS_PER_DEVICE=1` 表示
+#: 每个账号独占一台设备 —— 生成失败就拒绝（QimeiCapacityError），绝不降级共用。
+#: 硬上限不可上调：上游按设备归因风险，2 号/台是实测安全线。
+OWNER_LIMIT_ENV = "QIMEI_MAX_OWNERS_PER_DEVICE"
 MAX_EXPORT_BYTES = 16 * 1024 * 1024
+
+
+def owner_limit() -> int:
+    """当前部署的单设备账号上限：默认硬上限，只允许向下收紧到 1。"""
+    raw = (os.environ.get(OWNER_LIMIT_ENV) or "").strip()
+    if not raw:
+        return MAX_OWNERS_PER_QIMEI
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= MAX_OWNERS_PER_QIMEI:
+        raise QimeiPoolError("%s 只接受 1..%d，收到 %r"
+                             % (OWNER_LIMIT_ENV, MAX_OWNERS_PER_QIMEI, raw))
+    return value
 
 #: qimei36 的合法形态：24 hex 摘要 + '3000' 格式标记 + 8 hex 尾段。
 QIMEI_MARK = "3000"
@@ -556,11 +579,11 @@ def _normalise_state(raw_table, raw_pool, *, table_path, pool_path, default_ts,
             pool[q] = entry
             dirty_flag.append(q)
         if uid not in entry["owners"]:
-            if len(entry["owners"]) >= MAX_OWNERS_PER_QIMEI:
+            if len(entry["owners"]) >= owner_limit():
                 raise QimeiPoolError(
-                    "qimei_table 要求把 uid=%s 挂到 %s，但它已有 %d 个 owner（硬上限 %d）"
+                    "qimei_table 要求把 uid=%s 挂到 %s，但它已有 %d 个 owner（当前上限 %d）"
                     % (mask_uid(uid), mask_qimei(q), len(entry["owners"]),
-                       MAX_OWNERS_PER_QIMEI))
+                       owner_limit()))
             entry["owners"].append(uid)
             dirty_flag.append(q)
 
@@ -586,6 +609,15 @@ def _normalise_state(raw_table, raw_pool, *, table_path, pool_path, default_ts,
                 warning("qimei_pool 有名额但 qimei_table 缺映射：uid=%s qimei=%s（reconcile 可修）",
                                mask_uid(uid), mask_qimei(q))
 
+    limit = owner_limit()
+    if limit < MAX_OWNERS_PER_QIMEI:
+        shared = [q for q in sorted(pool) if len(pool[q]["owners"]) > limit]
+        if shared:
+            raise QimeiPoolError(
+                "%s=%d 下这些设备仍挂着多个账号：%s（先把多余账号 release 再启动，"
+                "不要放宽上限）"
+                % (OWNER_LIMIT_ENV, limit, ", ".join(mask_qimei(q) for q in shared)))
+
     if snapshot_path is not None and (table != raw_table or pool != raw_pool):
         raise QimeiPoolError("QIMEI snapshot is not canonical; review migration")
     state = State(table=table, pool=pool, dirty=bool(dirty_flag),
@@ -598,7 +630,7 @@ def validate_or_raise(state_dir=None) -> State:
     """启动钩子：池不合法就抛 QimeiPoolError。"""
     state = load_state(state_dir)
     logger.info("qimei 池校验通过：设备 %d 台 / 绑定 %d 个（上限 %d 号/台）",
-                len(state.pool), len(state.table), MAX_OWNERS_PER_QIMEI)
+                len(state.pool), len(state.table), owner_limit())
     return state
 
 
@@ -979,6 +1011,7 @@ def _pick_shareable(state: State, uid: str) -> str:
     """
     candidates = []
     managed = _managed_accounts(state)
+    limit = owner_limit()
     for qimei, entry in state.pool.items():
         if not entry.get("real", True):
             continue
@@ -987,7 +1020,7 @@ def _pick_shareable(state: State, uid: str) -> str:
             continue  # Managed devices remain exclusive, even for legacy callers.
         if uid in owners:
             return qimei
-        if len(owners) >= MAX_OWNERS_PER_QIMEI:
+        if len(owners) >= limit:
             continue
         candidates.append((len(owners), entry.get("last_used_at") or "",
                            entry.get("created_at") or "", qimei))
@@ -1007,6 +1040,7 @@ def assign_ex(uid, *, generator=None, state_dir=None, allow_derived: bool = Fals
     if not user:
         raise ValueError("uid 不能为空")
     sd = _state_dir(state_dir)
+    limit = owner_limit()
     with (contextlib.nullcontext() if dry_run else _locked(sd)):
         state = load_state(sd)
         now = _now()
@@ -1019,10 +1053,10 @@ def assign_ex(uid, *, generator=None, state_dir=None, allow_derived: bool = Fals
                 "owners": [], "real": True, "source": "migrated",
                 "created_at": now, "last_rotated": now, "last_used_at": None})
             if user not in entry["owners"]:
-                if len(entry["owners"]) >= MAX_OWNERS_PER_QIMEI:
+                if len(entry["owners"]) >= limit:
                     raise QimeiPoolError(
                         "qimei %s 已满 %d 号，无法补挂 uid=%s"
-                        % (mask_qimei(qimei), MAX_OWNERS_PER_QIMEI,
+                        % (mask_qimei(qimei), limit,
                            mask_uid(user)))
                 entry["owners"].append(user)
                 state.dirty = True
@@ -1095,7 +1129,7 @@ def assign_ex(uid, *, generator=None, state_dir=None, allow_derived: bool = Fals
         raise QimeiCapacityError(
             "qimei 已满 %d 号：所有真品设备都已有 %d 个账号，拒绝分配 uid=%s"
             "（生成失败：%s）"
-            % (MAX_OWNERS_PER_QIMEI, MAX_OWNERS_PER_QIMEI, mask_uid(user),
+            % (limit, limit, mask_uid(user),
                str(gen_error or "生成器未启用")[:200]))
 
 

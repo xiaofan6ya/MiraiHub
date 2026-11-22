@@ -284,6 +284,53 @@ class QimeiAssignTest(unittest.TestCase):
                 self.assertEqual(self._snapshot(directory), before)
 
 
+    def test_owner_limit_only_accepts_one_or_two(self):
+        os.environ.pop(qa.OWNER_LIMIT_ENV, None)
+        self.assertEqual(qa.owner_limit(), qa.MAX_OWNERS_PER_QIMEI)
+        with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: "1"}):
+            self.assertEqual(qa.owner_limit(), 1)
+        for bad in ("0", "3", "abc", "-1", "1.5"):
+            with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: bad}):
+                with self.assertRaises(qa.QimeiPoolError):
+                    qa.owner_limit()
+        with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: "  "}):
+            self.assertEqual(qa.owner_limit(), qa.MAX_OWNERS_PER_QIMEI)  # 空白视为未设置
+
+    def test_owner_limit_one_never_shares(self):
+        """上限=1：生成失败不得复用 1-owner 设备，直接容量拒绝且不写盘。"""
+        self._write({}, {})
+        with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: "1"}):
+            a = qa.assign_ex(UID_A, generator=lambda: SEED_Q, state_dir=self.dir)
+            self.assertEqual((a["source"], a["owners"]), ("generated", 1))
+            before = self._snapshot(self.dir)
+            with self.assertRaises(qa.QimeiCapacityError) as ctx:
+                qa.assign_ex(UID_B, generator=_fail, state_dir=self.dir)
+            self.assertIn("已满 1 号", str(ctx.exception))
+            self.assertEqual(self._snapshot(self.dir), before)
+        self.assertEqual(self._pool()[SEED_Q]["owners"], [UID_A])
+        self.assertNotIn(UID_B, self._table())
+
+    def test_owner_limit_one_rejects_shared_ledger_on_load(self):
+        self._write({SEED_UID: SEED_Q, UID_A: SEED_Q},
+                    {SEED_Q: {"owners": [SEED_UID, UID_A], "real": True}})
+        with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: "1"}):
+            with self.assertRaises(qa.QimeiPoolError) as ctx:
+                qa.load_state(self.dir)
+        self.assertIn(qa.OWNER_LIMIT_ENV, str(ctx.exception))
+        # 默认上限仍允许 2 号/台，未收紧的部署不受影响。
+        self.assertEqual(len(qa.load_state(self.dir).pool[SEED_Q]["owners"]), 2)
+
+    def test_owner_limit_one_recycles_idle_device(self):
+        """0-owner 的闲置设备在上限=1 下仍可被独占复用，不算共用。"""
+        self._write({}, {})
+        qa.assign_ex(UID_A, generator=lambda: SEED_Q, state_dir=self.dir)
+        qa.release(UID_A, state_dir=self.dir)
+        with patch.dict(os.environ, {qa.OWNER_LIMIT_ENV: "1"}):
+            b = qa.assign_ex(UID_B, generator=_fail, state_dir=self.dir)
+        self.assertEqual((b["source"], b["owners"]), ("shared", 1))
+        self.assertEqual(b["qimei36"], SEED_Q)
+
+
 class ShippedStateTest(unittest.TestCase):
     """仓库里**不带真值**：空表空池必须能跑通，示例文件不能被当成真表读进来。"""
 
