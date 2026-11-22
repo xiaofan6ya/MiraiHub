@@ -396,5 +396,37 @@ class ShippedStateTest(unittest.TestCase):
         self.assertNotEqual(value, qa.derived_qimei("B" * 32))
 
 
+class StateWriteGuardTest(unittest.TestCase):
+    """默认回落目录在 git 工作树内时必须拒绝写（2026-11-22 真值事故的回归锁）。"""
+
+    def test_default_dir_in_worktree_is_refused(self):
+        core = Path(qa.__file__).resolve().parent
+        table = core / "qimei_table.json"
+        pool = core / "qimei_pool.json"
+        before = (table.exists(), pool.exists())
+        with patch.dict(os.environ, {"QIMEI_STATE_DIR": "",
+                                    "QIMEI_TABLE_PATH": "",
+                                    "QIMEI_POOL_PATH": ""}):
+            state = qa.load_state()
+            with self.assertRaises(qa.QimeiError):
+                qa.save_state(state)
+        self.assertEqual((table.exists(), pool.exists()), before)
+
+    def test_explicit_state_dir_still_writes(self):
+        with tempfile.TemporaryDirectory(prefix="qimei-guard-") as tmp:
+            with patch.dict(os.environ, {"QIMEI_STATE_DIR": tmp,
+                                        "QIMEI_TABLE_PATH": "",
+                                        "QIMEI_POOL_PATH": ""}):
+                state = qa.load_state()
+                state.table[SEED_UID] = SEED_Q
+                state.pool[SEED_Q] = {"owners": [SEED_UID], "real": True,
+                                     "source": "generated",
+                                     "created_at": qa._now(),
+                                     "last_rotated": qa._now(),
+                                     "last_used_at": None}
+                qa.save_state(state)
+                self.assertTrue((Path(tmp) / "qimei_table.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
