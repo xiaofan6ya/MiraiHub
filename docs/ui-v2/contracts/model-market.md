@@ -467,3 +467,59 @@ GET /api/models/aggregate
   ]
 }
 ```
+
+---
+
+## 实现对照
+
+> S13 实测记录。接口与数据转换在 `admin/ui/src/api/market.ts`，页面在 `admin/ui/src/pages/MarketPage.vue`，
+> 单测在 `admin/ui/tests/page-market.spec.ts`（28 条）。路由由 captain 统一接线（`router/index.ts` 的 PAGE_COMPONENTS）。
+
+### 接口
+
+| 用途 | 调用 | 后端位置 |
+|---|---|---|
+| 卡片全部数字（窗口用量 / 定价 / 可用账号） | `GET /api/stats/model-market?hours=24\|72\|168` | `admin/routers/stats.py:model_market`（913 行） |
+| 主要调用名（`client_id`） | `GET /api/models/aggregate`，失败不影响主流程 | `admin/routers/models.py:list_aggregate` + `admin/model_alias.py:aggregate_payload` |
+| sparkline 分时序列 | `GET /api/stats/dashboard?days=1\|3\|7&granularity=hour&top_models=12`，只取 `trend` | `admin/routers/stats.py:dashboard_stats` → `_dashboard_agg` |
+
+### 功能对照
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 卡片 / 列表视图切换，存 localStorage | 页头 `Segmented` + `readMarketView`/`writeMarketView`（键 `mh.market.view`） | 已实现 |
+| 时间窗口 24h / 3d / 7d，存 localStorage 并同步路由 | 页头 `Segmented` + `normalizeHours`/`readMarketHours`/`writeMarketHours`（键 `mh.market.hours`）+ `useTableQuery` 的 `hours` 筛选 | 已实现 |
+| 搜索（展示名 / key / 调用名 / 各平台原始模型名，大小写不敏感） | `filterMarketCards` + FilterBar 搜索框 | 已实现 |
+| 厂商（平台）过滤，选项只取数据集中出现过的平台 | `platformOptions` + `filterMarketCards` | 已实现 |
+| 能力过滤「只看可用」 | `filterMarketCards({ available: 'available' })` | 已实现 |
+| 排序（调用量 / 价格 / 速度 / 成功率 / 名称） | `sortMarketCards` + FilterBar 排序下拉 + DataTable 列头排序（两处同一份状态） | 已实现 |
+| 卡片：厂商图标 | `ModelIcon`（`vendor` 传归一 key，沿旧版 `model-icons.js` 映射） | 已实现 |
+| 卡片：模型名 + 平台 chips（>3 折叠为 `+N`） | `market-card__head` | 已实现 |
+| 卡片：平台数 / 倍率（免费、未定价） | `priceText` + `platformCount` | 已实现 |
+| 卡片：成功率（≥99.5% ok / ≥97% warn / <97% danger / 无数据 neutral） | `rateTone` + `fmtPct` | 已实现 |
+| 卡片：TTFT（毫秒进、自动单位） | `fmtDuration` | 已实现 |
+| 卡片：列表补齐延迟 / 吞吐 / 积分 | `columns`（延迟、吞吐、积分列）+ `fmtCredit` | 已实现 |
+| 卡片：近窗口请求 sparkline | 内联 SVG `Sparkline` + `sparklineBars`（12 桶合并后按峰值归一） | 有差异：`model-market` 不返回分桶，序列取自 dashboard 的 `trend`（后端只回 Top N 模型）；没进 Top N 的模型不画（页脚注明，不伪造数据） |
+| 复制模型名 | `copyName` → `copyText`，成功 Toast「已复制 …」，失败「复制失败：…」 | 已实现 |
+| 查看日志（跳 `/logs` 带 `model`） | `logLinkFor` + `router.push({ path: '/logs', query: { model } })` | 已实现 |
+| 列表视图同字段 | `columns`：模型（图标+平台标签）· 倍率 · 请求 · 成功率 · TTFT · 延迟 · 吞吐 · 近窗口趋势 · 积分 · 状态 · 调用名 · 操作 | 已实现 |
+| 页脚摘要（窗口 / 总数 / 可用数 / 数据源） | `windowSummary`（`source` rollup → 小时汇总，raw → 原始日志） | 已实现 |
+| 四态：首次加载 / 刷新 / 空 / 错误 | 骨架 7 张卡（契约 §6.1）；刷新保留旧数据 + `Card loading` 转圈；`Empty`；`ErrorBlock` + 重试 | 已实现 |
+| 空状态三档文案（筛选为空 / 广场为空 / 全部不可用） | `emptyDescription` | 已实现 |
+| 不可用卡片弱化 | `.market-card.is-off`（透明度降到 0.55） | 已实现 |
+| 平台上下文：切平台重新取数、卸载取消 | `onMounted` 订阅 `usePlatformStore().onChange`（selector 变了才请求），`onBeforeUnmount` 取消 | 已实现 |
+| 筛选 / 排序 / 分页同步路由 query | `useTableQuery('market')`：`q` / `platform` / `available` / `hours` / `sort` / `order` / `page` / `size` | 已实现（契约 §5 未涉及分页，按任务书要求补：卡片视图用「上一页 / 下一页」，列表用 DataTable 分页） |
+| 手机 375px | 卡片单列、筛选控件满宽；列表走 DataTable 的 mobile 卡片模式（title/subtitle/meta/actions） | 已实现 |
+| 数字与时间格式（num / pct / latency / credit） | `utils/format` 的 `fmtCompact` / `fmtPct` / `fmtDuration` / `fmtCredit` | 有差异：全站统一口径（`fmtCompact` 用 K/M/B，本契约 §4.1 示例用「万 / 亿」），按 05-patterns §4 服从全站 |
+| 1h 时间窗口 | 未提供 | 有差异：任务书窗口范围为 24h / 3d / 7d（设计稿 P15 同样只有这三档），旧版 1h 不迁移 |
+| 响应超时 > 10 秒视为失败 | 走 http 层与后端 30 秒缓存 | 有差异：`http()` 对页面请求不设硬超时（05-patterns §1 约定只有心跳类请求用 `timeoutMs`），超时表现为网络错误 |
+| 卡片整卡点击跳转 | — | 有差异：契约 §6.4 / §7.2 记录旧版就没有整卡跳转；新版改为卡片内「查看日志」按钮（P15 设计稿同款） |
+
+### 单测覆盖（`admin/ui/tests/page-market.spec.ts`）
+
+- `toMarketCards`：字段映射、调用名优先级（aggregate `client_id` → 最低倍率 `model_id` → `models[0]`）、可用性重算、免费/未定价、sparkline 命中与缺失、脏数据兜底；
+- `sparklineBars`：分桶守恒、峰值归一、全 0 / 空 / NaN 返回空数组（不画假数据）；
+- `filterMarketCards` / `sortMarketCards` / `paginateMarketCards` / `marketStats` / `platformOptions` / `rateTone` / `logLinkFor` / `hoursToDays` / `normalizeModelName` / `indexCallNames` / `indexTrendSeries`。
+
+测试数据全部照抄后端真实响应形状（`model_market` / `aggregate_payload` / `_dashboard_agg` 的 `trend`）。
+

@@ -19,6 +19,10 @@ const PAGE_COMPONENTS: Partial<Record<PageKey, () => Promise<Component>>> = {
   sync: () => import('@/pages/SyncPage.vue').then((mod) => mod.default),
   alerts: () => import('@/pages/AlertsPage.vue').then((mod) => mod.default),
   groups: () => import('@/pages/GroupsPage.vue').then((mod) => mod.default),
+  ip: () => import('@/pages/IpPage.vue').then((mod) => mod.default),
+  schedules: () => import('@/pages/SchedulesPage.vue').then((mod) => mod.default),
+  models: () => import('@/pages/ModelsPage.vue').then((mod) => mod.default),
+  market: () => import('@/pages/MarketPage.vue').then((mod) => mod.default),
 }
 
 const pageRoutes: RouteRecordRaw[] = PAGES.map((page) => ({

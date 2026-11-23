@@ -657,3 +657,93 @@ DeepSeek V4.1 Flash（2 个平台）
 | 同步模型 | `/api/models/sync` | POST | 「从后端同步」按钮 |
 | 测速 | `/api/models/speed-test` | POST | 「测速」按钮 |
 | 保存显示偏好 | `/api/models/display` | POST | 聚合/倍率/官方同显 切换 |
+
+---
+
+## 实现对照
+
+> 本节由 S12 实现补充，只追加、不改写上文。**接口字段一律以后端为准**（`admin/routers/models.py`、`admin/health.py`、`admin/platform/models_router.py`、`model_metadata.py`、`admin/model_alias.py`），与上文旧契约冲突处以本节「与旧契约的差异」为准。
+
+### 1. 交付文件
+
+| 文件 | 职责 |
+|------|------|
+| `admin/ui/src/api/models.ts` | 接口类型与调用（configs / display / PATCH / batch-toggle / sync / delete / speed-test / stats.model-health）+ 全部纯函数（归一、倍率、能力、筛选、排序、分页、编辑计划、结果文案） |
+| `admin/ui/src/pages/ModelsPage.vue` | 页面：PageHeader + FilterBar + DataTable + FormDrawer（编辑）+ FormDrawer（添加）+ 批量操作 |
+| `admin/ui/tests/page-models.spec.ts` | 25 条单测：跨平台归一、别名 chips、倍率/容量口径、筛选、三态排序、分页夹紧、编辑计划 diff、结果文案（数据形状照抄后端真实响应） |
+
+### 2. 页面结构 → 落点
+
+| 设计稿（06-pages-d P14） | 实现 |
+|---|---|
+| 标题 + ⓘ 白名单说明 | `PageHeader title="模型配置"` + `help`（旧版 #panel-models 的提示原文压缩） |
+| `[同步目录]` | `POST /api/models/sync`（不带 platform = 全部平台）；Toast 用 `describeSyncResult()` 拼「+N 新增，~M 更新，共 K 个；未取到：…」 |
+| `[批量操作 ▾]` | `n-dropdown`：全部启用 / 全部禁用 → `confirm`（禁用需输入「禁用」）→ `POST /api/models/batch-toggle {enabled, level:'system'}` → 报「已启用/已禁用 N 个模型配置」 |
+| `[添加模型]` | FormDrawer：选平台（全部平台 = 一次全量同步）→ `POST /api/models/sync?platform=`。**后端没有手工创建模型的端点**，新模型只能由上游目录同步进来，所以这一步就是「添加」的真实路径（见 §4-3） |
+| FilterBar：搜索 / 厂商 / 平台 / 能力 / 状态 | `n-input`（300ms 防抖走 FilterBar）+ 4 个 `n-select`；参数名 `q / vendor / platform / cap / status` 全写进路由 query |
+| 模型列：厂商图标 + Copyable 调用名 + 别名 chips + 能力小图标 | `ModelIcon(vendor)` + `Copyable(client_id)` + 别名 `Chip`（最多 3 个 + `+N`，点击可复制）+ 能力图标（image / tools / reasoning / video / image-out，带 `aria-label`） |
+| 可用平台列：平台 logo 叠排 | 最多 4 个 `PlatformLogo` 叠排 + `+N`，`title` 列出「平台 · 完整调用名 · 倍率 · 启停」 |
+| 倍率列 | `fmtMultiplier`（1.50x / 免费 / 无量纲 / —），语义色 `multiplierTone`（>1 warn，<1 或 0 ok，负值/空 muted） |
+| 限制列（并发 / 上下文） | 上下文与最大输出取**各平台最小值**（`fmtTokensShort`：128K / 1M）；并发用 `/api/stats/model-health` 的 `available_accounts / eligible_accounts`（后端无模型级并发字段，见 §4-5） |
+| 延迟与健康列（TTFT、成功率） | `ttfb_ms.p50` → `fmtDuration`；`success_rate` → `fmtPct` + 语气（≥95% ok / ≥80% warn / 其余 danger）；`requests` 次数；`available_accounts===0` 时红 Badge「无可用账号」 |
+| 状态列 | Badge：已启用 / 部分启用 / 已停用 + `启用平台数/平台总数` |
+| 操作列 | `RowActions`（内联「编辑」，⋯ 里：全部启用/全部停用、测速、删除） |
+| 行点击 → FormDrawer 编辑 | 桌面：模型单元格绑 `role=button` + Enter/Space（DataTable 桌面分支未接 rowClick）；手机：`clickable-rows` 整卡可点。抽屉编辑见 §3 |
+| 模型 ID 三态排序（升序 → 降序 → 默认） | `sortModelRows`：`sort=name&order=asc|desc`，`order` 为空 = 后端原始顺序；naive 的 cancel 映射到默认态。倍率/平台数同样可排 |
+| 手机卡片：模型与「延迟与健康」整行块 | 两列 `mobile: 'title'`（`mh-cards__title-cells` 整行块），其余列 `meta` / `actions`；375px 下筛选控件全宽 |
+| 分页 | 每页 50（`page-sizes [20,50,100]`），`page/size` 进路由 query；后端一次返回全部，客户端切页 |
+
+### 3. 抽屉字段 → 接口字段
+
+| 抽屉字段 | 落到 | 说明 |
+|---|---|---|
+| 展示名（别名） | `PATCH /api/models/{id}` 的 `note` | 后端的展示名就是 `note`（接口没有 `name`）；留空回退调用名；改一次会对该模型**每个平台配置各发一条** |
+| 启用状态 | `PATCH` 的 `enabled` | 按平台各一个开关；全部关掉时前端拦截（「至少要保留一个平台处于启用状态」）。`enabled` 后端有默认 True，所以每条 PATCH 都显式携带 |
+| 能力与限制 | `PATCH` 的 `caps` | `context_window / max_output_tokens / supports_images / supports_tools / supports_reasoning`；后端写入 `upstream_metadata._override`，下次同步不会被冲掉；`caps.overridden` 为真时抽屉显示「本站覆盖」 |
+| 各平台映射 | 只读展示 | 平台 logo + `client_id`（Copyable）+ `upstream_id` + 启停 Badge，逐平台一行 |
+| 倍率 | 只读 | `credit_multiplier` 由 `POST /api/models/sync` 写入；`PATCH` 不接受该字段，所以抽屉里按平台只读 + `hint` 说明来源（不提供假入口） |
+| 描述 | 只读展示 | `description` 也由同步写入，同上 |
+
+提交用纯函数 `buildModelEditPlan(row, form)`：只对**真正变化**的平台配置发 PATCH，字段也只带变化项；返回 `{updates, changed, error}`，页面据此提示「没有改动」或逐条 `Promise.allSettled` 统计失败数。
+
+### 4. 与旧契约（上文 §二）的差异：以后端为准
+
+1. **展示名字段是 `note`**，不是 `name`；`GET /api/models/configs` 的 items 里没有 `name`、`tags` 之外没有独立能力字段（能力在 `caps`）。
+2. **显示偏好是 `PUT /api/models/display`**，字段 `show_multiplier / show_busy / official_only`（没有 `aggregate`）。本页按 P14 设计稿用 FilterBar 取代这三个开关，故不在页面里读写该接口（API 层仍保留 `getModelDisplay / saveModelDisplay` 供后续页面复用）。
+3. **没有「手工新增模型」端点**：只有 `POST /api/models/sync?platform=`。所以「添加模型」= 选择平台后同步目录，语义与后端一致。
+4. **`PATCH` 不接受 `credit_multiplier` / `description`**：倍率与描述由同步覆盖，抽屉里只读展示。
+5. **没有模型级并发上限字段**：模型页的「限制」列用上下文/最大输出（`caps`）+ `available_accounts / eligible_accounts`（`/api/stats/model-health`）表达「能并发跑几个号」。
+6. **健康数据端点是 `GET /api/stats/model-health?hours=24`**（不是 `/api/models/model-health`）：TTFT = `ttfb_ms.p50`，成功率 = `success_rate`（0–1），请求数 = `requests`。健康接口失败不阻塞主表，只在表格上方给一条可重试提示。
+7. **聚合口径在后端 `admin/model_alias.canonical_key`**：前端用同方向复现——先抹掉倍率后缀 `(x2.0)` / `x2.0` 与标点，再按「上游展示名优先、上游 id 兜底」归一（`squashModelName` / `modelGroupKey`）。这样 Qoder 的 `dfmodel` 与 Loomy 的 `DeepSeek V4.1 Flash(x2.0)` 能和 `deepseek-v4.1-flash` 合成一行。
+8. **删除返回 `{id, model_id, ok}`**（不是 `{deleted:true}`）；删除按平台逐条发 `DELETE`，成功后提示删了几个平台配置。
+9. **`/api/models/sync` 的返回**含 `total_fetched / added / updated / total_in_db / enabled / platforms{} / problems{}`，页面用 `describeSyncResult` 把 `problems` 点名展示。
+
+### 5. 四态与边界
+
+| 状态 | 实现 |
+|---|---|
+| 首次加载 | `n-skeleton` × 6（`firstLoading = loading && items === null`） |
+| 刷新 | 保留旧数据，DataTable 顶部 2px 进度条 + “刷新”按钮 loading；成功后页码越界自动夹紧 |
+| 空 | 无筛选：「还没有模型配置。点『同步目录』从各平台上游拉取。」+ 主按钮；有筛选：「没有符合条件的模型」+「清除筛选」 |
+| 错误 | 无数据时 `ErrorBlock`（标题「加载模型失败：…」+ `detail` 展开 + 重试）；有数据时只 Toast，不清表格；健康接口单独降级 |
+| 搜索无结果 / 官方同显 | 空态文案区分；表格下脚注「官方目录共 N 个模型，本站已配置 M 个」 |
+| 账户禁用 / 无平台 | 空态直接引导「同步目录」，同步失败原因由 `problems` 透出（如「该平台没有可用（active）账号」） |
+| 平台切换 | `usePlatformStore().onChange` 订阅（健康数据按 `X-Platform` 收窄），`onBeforeUnmount` 取消订阅并 abort 在途请求；切换时清掉 `platform` 筛选避免停在旧平台 |
+
+### 6. 路由 query 约定
+
+`?q=deepseek&vendor=deepseek&platform=qoder-intl&cap=reasoning&status=enabled&sort=name&order=asc&page=2&size=50`
+
+`sort` 白名单：`name`（模型 ID 三态）/ `multiplier` / `platforms`。`useTableQuery('models', { pageSize: 50 })` 负责双向同步与每页条数记忆。
+
+### 7. 需要 captain 接线
+
+- `admin/ui/src/router/index.ts`：`models` key → `() => import('@/pages/ModelsPage.vue')`（页面 key 已在 `router/pages.ts` 存在，无需改 pages.ts）。
+- 本页不新增依赖、不改 `components/**`、`layout/**`、`api/http.ts`、`stores/**`。
+
+### 8. 验证
+
+- `npx vitest run tests/page-models.spec.ts` → 25 passed。
+- `npm run typecheck` → 本次改动零错误（同时报告：`src/pages/IpPage.vue(1072,16) TS2339` 属 S10 页面，不在本任务范围）。
+- `npm run build` → 通过（`ModelsPage` 尚未接线，故未出现在产物 chunk 中）。
+
