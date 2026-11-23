@@ -532,3 +532,56 @@ POST /api/accounts/export
 8. **导出安全**：
    - 导出的文件自动加密或仅含脱敏信息
    - 导出token 有 TTL（如 30 分钟），超期无法下载
+---
+
+## 实现对照
+
+> 本节由 S25（账号池·上）实现时追加（原 1–534 行未改动）。S26 会补齐导入/添加账号的完整表单；
+> 本步只交付列表、行/批量操作、整池后台任务与入口壳。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 页头：导入 / 扫描本机 / 导出 / 添加账号 ▾ | `AccountsPage.vue` PageHeader；`addAccountModes` 按平台声明生成下拉项 | 已实现（入口壳：导入/扫描/添加方式点击提示「S26 实现」；导出走真实异步导出任务） |
+| 状态页签：全部 / 已启用 / 已禁用 / 冷却 / 熔断（+计数，`?status=`） | `Segmented` + `accountTabCounts` + `normalizeAccountStatus`（`cooldown`→`cooling`，兼容概览页链接） | 已实现（计数来自全量行，保证与筛选结果一致） |
+| 搜索（名称 / UID / 域名 / 绑定 Key） | `FilterBar` + `filterAccountRows` | 已实现（后端只搜 name/uid；域名与绑定 Key 为客户端补足） |
+| 积分区间筛选（≥ / ≤） | FilterBar 两个输入 + `filterAccountRows` | 已实现（与旧版 accMinCredits/accMaxCredits 对应） |
+| 排序（ID / 名称 / 剩余积分 / 最近同步 / 最近使用） | 列 `sortable` + 受控 `sortOrder` + `sortAccountRows` | 已实现（客户端排序；旧版的 5 个 sort 值等价） |
+| 分页（50/100/200） | `paginateAccountRows` + `useTableQuery` | 已实现（**有差异**：为保证冷却/熔断页签与计数正确，本步取全量后客户端分页；`listAccounts` 仍保留 page/page_size 参数，S26 可切服务端分页） |
+| 账号列（名称 + UID 脱敏 + 域名 + 令牌天数） | 列 `name` / `renderAccount` / `maskAccountId` | 已实现 |
+| 状态 Badge（活跃/冷却/熔断/降级/已禁用）+ 悬停原因与恢复时间 | `accountStatusMeta` + `Badge` | 已实现 |
+| 平台扩展列（能力声明驱动） | `showTokenColumn` + `tokenColumn`：任一账号 `token_supported=true` 时追加「令牌」列（剩余天数 + 续期悬停，expired/expiring 着色） | 已实现（后端 `/api/platforms` 未声明「列」，故以账号能力字段驱动；更多扩展列待后端补声明） |
+| 剩余额度（Meter + 剩余/总，<20% warn / <5% danger） | 列 `balance` / `renderBalance` | 已实现 |
+| 今日消耗 | 列 `today`；数据来自 `GET /api/logs/summary?days=1` 一次聚合 | 已实现（旧版列表没有该列，设计稿 P6 新增；后端没有独立「今日消耗」字段，因此复用日志汇总） |
+| 到期（`fmtExpiry`） | 列 `expire`，取 `credits_soonest_expire_at`（毫秒） | 已实现 |
+| 最近使用（`fmtRelative`） | 列 `lastUsed` | 已实现 |
+| 备注（内联编辑） | 列 `note` 展示绑定 Key；行操作「编辑」打开 `FormDrawer` | **有差异**：`Account` 没有 note 字段（PATCH 只支持 name/max_in_flight/status）；可编辑项改为账号名称与并发上限，备注列展示绑定的 API Key |
+| 行操作：刷新额度 / 检测 / 启用禁用 / 编辑 / 详情 / 签到（能力声明）/ 删除 | `RowActions`（前 2 个直显，其余进 ⋯，删除朱色）+ `actionList` | 已实现（签到只在 `accountFeatures().checkin` 为 true 的平台出现；调用 `/api/accounts/{id}/task`，平台不支持时如实提示） |
+| 详情抽屉（全部字段 / 额度明细 / 模型冷却） | `FormDrawer`（lg、隐藏底栏）+ `KV` + 积分包列表 + `model_limits` | 已实现（**有差异**：未接「最近请求」——需要按账号查日志，留给 S26/日志页联动；积分包来自 `GET /{id}/credit-details`） |
+| 批量工具条：启用 / 禁用 / 刷新额度 / 检测 / 导出选中 / 删除 | `BulkBar` 插槽 + `POST /api/accounts/bulk` + `export-async` | 已实现（删除需输入「删除」确认；结果为 affected/errors，部分失败有 Toast） |
+| 整池任务：刷新全部 | 工具栏「刷新全部」→ `POST /api/accounts/refresh-batch` → `useJob` 轮询 | 已实现（确认后启动；任务键带平台，重复点击复用同一任务） |
+| 整池任务：检测全部 | 工具栏「检测全部」→ `POST /api/accounts/health-check-batch` | 已实现（新增入口：旧版在「管理操作」菜单里） |
+| 模型额度与冷却 | 工具栏按钮 → `GET /api/accounts/model-limits` → 抽屉列表 | 已实现（只读列表：账号 × 模型 × 剩余时间） |
+| 成长任务 | 工具栏（仅 WorkBuddy）→ `POST /api/growth/run-async` | 已实现（按 `accountFeatures().growth` 显示） |
+| 猫猫旅行与领奖 | 工具栏（仅 WorkBuddy）→ `POST /api/accounts/cat-travel/batch-async` | 已实现（按 `accountFeatures().catTravel` 显示） |
+| 后台任务进度：内联条 + 右下 JobProgress + 1500ms 轮询 | `useJob(undefined, { pollUrl: '/api/accounts/job/' })` + 表格上方内联条 + `JobProgress` | 已实现（与旧版 accountJobStatus/runJob 一致；任务详情抽屉列出逐条结果） |
+| 导出（异步 + 完成后自动下载） | `POST /api/accounts/export-async` → 轮询 → `download('/api/accounts/export-download', {token})` | 已实现（导出当前筛选结果或选中项） |
+| 平台能力声明驱动 | `accountFeatures()`（唯一判断点）+ `/api/platforms.actions` | 已实现（页面无 `if (platform === …)` 散落分支） |
+| 平台切换重载 + 卸载取消 | `usePlatformStore().onChange`（`/api/accounts` 读 X-Platform） | 已实现 |
+| 筛选/排序/分页同步路由 query | `useTableQuery('accounts')`（status/q/min/max + page/size/sort/order） | 已实现 |
+| 四态：首次加载骨架 / 刷新保留旧数据 / 空 / 错误+重试 | NSkeleton / Card loading + DataTable 进度条 / Empty（区分筛选无命中）/ ErrorBlock | 已实现 |
+| 手机 375px 卡片模式 | 列 `mobile` 标注（title / meta / subtitle / actions） | 已实现 |
+| 添加账号各方式（手机号、PKCE、手动、导入预览） | — | **未做（S26）**：页头保留下拉入口并按平台能力列出可见项，点击提示「S26 实现」 |
+| 扫描本机预览 / 导入本机 / 导入异步 | — | **未做（S26）**：页头保留入口 |
+| 订阅账号状态变化自动刷新（契约 §5.3） | — | 未做：无 SSE/事件源；由手动刷新与操作后刷新覆盖（S26 若接 SSE 再补） |
+| 单元测试（状态归一 / 行转换 / 页签筛选 / 排序分页 / 任务快照 / 能力声明） | `tests/page-accounts.spec.ts`（19 个用例，真实响应形状） | 已实现 |
+
+### 口径核对（以 accounts.py / logs.py / jobrunner.py 实际字段为准）
+
+- `GET /api/accounts` 不带 `page` 时返回全量 `{items, summary}`；带 `page` 时返回 `{items, summary, paginated, total, page, page_size}`。
+- `status` 查询参数只认 `active|disabled`；冷却/熔断/降级由 `gateway_state` + `gateway_reason`（cooling/breaker/degraded）表达。
+- `balance_total` / `balance_remain` 为整数；`credits_soonest_expire_at` 是**毫秒**时间戳。
+- `bound_key_name` 是独占绑定的 Key 名；`model_limits[]` 是当前仍生效的模型冷却（`remaining_seconds`）。
+- `POST /api/accounts/bulk` 同步执行（enable/disable/delete/refresh/check），返回 `{affected, skipped, errors}`；删除被 Key 独占绑定的账号会跳过并提示。
+- `refresh-batch` / `health-check-batch` 返回 `jobrunner` 快照；轮询 `GET /api/accounts/job/{job_id}`，`status !== running` 即结束。
+- 导出任务完成时 `result.file_token` 用于 `GET /api/accounts/export-download?token=…`，文件 30 分钟内可重复下载。
+- `GET /api/logs/summary?days=1` 的 `items[].account_id/requests/credits` 是「今日消耗」列的数据源（请求数含失败、积分只算成功）。

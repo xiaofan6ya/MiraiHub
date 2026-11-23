@@ -175,6 +175,7 @@ describe('应用外壳', () => {
       'ip', 'schedules', 'models', 'market',
       'keys', 'logs', 'usage', 'stats',
       'sentinel', 'gateway', 'platforms', 'overview',
+      'journal', 'credits', 'growth', 'accounts',
     ])
     for (const page of PAGES) {
       await router.push('/' + page.key)
@@ -183,7 +184,8 @@ describe('应用外壳', () => {
       await flushPromises()
       const title = wrapper.find('h1.ph-title')
       expect(title.exists(), page.key).toBe(true)
-      expect(title.text().trim()).toBe(page.title)
+      // 真实页面可能带平台名（如「成长计划 · WorkBuddy」），标题必须包含页面名。
+      expect(title.text().trim()).toContain(page.title)
       expect(wrapper.find('.placeholder').exists(), page.key).toBe(!implemented.has(page.key))
       const active = wrapper.find('.side-item.active')
       expect(active.exists(), page.key).toBe(true)
@@ -218,6 +220,8 @@ describe('应用外壳', () => {
       .find((item) => item.text().includes('调用'))
     expect(usageGroup).toBeTruthy()
     await usageGroup!.trigger('click')
+    // 目标页是懒加载组件：等 import 解析与路由提交完成。
+    await flushPromises()
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/logs')
   })
