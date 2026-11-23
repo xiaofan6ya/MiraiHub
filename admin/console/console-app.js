@@ -7681,6 +7681,20 @@ async function platformBeginAuth(spec, storage) {
           </p>
         </div>
       </div>
+      <form id="codarPwdForm" class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <p class="text-xs mb-1" style="color:var(--fg-muted)">
+          或者用科搭账号密码登录
+          <span style="color:var(--fg-subtle)">— 与扫码等价，密码只发一次、不落库</span>
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="codarPwdUser" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="账号（手机号）" autocomplete="username">
+          <input id="codarPwdPass" type="password" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="密码" autocomplete="current-password">
+          <button type="submit" id="codarPwdBtn" class="console-btn primary">登录</button>
+        </div>
+        <p id="codarPwdErr" class="text-xs mt-1" style="color:var(--danger)"></p>
+      </form>
       <p id="codarAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">等待扫码…</p>
       <div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px">
         <button type="button" id="codarAuthRetry" class="console-btn" hidden>重新获取二维码</button>
@@ -7691,6 +7705,45 @@ async function platformBeginAuth(spec, storage) {
     if (retryBtn) retryBtn.addEventListener("click", () => {
       closeModal();
       platformBeginAuth(spec, storage);
+    });
+
+    // 账号密码登录：与扫码等价，上游同一个 /v1/login（短信登录也是把它当密码字段）
+    const pwdForm = document.getElementById("codarPwdForm");
+    if (pwdForm) pwdForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const errEl = document.getElementById("codarPwdErr");
+      const statusEl = document.getElementById("codarAuthStatus");
+      const btn = document.getElementById("codarPwdBtn");
+      const user = (document.getElementById("codarPwdUser").value || "").trim();
+      const pass = (document.getElementById("codarPwdPass").value || "");
+      if (errEl) errEl.textContent = "";
+      if (!user || !pass) { if (errEl) errEl.textContent = "账号和密码都要填"; return; }
+      const restore = btn ? btnBusy(btn, "登录中") : () => {};
+      try {
+        const r = await api("/api/codar/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, password: pass }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("科搭登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
     });
 
     for (let i = 0; i < 160; i += 1) {

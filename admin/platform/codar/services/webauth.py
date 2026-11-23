@@ -307,3 +307,65 @@ def cancel(auth_id: str) -> dict:
     if session["status"] in ("pending", "scanned"):
         session["status"] = "canceled"
     return _public(session)
+
+
+# ---------------------------------------------------------------------------
+# 账号密码登录（与短信验证码共用 /v1/login）
+# ---------------------------------------------------------------------------
+LOGIN_PATH = "/v1/login"
+
+
+def _envelope(payload: dict) -> dict:
+    """把 `{code, data:{...}}` 解开；没有 data 就是它自己。"""
+    data = payload.get("data")
+    return data if isinstance(data, dict) else payload
+
+
+def password_login(db: Session, username: str, password: str) -> dict:
+    """账号密码换 token 并入库。
+
+    ## 两个必须分开的分支
+
+    1. **成功**：`POST api.kuaipaper.com/v1/login {username, password}` 回
+       `{token, username}` —— 注意短信登录也是打这个接口，只是把验证码塞进
+       `password` 字段。
+    2. **被 IP 风控拦下**：HTTP 200 里 `{"code":200,"data":{"code":201,
+       "status":"ip_verify_required","token":"…"}}`。那个 token 是**临时**的，
+       只能用于 `/v1/user/verify_ip`；把它当正式令牌存下来，后面每个请求都会
+       401。所以这里不存，直接告诉用户去官方页面完成短信安全验证。
+
+       为什么不接着把验证发送了：发短信的 `/v1/verification-code` 强制要
+       阿里人机验证的四件套（lot_number / captcha_output / pass_token /
+       gen_time），那是一个必须在浏览器里由人完成的挑战 —— 本端没有那套
+       widget 就发不出去，硬发只会拿到 `{"code":400,"message":"请完成人机验证"}`。
+    """
+    account = str(username or "").strip()
+    secret = str(password or "")
+    if not account or not secret:
+        raise AuthError("账号和密码都要填", kind="bad_request")
+
+    payload = _post(LOGIN_PATH, {"username": account, "password": secret},
+                    timeout=20.0)
+    data = _envelope(payload)
+    inner = data.get("code")
+    status = str(data.get("status") or "")
+    if inner == 201 or status == "ip_verify_required":
+        raise AuthError(
+            "这个账号当前网络需要短信安全验证（上游 IP 风控）："
+            "请先在科搭网页端登录一次完成验证，再回来用「令牌」或「扫码」导入",
+            kind="need_verify")
+    token = str(data.get("token") or "").strip()
+    if not token:
+        said = str(payload.get("message") or data.get("message") or "").strip()
+        code = payload.get("code")
+        raise AuthError(said or "登录失败（上游没给令牌，业务码 %s）" % code)
+    try:
+        verified = paths.verify_token(token)
+    except paths.ScanError as exc:
+        raise AuthError(str(exc)) from exc
+    account_row, _created = codar_accounts.import_record(
+        db, {"token": verified["token"],
+             "username": str(data.get("username") or verified["username"]),
+             "source": "password"})
+    return {"status": "done", "account_id": int(account_row.id or 0),
+            "account": account_row.name or ""}

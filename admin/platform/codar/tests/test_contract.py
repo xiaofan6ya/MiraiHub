@@ -1091,3 +1091,53 @@ def test_qr_pending_and_scanned(monkeypatch):
                             if path == webauth.QR_PATH else {"code": 200, "data": {"status": s}})
         begun = webauth.begin()
         assert webauth.poll(None, begun["auth_id"])["status"] == expected
+
+
+# ---------------------------------------------------------------------------
+# 账号密码登录
+# ---------------------------------------------------------------------------
+def test_password_login_success(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQwNzA5MDg4MDAsInVzZXJuYW1lIjoidTEifQ.x"
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 200, "data": {"token": token, "username": "u1"}})
+    monkeypatch.setattr(webauth.paths, "verify_token",
+                        lambda t: {"token": t, "username": "u1", "expires_at": 4070908800})
+
+    class FakeAccount:
+        id = 9
+        name = "u1"
+
+    imported = []
+    monkeypatch.setattr(webauth.codar_accounts, "import_record",
+                        lambda db, record: (imported.append(record), (FakeAccount(), True))[1])
+    out = webauth.password_login(None, "u1", "pw")
+    assert out["status"] == "done" and out["account_id"] == 9
+    assert imported and imported[0]["source"] == "password"
+
+
+def test_password_login_ip_verify_is_not_a_token(monkeypatch):
+    """被 IP 风控拦下时那个 token 是临时的，绝不能入库。"""
+    from admin.platform.codar.services import webauth
+
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 200,
+        "data": {"code": 201, "status": "ip_verify_required", "token": "temp-token"}})
+    monkeypatch.setattr(webauth.codar_accounts, "import_record",
+                        lambda db, record: (_ for _ in ()).throw(AssertionError("不该入库")))
+    with pytest.raises(webauth.AuthError) as info:
+        webauth.password_login(None, "u1", "pw")
+    assert info.value.kind == "need_verify"
+    assert "短信安全验证" in str(info.value)
+
+
+def test_password_login_refusal(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 400, "message": "用户名或密码错误"})
+    with pytest.raises(webauth.AuthError) as info:
+        webauth.password_login(None, "u1", "bad")
+    assert info.value.kind == "upstream"
+    assert "密码错误" in str(info.value)

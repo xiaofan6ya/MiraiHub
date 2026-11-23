@@ -306,3 +306,23 @@ def auth_cancel(body: AuthIdIn, _: bool = Depends(require_admin)):
     from admin.platform.codar.services import webauth
 
     return webauth.cancel((body.auth_id or "").strip())
+
+
+class PasswordIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@router.post("/auth/password")
+def auth_password(body: PasswordIn, _: bool = Depends(require_admin),
+                  db=Depends(get_db)):
+    """账号密码登录（与短信验证码共用上游 `/v1/login`）。"""
+    from admin.platform.codar.services import webauth
+
+    try:
+        return {"ok": True, **webauth.password_login(db, body.username, body.password)}
+    except webauth.AuthError as exc:
+        # 400：参数没填；401：账号密码错；409：需要先过短信安全验证（缺一步，不是错）
+        status = {"bad_request": 400, "upstream": 401,
+                  "need_verify": 409}.get(exc.kind, 502)
+        raise HTTPException(status, detail=str(exc)) from exc
