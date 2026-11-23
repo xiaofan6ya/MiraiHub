@@ -7642,6 +7642,273 @@ async function platformBeginAuth(spec, storage) {
     return;
   }
 
+  // 科搭 Codar：微信扫码授权（官方自己的扫码登录，换票后直接入库）。
+  //
+  // 二维码不是我们渲染的：上游 `POST /v1/wechat/login/qrcode` 回的是微信自己的
+  // 图片地址，后端代理取字节再回给控制台（`/api/codar/auth/qr.png`），
+  // 这样既不用在页面里引外链，也能只放行白名单主机。
+  if (id === "codar") {
+    let begin;
+    try {
+      begin = await api("/api/codar/auth/begin", { method: "POST" });
+    } catch (e) {
+      toast("发起扫码失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok: bok, data: bd } = await safeJson(begin);
+    if (!bok || !bd || !bd.auth_id) {
+      toast("发起扫码失败：" + ((bd && (bd.detail || bd.reason)) || "没有拿到扫码会话"), "err");
+      return;
+    }
+    const authId = bd.auth_id;
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · 科搭 Codar</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        用微信扫下面的码并确认，凭证会自动入库 —— 不需要密码，也不需要本机客户端。
+      </p>
+      <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+        <img src="/api/codar/auth/qr.png?auth_id=${esc(authId)}" alt="微信扫码登录"
+             width="200" height="200"
+             style="border-radius:12px;background:#fff;padding:6px;border:1px solid var(--border)">
+        <div style="flex:1;min-width:220px">
+          <p class="text-sm mb-2" style="color:var(--fg)"><b>操作步骤</b></p>
+          <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:18px;line-height:1.95">
+            <li>打开手机微信，扫左边的二维码</li>
+            <li>手机上点「确认登录」</li>
+            <li>这边会自动变成「授权成功」，不用再操作</li>
+          </ol>
+          <p class="text-xs mt-2" style="color:var(--fg-subtle);line-height:1.7">
+            二维码约 5 分钟有效；过期后点下面的「重新获取二维码」。
+          </p>
+        </div>
+      </div>
+      <form id="codarPwdForm" class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <p class="text-xs mb-1" style="color:var(--fg-muted)">
+          或者用科搭账号密码登录
+          <span style="color:var(--fg-subtle)">— 与扫码等价，密码只发一次、不落库</span>
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="codarPwdUser" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="账号（手机号）" autocomplete="username">
+          <input id="codarPwdPass" type="password" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="密码" autocomplete="current-password">
+          <button type="submit" id="codarPwdBtn" class="console-btn primary">登录</button>
+        </div>
+        <p id="codarPwdErr" class="text-xs mt-1" style="color:var(--danger)"></p>
+      </form>
+      <p id="codarAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">等待扫码…</p>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px">
+        <button type="button" id="codarAuthRetry" class="console-btn" hidden>重新获取二维码</button>
+        <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
+      </div>`, "max-w-2xl");
+
+    const retryBtn = document.getElementById("codarAuthRetry");
+    if (retryBtn) retryBtn.addEventListener("click", () => {
+      closeModal();
+      platformBeginAuth(spec, storage);
+    });
+
+    // 账号密码登录：与扫码等价，上游同一个 /v1/login（短信登录也是把它当密码字段）
+    const pwdForm = document.getElementById("codarPwdForm");
+    if (pwdForm) pwdForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const errEl = document.getElementById("codarPwdErr");
+      const statusEl = document.getElementById("codarAuthStatus");
+      const btn = document.getElementById("codarPwdBtn");
+      const user = (document.getElementById("codarPwdUser").value || "").trim();
+      const pass = (document.getElementById("codarPwdPass").value || "");
+      if (errEl) errEl.textContent = "";
+      if (!user || !pass) { if (errEl) errEl.textContent = "账号和密码都要填"; return; }
+      const restore = btn ? btnBusy(btn, "登录中") : () => {};
+      try {
+        const r = await api("/api/codar/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, password: pass }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("科搭登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
+    });
+
+    for (let i = 0; i < 160; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const el = document.getElementById("codarAuthStatus");
+      if (!el) return;                       // 弹窗被关掉了
+      let poll;
+      try {
+        poll = await api("/api/codar/auth/poll?auth_id=" + encodeURIComponent(authId));
+      } catch (e) { continue; }
+      const { ok: pok, data: pd } = await safeJson(poll);
+      if (!pok || !pd) continue;
+      const status = pd.status || "";
+      if (status === "pending") { el.textContent = "等待扫码…"; el.style.color = "var(--fg-muted)"; continue; }
+      if (status === "scanned") { el.textContent = "已扫码，请在手机上确认"; el.style.color = "var(--brand)"; continue; }
+      if (status === "done") {
+        el.textContent = "授权成功，账号「" + (pd.account || pd.account_id) + "」已入库";
+        el.style.color = "var(--ok)";
+        toast("科搭授权成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+        return;
+      }
+      el.textContent = "授权未完成：" + (pd.error || "请重试");
+      el.style.color = "var(--danger)";
+      if (retryBtn) retryBtn.hidden = false;
+      return;
+    }
+    const el = document.getElementById("codarAuthStatus");
+    if (el) el.textContent = "等待超时，请重新获取二维码";
+    if (retryBtn) retryBtn.hidden = false;
+    return;
+  }
+
+  // AStudio（讯飞 Astron Studio）：授权登录 = 引导在本机桌面端登录一次，
+  // 登录态落盘后由后端自动导入。官方没有给第三方的设备码/OAuth，
+  // 网页登录的 Cookie 也只存在浏览器里 —— 这条是唯一不糊弄人的形态。
+  if (id === "astudio") {
+    let begin;
+    try {
+      begin = await api("/api/astudio/auth/begin", { method: "POST" });
+    } catch (e) {
+      toast("发起授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok: bok, data: bd } = await safeJson(begin);
+    if (!bok || !bd || !bd.auth_id) {
+      toast("发起授权失败：" + ((bd && (bd.detail || bd.reason)) || "没有拿到授权会话"), "err");
+      return;
+    }
+    const authId = bd.auth_id;
+    const installed = bd.installed !== false;
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · AStudio</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        AStudio 的登录态由它自己的客户端保存在本机；在这里登录一次后，
+        网关会读取那份登录态并自动入库（不需要复制粘贴任何东西）。
+      </p>
+      <div style="padding:12px 14px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border)">
+        <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:18px;line-height:1.95">
+          ${installed
+            ? '<li>在本机的 <b>AStudio 桌面端</b>里登录一次（已登录就跳过）</li>'
+            : '<li>这台机器上还没有 AStudio 桌面端：先<a href="https://agent.xfyun.cn/" target="_blank" rel="noopener" style="color:var(--brand)">下载安装</a>并登录一次</li>'}
+          <li>登录完成的几秒内，这边会自动变成「授权成功」</li>
+          <li>不想装客户端：把 <code>modelBearerToken</code> 粘到「导入」里也能用</li>
+        </ol>
+      </div>
+      <p id="astudioAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">
+        等待本机登录态…（${installed ? "请在本机桌面端登录" : "装好并登录后自动继续"}）
+      </p>
+
+      <details class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <summary class="text-xs" style="cursor:pointer;color:var(--fg-muted)">
+          没有桌面端？用浏览器登录（粘贴 Cookie 换票）
+        </summary>
+        <div class="mt-2">
+          <p class="text-xs mb-1" style="color:var(--fg-subtle);line-height:1.7">
+            在浏览器打开 <a href="https://agent.xfyun.cn/" target="_blank" rel="noopener"
+              style="color:var(--brand)">agent.xfyun.cn</a> 登录后，按 F12 → Network → 任选一条
+            <code>agent.xfyun.cn</code> 的请求 → 复制 Request Headers 里的整条 <code>Cookie</code>，
+            粘到下面。
+          </p>
+          <textarea id="astudioCookie" rows="3" class="w-full text-xs"
+            style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg)"
+            placeholder="token=...; account_id=...; ssoSessionId=..." spellcheck="false"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            <span id="astudioCookieErr" class="text-xs" style="color:var(--danger)"></span>
+            <button type="button" id="astudioCookieBtn" class="console-btn primary">用这段 Cookie 登录</button>
+          </div>
+        </div>
+      </details>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
+      </div>`, "max-w-lg");
+
+    const cookieBtn = document.getElementById("astudioCookieBtn");
+    if (cookieBtn) cookieBtn.addEventListener("click", async () => {
+      const input = document.getElementById("astudioCookie");
+      const errEl = document.getElementById("astudioCookieErr");
+      const statusEl = document.getElementById("astudioAuthStatus");
+      const value = (input && input.value || "").trim();
+      if (errEl) errEl.textContent = "";
+      if (!value) { if (errEl) errEl.textContent = "先把 Cookie 粘进来"; return; }
+      const restore = btnBusy(cookieBtn, "换票中");
+      try {
+        const r = await api("/api/astudio/auth/cookie", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cookie: value }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("AStudio 登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
+    });
+
+    for (let i = 0; i < 160; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const el = document.getElementById("astudioAuthStatus");
+      if (!el) return;
+      let poll;
+      try {
+        poll = await api("/api/astudio/auth/poll?auth_id=" + encodeURIComponent(authId));
+      } catch (e) { continue; }
+      const { ok: pok, data: pd } = await safeJson(poll);
+      if (!pok || !pd) continue;
+      const status = pd.status || "";
+      if (status === "pending") continue;
+      if (status === "done") {
+        el.textContent = "授权成功，账号「" + (pd.account || pd.account_id) + "」已入库";
+        el.style.color = "var(--ok)";
+        toast("AStudio 授权成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+        return;
+      }
+      el.textContent = "授权未完成：" + (pd.error || "请重试");
+      el.style.color = "var(--danger)";
+      return;
+    }
+    return;
+  }
+
   // 腾讯 Marvis：QQ / 微信 OAuth。
   //
   // 为什么不能走下面的通用「设备码」兜底：那条路要求**服务端**把凭证轮询回来，

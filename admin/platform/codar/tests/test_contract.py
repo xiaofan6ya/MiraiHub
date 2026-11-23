@@ -1003,3 +1003,141 @@ def test_queue_timeout_raises_retryable_429():
     assert exc.value.kind == "concurrent"
     assert exc.value.retry_after > 0
     assert exc.value.retryable is True
+
+
+# ---------------------------------------------------------------------------
+# 微信扫码授权（离线：上游与入库都打桩）
+# ---------------------------------------------------------------------------
+def _qr_session(monkeypatch, status_answer, token="eyJ0eXAiOiJKV1QifQ.eyJleHAiOjQwNzA5MDg4MDAsInVzZXJuYW1lIjoidTEifQ.sig"):
+    from admin.platform.codar.services import webauth
+
+    monkeypatch.setattr(webauth, "_post", lambda path, body: status_answer)
+    sessions = {}
+    with webauth._LOCK:
+        webauth._SESSIONS.clear()
+    begun = webauth.begin() if False else None
+    return webauth
+
+
+def test_qr_url_allowlist():
+    from admin.platform.codar.services import webauth
+
+    assert webauth.qr_url_allowed("https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=x")
+    assert webauth.qr_url_allowed("https://codar-web.speedai.com/a.png")
+    # 回环、明文、带端口、带 userinfo 一律拒绝
+    for bad in ("http://mp.weixin.qq.com/x", "https://127.0.0.1/x.png",
+                "https://mp.weixin.qq.com:8443/x", "https://u:p@mp.weixin.qq.com/x",
+                "https://evil.example.com/x.png"):
+        assert not webauth.qr_url_allowed(bad), bad
+
+
+def test_qr_begin_and_poll_done(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    answers = {
+        webauth.QR_PATH: {"code": 200, "data": {"scene": "s-1",
+                                                "qr_url": "https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=t"}},
+        webauth.STATUS_PATH: {"code": 200, "data": {"status": "SUCCESS",
+                                                    "token": "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQwNzA5MDg4MDAsInVzZXJuYW1lIjoidTEifQ.x",
+                                                    "username": "u1"}},
+    }
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: answers[path])
+    imported = []
+
+    class FakeAccount:
+        id = 7
+        name = "u1"
+
+    monkeypatch.setattr(webauth.codar_accounts, "import_record",
+                        lambda db, record: (imported.append(record), (FakeAccount(), True))[1])
+    monkeypatch.setattr(webauth.paths, "verify_token",
+                        lambda token: {"token": token, "username": "u1", "expires_at": 4070908800})
+
+    begun = webauth.begin()
+    assert begun["scene"] == "s-1" and begun["expires_in"] == webauth.TTL_S
+    state = webauth.poll(None, begun["auth_id"])
+    assert state["status"] == "done" and state["account_id"] == 7
+    assert imported and imported[0]["source"] == "qr"
+    # 二次轮询不该重复入库
+    again = webauth.poll(None, begun["auth_id"])
+    assert again["status"] == "done" and len(imported) == 1
+
+
+def test_qr_status_mapping(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    cases = [
+        ({"code": 200, "data": {"status": "EXPIRED"}}, "expired"),
+        ({"code": 404, "data": {}}, "expired"),
+        ({"code": 200, "data": {"status": "REQUIRED_BIND_PHONE"}}, "failed"),
+        ({"code": 200, "data": {"status": "REQUIRED_IP_VERIFY"}}, "failed"),
+        ({"code": 200, "data": {"status": "FAILED"}}, "failed"),
+    ]
+    for answer, expected in cases:
+        monkeypatch.setattr(webauth, "_post",
+                            lambda path, body=None, a=answer, **kw: a if path == webauth.STATUS_PATH else
+                            {"code": 200, "data": {"scene": "s", "qr_url": "https://mp.weixin.qq.com/x"}})
+        begun = webauth.begin()
+        state = webauth.poll(None, begun["auth_id"])
+        assert state["status"] == expected, (answer, state)
+
+
+def test_qr_pending_and_scanned(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    for said, expected in (("WAITING", "pending"), ("SCANNED", "scanned")):
+        monkeypatch.setattr(webauth, "_post",
+                            lambda path, body=None, s=said, **kw: {"code": 200, "data": {"scene": "s", "qr_url": "https://mp.weixin.qq.com/x"}}
+                            if path == webauth.QR_PATH else {"code": 200, "data": {"status": s}})
+        begun = webauth.begin()
+        assert webauth.poll(None, begun["auth_id"])["status"] == expected
+
+
+# ---------------------------------------------------------------------------
+# 账号密码登录
+# ---------------------------------------------------------------------------
+def test_password_login_success(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQwNzA5MDg4MDAsInVzZXJuYW1lIjoidTEifQ.x"
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 200, "data": {"token": token, "username": "u1"}})
+    monkeypatch.setattr(webauth.paths, "verify_token",
+                        lambda t: {"token": t, "username": "u1", "expires_at": 4070908800})
+
+    class FakeAccount:
+        id = 9
+        name = "u1"
+
+    imported = []
+    monkeypatch.setattr(webauth.codar_accounts, "import_record",
+                        lambda db, record: (imported.append(record), (FakeAccount(), True))[1])
+    out = webauth.password_login(None, "u1", "pw")
+    assert out["status"] == "done" and out["account_id"] == 9
+    assert imported and imported[0]["source"] == "password"
+
+
+def test_password_login_ip_verify_is_not_a_token(monkeypatch):
+    """被 IP 风控拦下时那个 token 是临时的，绝不能入库。"""
+    from admin.platform.codar.services import webauth
+
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 200,
+        "data": {"code": 201, "status": "ip_verify_required", "token": "temp-token"}})
+    monkeypatch.setattr(webauth.codar_accounts, "import_record",
+                        lambda db, record: (_ for _ in ()).throw(AssertionError("不该入库")))
+    with pytest.raises(webauth.AuthError) as info:
+        webauth.password_login(None, "u1", "pw")
+    assert info.value.kind == "need_verify"
+    assert "短信安全验证" in str(info.value)
+
+
+def test_password_login_refusal(monkeypatch):
+    from admin.platform.codar.services import webauth
+
+    monkeypatch.setattr(webauth, "_post", lambda path, body=None, **kw: {
+        "code": 400, "message": "用户名或密码错误"})
+    with pytest.raises(webauth.AuthError) as info:
+        webauth.password_login(None, "u1", "bad")
+    assert info.value.kind == "upstream"
+    assert "密码错误" in str(info.value)

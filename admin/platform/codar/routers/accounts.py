@@ -252,3 +252,77 @@ def activities(_: bool = Depends(require_admin), db=Depends(get_db)):
         items.append({"account_id": row.id, "name": row.name,
                       "activities": codar_checkin.activities(db, row)})
     return {"platform": PLATFORM, "items": items}
+
+
+# ---------------------------------------------------------------------------
+# 微信扫码授权登录（免客户端）
+# ---------------------------------------------------------------------------
+class AuthIdIn(BaseModel):
+    auth_id: str = ""
+
+
+@router.post("/auth/begin")
+def auth_begin(_: bool = Depends(require_admin)):
+    """开一个扫码会话：返回 auth_id + 二维码图片地址（图片由本网关代理）。"""
+    from admin.platform.codar.services import webauth
+
+    try:
+        return {"ok": True, **webauth.begin()}
+    except webauth.AuthError as exc:
+        raise HTTPException(502, detail=str(exc)) from exc
+
+
+@router.get("/auth/poll")
+def auth_poll(auth_id: str = "", _: bool = Depends(require_admin),
+              db=Depends(get_db)):
+    """轮询扫码状态；完成时已换票并入库。"""
+    from admin.platform.codar.services import webauth
+
+    if not (auth_id or "").strip():
+        raise HTTPException(400, detail="缺少 auth_id")
+    try:
+        return webauth.poll(db, auth_id.strip())
+    except webauth.AuthError as exc:
+        raise HTTPException(502, detail=str(exc)) from exc
+
+
+@router.get("/auth/qr.png")
+def auth_qr_png(auth_id: str = "", _: bool = Depends(require_admin)):
+    """二维码图片（服务端代理微信图片口，控制台只同源加载）。"""
+    from fastapi.responses import Response
+
+    from admin.platform.codar.services import webauth
+
+    try:
+        body, media = webauth.qr_image(auth_id.strip())
+    except webauth.AuthError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    return Response(body, media_type=media,
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.post("/auth/cancel")
+def auth_cancel(body: AuthIdIn, _: bool = Depends(require_admin)):
+    from admin.platform.codar.services import webauth
+
+    return webauth.cancel((body.auth_id or "").strip())
+
+
+class PasswordIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@router.post("/auth/password")
+def auth_password(body: PasswordIn, _: bool = Depends(require_admin),
+                  db=Depends(get_db)):
+    """账号密码登录（与短信验证码共用上游 `/v1/login`）。"""
+    from admin.platform.codar.services import webauth
+
+    try:
+        return {"ok": True, **webauth.password_login(db, body.username, body.password)}
+    except webauth.AuthError as exc:
+        # 400：参数没填；401：账号密码错；409：需要先过短信安全验证（缺一步，不是错）
+        status = {"bad_request": 400, "upstream": 401,
+                  "need_verify": 409}.get(exc.kind, 502)
+        raise HTTPException(status, detail=str(exc)) from exc
