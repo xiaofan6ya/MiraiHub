@@ -18,7 +18,8 @@ from pathlib import Path
 import webbrowser
 
 from desktop.common import ROOT, VERSION, atomic_json, data_dir
-from desktop.runtime import configure_node, ensure_node, ensure_webview2
+from desktop.runtime import (configure_node, ensure_node, ensure_webview2,
+                             node_executable)
 from desktop.tray import TrayController, available as tray_available
 from desktop.updates import UpdateService
 
@@ -33,6 +34,86 @@ class _NullTray:
         pass
 
     state = "stopped"
+
+
+#: Windows 专用的「不要弹控制台窗口」标志；POSIX 上必须传 0，否则 Popen 会
+#: 因为不认识这个关键字而直接抛异常。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _applescript_quote(text: str) -> str:
+    """把一段文字塞进 AppleScript 的字符串字面量里。"""
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _message_box(message: str, title: str = "MiraiHub", flags: int = 64) -> None:
+    """弹一个系统对话框。
+
+    Windows 用 MessageBoxW；macOS 用 osascript（不引入 pyobjc 依赖）。两个都
+    弹不出来时（CI、无人值守）只写日志 —— **弹框失败不能带走启动流程**。
+    """
+    try:
+        if os.name == "nt":
+            ctypes.windll.user32.MessageBoxW(None, message, title, flags)
+            return
+        if sys.platform == "darwin":
+            script = "display dialog %s with title %s buttons {\"好\"} default button 1" % (
+                _applescript_quote(message), _applescript_quote(title))
+            subprocess.run(["osascript", "-e", script], capture_output=True,
+                           timeout=300, check=False)
+            return
+    except Exception:  # noqa: BLE001 - 没有图形环境
+        logging.getLogger("desktop").debug("系统对话框不可用", exc_info=True)
+    logging.getLogger("desktop").info("%s：%s", title, message)
+
+
+def _confirm(message: str, title: str = "MiraiHub") -> bool:
+    """「是 / 否」对话框，返回是否点了「是」。macOS 走 osascript 的按钮文本。"""
+    try:
+        if os.name == "nt":
+            return ctypes.windll.user32.MessageBoxW(None, message, title, 0x00010024) == 6
+        if sys.platform == "darwin":
+            script = ("display dialog %s with title %s buttons {\"稍后\", \"立即更新\"} "
+                      "default button 2 with icon note" % (
+                          _applescript_quote(message), _applescript_quote(title)))
+            done = subprocess.run(["osascript", "-e", script], capture_output=True,
+                                  timeout=300, check=False)
+            return "立即更新" in (done.stdout or b"").decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        logging.getLogger("desktop").debug("确认对话框不可用", exc_info=True)
+    return False
+
+
+def _lock_instance(handle) -> bool:
+    """独占打开本实例锁：Windows 用 msvcrt，macOS/Linux 用 fcntl。"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _webview_gui() -> str | None:
+    """pywebview 的后端：Windows 用 EdgeChromium，macOS 交给它自己选 Cocoa。"""
+    return "edgechromium" if os.name == "nt" else None
+
+
+def _window_icon() -> str:
+    """窗口/包图标：macOS 用 .icns，Windows 用 .ico。"""
+    assets = ROOT / "desktop/assets"
+    if sys.platform == "darwin":
+        candidates = (assets / "app.icns", assets / "app.png")
+    else:
+        candidates = (assets / "app.ico", assets / "app.png")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 #: PyInstaller onefile 会在 %TEMP% 下解压一份 `_MEIxxxxxx` 运行目录。
@@ -73,6 +154,11 @@ def cleanup_stale_mei_dirs() -> int:
     """
     import shutil
     import tempfile
+
+    # macOS / Linux 上改名一个「正在被别的进程使用」的目录是允许的，
+    # 探测会误判成「没人用」进而删掉活实例的目录。这条清理只在 Windows 做。
+    if os.name != "nt":
+        return 0
 
     current = ""
     mei_base = getattr(sys, "_MEIPASS", "") or ""
@@ -267,9 +353,8 @@ def backend(port: int):
     if not init_db():
         raise RuntimeError("本地数据库初始化失败")
     def runtime_watch():
-        from desktop.runtime import node_dir
         for _ in range(600):
-            if (node_dir(base) / "node.exe").is_file():
+            if node_executable(base).is_file():
                 from admin.turing_token import clear_cache, warmup
                 clear_cache()
                 warmup()
@@ -458,11 +543,11 @@ class DesktopAPI:
             latest = result.get("latest")
             if not result.get("available") or not latest or self.closing.is_set():
                 return
-            choice = ctypes.windll.user32.MessageBoxW(
-                None, f"发现新版本 {latest['tag']}（当前 v{VERSION}）。\n\n"
+            confirmed = _confirm(
+                f"发现新版本 {latest['tag']}（当前 v{VERSION}）。\n\n"
                 "是否立即更新？\n选择“是”将下载、校验并重启客户端；选择“否”暂不更新。",
-                "MiraiHub · 版本更新", 0x00010024)
-            if choice != 6 or self.closing.is_set():  # IDYES
+                "MiraiHub · 版本更新")
+            if not confirmed or self.closing.is_set():
                 return
             response = self.download_update(latest["id"])
             if response.get("error"):
@@ -523,6 +608,19 @@ class DesktopAPI:
     def apply_update(self):
         if not self.update_file or not self.update_state["ready"]:
             return {"error": "请先完成下载和校验"}
+        if sys.platform == "darwin":
+            # .app 是个目录包，运行中替换内核（签名/启动器/资源）比 Windows
+            # 换 exe 危险得多：先让用户看到下载好的文件，再手动拖进「应用程序」。
+            # 「装不上」永远比「装坏了打不开」好。
+            try:
+                subprocess.run(["open", "-R", str(self.update_file)], check=False, timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            self.tray.notify("更新包已下载，已打开其所在目录；"
+                             "退出本客户端后替换「应用程序」里的 MiraiHub 即可")
+            return {"ok": True, "manual": True,
+                    "path": str(self.update_file),
+                    "message": "更新包已下载并打开所在目录，请手动替换应用"}
         target = Path(sys.executable).resolve()
         # Preflight write permission before shutting down the current working client.
         probe = target.parent / f".wb-update-{os.getpid()}.tmp"
@@ -576,8 +674,11 @@ class DesktopAPI:
             env = dict(os.environ, WB_DESKTOP_PARENT=str(os.getpid()), WB_DESKTOP_BOOT=nonce)
             output = (self.base / "logs/backend.log").open("w", encoding="utf-8")
             try:
-                self.process = subprocess.Popen(command, env=env, stdout=output, stderr=output,
-                                                creationflags=subprocess.CREATE_NO_WINDOW)
+                self.process = subprocess.Popen(
+                    command, env=env, stdout=output, stderr=output,
+                    creationflags=_NO_WINDOW,
+                    # POSIX：独立进程组，退出时能整组带走（macOS 没有 taskkill /T）
+                    start_new_session=(os.name != "nt"))
             finally:
                 output.close()
             # Closing during Popen must not leave a backend started after stop() ran.
@@ -679,7 +780,8 @@ class DesktopAPI:
             self.window = webview.create_window(
                 f"MiraiHub · v{VERSION}", html=SPLASH, js_api=Bridge(self),
                 width=1280, height=860, min_size=(900, 600),
-                background_color="#f5f6f8", text_select=True, frameless=True, easy_drag=False)
+                background_color="#f5f6f8", text_select=True,
+                                          frameless=(os.name == "nt"), easy_drag=False)
         except Exception as exc:
             logging.exception("Window creation failed from tray")
             self.window = None
@@ -826,8 +928,16 @@ class DesktopAPI:
             try:
                 self.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
-                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                                   capture_output=True, creationflags=_NO_WINDOW)
+                else:
+                    # 起服务时开了独立进程组：杀整组，避免 python shim 留下的孤儿
+                    try:
+                        import signal
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    except OSError:
+                        self.process.kill()
                 try:
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -890,20 +1000,22 @@ def run(tray_mode: bool = False):
     tray_mode: 双击 EXE 或开机自启时的默认路径 —— 只放托盘图标，不起服务、不开窗口，
     由用户在右键菜单里决定何时启动。窗口模式（不开托盘）保持旧行为以兼容 --smoke-test。
     """
-    if os.name != "nt":
-        raise RuntimeError("桌面 EXE 支持 Windows 10/11 x64")
-    import msvcrt
+    if sys.platform not in ("win32", "darwin"):
+        raise RuntimeError("桌面版支持 Windows 10/11 x64 与 macOS 12+")
     import webview
     base = data_dir()
     # Use a per-user lock rather than a PID file (stale PID files cannot block startup).
     lock = (base / "desktop.lock").open("a+b")
     lock.seek(0)
-    try:
-        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        ctypes.windll.user32.MessageBoxW(None, "MiraiHub 已在运行，请查看系统托盘图标。", "MiraiHub", 64)
+    if not _lock_instance(lock):
+        _message_box("MiraiHub 已在运行，请查看系统托盘图标。", "MiraiHub", 64)
         lock.close()
         return
+    # macOS 的托盘（pystray 的 AppKit 后端）和 pywebview 的 Cocoa 主循环抢同一个
+    # run loop，同时跑会有一个起不来。macOS 上固定走窗口模式，托盘菜单不提供。
+    if sys.platform == "darwin" and tray_mode:
+        logging.getLogger("desktop").info("macOS 上不使用托盘，改为窗口模式")
+        tray_mode = False
     api = tray = None
     try:
         config = configure_environment(base)
@@ -940,22 +1052,23 @@ def run(tray_mode: bool = False):
             started = tray.start()
             _boot("tray.start()=%s" % started)
             if not started:
-                ctypes.windll.user32.MessageBoxW(
-                    None, "托盘组件不可用，将以窗口模式启动。\n\n数据和日志：" + str(base),
-                    "MiraiHub", 48)
+                _message_box("托盘组件不可用，将以窗口模式启动。\n\n数据和日志：" + str(base),
+                             "MiraiHub", 48)
                 tray_mode = False
 
         if not tray_mode:
             # Original path: window owns everything, closing it exits the app.
             window = webview.create_window(f"MiraiHub · v{VERSION}", html=SPLASH, js_api=Bridge(api),
                                           width=1280, height=860, min_size=(900, 600),
-                                          background_color="#f5f6f8", text_select=True, frameless=True, easy_drag=False)
+                                          background_color="#f5f6f8", text_select=True,
+                                          frameless=(os.name == "nt"), easy_drag=False)
             api.window = window
             window.events.closed += api.stop
             _boot("window created (window mode)")
-            webview.start(lambda: (api.retry_runtime(), api.retry_start()), gui="edgechromium",
+            webview.start(lambda: (api.retry_runtime(), api.retry_start()),
+                          gui=_webview_gui(),
                           private_mode=False, storage_path=str(base / "webview"),
-                          icon=str(ROOT / "desktop/assets/app.ico"))
+                          icon=_window_icon())
             _boot("webview.start() returned (window mode)")
             return
 
@@ -977,8 +1090,8 @@ def run(tray_mode: bool = False):
         window = webview.create_window(
             f"MiraiHub · v{VERSION}", html=SPLASH, js_api=Bridge(api),
             width=1280, height=860, min_size=(900, 600),
-            background_color="#f5f6f8", text_select=True, frameless=True,
-            easy_drag=False)
+            background_color="#f5f6f8", text_select=True,
+            frameless=(os.name == "nt"), easy_drag=False)
         api.window = window
         # 关闭窗口 = 收进托盘（不停服务）。真正退出走托盘菜单的「退出」。
         window.events.closing += api.on_window_closing
@@ -993,9 +1106,9 @@ def run(tray_mode: bool = False):
             threading.Thread(target=api._check_tray_startup_update,
                              name="startup-update", daemon=True).start()
 
-        webview.start(start_tray_shell, gui="edgechromium",
+        webview.start(start_tray_shell, gui=_webview_gui(),
                       private_mode=False, storage_path=str(base / "webview"),
-                      icon=str(ROOT / "desktop/assets/app.ico"))
+                      icon=_window_icon())
     except Exception as exc:
         logging.exception("Desktop failed")
         # windowed EXE 没有控制台，MessageBox 又可能在无人值守时被忽略；
@@ -1009,7 +1122,7 @@ def run(tray_mode: bool = False):
                 fh.write(traceback.format_exc() + "\n")
         except Exception:
             pass
-        ctypes.windll.user32.MessageBoxW(None, str(exc) + f"\n\n数据和日志：{base}", "MiraiHub", 16)
+        _message_box(str(exc) + f"\n\n数据和日志：{base}", "MiraiHub", 16)
     finally:
         if api:
             api.stop()
