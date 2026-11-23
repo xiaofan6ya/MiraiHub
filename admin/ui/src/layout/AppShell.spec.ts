@@ -174,6 +174,7 @@ describe('应用外壳', () => {
       'maintenance', 'sync', 'alerts', 'groups',
       'ip', 'schedules', 'models', 'market',
       'keys', 'logs', 'usage', 'stats',
+      'sentinel', 'gateway', 'platforms', 'overview',
     ])
     for (const page of PAGES) {
       await router.push('/' + page.key)

@@ -628,3 +628,37 @@ OpenAI
 | 性能趋势图 | 平台网关页下方 | 移到「数据看板」（P11） | ✓ 已规划 |
 | 策略应用记录 | 平台网关页底部 | 移到「操作日志」（P22） | ✓ 已规划 |
 | 账号绑定检查 | 平台管理页 | 保留在「账号管理」（P13） | ✓ |
+
+
+---
+
+## 实现对照（S19，`admin/ui/src/pages/GatewayPage.vue`）
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 6 个调度策略单选卡（选项与后端 `strategies` 一致） | `GatewayPage.vue` 策略卡片 + `gateway.ts:strategyOf`；一行 6 个、≤1280 3×2、≤760 2 列 | 已实现 |
+| 只显示选中策略的说明 | `strategyDescription(config)` 单行说明 | 已实现 |
+| 策略切换立即保存；失败回滚并 Toast | `changeStrategy()` 乐观更新 + `PUT /api/gateway/config {strategy}` + 回滚 | 已实现（Toast「策略已切换：<名称>」/「切换策略失败：<原因>」） |
+| 当前调度顺序列表：序号 · logo · 名称 · 优先级输入 72px · 可用账号 · 额度 · 原因 | `order` 列表 + `NInputNumber.gw-priority`（72px）+ `formatBalance` | 已实现 |
+| 优先级策略下原生拖拽排序并保存 | 行 `draggable` + `dragstart/dragover/dragend` → `priorityPayload`（10/20/30…）→ `PUT {priority}` | 已实现（Toast「已保存调度顺序」；失败回滚并重取） |
+| 其它策略下拖拽禁用、顺序只读、显示原因列 | `canDrag()` 仅 `strategy === 'priority'`；非优先级策略优先级显示为只读文字，原因列常显 | 已实现 |
+| 优先级数字直接编辑（blur / Enter 保存，0–9999） | `commitPriority()` → `savePriority()` | 已实现（Toast「已保存优先级」；失败重取恢复） |
+| 禁用 / 恢复平台（确认框、账号数据保留说明） | 行内「禁用 / 启用」→ `POST /api/gateway/disable|enable` + `setGatewayEnabled` | 已实现（Toast「已禁用 / 已启用」，行内 Badge） |
+| 不可用 / 已禁用平台保留在列表中并给出原因 | 后端 `order(include_unavailable=True)` 的 `available/reason`；Badge「已禁用 / 无可用账号」 | 已实现 |
+| 调度预演 RouteRibbon（按当前策略的预期分流比例） | `simulateRouting()` + `RouteRibbon`（lane 成功率取平台速度表） | 已实现（**纯前端模拟**，见下方差异） |
+| 「模拟 100 个请求」+ 结果分布文案 | `runSimulation()` + `simulationText()`（「100 个请求中：WorkBuddy 62 · Loomy 38」） | 已实现 |
+| 无头请求走哪个平台表单（spread_unbound 开关 + 旧版说明） | `NSwitch` + `PUT {spread_unbound}` + 乐观更新/回滚 + 旧版两段说明原文 | 已实现 |
+| 平台速度 · TTFT / TPS（近 24 小时）DataTable | `GET /api/platform/speed?hours=24` + `toSpeedRows()`（成功率着色 / TTFT / TPS / 总耗时 / 样本 / 最快 / 样本少） | 已实现 |
+| 刷新按钮 | 页头「刷新」→ `loadAll()`（config + order + speed 并行） | 已实现 |
+| 四态：首次加载骨架 / 刷新保留旧数据 / 空 / 错误 + 重试 | 页面骨架、各卡片 `loading`、`Empty`（无可用平台 / 无速度样本）、`ErrorBlock` | 已实现 |
+| 平台上下文订阅（卸载取消） | `usePlatformStore().onChange` → `loadAll()`；`onBeforeUnmount` 取消 | 已实现（网关配置本身是全局的，重取不改变数据；platform-context.md §6.4 记录 gateway 与平台无关） |
+| 手机 375px | 策略 2 列；顺序行改为两行网格；速度表用 DataTable 卡片模式 | 已实现（未截图验证） |
+| 筛选 / 排序同步路由 query | — | 不适用：本页无列表筛选与分页（速度表固定按后端 score 排序） |
+
+### 与旧版/设计稿的差异（如实说明）
+
+1. **调度预演是纯前端模拟**：设计稿允许「若是纯前端模拟就按当前顺序/策略在前端模拟」。实现口径为：`round_robin` 平均分摊；`random` 按可用账号数加权随机；其余策略按「可用账号数」加权分摊（最大余额法）。它只解释当前顺序与平台容量，**不代表真实流量**，页面已注明。
+2. **顺序数据来自 `/api/gateway/order`**（含 `available/reason`，与旧版一致），未额外调用 `/api/gateway/health`（`api/gateway.ts` 保留该函数，页面未用）。
+3. **未接 `/api/gateway/resolve`**：设计稿没有要求模型级落点预演，本页不做。
+4. **速度表不做前端排序**：后端已按综合分排序，页面按原顺序展示（表头不带排序箭头），避免与真实排名冲突。
+5. **禁用/启用用独立接口**（`/disable`、`/enable`）而不是批量 `PUT {disabled}`：旧版也是逐平台调用，确认框文案沿用旧版含义。
