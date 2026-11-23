@@ -204,7 +204,10 @@ def oauth_url(realm: str = "") -> str:
 MODEL_TABLE = (
     # ── DeepSeek ──
     ("main-auto", "deepseek-v4-1-flash-261017", 1_000_000,
-     {"reasoning": True, "tools": True}),
+     # vision：2026-11-23 直连上游实测，带 data URL 图片问「左半右半各什么
+     # 颜色」，答「红色，蓝色」；反向配色答反、无图时明确回「没有收到截图」
+     # —— 这个模型本来就是多模态的。
+     {"reasoning": True, "tools": True, "vision": True}),
     ("deepseek-v4-pro-external", "deepseek-v4-pro-202606", 1_000_000,
      {"reasoning": True, "tools": True}),
     ("hy3-preview-agent", "deepseek-v4-flash-ga-260731", 1_000_000,
