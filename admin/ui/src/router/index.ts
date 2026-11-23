@@ -1,7 +1,8 @@
+import type { Component } from 'vue'
 import { createRouter, createWebHashHistory, type RouteRecordRaw, type Router } from 'vue-router'
 import AppShell from '@/layout/AppShell.vue'
 import Placeholder from '@/pages/_Placeholder.vue'
-import { PAGES, atRootHash, clearLegacyQuery, readLegacyTab } from './pages'
+import { PAGES, atRootHash, clearLegacyQuery, readLegacyTab, type PageKey } from './pages'
 
 /**
  * 路由实例（hash 模式）：`/admin/v2/#/accounts`，后端只需要服务一个 index.html。
@@ -9,10 +10,21 @@ import { PAGES, atRootHash, clearLegacyQuery, readLegacyTab } from './pages'
  */
 export * from './pages'
 
+/**
+ * 已实现的页面组件。未列入的 key 继续走 _Placeholder，
+ * 这样逐页交付时导航与路由表始终完整（08-prompts-pages 的 S06–S30）。
+ */
+const PAGE_COMPONENTS: Partial<Record<PageKey, () => Promise<Component>>> = {
+  maintenance: () => import('@/pages/MaintenancePage.vue').then((mod) => mod.default),
+  sync: () => import('@/pages/SyncPage.vue').then((mod) => mod.default),
+  alerts: () => import('@/pages/AlertsPage.vue').then((mod) => mod.default),
+  groups: () => import('@/pages/GroupsPage.vue').then((mod) => mod.default),
+}
+
 const pageRoutes: RouteRecordRaw[] = PAGES.map((page) => ({
   path: page.key,
   name: page.key,
-  component: Placeholder,
+  component: PAGE_COMPONENTS[page.key] ?? Placeholder,
   meta: {
     group: page.group,
     groupKey: page.groupKey,
