@@ -43,6 +43,7 @@ import { useConfirm, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError } from '@/api/http'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import { FMT_EMPTY, fmtCredit, fmtInt, fmtTime } from '@/utils/format'
 import {
   accountStatusText,
@@ -67,14 +68,11 @@ import {
   type SelectionPolicy,
 } from '@/api/credits'
 
-const HELP_TEXT =
-  '按到期时间展示账号风险。实际新会话由下方调度策略分配；平台按 7 天判定「快到期」，这部分额度不用完就会作废。' +
-  '概览里的「可用积分」是余额口径（与账号池一致），到期分档条是快照口径（只覆盖采集过到期数据的账号）。'
+const { t } = useI18n()
 
-const POLICY_NOTE =
-  '保存后恢复自动选号并清除手动优先级，对新会话生效；已有会话继续保持粘性，健康、冷却、绑定和账号在途限制仍然有效。'
-
-const INTERVAL_NOTE = '仅限制同一上游账号连续发起请求；不同账号可同时请求。已开始的请求继续并行，设为 0 可关闭。'
+const helpText = computed(() => t('page.credits.help'))
+const policyNote = computed(() => t('page.credits.policyNote'))
+const intervalNote = computed(() => t('page.credits.intervalNote'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -146,7 +144,7 @@ async function loadExpiry(): Promise<void> {
     applyPolicyForm()
   } catch (error) {
     expiryError.value = toErrorState(error)
-    if (expiry.value !== null) toast.error(failureText('刷新积分到期', error))
+    if (expiry.value !== null) toast.error(failureText(t('page.credits.action.refreshExpiry'), error))
   } finally {
     loading.expiry = false
   }
@@ -159,7 +157,7 @@ async function loadUsage(): Promise<void> {
     usage.value = await getCreditUsage({ days: 7, top: 12 })
   } catch (error) {
     usageError.value = toErrorState(error)
-    if (usage.value !== null) toast.error(failureText('刷新账号消耗构成', error))
+    if (usage.value !== null) toast.error(failureText(t('page.credits.action.refreshUsage'), error))
   } finally {
     loading.usage = false
   }
@@ -183,7 +181,7 @@ async function loadMorePackages(): Promise<void> {
       expiry.value = { ...expiry.value, has_more: payload.has_more, packages_total: payload.packages_total }
     }
   } catch (error) {
-    toast.error(failureText('加载更多积分包', error))
+    toast.error(failureText(t('page.credits.action.loadMore'), error))
   } finally {
     loading.more = false
   }
@@ -197,17 +195,17 @@ async function savePolicy(): Promise<void> {
   if (!policy.value || !dirty.value || loading.saving) return
   const interval = Number(form.interval)
   if (!Number.isInteger(interval) || interval < 0 || interval > 60000) {
-    toast.error('上游启动间隔必须是 0 到 60000 的整数毫秒')
+    toast.error(t('page.credits.policy.invalidInterval'))
     return
   }
   loading.saving = true
   try {
     policy.value = await saveSelectionPolicy({ mode: form.mode, upstream_start_interval_ms: interval })
     applyPolicyForm()
-    toast.success('账号调度策略已保存，新会话立即按新策略分配')
+    toast.success(t('page.credits.policy.saved'))
     await loadExpiry()
   } catch (error) {
-    toast.error(failureText('保存账号调度策略', error))
+    toast.error(failureText(t('page.credits.action.savePolicy'), error))
   } finally {
     loading.saving = false
   }
@@ -215,20 +213,21 @@ async function savePolicy(): Promise<void> {
 
 async function restoreAuto(): Promise<void> {
   if (!expiry.value || !isManual.value || loading.saving) return
-  const label = policy.value?.modes.find((item) => item.value === policy.value?.mode)?.label || '自动'
+  const label =
+    policy.value?.modes.find((item) => item.value === policy.value?.mode)?.label || t('page.credits.mode.auto')
   const ok = await confirm({
-    title: '恢复自动选号？',
-    message: '会清除手动优先级，恢复「' + label + '」自动调度；下一次选号生效，在途请求继续执行。',
-    okText: '恢复自动选号',
+    title: t('page.credits.confirmRestore.title'),
+    message: t('page.credits.confirmRestore.body', { label }),
+    okText: t('page.credits.confirmRestore.ok'),
   })
   if (!ok) return
   loading.saving = true
   try {
     await restoreAutomaticSelection(expiry.value.selection_order)
-    toast.success('已恢复当前自动调度策略')
+    toast.success(t('page.credits.toast.restored'))
     await loadExpiry()
   } catch (error) {
-    toast.error(failureText('恢复自动选号', error))
+    toast.error(failureText(t('page.credits.action.restoreAuto'), error))
   } finally {
     loading.saving = false
   }
@@ -243,16 +242,16 @@ async function syncAll(): Promise<void> {
   loading.syncing = true
   job.value = {
     id: 'credits-sync',
-    name: '重新采集积分快照',
+    name: t('page.credits.sync.name'),
     status: 'running',
     percent: 0,
-    message: '串行采集全部启用账号，账号多时需要几十秒…',
+    message: t('page.credits.sync.running'),
   }
   try {
     const result = await syncCredits()
     job.value = {
       id: 'credits-sync',
-      name: '重新采集积分快照',
+      name: t('page.credits.sync.name'),
       status: result.failed > 0 ? 'failed' : 'done',
       percent: 100,
       succeeded: result.refreshed,
@@ -263,7 +262,7 @@ async function syncAll(): Promise<void> {
     await loadAll()
   } catch (error) {
     if (job.value) job.value = { ...job.value, status: 'failed', message: errorMessage(error) }
-    toast.error(failureText('重新采集积分快照', error))
+    toast.error(failureText(t('page.credits.action.sync'), error))
   } finally {
     loading.syncing = false
   }
@@ -271,8 +270,8 @@ async function syncAll(): Promise<void> {
 
 function onJobView(): void {
   if (!job.value) return
-  if (job.value.status === 'failed') toast.warning(job.value.message || '部分账号采集失败')
-  else toast.info(job.value.message || '采集已完成')
+  if (job.value.status === 'failed') toast.warning(job.value.message || t('page.credits.toast.jobFailed'))
+  else toast.info(job.value.message || t('page.credits.toast.jobDone'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -291,37 +290,37 @@ const usageView = computed(() => usageBars(usage.value, 12))
 const packageColumns = computed<TableColumn[]>(() => [
   {
     key: 'remaining',
-    title: '积分',
+    title: t('page.credits.col.credits'),
     mobile: 'title',
     width: 96,
     numeric: true,
     render: (row: TableRow) => h('span', { class: 'cr-strong tnum' }, (row as unknown as PackageRowView).remainingText),
   },
-  { key: 'display_name', title: '来源', mobile: 'subtitle', minWidth: 160 },
+  { key: 'display_name', title: t('page.credits.col.source'), mobile: 'subtitle', minWidth: 160 },
   {
     key: 'account_name',
-    title: '账号',
+    title: t('page.credits.col.account'),
     mobile: 'meta',
     minWidth: 140,
     render: (row: TableRow) => h('span', { class: 'cr-muted' }, (row as unknown as PackageRowView).account_name || FMT_EMPTY),
   },
   {
     key: 'expire',
-    title: '到期日',
+    title: t('page.credits.col.expireDate'),
     mobile: 'meta',
     width: 150,
     render: (row: TableRow) => {
       const item = row as unknown as PackageRowView
       return h('span', { class: 'cr-expire' }, [
         h('span', { class: 'tnum' }, item.expireText),
-        item.expiring_soon ? h(Badge, { tone: 'warn' }, { default: () => '快到期' }) : null,
-        item.expired ? h(Badge, { tone: 'danger' }, { default: () => '已过期' }) : null,
+        item.expiring_soon ? h(Badge, { tone: 'warn' }, { default: () => t('page.credits.col.expiringSoonBadge') }) : null,
+        item.expired ? h(Badge, { tone: 'danger' }, { default: () => t('page.credits.col.expiredBadge') }) : null,
       ])
     },
   },
   {
     key: 'usage',
-    title: '剩余占比',
+    title: t('page.credits.col.remainingRatio'),
     mobile: 'meta',
     width: 160,
     render: (row: TableRow) => {
@@ -332,7 +331,7 @@ const packageColumns = computed<TableColumn[]>(() => [
         tone: item.expiring_soon ? 'warn' : 'ok',
         showValue: true,
         valueText: Math.round(item.remainingRatio) + '%',
-        ariaLabel: '积分包剩余占比',
+        ariaLabel: t('page.credits.meter.packageRatioAria'),
       })
     },
   },
@@ -397,7 +396,7 @@ function soonestTone(row: CreditAccountRow): 'ok' | 'warn' | 'danger' | 'neutral
 function accountPackagesCell(row: TableRow): VNodeChild {
   const item = row as unknown as CreditAccountRow & { rank: number }
   const list = (item.next_expiring || []).slice(0, 2)
-  if (!list.length) return h('span', { class: 'cr-muted' }, '没有仍有剩余的积分包')
+  if (!list.length) return h('span', { class: 'cr-muted' }, t('page.credits.noPackages'))
   return h(
     'div',
     { class: 'cr-chips' },
@@ -420,7 +419,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'account_name',
-    title: '账号',
+    title: t('page.credits.col.account'),
     mobile: 'title',
     minWidth: 170,
     sortable: true,
@@ -435,7 +434,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'status',
-    title: '状态',
+    title: t('page.credits.col.status'),
     mobile: 'meta',
     width: 92,
     render: (row: TableRow) => {
@@ -447,7 +446,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'total_remaining',
-    title: '剩余积分',
+    title: t('page.credits.col.totalRemaining'),
     mobile: 'meta',
     width: 108,
     numeric: true,
@@ -457,7 +456,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'expiring_soon_remaining',
-    title: '7 天内到期',
+    title: t('page.credits.col.expiringSoon'),
     mobile: 'meta',
     width: 116,
     numeric: true,
@@ -472,7 +471,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'evergreen_remaining',
-    title: '长期有效',
+    title: t('page.credits.col.evergreen'),
     mobile: 'meta',
     width: 104,
     numeric: true,
@@ -480,7 +479,7 @@ const accountColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'soonest',
-    title: '最近到期',
+    title: t('page.credits.col.soonest'),
     mobile: 'meta',
     width: 180,
     sortable: true,
@@ -489,20 +488,22 @@ const accountColumns = computed<TableColumn[]>(() => [
       const item = row as unknown as CreditAccountRow
       return h('div', { class: 'cr-stack' }, [
         h(Badge, { tone: soonestTone(item) }, { default: () => soonestLabel(item.soonest_days_left) }),
-        item.synced_at ? h('span', { class: 'cr-sub tnum' }, fmtTime(item.synced_at) + ' 采集') : null,
+        item.synced_at
+          ? h('span', { class: 'cr-sub tnum' }, t('page.credits.col.syncedAt', { time: fmtTime(item.synced_at) }))
+          : null,
       ])
     },
   },
   {
     key: 'next_expiring',
-    title: '最近快到期的积分包',
+    title: t('page.credits.col.nextPackages'),
     mobile: 'meta',
     minWidth: 240,
     render: accountPackagesCell,
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.credits.col.actions'),
     mobile: 'actions',
     width: 84,
     hideable: false,
@@ -511,12 +512,12 @@ const accountColumns = computed<TableColumn[]>(() => [
       h('button', {
         type: 'button',
         class: 'cr-link',
-        'aria-label': '查看积分明细',
+        'aria-label': t('page.credits.col.detailAria'),
         onClick: (event: MouseEvent) => {
           event.stopPropagation()
           openDetail(row as unknown as CreditAccountRow)
         },
-      }, '明细'),
+      }, t('page.credits.col.detail')),
   },
 ])
 
@@ -531,17 +532,23 @@ const detailKv = computed<KvItem[]>(() => {
   const item = selected.value
   if (!item) return []
   return [
-    { label: '账号', value: item.account_name },
+    { label: t('page.credits.detail.account'), value: item.account_name },
     { label: 'UID', value: item.uid || FMT_EMPTY, mono: true },
-    { label: '状态', value: accountStatusText(item.status) },
-    { label: '剩余积分', value: fmtCredit(item.total_remaining) },
-    { label: '可用余额', value: fmtCredit(item.balance_remain) },
-    { label: '7 天内到期', value: fmtCredit(item.expiring_soon_remaining) },
-    { label: '长期有效', value: fmtCredit(item.evergreen_remaining) },
-    { label: '已过期', value: fmtCredit(item.expired_remaining) },
-    { label: '最近到期', value: soonestLabel(item.soonest_days_left) },
-    { label: '积分包', value: item.active_package_count + ' 个有效 / ' + item.package_count + ' 个' },
-    { label: '采集时间', value: item.synced_at ? fmtTime(item.synced_at) : FMT_EMPTY },
+    { label: t('page.credits.col.status'), value: accountStatusText(item.status) },
+    { label: t('page.credits.col.totalRemaining'), value: fmtCredit(item.total_remaining) },
+    { label: t('page.credits.detail.balance'), value: fmtCredit(item.balance_remain) },
+    { label: t('page.credits.col.expiringSoon'), value: fmtCredit(item.expiring_soon_remaining) },
+    { label: t('page.credits.col.evergreen'), value: fmtCredit(item.evergreen_remaining) },
+    { label: t('page.credits.detail.expired'), value: fmtCredit(item.expired_remaining) },
+    { label: t('page.credits.col.soonest'), value: soonestLabel(item.soonest_days_left) },
+    {
+      label: t('page.credits.detail.packagesLabel'),
+      value: t('page.credits.detail.packages', {
+        active: item.active_package_count,
+        total: item.package_count,
+      }),
+    },
+    { label: t('page.credits.detail.syncedAt'), value: item.synced_at ? fmtTime(item.synced_at) : FMT_EMPTY },
   ]
 })
 
@@ -550,12 +557,12 @@ const detailPackages = computed<TableRow[]>(() =>
 )
 
 const detailPackageColumns = computed<TableColumn[]>(() => [
-  { key: 'display_name', title: '来源', mobile: 'title', minWidth: 140 },
-  { key: 'remaining', title: '剩余 / 总额', mobile: 'meta', width: 140, numeric: true },
-  { key: 'expire', title: '到期日', mobile: 'meta', width: 150 },
+  { key: 'display_name', title: t('page.credits.col.source'), mobile: 'title', minWidth: 140 },
+  { key: 'remaining', title: t('page.credits.detail.remainingOfTotal'), mobile: 'meta', width: 140, numeric: true },
+  { key: 'expire', title: t('page.credits.col.expireDate'), mobile: 'meta', width: 150 },
   {
     key: 'usage',
-    title: '剩余占比',
+    title: t('page.credits.col.remainingRatio'),
     mobile: 'meta',
     width: 140,
     render: (row: TableRow) => {
@@ -569,6 +576,14 @@ function openDetail(row: CreditAccountRow): void {
   selected.value = row
   detailOpen.value = true
 }
+
+const policyModeLabel = computed(() =>
+  isManual.value
+    ? t('page.credits.ranking.modeManual')
+    : t('page.credits.ranking.modeAuto', {
+        label: policy.value?.modes.find((m) => m.value === policy.value?.mode)?.label || '—',
+      }),
+)
 
 /* ------------------------------------------------------------------ *
  * 生命周期：平台切换重取、卸载取消
@@ -591,16 +606,20 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="credits-page">
-    <PageHeader title="积分到期" :help="HELP_TEXT">
+    <PageHeader :title="t('page.credits.title')" :help="helpText">
       <template #actions>
-        <Btn variant="primary" :loading="loading.syncing" @click="syncAll">重新采集</Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading.expiry" @click="loadAll">刷新</Btn>
+        <Btn variant="primary" :loading="loading.syncing" @click="syncAll">
+          {{ t('page.credits.action.sync') }}
+        </Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading.expiry" @click="loadAll">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
     <ErrorBlock
       v-if="expiryError && !expiry"
-      title="加载积分到期失败"
+      :title="t('page.credits.error.expiry')"
       :detail="expiryError.detail"
       @retry="loadAll"
     />
@@ -613,27 +632,27 @@ onBeforeUnmount(() => {
 
       <!-- 账号调度策略 -->
       <Card class="cr-policy" :loading="loading.saving">
-        <template #title>账号调度策略</template>
+        <template #title>{{ t('page.credits.policy.title') }}</template>
         <template #extra>
-          <Badge v-if="isManual" tone="warn" dot>手动优先级</Badge>
-          <Badge v-else tone="brand" dot>自动选号</Badge>
-          <HelpTip :content="POLICY_NOTE" label="调度策略说明" />
+          <Badge v-if="isManual" tone="warn" dot>{{ t('page.credits.policy.manual') }}</Badge>
+          <Badge v-else tone="brand" dot>{{ t('page.credits.policy.auto') }}</Badge>
+          <HelpTip :content="policyNote" :label="t('page.credits.policy.helpLabel')" />
         </template>
 
         <div class="cr-policy__row">
           <label class="cr-field">
-            <span class="cr-field__label">选号模式</span>
+            <span class="cr-field__label">{{ t('page.credits.policy.mode') }}</span>
             <NSelect
               class="cr-mode"
               :value="form.mode"
               :options="modeOptions"
               :disabled="loading.saving"
-              aria-label="选号模式"
+              :aria-label="t('page.credits.policy.mode')"
               @update:value="(value: string) => (form.mode = value)"
             />
           </label>
           <label class="cr-field">
-            <span class="cr-field__label">同账号上游启动间隔（毫秒）</span>
+            <span class="cr-field__label">{{ t('page.credits.policy.interval') }}</span>
             <NInputNumber
               class="cr-interval"
               :value="form.interval"
@@ -642,38 +661,45 @@ onBeforeUnmount(() => {
               :step="1"
               :show-button="false"
               :disabled="loading.saving"
-              aria-label="同账号上游启动间隔（毫秒）"
+              :aria-label="t('page.credits.policy.interval')"
               @update:value="(value: number | null) => (form.interval = typeof value === 'number' ? value : 0)"
             />
           </label>
           <Btn variant="primary" :disabled="!dirty || loading.saving" :loading="loading.saving" @click="savePolicy">
-            保存策略
+            {{ t('page.credits.policy.save') }}
           </Btn>
-          <Btn variant="quiet" :disabled="!isManual || loading.saving" @click="restoreAuto">恢复自动选号</Btn>
+          <Btn variant="quiet" :disabled="!isManual || loading.saving" @click="restoreAuto">
+            {{ t('page.credits.policy.restore') }}
+          </Btn>
         </div>
         <p class="cr-hint">{{ modeDescription }}</p>
-        <p class="cr-note">{{ INTERVAL_NOTE }}</p>
-        <p class="cr-note">{{ POLICY_NOTE }}</p>
+        <p class="cr-note">{{ intervalNote }}</p>
+        <p class="cr-note">{{ policyNote }}</p>
       </Card>
 
       <!-- 到期风险分布 -->
       <Card class="cr-risk" :loading="loading.expiry">
-        <template #title>到期风险分布</template>
+        <template #title>{{ t('page.credits.risk.title') }}</template>
         <template #extra><span class="cr-sub">{{ risk.hint }}</span></template>
 
-        <StackMeter v-if="!risk.empty" :items="riskItems" :total="risk.total" unit=" 积分" />
-        <Empty v-else description="没有任何即将到期的额度 —— 全部积分包都是长期有效或已清空。" />
-        <p class="cr-note">
-          ≤30 天是「快到期」合计（按到期时间分档）；30 天以外是有到期日但还很远的额度；长期有效没有作废风险。
-        </p>
+        <StackMeter
+          v-if="!risk.empty"
+          :items="riskItems"
+          :total="risk.total"
+          :unit="' ' + t('page.credits.unit.credits')"
+        />
+        <Empty v-else :description="t('page.credits.risk.empty')" />
+        <p class="cr-note">{{ t('page.credits.risk.note') }}</p>
       </Card>
 
       <div class="cr-grid">
         <!-- 最近快到期的积分包 -->
         <Card class="cr-packages" :loading="loading.expiry || loading.more">
-          <template #title>最近快到期的积分包</template>
+          <template #title>{{ t('page.credits.packages.title') }}</template>
           <template #extra>
-            <span class="cr-sub">按到期升序 · 已显示 {{ packages.length }}/{{ expiry?.packages_total || 0 }} 个</span>
+            <span class="cr-sub">
+              {{ t('page.credits.packages.counter', { shown: packages.length, total: expiry?.packages_total || 0 }) }}
+            </span>
           </template>
 
           <DataTable
@@ -683,60 +709,62 @@ onBeforeUnmount(() => {
             row-key="rowKey"
             :pagination="false"
             :virtual-scroll="true"
-            empty-description="没有仍有剩余的积分包。点右上「重新采集」从上游拉取最新明细。"
+            :empty-description="t('page.credits.packages.empty')"
           >
             <template #empty>
-              <Empty description="没有仍有剩余的积分包。点右上「重新采集」从上游拉取最新明细。" />
+              <Empty :description="t('page.credits.packages.empty')" />
             </template>
           </DataTable>
           <div v-if="packagesHasMore" class="cr-more">
-            <Btn variant="quiet" size="sm" :loading="loading.more" @click="loadMorePackages">加载更多</Btn>
+            <Btn variant="quiet" size="sm" :loading="loading.more" @click="loadMorePackages">
+              {{ t('page.credits.action.loadMore') }}
+            </Btn>
           </div>
         </Card>
 
         <!-- 账号消耗构成 -->
         <Card class="cr-usage" :loading="loading.usage">
-          <template #title>账号消耗构成（近 7 天）</template>
+          <template #title>{{ t('page.credits.usage.title') }}</template>
           <template #extra><span class="cr-sub">{{ usageView.hint }}</span></template>
 
           <ErrorBlock
             v-if="usageError"
             compact
-            :title="'加载账号消耗构成失败：' + usageError.message"
+            :title="t('page.credits.error.usage', { error: usageError.message })"
             :detail="usageError.detail"
             @retry="loadUsage"
           />
           <BarList
             v-else-if="!usageView.empty"
             :items="usageView.items"
-            unit=" 积分"
+            :unit="' ' + t('page.credits.unit.credits')"
             :total="usageView.total"
             :format="fmtCredit"
             :limit="12"
           />
-          <Empty v-else description="近 7 天没有产生积分消耗。" />
+          <Empty v-else :description="t('page.credits.usage.empty')" />
         </Card>
       </div>
 
       <!-- 账号到期排行 -->
       <Card class="cr-ranking" :loading="loading.expiry">
-        <template #title>账号到期排行</template>
+        <template #title>{{ t('page.credits.ranking.title') }}</template>
         <template #extra>
           <span class="cr-sub">
-            {{ accountTotal }} 个账号 · {{ isManual ? '手动优先级（已覆盖自动策略）' : '自动：' + (policy?.modes.find((m) => m.value === policy?.mode)?.label || '—') }} · 排名用于观察到期风险
+            {{ t('page.credits.ranking.meta', { total: accountTotal, mode: policyModeLabel }) }}
           </span>
         </template>
 
         <ErrorBlock
           v-if="expiryError"
           compact
-          :title="'刷新积分到期失败：' + expiryError.message"
+          :title="t('page.credits.error.ranking', { error: expiryError.message })"
           :detail="expiryError.detail"
           @retry="loadExpiry"
         />
         <Empty
           v-else-if="!accountTotal"
-          description="没有启用账号。先在「账号池」里添加账号。"
+          :description="t('page.credits.ranking.empty')"
         />
         <DataTable
           v-else
@@ -750,27 +778,36 @@ onBeforeUnmount(() => {
           :item-count="accountTotal"
           :page-sizes="[20, 50, 100]"
           clickable-rows
-          empty-description="没有启用账号。先在「账号池」里添加账号。"
+          :empty-description="t('page.credits.ranking.empty')"
           @update:page="table.setPage"
           @update:page-size="table.setPageSize"
           @update:sorter="onSorter"
           @row-click="(row: TableRow) => openDetail(row as unknown as CreditAccountRow)"
         />
-        <p class="cr-note">名次按到期紧迫度排序（后端 ordered_accounts）；实际选号仍由上方「账号调度策略」决定。</p>
+        <p class="cr-note">{{ t('page.credits.ranking.note') }}</p>
       </Card>
     </template>
 
-    <JobProgress :jobs="job ? [job] : []" title="积分采集" @hide="job = null" @view="onJobView" />
+    <JobProgress
+      :jobs="job ? [job] : []"
+      :title="t('page.credits.job.title')"
+      @hide="job = null"
+      @view="onJobView"
+    />
 
     <DetailDrawer
       v-model:show="detailOpen"
-      :title="selected ? '积分明细 · ' + selected.account_name : '积分明细'"
+      :title="
+        selected ? t('page.credits.drawer.titleOf', { name: selected.account_name }) : t('page.credits.drawer.title')
+      "
       :badge="selected ? { tone: selected.expiring_soon ? 'warn' : 'ok', label: soonestLabel(selected.soonest_days_left) } : null"
       :subtitle="selected?.uid || ''"
     >
       <template v-if="selected">
         <KV :items="detailKv" label-width="96px" />
-        <p class="cr-sub">最近到期的 {{ detailPackages.length }} 个积分包（其余明细请在账号池查看）：</p>
+        <p class="cr-sub">
+          {{ t('page.credits.drawer.recentPackages', { count: detailPackages.length }) }}
+        </p>
         <DataTable
           table-id="credits-detail"
           :columns="detailPackageColumns"
@@ -778,11 +815,11 @@ onBeforeUnmount(() => {
           row-key="rowKey"
           :pagination="false"
           :virtual-scroll="false"
-          empty-description="没有仍有剩余的积分包。"
+          :empty-description="t('page.credits.noPackages')"
         />
       </template>
       <template #footer>
-        <Btn variant="default" @click="detailOpen = false">关闭</Btn>
+        <Btn variant="default" @click="detailOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
   </div>

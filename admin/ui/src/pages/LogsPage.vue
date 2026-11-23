@@ -38,6 +38,7 @@ import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
 import { FMT_EMPTY, fmtCredit, fmtDuration, fmtFullTime, fmtInt, fmtTime } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import {
   LOG_RANGE_OPTIONS,
   LOG_RESULT_OPTIONS,
@@ -80,17 +81,14 @@ import {
   type UsageLogSummaryPayload,
 } from '@/api/logs'
 
+const { t } = useI18n()
+
 /** 旧版 #panel-logs 页头说明（收进 ⓘ）。 */
-const HELP_TEXT =
-  '筛选条件下方是请求动态（自动刷新，正在发生的请求）；再往下是按账号汇总与落库记录表格，可筛选、导出。' +
-  '用量在请求结束后写入；实时请求见风控哨兵。' +
-  '请求详情只在开启「记录请求详情」后缓存，凭据脱敏、不写数据库，重启 / 过期 / 容量淘汰后无法恢复。'
+const helpText = computed(() => t('page.logs.help'))
 
-const CAPTURE_HELP =
-  '开启后记录新请求的入站正文和各次发往上游的实际正文，仅供管理员审核。凭据脱敏，正文可能含完整对话；不写数据库。' +
-  '关闭停止新记录，已有缓存可手动清空。缓存上限 200 条 / 64 MiB / 单条 8 MiB / 60 分钟过期，重启清空。'
+const captureHelp = computed(() => t('page.logs.captureHelp'))
 
-const EXPORT_DIAG_HINT = '含脱敏诊断，最多导出最近 1000 条'
+const exportDiagHint = computed(() => t('page.logs.exportDiagHint'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -160,7 +158,7 @@ function toErrorState(error: unknown): ErrorState {
 
 const platformOptions = computed(() => {
   const seen = new Set<string>()
-  const options = [{ label: '全部平台', value: '' }]
+  const options = [{ label: t('page.logs.filter.allPlatforms'), value: '' }]
   for (const item of platform.platforms) {
     const value = String(item.storage_platform || item.id || '')
     const key = value.toLowerCase()
@@ -172,7 +170,7 @@ const platformOptions = computed(() => {
 })
 
 function platformLabel(value: string): string {
-  if (!value) return '全部平台'
+  if (!value) return t('page.logs.filter.allPlatforms')
   return platformOptions.value.find((item) => item.value === value)?.label || value
 }
 
@@ -180,9 +178,17 @@ const accounts = ref<LogAccountOption[]>([])
 const accountsLoading = ref(false)
 
 const accountOptions = computed(() => {
-  const options = [{ label: '全部账号（' + accounts.value.length + ' 个有记录）', value: '' }]
+  const options = [
+    { label: t('page.logs.filter.allAccounts', { count: accounts.value.length }), value: '' },
+  ]
   for (const item of accounts.value) {
-    const suffix = item.requests == null ? '' : ' · ' + fmtInt(item.requests) + ' 次 · ' + fmtCredit(item.credits) + ' 积分'
+    const suffix =
+      item.requests == null
+        ? ''
+        : t('page.logs.filter.accountSuffix', {
+            requests: fmtInt(item.requests),
+            credits: fmtCredit(item.credits),
+          })
     options.push({ label: item.name + suffix, value: String(item.id) })
   }
   return options
@@ -259,7 +265,7 @@ async function loadList(options: { silent?: boolean } = {}): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     listError.value = toErrorState(error)
-    if (rows.value !== null) toast.error(failureText('刷新用量日志', error))
+    if (rows.value !== null) toast.error(failureText(t('page.logs.action.refreshList'), error))
   } finally {
     if (listController === controller) {
       listController = null
@@ -311,7 +317,7 @@ function toggleSummary(): void {
 function applyAccountFilter(row: TableRow): void {
   const item = row as unknown as AccountSummaryRow
   if (!item.account_id) {
-    toast.warning('「未记录账号 / 未选号」没有账号 id，无法按账号筛选；可改用结果或时间范围筛选')
+    toast.warning(t('page.logs.toast.noAccountId'))
     return
   }
   table.setFilter('account_id', String(item.account_id))
@@ -345,9 +351,9 @@ const livePolling = usePolling(
 )
 
 const liveHint = computed(() => {
-  if (liveUserPaused.value) return '已暂停自动刷新'
+  if (liveUserPaused.value) return t('page.logs.live.pausedByUser')
   if (livePolling.paused.value) return livePolling.pausedMessage.value
-  if (liveError.value) return '请求动态读取失败：' + liveError.value
+  if (liveError.value) return t('page.logs.live.error', { error: liveError.value })
   return liveHintText(live.value, 15)
 })
 
@@ -487,9 +493,16 @@ async function toggleCapture(enabled: boolean): Promise<void> {
   captureBusy.value = true
   try {
     capture.value = await setCaptureEnabled(enabled)
-    toast.success(enabled ? '已开启请求详情记录' : '已关闭请求详情记录')
+    toast.success(
+      enabled ? t('page.logs.toast.captureOn') : t('page.logs.toast.captureOff'),
+    )
   } catch (error) {
-    toast.error(failureText(enabled ? '开启请求详情记录' : '关闭请求详情记录', error))
+    toast.error(
+      failureText(
+        enabled ? t('page.logs.action.enableCapture') : t('page.logs.action.disableCapture'),
+        error,
+      ),
+    )
   } finally {
     captureBusy.value = false
     void loadCapture()
@@ -498,18 +511,18 @@ async function toggleCapture(enabled: boolean): Promise<void> {
 
 async function clearCapture(): Promise<void> {
   const confirmed = await confirm({
-    title: '清空详情缓存？',
-    message: '已缓存的请求正文会立即删除，之后无法恢复；已落库的用量日志不受影响。',
-    okText: '清空',
+    title: t('page.logs.confirmClear.title'),
+    message: t('page.logs.confirmClear.body'),
+    okText: t('page.logs.confirmClear.ok'),
     danger: true,
   })
   if (!confirmed) return
   captureBusy.value = true
   try {
     capture.value = await clearCaptureCache()
-    toast.success('已清空详情缓存')
+    toast.success(t('page.logs.toast.cacheCleared'))
   } catch (error) {
-    toast.error(failureText('清空详情缓存', error))
+    toast.error(failureText(t('page.logs.action.clearCache'), error))
   } finally {
     captureBusy.value = false
   }
@@ -526,12 +539,12 @@ const exporting = ref<'' | 'csv' | 'diagnostics'>('')
 async function exportLogs(diagnostics = false): Promise<void> {
   if (exporting.value) return
   exporting.value = diagnostics ? 'diagnostics' : 'csv'
-  toast.info('正在导出 CSV…')
+  toast.info(t('page.logs.toast.exporting'))
   try {
     const filename = await downloadLogsExport(buildExportQuery(currentFilters()), diagnostics)
-    toast.success('已导出 ' + filename)
+    toast.success(t('page.logs.toast.exported', { name: filename }))
   } catch (error) {
-    toast.error(failureText('导出', error))
+    toast.error(failureText(t('page.logs.action.export'), error))
   } finally {
     exporting.value = ''
   }
@@ -586,7 +599,7 @@ async function loadIngress(logId: number, offset: number): Promise<void> {
     ingressPage.value = page
     ingressText.value = offset === 0 ? page.text : ingressText.value + page.text
   } catch (error) {
-    toast.error(failureText('读取请求正文', error))
+    toast.error(failureText(t('page.logs.action.readIngress'), error))
   }
 }
 
@@ -604,7 +617,7 @@ async function loadUpstream(index: number, offset = 0): Promise<void> {
     }
   } catch (error) {
     upstreamBodies[index] = { ...current, loading: false }
-    toast.error(failureText('读取上游正文', error))
+    toast.error(failureText(t('page.logs.action.readUpstream'), error))
   }
 }
 
@@ -615,8 +628,8 @@ const ingressCost = computed(() => {
   const cached = Number(capture.ingress.body_cached_bytes || 0)
   const full = Number(capture.ingress.body_bytes || 0)
   return (
-    '正文缓存 ' + fmtInt(cached) + ' / ' + fmtInt(full) + ' 字节' +
-    (capture.ingress.body_truncated ? ' · 采集时已截断' : '')
+    t('page.logs.detail.ingressCost', { cached: fmtInt(cached), full: fmtInt(full) }) +
+    (capture.ingress.body_truncated ? t('page.logs.detail.ingressTruncated') : '')
   )
 })
 
@@ -626,28 +639,37 @@ const detailKv = computed(() => {
   const item = detailView.value
   if (!item) return []
   return [
-    { label: '请求编号', value: item.id, mono: true },
-    { label: '时间', value: fmtFullTime(item.created_at) },
-    { label: '平台', value: platformLabel(item.platform) },
-    { label: '账号', value: item.account_name || FMT_EMPTY },
+    { label: t('page.logs.detail.requestId'), value: item.id, mono: true },
+    { label: t('page.logs.detail.time'), value: fmtFullTime(item.created_at) },
+    { label: t('page.logs.detail.platform'), value: platformLabel(item.platform) },
+    { label: t('page.logs.detail.account'), value: item.account_name || FMT_EMPTY },
     { label: 'Key', value: item.key_name || FMT_EMPTY },
-    { label: '模型', value: item.model || FMT_EMPTY, mono: true },
-    { label: '端点 / 用途', value: item.use_case || FMT_EMPTY, mono: true },
-    { label: '结果', value: item.isError ? item.error_kind || '失败' : '成功' },
+    { label: t('page.logs.detail.model'), value: item.model || FMT_EMPTY, mono: true },
+    { label: t('page.logs.detail.useCase'), value: item.use_case || FMT_EMPTY, mono: true },
+    {
+      label: t('page.logs.detail.result'),
+      value: item.isError ? item.error_kind || t('page.logs.detail.failed') : t('page.logs.detail.success'),
+    },
     {
       label: 'Token',
-      value:
-        '入 ' + fmtInt(item.prompt_tokens) + ' · 出 ' + fmtInt(item.completion_tokens) +
-        ' · 缓存 ' + fmtInt(item.cached_tokens) + ' · 合计 ' + fmtInt(item.total_tokens),
+      value: t('page.logs.detail.tokenBreakdown', {
+        input: fmtInt(item.prompt_tokens),
+        output: fmtInt(item.completion_tokens),
+        cached: fmtInt(item.cached_tokens),
+        total: fmtInt(item.total_tokens),
+      }),
     },
-    { label: '缓存命中', value: item.cacheRateText },
-    { label: '积分', value: fmtCredit(item.credits) },
-    { label: '首响应', value: item.ttfbText },
-    { label: '总耗时', value: item.latencyText },
+    { label: t('page.logs.detail.cacheHit'), value: item.cacheRateText },
+    { label: t('page.logs.detail.credits'), value: fmtCredit(item.credits) },
+    { label: t('page.logs.detail.ttfb'), value: item.ttfbText },
+    { label: t('page.logs.detail.latency'), value: item.latencyText },
     { label: 'TPS', value: item.tpsText },
-    { label: '客户端 IP', value: item.client_ip || FMT_EMPTY, mono: true },
-    { label: '序号', value: item.seq ?? FMT_EMPTY },
-    { label: '思考强度', value: item.reasoning_effort || '默认 / 未记录' },
+    { label: t('page.logs.detail.clientIp'), value: item.client_ip || FMT_EMPTY, mono: true },
+    { label: t('page.logs.detail.seq'), value: item.seq ?? FMT_EMPTY },
+    {
+      label: t('page.logs.detail.reasoning'),
+      value: item.reasoning_effort || t('page.logs.detail.reasoningDefault'),
+    },
   ]
 })
 
@@ -657,12 +679,12 @@ const diagnosticJson = computed(() =>
 
 async function copyCurl(): Promise<void> {
   if (!curlText.value) {
-    toast.warning('这条记录没有可用的请求缓存，无法生成 curl')
+    toast.warning(t('page.logs.toast.noCurl'))
     return
   }
   const ok = await copy(curlText.value)
-  if (ok) toast.success('已复制 curl')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('page.logs.toast.curlCopied'))
+  else toast.error(t('common.copyFailed'))
 }
 
 async function downloadCapture(): Promise<void> {
@@ -670,9 +692,9 @@ async function downloadCapture(): Promise<void> {
   if (!id) return
   try {
     const filename = await downloadLogCapture(id)
-    toast.success('已下载 ' + filename)
+    toast.success(t('page.logs.toast.downloaded', { name: filename }))
   } catch (error) {
-    toast.error(failureText('下载完整 JSONL', error))
+    toast.error(failureText(t('page.logs.action.downloadJsonl'), error))
   }
 }
 
@@ -688,7 +710,7 @@ function truncate(text: string, max: number): string {
 const columns = computed<TableColumn[]>(() => [
   {
     key: 'time',
-    title: '时间',
+    title: t('page.logs.col.time'),
     mobile: 'title',
     width: 96,
     render: (row: TableRow): VNodeChild => {
@@ -708,20 +730,26 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'model',
-    title: '模型',
+    title: t('page.logs.col.model'),
     mobile: 'subtitle',
     width: 190,
     render: (row: TableRow): VNodeChild => {
       const item = row as unknown as LogRowView
       return h('div', { class: 'logs-model' }, [
         h('span', { class: 'logs-mono', title: item.model_raw || item.model }, truncate(item.model, 26)),
-        h('small', { class: 'logs-sub' }, '思考：' + (item.reasoning_effort || '默认 / 未记录')),
+        h(
+          'small',
+          { class: 'logs-sub' },
+          t('page.logs.col.reasoning', {
+            value: item.reasoning_effort || t('page.logs.detail.reasoningDefault'),
+          }),
+        ),
       ])
     },
   },
   {
     key: 'platform_account',
-    title: '平台 / 账号',
+    title: t('page.logs.col.platformAccount'),
     mobile: 'meta',
     width: 180,
     render: (row: TableRow): VNodeChild => {
@@ -734,7 +762,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'use_case',
-    title: '端点',
+    title: t('page.logs.col.useCase'),
     mobile: 'hidden',
     width: 100,
     render: (row: TableRow): VNodeChild => {
@@ -744,7 +772,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'result',
-    title: '结果',
+    title: t('page.logs.col.result'),
     mobile: 'meta',
     width: 104,
     render: (row: TableRow): VNodeChild => {
@@ -758,22 +786,22 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'tokens',
-    title: 'Token 入 / 出 / 缓存',
+    title: t('page.logs.col.tokens'),
     mobile: 'meta',
     width: 190,
     numeric: true,
     render: (row: TableRow): VNodeChild => {
       const item = row as unknown as LogRowView
       return h('div', { class: 'logs-tokens tnum' }, [
-        h('span', {}, '入 ' + fmtInt(item.prompt_tokens)),
-        h('span', {}, '出 ' + fmtInt(item.completion_tokens)),
-        h('span', {}, '缓存 ' + fmtInt(item.cached_tokens)),
+        h('span', {}, t('page.logs.col.tokenIn', { value: fmtInt(item.prompt_tokens) })),
+        h('span', {}, t('page.logs.col.tokenOut', { value: fmtInt(item.completion_tokens) })),
+        h('span', {}, t('page.logs.col.tokenCached', { value: fmtInt(item.cached_tokens) })),
       ])
     },
   },
   {
     key: 'cache_rate',
-    title: '命中率',
+    title: t('page.logs.col.cacheRate'),
     mobile: 'meta',
     width: 84,
     numeric: true,
@@ -782,7 +810,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'credits',
-    title: '积分',
+    title: t('page.logs.col.credits'),
     mobile: 'meta',
     width: 88,
     numeric: true,
@@ -794,21 +822,23 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'latency',
-    title: '耗时（TTFT / 总）',
+    title: t('page.logs.col.latency'),
     mobile: 'meta',
     width: 150,
     render: (row: TableRow): VNodeChild => {
       const item = row as unknown as LogRowView
       return h('div', { class: 'logs-latency tnum' }, [
-        h('span', {}, '首 ' + item.ttfbText),
-        h('span', {}, '总 ' + item.latencyText),
-        item.tpsText !== FMT_EMPTY ? h('span', { class: 'logs-sub' }, 'TPS ' + item.tpsText) : null,
+        h('span', {}, t('page.logs.col.ttfb', { value: item.ttfbText })),
+        h('span', {}, t('page.logs.col.total', { value: item.latencyText })),
+        item.tpsText !== FMT_EMPTY
+          ? h('span', { class: 'logs-sub' }, t('page.logs.col.tps', { value: item.tpsText }))
+          : null,
       ])
     },
   },
   {
     key: 'client_ip',
-    title: '客户端 IP',
+    title: t('page.logs.col.clientIp'),
     mobile: 'hidden',
     width: 128,
     render: (row: TableRow): VNodeChild => {
@@ -818,7 +848,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.logs.col.actions'),
     mobile: 'actions',
     width: 72,
     hideable: false,
@@ -827,51 +857,51 @@ const columns = computed<TableColumn[]>(() => [
       h('button', {
         type: 'button',
         class: 'logs-link',
-        'aria-label': '查看调用详情',
+        'aria-label': t('page.logs.col.detailAria'),
         onClick: (event: MouseEvent) => {
           event.stopPropagation()
           void openDetail(row)
         },
-      }, '详情'),
+      }, t('page.logs.col.detail')),
   },
 ])
 
 const summaryColumns = computed<TableColumn[]>(() => [
-  { key: 'account_name', title: '账号', mobile: 'title', minWidth: 160 },
+  { key: 'account_name', title: t('page.logs.summaryCol.account'), mobile: 'title', minWidth: 160 },
   {
-    key: 'requests', title: '请求数', mobile: 'meta', width: 92, numeric: true,
+    key: 'requests', title: t('page.logs.summaryCol.requests'), mobile: 'meta', width: 92, numeric: true,
     render: (row: TableRow) => h('span', { class: 'tnum' }, fmtInt((row as unknown as AccountSummaryRow).requests)),
   },
   {
-    key: 'failed_requests', title: '失败', mobile: 'meta', width: 72, numeric: true,
+    key: 'failed_requests', title: t('page.logs.summaryCol.failed'), mobile: 'meta', width: 72, numeric: true,
     render: (row: TableRow) => {
       const item = row as unknown as AccountSummaryRow
       return h('span', { class: item.failed_requests > 0 ? 'logs-credit tnum' : 'logs-sub tnum' }, fmtInt(item.failed_requests))
     },
   },
   {
-    key: 'credits', title: '积分', mobile: 'meta', width: 88, numeric: true,
+    key: 'credits', title: t('page.logs.summaryCol.credits'), mobile: 'meta', width: 88, numeric: true,
     render: (row: TableRow) => h('span', { class: 'logs-credit tnum' }, fmtCredit((row as unknown as AccountSummaryRow).credits)),
   },
   {
-    key: 'total_tokens', title: 'Token', mobile: 'meta', width: 92, numeric: true,
+    key: 'total_tokens', title: t('page.logs.summaryCol.tokens'), mobile: 'meta', width: 92, numeric: true,
     render: (row: TableRow) => h('span', { class: 'logs-sub tnum' }, fmtInt((row as unknown as AccountSummaryRow).total_tokens)),
   },
   {
-    key: 'cache_rate', title: '命中率', mobile: 'meta', width: 84, numeric: true,
+    key: 'cache_rate', title: t('page.logs.summaryCol.cacheRate'), mobile: 'meta', width: 84, numeric: true,
     render: (row: TableRow) => h('span', { class: 'logs-sub tnum' }, (row as unknown as AccountSummaryRow).cacheRateText),
   },
   {
-    key: 'avg_latency_ms', title: '平均耗时', mobile: 'meta', width: 92, numeric: true,
+    key: 'avg_latency_ms', title: t('page.logs.summaryCol.avgLatency'), mobile: 'meta', width: 92, numeric: true,
     render: (row: TableRow) => h('span', { class: 'logs-sub tnum' }, (row as unknown as AccountSummaryRow).avgLatencyText),
   },
   {
-    key: 'last_used_at', title: '最近使用', mobile: 'meta', width: 120,
+    key: 'last_used_at', title: t('page.logs.summaryCol.lastUsed'), mobile: 'meta', width: 120,
     render: (row: TableRow) => h('span', { class: 'logs-time' }, (row as unknown as AccountSummaryRow).lastUsedText),
   },
   {
     key: 'share',
-    title: '积分占比',
+    title: t('page.logs.summaryCol.share'),
     mobile: 'meta',
     width: 130,
     render: (row: TableRow): VNodeChild => {
@@ -880,9 +910,11 @@ const summaryColumns = computed<TableColumn[]>(() => [
         value: item.credits,
         max: maxCredits.value,
         tone: item.unattributed ? 'neutral' : 'brand',
-        valueText: item.unattributed ? '未记录账号' : Math.round((item.credits / maxCredits.value) * 100) + '%',
+        valueText: item.unattributed
+          ? t('page.logs.summaryCol.unattributed')
+          : Math.round((item.credits / maxCredits.value) * 100) + '%',
         showValue: true,
-        ariaLabel: '积分占比',
+        ariaLabel: t('page.logs.summaryCol.share'),
       })
     },
   },
@@ -900,26 +932,40 @@ function summaryData(): TableRow[] {
 const chips = computed<FilterChip[]>(() => {
   const f = currentFilters()
   const list: FilterChip[] = []
-  if (f.platform) list.push({ key: 'platform', label: '平台', value: platformLabel(f.platform) })
+  if (f.platform)
+    list.push({ key: 'platform', label: t('page.logs.chip.platform'), value: platformLabel(f.platform) })
   if (f.account_id) {
     const account = accounts.value.find((item) => String(item.id) === f.account_id)
-    list.push({ key: 'account_id', label: '账号', value: account?.name || '#' + f.account_id })
+    list.push({
+      key: 'account_id',
+      label: t('page.logs.chip.account'),
+      value: account?.name || '#' + f.account_id,
+    })
   }
-  if (f.account) list.push({ key: 'account', label: '账号名', value: f.account })
-  if (f.model) list.push({ key: 'model', label: '模型', value: f.model })
+  if (f.account) list.push({ key: 'account', label: t('page.logs.chip.accountName'), value: f.account })
+  if (f.model) list.push({ key: 'model', label: t('page.logs.chip.model'), value: f.model })
   if (f.key) list.push({ key: 'key', label: 'Key', value: f.key })
-  if (f.ip) list.push({ key: 'ip', label: '客户端 IP', value: f.ip })
+  if (f.ip) list.push({ key: 'ip', label: t('page.logs.chip.clientIp'), value: f.ip })
   if (f.result) {
     const label = LOG_RESULT_OPTIONS.find((item) => item.value === f.result)?.label
-    list.push({ key: 'result', label: '结果', value: label || f.result })
+    list.push({ key: 'result', label: t('page.logs.chip.result'), value: label || f.result })
   }
   if (f.start || f.end) {
-    list.push({ key: 'start', label: '日期', value: (f.start || '…') + ' ~ ' + (f.end || '…') })
+    list.push({
+      key: 'start',
+      label: t('page.logs.chip.date'),
+      value: (f.start || '…') + ' ~ ' + (f.end || '…'),
+    })
   } else {
     const range = LOG_RANGE_OPTIONS.find((item) => item.value === f.range)
-    list.push({ key: 'range', label: '时间', value: range?.label || f.range })
+    list.push({ key: 'range', label: t('page.logs.chip.time'), value: range?.label || f.range })
   }
-  if (f.fast === '1') list.push({ key: 'fast', label: '快速翻页', value: '不统计总数' })
+  if (f.fast === '1')
+    list.push({
+      key: 'fast',
+      label: t('page.logs.chip.fast'),
+      value: t('page.logs.chip.fastValue'),
+    })
   return list
 })
 
@@ -1019,47 +1065,86 @@ function systemCols(): TableColumn[] {
 /* 让模板可引用常量 */
 const RANGE_OPTIONS = LOG_RANGE_OPTIONS
 const RESULT_OPTIONS = LOG_RESULT_OPTIONS
-const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计总数，适合日志量大的窗口。'
+const FILTER_HELP = computed(() => t('page.logs.filterHelp'))
+
+const pagerInfo = computed(() => {
+  let text = t('page.logs.pager.page', { page: table.state.page })
+  if (totalKnown.value != null) text += t('page.logs.pager.total', { total: fmtInt(totalKnown.value) })
+  else if (table.state.filters.fast === '1') text += t('page.logs.pager.fast')
+  else if (!hasMore.value) text += t('page.logs.pager.end')
+  return text
+})
+
+const ingressLabel = computed(() =>
+  ingressPage.value
+    ? t('page.logs.detail.ingressRead', {
+        read: fmtInt(ingressPage.value.next_offset),
+        total: fmtInt(ingressPage.value.cached_bytes),
+      })
+    : t('page.logs.detail.ingressCollapsed'),
+)
+
+const detailTitle = computed(() =>
+  detail.value
+    ? t('page.logs.detail.titleOf', { model: detail.value.model || '' })
+    : t('page.logs.detail.title'),
+)
 </script>
 
 <template>
   <div class="logs-page">
-    <PageHeader title="用量日志" :help="HELP_TEXT">
+    <PageHeader :title="t('page.logs.title')" :help="helpText">
       <template #actions>
         <Btn
           variant="quiet"
           :icon="Download"
           :loading="exporting === 'diagnostics'"
           :disabled="Boolean(exporting)"
-          title="含脱敏诊断，最多导出最近 1000 条"
+          :title="exportDiagHint"
           @click="exportLogs(true)"
         >
-          导出诊断
+          {{ t('page.logs.action.exportDiagnostics') }}
         </Btn>
-        <Btn variant="quiet" :icon="Download" :loading="exporting === 'csv'" :disabled="Boolean(exporting)" @click="exportLogs(false)">
-          导出
+        <Btn
+          variant="quiet"
+          :icon="Download"
+          :loading="exporting === 'csv'"
+          :disabled="Boolean(exporting)"
+          @click="exportLogs(false)"
+        >
+          {{ t('page.logs.action.export') }}
         </Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="listLoading" @click="loadList()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="listLoading" @click="loadList()">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
     <!-- 请求详情记录 -->
     <Card class="logs-capture" :loading="captureLoading">
-      <template #title>请求详情记录</template>
-      <template #extra><HelpTip :content="CAPTURE_HELP" label="请求详情记录说明" /></template>
+      <template #title>{{ t('page.logs.capture.title') }}</template>
+      <template #extra>
+        <HelpTip :content="captureHelp" :label="t('page.logs.capture.helpLabel')" />
+      </template>
       <div class="logs-capture__row">
         <NSwitch
           :value="capture?.enabled === true"
           :loading="captureLoading || captureBusy"
           :disabled="captureLoading || captureBusy"
-          aria-label="记录请求详情"
+          :aria-label="t('page.logs.capture.switchAria')"
           @update:value="toggleCapture"
         />
-        <span class="logs-capture__label">记录请求详情（内存缓存）</span>
+        <span class="logs-capture__label">{{ t('page.logs.capture.label') }}</span>
         <span class="logs-capture__status" :class="{ 'is-error': Boolean(captureError) }">
-          {{ captureError ? '读取开关状态失败：' + captureError : captureText }}
+          {{
+            captureError
+              ? t('page.logs.capture.statusError', { error: captureError })
+              : captureText
+          }}
         </span>
-        <Btn variant="quiet" size="sm" :loading="captureLoading" @click="loadCapture">刷新状态</Btn>
+        <Btn variant="quiet" size="sm" :loading="captureLoading" @click="loadCapture">
+          {{ t('page.logs.capture.refreshStatus') }}
+        </Btn>
         <Btn
           variant="quiet"
           size="sm"
@@ -1067,7 +1152,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
           :disabled="captureBusy || !capture"
           @click="clearCapture"
         >
-          清空详情缓存
+          {{ t('page.logs.capture.clear') }}
         </Btn>
       </div>
     </Card>
@@ -1087,7 +1172,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
             class="logs-filter__select"
             :value="table.state.filters.platform"
             :options="platformOptions"
-            aria-label="平台"
+            :aria-label="t('page.logs.filter.platformAria')"
             @update:value="(value: string | number | null) => setFilterValue('platform', value)"
           />
           <NSelect
@@ -1095,14 +1180,14 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
             :value="table.state.filters.account_id"
             :options="accountOptions"
             :loading="accountsLoading"
-            aria-label="按账号（窗口内有记录的）"
+            :aria-label="t('page.logs.filter.accountAria')"
             @update:value="(value: string | number | null) => setFilterValue('account_id', value)"
           />
           <NSelect
             class="logs-filter__select"
             :value="table.state.filters.range"
             :options="RANGE_OPTIONS.map((item) => ({ label: item.label, value: item.value }))"
-            aria-label="时间范围"
+            :aria-label="t('page.logs.filter.rangeAria')"
             @update:value="(value: string | number | null) => setFilterValue('range', value)"
           />
           <NDatePicker
@@ -1111,8 +1196,8 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
             value-format="yyyy-MM-dd"
             :formatted-value="table.state.filters.start || null"
             clearable
-            aria-label="起始日期"
-            placeholder="起始日期"
+            :aria-label="t('page.logs.filter.startAria')"
+            :placeholder="t('page.logs.filter.startPlaceholder')"
             @update:formatted-value="(value: string | null) => setFilterValue('start', value)"
           />
           <NDatePicker
@@ -1121,22 +1206,22 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
             value-format="yyyy-MM-dd"
             :formatted-value="table.state.filters.end || null"
             clearable
-            aria-label="结束日期"
-            placeholder="结束日期"
+            :aria-label="t('page.logs.filter.endAria')"
+            :placeholder="t('page.logs.filter.endPlaceholder')"
             @update:formatted-value="(value: string | null) => setFilterValue('end', value)"
           />
           <NInput
             class="logs-filter__input"
             :value="table.state.filters.model"
-            placeholder="全部模型"
+            :placeholder="t('page.logs.filter.modelPlaceholder')"
             clearable
-            aria-label="模型"
+            :aria-label="t('page.logs.filter.modelAria')"
             @update:value="(value: string) => change('model', value)"
           />
           <NInput
             class="logs-filter__input"
             :value="table.state.filters.key"
-            placeholder="全部 Key"
+            :placeholder="t('page.logs.filter.keyPlaceholder')"
             clearable
             aria-label="Key"
             @update:value="(value: string) => change('key', value)"
@@ -1145,33 +1230,33 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
             class="logs-filter__select"
             :value="table.state.filters.result"
             :options="RESULT_OPTIONS.map((item) => ({ label: item.label, value: item.value }))"
-            aria-label="调用结果"
+            :aria-label="t('page.logs.filter.resultAria')"
             @update:value="(value: string | number | null) => setFilterValue('result', value)"
           />
           <NInput
             class="logs-filter__input logs-filter__input--ip"
             :value="table.state.filters.ip"
-            placeholder="全部"
+            :placeholder="t('page.logs.filter.ipPlaceholder')"
             clearable
-            aria-label="客户端 IP"
+            :aria-label="t('page.logs.filter.clientIpAria')"
             @update:value="(value: string) => change('ip', value)"
           />
           <NCheckbox
             class="logs-filter__fast"
             :checked="table.state.filters.fast === '1'"
-            title="日志量大时，精确总数需要额外扫一遍索引；关掉可让翻页更快"
+            :title="t('page.logs.filter.fastTitle')"
             @update:checked="(checked: boolean) => setFilterValue('fast', checked ? '1' : '')"
           >
-            快速翻页（不统计总数）
+            {{ t('page.logs.filter.fastLabel') }}
           </NCheckbox>
-          <HelpTip :content="FILTER_HELP" label="筛选说明" />
+          <HelpTip :content="FILTER_HELP" :label="t('page.logs.filter.helpLabel')" />
         </template>
       </FilterBar>
     </Card>
 
     <!-- 请求动态 -->
     <Card class="logs-live" :loading="livePolling.running.value && !liveUserPaused">
-      <template #title>请求动态</template>
+      <template #title>{{ t('page.logs.live.title') }}</template>
       <template #extra>
         <span class="logs-live__hint" :class="{ 'is-error': livePolling.paused.value }">{{ liveHint }}</span>
         <Btn
@@ -1180,21 +1265,34 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
           :icon="liveUserPaused || livePolling.paused.value ? Play : Pause"
           @click="toggleLive"
         >
-          {{ liveUserPaused || livePolling.paused.value ? '继续' : '暂停' }}
+          {{ liveUserPaused || livePolling.paused.value ? t('page.logs.live.resume') : t('page.logs.live.pause') }}
         </Btn>
       </template>
 
       <div v-if="livePolling.paused.value" class="logs-live__paused">
         <ErrorBlock
           compact
-          :title="livePolling.pausedMessage.value || '自动刷新已暂停'"
+          :title="livePolling.pausedMessage.value || t('page.logs.live.pausedAuto')"
           :retry="false"
         />
-        <Btn variant="default" size="sm" @click="toggleLive">恢复自动刷新</Btn>
+        <Btn variant="default" size="sm" @click="toggleLive">
+          {{ t('page.logs.live.resumeAuto') }}
+        </Btn>
       </div>
 
-      <div class="logs-bars" role="img" aria-label="最近 15 分钟每分钟请求数">
-        <div v-for="bar in liveBars" :key="bar.at" class="logs-bar" :title="bar.label + ' · ' + bar.requests + ' 次 · 错误 ' + bar.errors">
+      <div class="logs-bars" role="img" :aria-label="t('page.logs.live.barsAria')">
+        <div
+          v-for="bar in liveBars"
+          :key="bar.at"
+          class="logs-bar"
+          :title="
+            t('page.logs.live.barTitle', {
+              label: bar.label,
+              requests: bar.requests,
+              errors: bar.errors,
+            })
+          "
+        >
           <div class="logs-bar__track">
             <div class="logs-bar__requests" :style="{ height: Math.max(2, (bar.requests / liveMax) * 100) + '%' }" />
             <div class="logs-bar__errors" :style="{ height: Math.max(bar.errors ? 2 : 0, (bar.errors / liveMax) * 100) + '%' }" />
@@ -1212,23 +1310,23 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
           <span class="logs-sub tnum">{{ item.elapsed_ms > 0 ? fmtDuration(item.elapsed_ms) : '—' }}</span>
         </div>
       </div>
-      <p v-else class="logs-sub">最近 15 分钟还没有请求。</p>
+      <p v-else class="logs-sub">{{ t('page.logs.live.empty') }}</p>
     </Card>
 
     <!-- 按账号汇总 -->
     <Card class="logs-summary" :loading="summaryLoading">
-      <template #title>按账号汇总</template>
+      <template #title>{{ t('page.logs.summary.title') }}</template>
       <template #extra>
         <span class="logs-summary__hint">{{ summaryHintText(summary) }}</span>
         <Btn variant="quiet" size="sm" :aria-expanded="summaryOpen" @click="toggleSummary">
-          {{ summaryOpen ? '收起' : '展开' }}
+          {{ summaryOpen ? t('page.logs.summary.collapse') : t('page.logs.summary.expand') }}
         </Btn>
       </template>
       <template v-if="summaryOpen">
         <ErrorBlock
           v-if="summaryError"
           compact
-          :title="'加载按账号汇总失败：' + summaryError.message"
+          :title="t('page.logs.summary.error', { error: summaryError.message })"
           :detail="summaryError.detail"
           @retry="loadSummary()"
         />
@@ -1237,7 +1335,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
         </div>
         <Empty
           v-else-if="!summaryRows.length"
-          description="该时间范围内没有账号产生请求。"
+          :description="t('page.logs.summary.empty')"
         />
         <DataTable
           v-else
@@ -1248,7 +1346,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
           :pagination="false"
           :virtual-scroll="false"
           clickable-rows
-          empty-description="该时间范围内没有账号产生请求。"
+          :empty-description="t('page.logs.summary.empty')"
           @row-click="applyAccountFilter"
         />
       </template>
@@ -1258,7 +1356,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
     <Card flush class="logs-table-card">
       <ErrorBlock
         v-if="listError && rows === null"
-        :title="'加载用量日志失败：' + listError.message"
+        :title="t('page.logs.error.loadList', { error: listError.message })"
         :detail="listError.detail"
         @retry="loadList()"
       />
@@ -1275,28 +1373,25 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
           :pagination="false"
           :virtual-scroll="true"
           clickable-rows
-          empty-description="还没有请求记录（代理产生调用后这里会出现）"
+          :empty-description="t('page.logs.table.empty')"
           @row-click="openDetail"
         >
           <template #empty>
-            <Empty description="当前筛选条件下没有记录，试试放宽时间范围或清除筛选">
-              <Btn variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
+            <Empty :description="t('page.logs.table.emptyFiltered')">
+              <Btn variant="default" size="sm" @click="resetFilters">
+                {{ t('page.logs.clearFilters') }}
+              </Btn>
             </Empty>
           </template>
         </DataTable>
         <div class="logs-pager">
-          <span class="logs-sub">
-            第 {{ table.state.page }} 页
-            <template v-if="totalKnown != null"> · 共 {{ fmtInt(totalKnown) }} 条</template>
-            <template v-else-if="table.state.filters.fast === '1'"> · 快速翻页（未统计总数）</template>
-            <template v-else-if="!hasMore"> · 已到末尾</template>
-          </span>
+          <span class="logs-sub">{{ pagerInfo }}</span>
           <div class="logs-pager__actions">
             <Btn size="sm" :icon="ChevronLeft" :disabled="table.state.page < 2" @click="table.setPage(table.state.page - 1)">
-              上一页
+              {{ t('page.logs.pager.prev') }}
             </Btn>
             <Btn size="sm" :disabled="!hasMore" @click="table.setPage(table.state.page + 1)">
-              下一页
+              {{ t('page.logs.pager.next') }}
               <ChevronRight :size="14" />
             </Btn>
           </div>
@@ -1307,7 +1402,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
     <!-- 详情 -->
     <DetailDrawer
       v-model:show="detailOpen"
-      :title="detail ? '调用详情 · ' + (detail.model || '') : '调用详情'"
+      :title="detailTitle"
       :badge="detailRow ? { tone: detailRow.resultTone, label: detailRow.resultLabel } : null"
       :subtitle="detailRow ? fmtFullTime(detailRow.created_at) : ''"
     >
@@ -1316,35 +1411,45 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
       </div>
       <ErrorBlock
         v-else-if="detailError"
-        :title="'读取调用详情失败：' + detailError.message"
+        :title="t('page.logs.detail.error', { error: detailError.message })"
         :detail="detailError.detail"
         @retry="detailRow ? openDetail(detailRow) : undefined"
       />
       <template v-else-if="detail">
-        <Section title="概要" first>
+        <Section :title="t('page.logs.detail.sectionSummary')" first>
           <KV :items="detailKv" label-width="96px" />
         </Section>
 
-        <Section v-if="detail.diagnostic || detail.error_kind" title="错误与诊断">
-          <p v-if="detail.error_kind" class="logs-sub">网关分类：{{ detail.error_kind }}</p>
+        <Section
+          v-if="detail.diagnostic || detail.error_kind"
+          :title="t('page.logs.detail.sectionErrors')"
+        >
+          <p v-if="detail.error_kind" class="logs-sub">
+            {{ t('page.logs.detail.errorKind', { kind: detail.error_kind }) }}
+          </p>
           <CodeBlock
             v-if="diagnosticJson"
             :code="diagnosticJson"
             language="json"
             max-height="240px"
           />
-          <p v-else class="logs-sub">这条记录没有保存诊断信息。</p>
+          <p v-else class="logs-sub">{{ t('page.logs.detail.noDiagnostic') }}</p>
         </Section>
 
-        <Section title="请求正文（内存缓存）">
+        <Section :title="t('page.logs.detail.sectionBody')">
           <template v-if="detail.request_capture">
             <p class="logs-sub">
-              捕获于 {{ fmtFullTime(detail.request_capture.captured_at) }} · {{ ingressCost }}
+              {{
+                t('page.logs.detail.capturedAt', {
+                  time: fmtFullTime(detail.request_capture.captured_at),
+                  cost: ingressCost,
+                })
+              }}
             </p>
-            <p class="logs-sub">入站请求头（凭据脱敏）：</p>
+            <p class="logs-sub">{{ t('page.logs.detail.ingressHeaders') }}</p>
             <CodeBlock :code="JSON.stringify(detail.request_capture.ingress.headers, null, 2)" language="json" max-height="160px" />
             <p class="logs-sub">
-              入站正文：{{ ingressPage ? '已读取 ' + fmtInt(ingressPage.next_offset) + ' / ' + fmtInt(ingressPage.cached_bytes) + ' 字节' : '展开后读取' }}
+              {{ t('page.logs.detail.ingressLine', { value: ingressLabel }) }}
             </p>
             <CodeBlock v-if="ingressText" :code="ingressText" language="http" max-height="320px" />
             <div class="logs-body-actions">
@@ -1354,7 +1459,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
                 size="sm"
                 @click="detail && loadIngress(detail.id, 0)"
               >
-                展开入站正文
+                {{ t('page.logs.detail.expandIngress') }}
               </Btn>
               <Btn
                 v-if="ingressPage?.has_more"
@@ -1362,19 +1467,30 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
                 size="sm"
                 @click="detail && loadIngress(detail.id, ingressPage?.next_offset || 0)"
               >
-                继续读取
+                {{ t('page.logs.detail.continueReading') }}
               </Btn>
-              <Btn variant="quiet" size="sm" :icon="Copy" @click="copyCurl">复制 curl</Btn>
+              <Btn variant="quiet" size="sm" :icon="Copy" @click="copyCurl">
+                {{ t('page.logs.detail.copyCurl') }}
+              </Btn>
             </div>
 
-            <p class="logs-sub">实际发往上游（{{ detail.request_capture.upstream.length }} 次尝试）：</p>
+            <p class="logs-sub">
+              {{ t('page.logs.detail.upstreamTitle', { count: detail.request_capture.upstream.length }) }}
+            </p>
             <div
               v-for="(attempt, index) in detail.request_capture.upstream"
               :key="attempt.attempt"
               class="logs-upstream"
             >
               <p class="logs-sub">
-                第 {{ attempt.attempt }} 次 · {{ attempt.method }} {{ attempt.url }} · HTTP {{ attempt.http_status || '未返回' }}
+                {{
+                  t('page.logs.detail.attemptLine', {
+                    index: attempt.attempt,
+                    method: attempt.method,
+                    url: attempt.url,
+                    status: attempt.http_status || t('page.logs.detail.noStatus'),
+                  })
+                }}
               </p>
               <CodeBlock
                 v-if="upstreamBodies[index]?.text"
@@ -1390,7 +1506,7 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
                   :loading="upstreamBodies[index]?.loading"
                   @click="loadUpstream(index, 0)"
                 >
-                  展开上游正文
+                  {{ t('page.logs.detail.expandUpstream') }}
                 </Btn>
                 <Btn
                   v-if="upstreamBodies[index]?.page?.has_more"
@@ -1399,23 +1515,23 @@ const FILTER_HELP = '筛选条件会同步到地址栏；快速翻页不统计�
                   :loading="upstreamBodies[index]?.loading"
                   @click="loadUpstream(index, upstreamBodies[index]?.page?.next_offset || 0)"
                 >
-                  继续读取
+                  {{ t('page.logs.detail.continueReading') }}
                 </Btn>
               </div>
             </div>
             <p v-if="detail.request_capture.upstream_omitted" class="logs-sub">
-              另有 {{ detail.request_capture.upstream_omitted }} 次尝试因上限省略。
+              {{ t('page.logs.detail.upstreamOmitted', { count: detail.request_capture.upstream_omitted }) }}
             </p>
           </template>
-          <p v-else class="logs-sub">
-            这条记录没有可用的内存请求缓存。请打开「记录请求详情」后再发起请求；缓存重启、过期或容量淘汰后无法恢复。
-          </p>
+          <p v-else class="logs-sub">{{ t('page.logs.detail.noCapture') }}</p>
         </Section>
       </template>
 
       <template #footer>
-        <Btn variant="quiet" :disabled="!detail" @click="downloadCapture">下载完整 JSONL</Btn>
-        <Btn variant="default" @click="detailOpen = false">关闭</Btn>
+        <Btn variant="quiet" :disabled="!detail" @click="downloadCapture">
+          {{ t('page.logs.action.downloadJsonl') }}
+        </Btn>
+        <Btn variant="default" @click="detailOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
   </div>

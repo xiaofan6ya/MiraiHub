@@ -244,6 +244,7 @@ beforeEach(() => {
   vi.mocked(gatewayApi.getGatewayConfig).mockResolvedValue(GATEWAY_CONFIG as never)
   vi.mocked(gatewayApi.getGatewayOrder).mockResolvedValue([] as never)
   vi.mocked(gatewayApi.getPlatformSpeed).mockResolvedValue(SPEED as never)
+  vi.mocked(gatewayApi.simulateRouting).mockReturnValue([] as never)
   vi.mocked(openentryApi.getGateStatus).mockResolvedValue(GATE_PAYLOAD as never)
   vi.mocked(openentryApi.getOpenConfig).mockResolvedValue(OPEN_CONFIG as never)
   vi.mocked(openentryApi.getAdminTickets).mockResolvedValue(TICKETS as never)

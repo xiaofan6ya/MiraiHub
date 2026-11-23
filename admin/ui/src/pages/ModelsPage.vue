@@ -50,6 +50,7 @@ import { useConfirm, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { FMT_EMPTY, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import { ApiError, isAbortError } from '@/api/http'
 import {
   CAPABILITY_LABELS,
@@ -85,11 +86,10 @@ import {
   type ModelSpeedTestPayload,
 } from '@/api/models'
 
+const { t } = useI18n()
+
 /** 旧版 #panel-models 顶部那段提示（收进 ⓘ）。 */
-const HELP_TEXT =
-  '白名单：只有列在这里且处于启用状态的模型对外可用。未配置任何模型时放行全部；' +
-  '配置后请求不在启用名单内的模型会返回「模型不存在」。模型目录来自各平台上游，' +
-  '用「同步目录」拉取；展示名、能力覆盖与启停在这里改。'
+const helpText = computed(() => t('page.models.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -140,19 +140,27 @@ const hasFilters = computed(() =>
 
 const summary = computed(() => {
   const current = filteredStats.value
-  const base =
-    '共 ' + current.total + ' 个模型 · ' + current.configs + ' 条平台配置 · 已启用 ' +
-    current.enabled
-  const tail = current.unavailable > 0 ? ' · 无可用账号 ' + current.unavailable : ''
+  const base = t('page.models.summary.base', {
+    total: current.total,
+    configs: current.configs,
+    enabled: current.enabled,
+  })
+  const tail =
+    current.unavailable > 0
+      ? t('page.models.summary.unavailable', { count: current.unavailable })
+      : ''
   if (!hasFilters.value) return base + tail
-  return '筛选出 ' + current.total + ' / 共 ' + stats.value.total + ' 个模型 · 已启用 ' +
-    current.enabled + tail
+  return (
+    t('page.models.summary.filtered', {
+      total: current.total,
+      all: stats.value.total,
+      enabled: current.enabled,
+    }) + tail
+  )
 })
 
 const emptyDescription = computed(() =>
-  hasFilters.value
-    ? '没有符合条件的模型。清空筛选后可看到全部模型。'
-    : '还没有模型配置。点「同步目录」从各平台上游拉取。',
+  hasFilters.value ? t('page.models.empty.filtered') : t('page.models.empty.none'),
 )
 
 /* ------------------------------ 筛选项 ------------------------------ */
@@ -168,20 +176,29 @@ watch(
 const vendorSelectOptions = computed(() => vendorOptions(allRows.value))
 const platformSelectOptions = computed(() => platformOptions(platforms.value))
 
-const CAPABILITY_OPTIONS = [
-  { label: '能力：全部', value: '' },
-  { label: '图片输入', value: 'image' },
-  { label: '工具调用', value: 'tools' },
-  { label: '推理', value: 'reasoning' },
-  { label: '视频', value: 'video' },
-  { label: '生图', value: 'image-out' },
-]
+const CAP_LABELS = computed<Record<string, string>>(() => ({
+  image: t('page.models.cap.image'),
+  tools: t('page.models.cap.tools'),
+  reasoning: t('page.models.cap.reasoning'),
+  video: t('page.models.cap.video'),
+  'image-out': t('page.models.cap.imageOut'),
+}))
 
-const STATUS_OPTIONS = [
-  { label: '状态：全部', value: '' },
-  { label: '已启用', value: 'enabled' },
-  { label: '含停用平台', value: 'disabled' },
-]
+const CAPABILITY_OPTIONS = computed(() => [
+  { label: t('page.models.filter.capAll'), value: '' },
+  ...Object.entries(CAP_LABELS.value).map(([value, label]) => ({ label, value })),
+])
+
+const STATUS_OPTIONS = computed(() => [
+  { label: t('page.models.filter.statusAll'), value: '' },
+  { label: t('page.models.filter.statusEnabled'), value: 'enabled' },
+  { label: t('page.models.filter.statusMixed'), value: 'disabled' },
+])
+
+const STATUS_LABELS = computed<Record<string, string>>(() => ({
+  enabled: t('page.models.filter.statusEnabled'),
+  disabled: t('page.models.filter.statusMixed'),
+}))
 
 function labelOf(
   options: Array<{ label: string; value: string }>,
@@ -189,28 +206,41 @@ function labelOf(
 ): string {
   const hit = options.find((option) => option.value === value)
   if (!hit) return value
-  return hit.label.replace(/（.*）$/, '').replace(/：全部$/, '')
+  // 选择项的标签带「（N 个模型）」或「：全部」后缀，chip 里只留主体。
+  return hit.label.replace(/\uFF08.*\uFF09$/, '').replace(/\uFF1A\u5168\u90E8$/, '')
 }
 
 const chips = computed<FilterChip[]>(() => {
   const filters = table.state.filters
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.models.filter.chipSearch'), value: filters.q })
   if (filters.vendor) {
-    list.push({ key: 'vendor', label: '厂商', value: labelOf(vendorSelectOptions.value, filters.vendor) })
+    list.push({
+      key: 'vendor',
+      label: t('page.models.filter.chipVendor'),
+      value: labelOf(vendorSelectOptions.value, filters.vendor),
+    })
   }
   if (filters.platform) {
     list.push({
       key: 'platform',
-      label: '平台',
+      label: t('page.models.filter.chipPlatform'),
       value: labelOf(platformSelectOptions.value, filters.platform),
     })
   }
   if (filters.cap) {
-    list.push({ key: 'cap', label: '能力', value: labelOf(CAPABILITY_OPTIONS, filters.cap) })
+    list.push({
+      key: 'cap',
+      label: t('page.models.filter.chipCap'),
+      value: CAP_LABELS.value[filters.cap] || filters.cap,
+    })
   }
   if (filters.status) {
-    list.push({ key: 'status', label: '状态', value: labelOf(STATUS_OPTIONS, filters.status) })
+    list.push({
+      key: 'status',
+      label: t('page.models.filter.chipStatus'),
+      value: STATUS_LABELS.value[filters.status] || filters.status,
+    })
   }
   return list
 })
@@ -286,8 +316,12 @@ function platformTooltip(row: ModelRow): string {
   return row.platforms
     .map(
       (ref: ModelPlatformRef) =>
-        ref.platformLabel + ' · ' + ref.clientId + ' · ' + fmtMultiplier(ref.multiplier) +
-        (ref.enabled ? '' : ' · 已停用'),
+        ref.platformLabel +
+        ' · ' +
+        ref.clientId +
+        ' · ' +
+        fmtMultiplier(ref.multiplier) +
+        (ref.enabled ? '' : t('page.models.cell.disabledSuffix')),
     )
     .join('\n')
 }
@@ -306,7 +340,10 @@ function renderModelCell(row: ModelRow): VNodeChild {
     ),
   )
   const aliasChips = row.aliases.slice(0, MODEL_ALIAS_LIMIT).map((alias) =>
-    h(Chip, { key: 'alias-' + alias, mono: true, copy: true, value: alias, title: '复制别名' }, {
+    h(
+      Chip,
+      { key: 'alias-' + alias, mono: true, copy: true, value: alias, title: t('page.models.cell.aliasCopy') },
+      {
       default: () => alias,
     }),
   )
@@ -315,7 +352,10 @@ function renderModelCell(row: ModelRow): VNodeChild {
     aliasChips.push(
       h(
         Chip,
-        { key: 'alias-more', title: '还有 ' + row.aliasOverflow + ' 个别名：' + rest.join('、') },
+        {
+          key: 'alias-more',
+          title: t('page.models.cell.aliasMore', { count: row.aliasOverflow, list: rest.join('、') }),
+        },
         { default: () => '+' + row.aliasOverflow },
       ),
     )
@@ -327,7 +367,7 @@ function renderModelCell(row: ModelRow): VNodeChild {
       class: 'models-name',
       role: 'button',
       tabindex: 0,
-      title: '编辑 ' + row.name,
+      title: t('page.models.cell.editTitle', { name: row.name }),
       onClick: () => void openEdit(row),
       onKeydown: (event: KeyboardEvent) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -341,16 +381,22 @@ function renderModelCell(row: ModelRow): VNodeChild {
       h('div', { class: 'models-name__main' }, [
         h('div', { class: 'models-name__title' }, [
           h('span', { class: 'models-name__text' }, row.name),
-          row.free ? h(Badge, { tone: 'ok' }, { default: () => '免费' }) : null,
-          row.officialVisible ? null : h(Badge, { tone: 'neutral' }, { default: () => '旧模型' }),
+          row.free
+            ? h(Badge, { tone: 'ok' }, { default: () => t('page.models.cell.free') })
+            : null,
+          row.officialVisible
+            ? null
+            : h(Badge, { tone: 'neutral' }, { default: () => t('page.models.cell.legacy') }),
           row.partiallyEnabled
-            ? h(Badge, { tone: 'warn' }, { default: () => row.disabledCount + ' 个平台停用' })
+            ? h(Badge, { tone: 'warn' }, {
+                default: () => t('page.models.cell.platformsDisabled', { count: row.disabledCount }),
+              })
             : null,
         ]),
         h(Copyable, { value: row.callId, muted: true }),
         aliasChips.length ? h('div', { class: 'models-name__aliases' }, aliasChips) : null,
         caps.length
-          ? h('div', { class: 'models-name__caps', 'aria-label': '模型能力' }, caps)
+          ? h('div', { class: 'models-name__caps', 'aria-label': t('page.models.cell.capsAria') }, caps)
           : null,
       ]),
     ],
@@ -380,23 +426,23 @@ function renderMultiplier(row: ModelRow): VNodeChild {
   const tone = multiplierTone(row.multiplier)
   const hint =
     row.multiplier === null
-      ? '尚未同步倍率'
+      ? t('page.models.cell.multiplierPending')
       : row.multiplier < 0
-        ? '该平台按实际 token 计量，没有倍率概念'
+        ? t('page.models.cell.multiplierTokenBilled')
         : row.multiplier === 0
-          ? '本站不计费'
-          : '相对基准倍率'
+          ? t('page.models.cell.multiplierFree')
+          : t('page.models.cell.multiplierRelative')
   return h('span', { class: ['models-mult', 'is-' + tone], title: hint }, row.multiplierText)
 }
 
 function renderLimits(row: ModelRow): VNodeChild {
   const lines: VNodeChild[] = [
     h('span', { class: 'models-limits__line' }, [
-      h('span', { class: 'models-limits__label' }, '上下文'),
+      h('span', { class: 'models-limits__label' }, t('page.models.cell.context')),
       h('span', { class: 'tnum' }, fmtTokensShort(row.contextWindow)),
     ]),
     h('span', { class: 'models-limits__line' }, [
-      h('span', { class: 'models-limits__label' }, '输出'),
+      h('span', { class: 'models-limits__label' }, t('page.models.cell.output')),
       h('span', { class: 'tnum' }, fmtTokensShort(row.maxOutputTokens)),
     ]),
   ]
@@ -406,10 +452,10 @@ function renderLimits(row: ModelRow): VNodeChild {
         'span',
         {
           class: 'models-limits__line',
-          title: '可用账号 / 有资格账号（最近 24 小时，来自 /api/stats/model-health）',
+          title: t('page.models.cell.accountsTitle'),
         },
         [
-          h('span', { class: 'models-limits__label' }, '账号'),
+          h('span', { class: 'models-limits__label' }, t('page.models.cell.accounts')),
           h('span', { class: 'tnum' }, row.availableAccounts + '/' + (row.eligibleAccounts ?? 0)),
         ],
       ),
@@ -428,21 +474,35 @@ function renderHealth(row: ModelRow): VNodeChild {
       h('span', { class: 'tnum' }, fmtDuration(row.ttftP50)),
     ]),
     h('span', { class: 'models-health__line' }, [
-      h(Badge, { tone }, { default: () => (successRate === null ? '无样本' : fmtPct(successRate)) }),
-      h('span', { class: 'models-health__sub tnum' }, fmtInt(row.requests) + ' 次'),
+      h(Badge, { tone }, {
+        default: () => (successRate === null ? t('page.models.cell.noSamples') : fmtPct(successRate)),
+      }),
+      h(
+        'span',
+        { class: 'models-health__sub tnum' },
+        t('page.models.cell.requests', { count: fmtInt(row.requests) }),
+      ),
     ]),
     row.availableAccounts === 0 && (row.eligibleAccounts || 0) > 0
-      ? h(Badge, { tone: 'danger' }, { default: () => '无可用账号' })
+      ? h(Badge, { tone: 'danger' }, { default: () => t('page.models.cell.noAccounts') })
       : null,
   ])
 }
 
 function renderStatus(row: ModelRow): VNodeChild {
   const tone = row.enabled ? 'ok' : row.partiallyEnabled ? 'warn' : 'neutral'
-  const text = row.enabled ? '已启用' : row.partiallyEnabled ? '部分启用' : '已停用'
+  const text = row.enabled
+    ? t('page.models.status.enabled')
+    : row.partiallyEnabled
+      ? t('page.models.status.partial')
+      : t('page.models.status.disabled')
   return h('div', { class: 'models-status' }, [
     h(Badge, { tone, dot: true }, { default: () => text }),
-    h('span', { class: 'models-status__sub' }, row.enabledCount + '/' + row.platformCount + ' 平台'),
+    h(
+      'span',
+      { class: 'models-status__sub' },
+      t('page.models.status.platforms', { enabled: row.enabledCount, total: row.platformCount }),
+    ),
   ])
 }
 
@@ -453,10 +513,13 @@ function renderActions(row: ModelRow): VNodeChild {
     [
       h(RowActions, {
         actions: [
-          { key: 'edit', label: '编辑' },
-          { key: 'toggle', label: row.enabled ? '全部停用' : '全部启用' },
-          { key: 'speed', label: '测速', disabled: !row.speedTestable },
-          { key: 'delete', label: '删除', danger: true },
+          { key: 'edit', label: t('common.edit') },
+          {
+            key: 'toggle',
+            label: row.enabled ? t('page.models.action.disableAll') : t('page.models.action.enableAll'),
+          },
+          { key: 'speed', label: t('page.models.action.speed'), disabled: !row.speedTestable },
+          { key: 'delete', label: t('common.delete'), danger: true },
         ],
         max: 1,
         onSelect: (key: string) => {
@@ -470,7 +533,7 @@ function renderActions(row: ModelRow): VNodeChild {
 const columns = computed<TableColumn[]>(() => [
   {
     key: 'name',
-    title: '模型',
+    title: t('page.models.col.name'),
     mobile: 'title',
     minWidth: 320,
     sortable: true,
@@ -479,7 +542,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'platforms',
-    title: '可用平台',
+    title: t('page.models.col.platforms'),
     mobile: 'meta',
     width: 140,
     sortable: true,
@@ -488,7 +551,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'multiplier',
-    title: '倍率',
+    title: t('page.models.col.multiplier'),
     mobile: 'meta',
     width: 100,
     numeric: true,
@@ -498,28 +561,28 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'limits',
-    title: '限制',
+    title: t('page.models.col.limits'),
     mobile: 'meta',
     width: 156,
     render: (row: TableRow) => renderLimits(row as ModelRow),
   },
   {
     key: 'health',
-    title: '延迟与健康',
+    title: t('page.models.col.health'),
     mobile: 'title',
     width: 186,
     render: (row: TableRow) => renderHealth(row as ModelRow),
   },
   {
     key: 'status',
-    title: '状态',
+    title: t('page.models.col.status'),
     mobile: 'meta',
     width: 116,
     render: (row: TableRow) => renderStatus(row as ModelRow),
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.models.col.actions'),
     mobile: 'actions',
     width: 132,
     hideable: false,
@@ -560,7 +623,12 @@ async function loadConfigs(): Promise<void> {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     loadError.value = { message: errorMessage(error), detail }
-    toast.error(failureText(items.value === null ? '加载模型' : '刷新模型', error))
+    toast.error(
+      failureText(
+        items.value === null ? t('page.models.action.load') : t('page.models.action.refresh'),
+        error,
+      ),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -576,7 +644,7 @@ async function loadHealth(): Promise<void> {
     health.value = Array.isArray(payload?.items) ? payload.items : []
   } catch (error) {
     if (isAbortError(error)) return
-    healthError.value = failureText('加载模型健康', error)
+    healthError.value = failureText(t('page.models.action.loadHealth'), error)
   }
 }
 
@@ -591,46 +659,55 @@ async function loadAll(): Promise<void> {
 async function onSync(): Promise<void> {
   if (syncing.value) return
   syncing.value = true
-  toast.info('正在同步全部平台的模型目录…')
+  toast.info(t('page.models.toast.syncing'))
   try {
     const payload = await syncModels()
-    toast.success('同步完成：' + describeSyncResult(payload))
+    toast.success(t('page.models.toast.synced', { result: describeSyncResult(payload) }))
     await loadConfigs()
     await loadHealth()
   } catch (error) {
-    toast.error(failureText('同步模型目录', error))
+    toast.error(failureText(t('page.models.action.sync'), error))
   } finally {
     syncing.value = false
   }
 }
 
-const bulkOptions = [
-  { label: '全部启用', key: 'enable' },
-  { label: '全部禁用', key: 'disable' },
-]
+const bulkOptions = computed(() => [
+  { label: t('page.models.bulk.enable'), key: 'enable' },
+  { label: t('page.models.bulk.disable'), key: 'disable' },
+])
 
 async function onBulkSelect(key: string | number): Promise<void> {
   const enable = String(key) === 'enable'
   if (bulkRunning.value) return
   const ok = await confirm({
-    title: enable ? '启用全部系统级模型？' : '禁用全部系统级模型？',
-    message: enable
-      ? '把 level=system 的所有模型配置置为启用。禁用状态的旧模型也会一起打开。'
-      : '把 level=system 的所有模型配置置为禁用。禁用后网关会拒绝调用全部模型，直到重新启用。',
-    okText: enable ? '全部启用' : '全部禁用',
+    title: enable
+      ? t('page.models.bulk.titleEnable')
+      : t('page.models.bulk.titleDisable'),
+    message: enable ? t('page.models.bulk.bodyEnable') : t('page.models.bulk.bodyDisable'),
+    okText: enable ? t('page.models.bulk.enable') : t('page.models.bulk.disable'),
     danger: !enable,
-    requireText: enable ? undefined : '禁用',
+    requireText: enable ? undefined : t('page.models.bulk.requireText'),
   })
   if (!ok) return
   bulkRunning.value = true
   try {
     const payload = await batchToggleModels({ enabled: enable, level: 'system' })
     const count = Number(payload?.updated) || 0
-    toast.success((enable ? '已启用 ' : '已禁用 ') + count + ' 个模型配置')
+    toast.success(
+      enable
+        ? t('page.models.toast.bulkEnable', { count })
+        : t('page.models.toast.bulkDisable', { count }),
+    )
     await loadConfigs()
     await loadHealth()
   } catch (error) {
-    toast.error(failureText(enable ? '批量启用' : '批量禁用', error))
+    toast.error(
+      failureText(
+        enable ? t('page.models.action.bulkEnable') : t('page.models.action.bulkDisable'),
+        error,
+      ),
+    )
   } finally {
     bulkRunning.value = false
   }
@@ -643,10 +720,15 @@ const addPlatform = ref('')
 const addSubmitting = ref(false)
 
 const addPlatformOptions = computed(() => {
-  const options: Array<{ label: string; value: string }> = [{ label: '全部平台', value: '' }]
+  const options: Array<{ label: string; value: string }> = [
+    { label: t('page.models.add.platformAll'), value: '' },
+  ]
   for (const item of platforms.value) {
     options.push({
-      label: (item.label || item.platform) + '（' + (Number(item.count) || 0) + ' 个模型）',
+      label: t('page.models.add.platformCount', {
+        label: item.label || item.platform,
+        count: Number(item.count) || 0,
+      }),
       value: item.platform,
     })
   }
@@ -663,12 +745,12 @@ async function submitAdd(): Promise<void> {
   addSubmitting.value = true
   try {
     const payload = await syncModels(addPlatform.value || undefined)
-    toast.success('同步完成：' + describeSyncResult(payload))
+    toast.success(t('page.models.toast.synced', { result: describeSyncResult(payload) }))
     addOpen.value = false
     await loadConfigs()
     await loadHealth()
   } catch (error) {
-    toast.error(failureText('同步模型目录', error))
+    toast.error(failureText(t('page.models.action.sync'), error))
   } finally {
     addSubmitting.value = false
   }
@@ -692,13 +774,21 @@ async function toggleRow(row: ModelRow): Promise<void> {
   )
   const failed = results.filter((result) => result.status === 'rejected').length
   if (failed === 0) {
-    toast.success((enable ? '已启用「' : '已停用「') + row.name + '」')
+    toast.success(
+      enable
+        ? t('page.models.toggle.enabled', { name: row.name })
+        : t('page.models.toggle.disabled', { name: row.name }),
+    )
   } else {
     const first = results.find((result) => result.status === 'rejected') as
       | PromiseRejectedResult
       | undefined
     toast.error(
-      (enable ? '启用' : '停用') + '「' + row.name + '」部分平台失败：' + errorMessage(first?.reason),
+      t('page.models.toggle.partialFail', {
+        action: enable ? t('page.models.action.enable') : t('page.models.action.disable'),
+        name: row.name,
+        error: errorMessage(first?.reason),
+      }),
     )
   }
   await loadConfigs()
@@ -710,16 +800,16 @@ async function runSpeedTest(row: ModelRow): Promise<void> {
   if (speedTesting.value !== null) return
   const model = row.upstreamIds[0]
   if (!model) {
-    toast.warning('该模型没有可测速的上游 id')
+    toast.warning(t('page.models.speed.noUpstream'))
     return
   }
   speedTesting.value = row.configIds[0] ?? 0
   try {
     const payload: ModelSpeedTestPayload = await speedTestModel(model)
-    toast.success(row.name + ' 测速：' + describeSpeedTest(payload))
+    toast.success(t('page.models.speed.result', { name: row.name, result: describeSpeedTest(payload) }))
     await loadHealth()
   } catch (error) {
-    toast.error(failureText('测速「' + row.name + '」', error))
+    toast.error(failureText(t('page.models.action.speedTest', { name: row.name }), error))
   } finally {
     speedTesting.value = null
   }
@@ -727,11 +817,9 @@ async function runSpeedTest(row: ModelRow): Promise<void> {
 
 async function removeOne(row: ModelRow): Promise<void> {
   const ok = await confirm({
-    title: '删除「' + row.name + '」？',
-    message:
-      '会删除该模型在 ' + row.platformCount + ' 个平台上的配置，删除后该模型立即从白名单移除（调用返回模型不存在）。' +
-      '下次「同步目录」时如果上游仍在，它会以停用状态重新出现。',
-    okText: '删除',
+    title: t('page.models.delete.title', { name: row.name }),
+    message: t('page.models.delete.body', { count: row.platformCount }),
+    okText: t('common.delete'),
     danger: true,
   })
   if (!ok) return
@@ -739,8 +827,9 @@ async function removeOne(row: ModelRow): Promise<void> {
     row.platforms.map((ref) => deleteModelConfig(ref.configId)),
   )
   const failed = results.filter((result) => result.status === 'rejected').length
-  if (failed === 0) toast.success('已删除「' + row.name + '」')
-  else toast.error('删除「' + row.name + '」失败 ' + failed + ' 个平台配置')
+  if (failed === 0) toast.success(t('page.models.delete.done', { name: row.name }))
+  else
+    toast.error(t('page.models.delete.partialFail', { name: row.name, count: failed }))
   await loadConfigs()
   await loadHealth()
 }
@@ -772,9 +861,9 @@ const submitting = ref(false)
 const multiplierNote = computed(() => {
   const row = editing.value
   if (!row) return ''
-  if (row.multiplier === null) return '尚未同步倍率，先跑一次「同步目录」。'
-  if (row.multiplier < 0) return '该平台按实际 token 计量，没有倍率概念（显示为「无量纲」）。'
-  return '倍率由「同步目录」按上游目录写入（后端 PATCH 不接受该字段），这里按平台只读展示。'
+  if (row.multiplier === null) return t('page.models.edit.multiplierPending')
+  if (row.multiplier < 0) return t('page.models.edit.multiplierTokenBilled')
+  return t('page.models.edit.multiplierReadonly')
 })
 
 async function openEdit(row: ModelRow): Promise<void> {
@@ -799,7 +888,7 @@ async function submitEdit(): Promise<void> {
     return
   }
   if (!plan.changed) {
-    toast.info('没有改动')
+    toast.info(t('page.models.toast.noChanges'))
     drawerOpen.value = false
     return
   }
@@ -810,12 +899,20 @@ async function submitEdit(): Promise<void> {
     )
     const failed = results.filter((result) => result.status === 'rejected').length
     if (failed === 0) {
-      toast.success('已保存「' + row.name + '」的 ' + plan.updates.length + ' 个平台配置')
+      toast.success(
+        t('page.models.edit.saved', { name: row.name, count: plan.updates.length }),
+      )
     } else {
       const first = results.find((result) => result.status === 'rejected') as
         | PromiseRejectedResult
         | undefined
-      toast.error('保存「' + row.name + '」失败 ' + failed + ' 个：' + errorMessage(first?.reason))
+      toast.error(
+        t('page.models.edit.saveFailed', {
+          name: row.name,
+          count: failed,
+          error: errorMessage(first?.reason),
+        }),
+      )
     }
     drawerOpen.value = false
     await loadConfigs()
@@ -849,16 +946,22 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="models-page">
-    <PageHeader title="模型配置" :help="HELP_TEXT">
+    <PageHeader :title="t('page.models.title')" :help="helpText">
       <template #actions>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadAll()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadAll()">
+          {{ t('common.refresh') }}
+        </Btn>
         <Btn variant="default" :icon="RefreshCw" :loading="syncing" @click="onSync">
-          同步目录
+          {{ t('page.models.action.syncShort') }}
         </Btn>
         <n-dropdown trigger="click" :options="bulkOptions" @select="onBulkSelect">
-          <Btn variant="default" :icon="ListChecks" :loading="bulkRunning">批量操作</Btn>
+          <Btn variant="default" :icon="ListChecks" :loading="bulkRunning">
+            {{ t('page.models.action.bulk') }}
+          </Btn>
         </n-dropdown>
-        <Btn variant="primary" :icon="Plus" @click="openAdd">添加模型</Btn>
+        <Btn variant="primary" :icon="Plus" @click="openAdd">
+          {{ t('page.models.action.add') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -876,7 +979,7 @@ onBeforeUnmount(() => {
             <n-input
               class="models-filter__search"
               :value="search"
-              placeholder="搜索模型 ID / 别名 / 厂商 / 平台 / 能力"
+              :placeholder="t('page.models.filter.searchPlaceholder')"
               clearable
               @update:value="
                 (value: string) => {
@@ -916,20 +1019,25 @@ onBeforeUnmount(() => {
       <div class="models-body">
         <ErrorBlock
           v-if="loadError && items === null"
-          :title="'加载模型失败：' + loadError.message"
+          :title="t('page.models.error.load', { error: loadError.message })"
           :detail="loadError.detail"
           @retry="loadConfigs()"
         />
 
-        <div v-else-if="firstLoading" class="models-skeleton" aria-busy="true" aria-label="模型加载中">
+        <div
+          v-else-if="firstLoading"
+          class="models-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.models.loadingAria')"
+        >
           <n-skeleton v-for="index in 6" :key="index" height="44px" />
         </div>
 
         <template v-else>
           <div v-if="healthError" class="models-health-error">
-            <Badge tone="warn">健康数据</Badge>
+            <Badge tone="warn">{{ t('page.models.health.badge') }}</Badge>
             <span>{{ healthError }}</span>
-            <Btn variant="quiet" size="sm" @click="loadHealth()">重试</Btn>
+            <Btn variant="quiet" size="sm" @click="loadHealth()">{{ t('common.retry') }}</Btn>
           </div>
 
           <DataTable
@@ -953,18 +1061,24 @@ onBeforeUnmount(() => {
             <template #empty>
               <Empty :description="emptyDescription">
                 <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
-                  清除筛选
+                  {{ t('page.models.clearFilters') }}
                 </Btn>
-                <Btn v-else variant="primary" size="sm" :icon="RefreshCw" :loading="syncing" @click="onSync">
-                  同步目录
+                <Btn
+                  v-else
+                  variant="primary"
+                  size="sm"
+                  :icon="RefreshCw"
+                  :loading="syncing"
+                  @click="onSync"
+                >
+                  {{ t('page.models.action.syncShort') }}
                 </Btn>
               </Empty>
             </template>
           </DataTable>
 
           <p v-if="officialTotal > 0 && stats.total < officialTotal" class="models-footnote">
-            官方目录共 {{ officialTotal }} 个模型，本站已配置 {{ stats.total }} 个。
-            未配置的模型对客户端不可见，用「同步目录」补齐。
+            {{ t('page.models.footnote', { official: officialTotal, configured: stats.total }) }}
           </p>
         </template>
       </div>
@@ -973,9 +1087,9 @@ onBeforeUnmount(() => {
     <!-- 编辑：别名 / 限制 / 各平台映射 / 启用状态 -->
     <FormDrawer
       v-model:show="drawerOpen"
-      title="编辑模型"
+      :title="t('page.models.edit.title')"
       size="lg"
-      submit-text="保存"
+      :submit-text="t('common.save')"
       :submit-loading="submitting"
       @submit="submitEdit"
     >
@@ -986,22 +1100,33 @@ onBeforeUnmount(() => {
             <span class="models-edit-head__name">{{ editing.name }}</span>
             <Copyable :value="editing.callId" />
             <span class="models-edit-head__meta">
-              {{ editing.vendorLabel }} · {{ editing.platformCount }} 个平台 · {{ editing.multiplierText }}
+              {{
+                t('page.models.edit.platformMeta', {
+                  vendor: editing.vendorLabel,
+                  count: editing.platformCount,
+                  multiplier: editing.multiplierText,
+                })
+              }}
             </span>
           </div>
         </div>
 
         <FormField
-          label="展示名（别名）"
-          hint="客户端与 /v1/models 里显示的名字，可中文；留空回退到调用名。"
+          :label="t('page.models.edit.name')"
+          :hint="t('page.models.edit.nameHint')"
         >
-          <n-input v-model:value="form.note" placeholder="例如 DeepSeek V4.1 Flash" maxlength="255" clearable />
+          <n-input
+            v-model:value="form.note"
+            :placeholder="t('page.models.edit.namePlaceholder')"
+            maxlength="255"
+            clearable
+          />
         </FormField>
 
         <FormField
-          label="启用状态"
+          :label="t('page.models.edit.enabled')"
           :error="formError"
-          hint="按平台分别启停；全部停用后该模型从对外白名单里消失。"
+          :hint="t('page.models.edit.enabledHint')"
         >
           <div class="models-edit-platforms">
             <div
@@ -1021,7 +1146,7 @@ onBeforeUnmount(() => {
           </div>
         </FormField>
 
-        <FormField label="倍率" :hint="multiplierNote">
+        <FormField :label="t('page.models.edit.multiplier')" :hint="multiplierNote">
           <div class="models-edit-multipliers">
             <div
               v-for="ref in editing.platforms"
@@ -1035,10 +1160,10 @@ onBeforeUnmount(() => {
           </div>
         </FormField>
 
-        <FormField label="能力与限制" hint="写在本站覆盖层（_override），同步目录不会冲掉；留空表示沿用上游值。">
+        <FormField :label="t('page.models.edit.caps')" :hint="t('page.models.edit.capsHint')">
           <div class="models-edit-caps">
             <div class="models-edit-caps__row">
-              <span class="models-edit-caps__label">上下文窗口</span>
+              <span class="models-edit-caps__label">{{ t('page.models.edit.contextWindow') }}</span>
               <n-input-number
                 v-model:value="form.contextWindow"
                 :min="0"
@@ -1048,7 +1173,7 @@ onBeforeUnmount(() => {
               />
             </div>
             <div class="models-edit-caps__row">
-              <span class="models-edit-caps__label">最大输出</span>
+              <span class="models-edit-caps__label">{{ t('page.models.edit.maxOutput') }}</span>
               <n-input-number
                 v-model:value="form.maxOutputTokens"
                 :min="0"
@@ -1058,25 +1183,25 @@ onBeforeUnmount(() => {
               />
             </div>
             <div class="models-edit-caps__row">
-              <span class="models-edit-caps__label">支持图片输入</span>
+              <span class="models-edit-caps__label">{{ t('page.models.edit.supportsImages') }}</span>
               <n-switch v-model:value="form.supportsImages" size="small" />
             </div>
             <div class="models-edit-caps__row">
-              <span class="models-edit-caps__label">支持工具调用</span>
+              <span class="models-edit-caps__label">{{ t('page.models.edit.supportsTools') }}</span>
               <n-switch v-model:value="form.supportsTools" size="small" />
             </div>
             <div class="models-edit-caps__row">
-              <span class="models-edit-caps__label">支持推理</span>
+              <span class="models-edit-caps__label">{{ t('page.models.edit.supportsReasoning') }}</span>
               <n-switch v-model:value="form.supportsReasoning" size="small" />
             </div>
             <p v-if="editing.caps.overridden" class="models-edit-caps__hint">
-              <Badge tone="brand">本站覆盖</Badge>
-              这些值里至少一项是本站手调的，不是上游原值。
+              <Badge tone="brand">{{ t('page.models.edit.overriddenBadge') }}</Badge>
+              {{ t('page.models.edit.overriddenHint') }}
             </p>
           </div>
         </FormField>
 
-        <FormField label="各平台映射" hint="同一模型在不同平台的调用名与落点；复制任意一条给客户端都能直接调用。">
+        <FormField :label="t('page.models.edit.mapping')" :hint="t('page.models.edit.mappingHint')">
           <div class="models-edit-map">
             <div v-for="ref in editing.platforms" :key="'map-' + ref.configId" class="models-edit-map__row">
               <span class="models-edit-map__platform">
@@ -1084,11 +1209,14 @@ onBeforeUnmount(() => {
                 {{ ref.platformLabel }}
               </span>
               <Copyable :value="ref.clientId" muted />
-              <span class="models-edit-map__upstream mono" :title="'上游 id：' + ref.upstreamId">
+              <span
+                class="models-edit-map__upstream mono"
+                :title="t('page.models.edit.upstreamTitle', { id: ref.upstreamId })"
+              >
                 {{ ref.upstreamId }}
               </span>
               <Badge :tone="ref.enabled ? 'ok' : 'neutral'" dot>
-                {{ ref.enabled ? '启用' : '停用' }}
+                {{ ref.enabled ? t('page.models.edit.platformOn') : t('page.models.edit.platformOff') }}
               </Badge>
             </div>
           </div>
@@ -1097,8 +1225,8 @@ onBeforeUnmount(() => {
         <p v-if="editing.description" class="models-edit-desc">{{ editing.description }}</p>
         <p class="models-edit-hint">
           <HelpTip
-            content="删除模型请回到列表用行操作的「删除」；这里只改配置，不删记录。"
-            label="关于删除"
+            :content="t('page.models.edit.deleteTip')"
+            :label="t('page.models.edit.deleteTipLabel')"
           />
         </p>
       </template>
@@ -1107,25 +1235,20 @@ onBeforeUnmount(() => {
     <!-- 添加模型：后端没有手工新增端点，新模型只能从平台目录同步进来 -->
     <FormDrawer
       v-model:show="addOpen"
-      title="添加模型"
-      submit-text="同步该平台"
+      :title="t('page.models.add.title')"
+      :submit-text="t('page.models.add.submit')"
       :submit-loading="addSubmitting"
       @submit="submitAdd"
     >
-      <FormField label="平台" hint="选一个平台只同步它；选「全部平台」等于点一次「同步目录」。">
+      <FormField :label="t('page.models.add.platform')" :hint="t('page.models.add.platformHint')">
         <n-select
           :value="addPlatform"
           :options="addPlatformOptions"
           @update:value="(value: string | number | null) => (addPlatform = value === null ? '' : String(value))"
         />
       </FormField>
-      <p class="models-edit-desc">
-        模型目录由各平台上游下发，本站不手工造条目：同步会把上游新增的模型写进白名单（默认启用），
-        已存在的模型只刷新倍率、描述与能力，启停状态与手调覆盖保持不变。
-      </p>
-      <p class="models-edit-desc">
-        同步失败的平台会在结果里点名（例如「该平台没有可用（active）账号」），不会静默少一批模型。
-      </p>
+      <p class="models-edit-desc">{{ t('page.models.add.note1') }}</p>
+      <p class="models-edit-desc">{{ t('page.models.add.note2') }}</p>
     </FormDrawer>
   </div>
 </template>
