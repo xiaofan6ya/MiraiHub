@@ -15,7 +15,7 @@
  * 平台上下文：订阅 usePlatformStore().onChange 重新取数（/api/accounts 按 X-Platform 收窄）。
  */
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch, type VNodeChild } from 'vue'
-import { NDropdown, NInput, NInputNumber, NSkeleton } from 'naive-ui'
+import { NCheckbox, NDropdown, NInput, NInputNumber, NSelect, NSkeleton } from 'naive-ui'
 import { ChevronDown, Download, Plus, RefreshCw, ScanLine, Upload } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
@@ -41,6 +41,8 @@ import {
   type TableRow,
 } from '@/components'
 import { useConfirm, useJob, useTableQuery, useToast } from '@/composables'
+import { copyText } from '@/composables/useCopy'
+import { registerCommand } from '@/layout/commandRegistry'
 import { usePlatformStore } from '@/stores/platform'
 import { fmtCredit, fmtDuration, fmtInt, fmtRelative } from '@/utils/format'
 import { failureText } from '@/utils/error'
@@ -80,6 +82,39 @@ import {
   type AccountUsageToday,
   type CreditDetailsPayload,
 } from '@/api/accounts'
+import {
+  AUTH_STEPS,
+  COUNTRY_CODES,
+  addAccountManually,
+  addMethodsFor,
+  addResultText,
+  authStateOf,
+  authStepIndex,
+  beginBrowserAuth,
+  defaultVerify,
+  importAccountsAsync,
+  importLocalAccounts,
+  importLocalText,
+  importModeOf,
+  importStorageOf,
+  manualHint,
+  maskPhone,
+  methodEnabled,
+  parseImportText,
+  pollBrowserAuth,
+  preparePhoneFlow,
+  scanLocalAccounts,
+  scanPreviewRows,
+  scanSummary,
+  sendPhoneCode,
+  validatePhoneForm,
+  verifyPhoneCode,
+  type AddMethodKey,
+  type BrowserAuthView,
+  type PhoneForm,
+  type ScanLocalPayload,
+  type ScanPreviewRow,
+} from '@/api/account-add'
 
 const HELP_TEXT =
   '统一管理账号、可用积分与登录状态。列表跟随顶栏的平台上下文；' +
@@ -867,19 +902,381 @@ async function openLimits(): Promise<void> {
  * 页头入口壳（S26 完整表单）
  * ------------------------------------------------------------------ */
 
-const addModes = computed(() => addAccountModes(platformStore.currentSpec))
 const addOptions = computed(() =>
-  addModes.value.map((mode) => ({ key: mode.key, label: mode.label })),
+  addMethodsFor(platformStore.currentSpec).map((method) => ({
+    key: method.key,
+    label: method.label,
+    disabled: Boolean(method.disabledReason),
+  })),
 )
 
-function onAddMode(key: string): void {
-  const mode = addModes.value.find((item) => item.key === key)
-  toast.info((mode?.label || '该方式') + '：完整表单将在 S26 实现，本步只保留入口')
+/* ------------------------------------------------------------------ *
+ * S26 添加账号（能力声明驱动：方式来自 addMethodsFor，流程集中在 api/account-add.ts）
+ * ------------------------------------------------------------------ */
+
+type AddDrawerKind = 'manual' | 'import' | 'scan' | 'phone' | 'authorize'
+
+const platformSpec = computed(() => platformStore.currentSpec)
+const platformName = computed(() => platformStore.currentSpec?.label || platformStore.currentId || '当前平台')
+const addMethods = computed(() => addMethodsFor(platformSpec.value))
+
+const addOpen = ref(false)
+const addKind = ref<AddDrawerKind>('manual')
+const addTitleMap: Record<AddDrawerKind, string> = {
+  manual: '手动添加账号',
+  import: '导入账号',
+  scan: '扫描本机',
+  phone: '手机号登录',
+  authorize: '浏览器授权登录',
+}
+const addTitle = computed(() => addTitleMap[addKind.value] + ' · ' + platformName.value)
+const addSubmitText = computed(() => {
+  if (addKind.value === 'import') return '导入 ' + importSelected.value.length + ' 个'
+  if (addKind.value === 'scan') return '导入选中 ' + scanSelected.value.length + ' 个'
+  if (addKind.value === 'phone') return '登录并添加'
+  if (addKind.value === 'authorize') return '重新发起授权'
+  return '添加账号'
+})
+
+function openAddDrawer(kind: AddDrawerKind): void {
+  addKind.value = kind
+  addOpen.value = true
+  if (kind === 'scan') void loadScan()
+  if (kind === 'phone') resetPhone()
+  if (kind === 'authorize') resetAuth()
+  if (kind === 'import') {
+    importText.value = ''
+    importSelected.value = []
+    importVerify.value = defaultVerify(platformSpec.value)
+  }
+  if (kind === 'manual') {
+    manualName.value = ''
+    manualJson.value = ''
+  }
 }
 
-function shellNotice(label: string): void {
-  toast.info(label + '：完整表单将在 S26 实现，本步只保留入口')
+function onAddMode(key: string): void {
+  const mode = key as AddMethodKey
+  if (!methodEnabled(platformSpec.value, mode)) {
+    toast.warning('当前平台不支持「' + key + '」这种方式')
+    return
+  }
+  openAddDrawer(mode as AddDrawerKind)
 }
+
+function submitAdd(): void {
+  if (addKind.value === 'manual') return void submitManual()
+  if (addKind.value === 'import') return void submitImport()
+  if (addKind.value === 'scan') return void submitScan()
+  if (addKind.value === 'phone') return void onVerifyPhone()
+  if (addKind.value === 'authorize') return void onBeginAuth()
+}
+
+/* ---------------- 手动添加 ---------------- */
+const manualName = ref('')
+const manualJson = ref('')
+const manualBusy = ref(false)
+
+async function submitManual(): Promise<void> {
+  const text = manualJson.value.trim()
+  if (!text) {
+    toast.error('请粘贴凭证 JSON')
+    return
+  }
+  manualBusy.value = true
+  try {
+    const result = await addAccountManually({ name: manualName.value.trim(), auth_json: text })
+    toast.success(addResultText(result, platformName.value))
+    addOpen.value = false
+    await load()
+  } catch (error) {
+    toast.error(failureText('添加账号', error))
+  } finally {
+    manualBusy.value = false
+  }
+}
+
+/* ---------------- 导入 ---------------- */
+const importText = ref('')
+const importVerify = ref(true)
+const importBusy = ref(false)
+const importSelected = ref<number[]>([])
+const importPreview = computed(() => parseImportText(importText.value))
+const importRows = computed(() => importPreview.value.rows)
+const importMode = computed(() => importModeOf(platformSpec.value))
+
+watch(importRows, (rows) => {
+  importSelected.value = rows.filter((row) => row.selected).map((row) => row.index)
+})
+
+function toggleImportRow(index: number, checked: boolean): void {
+  const next = new Set(importSelected.value)
+  if (checked) next.add(index)
+  else next.delete(index)
+  importSelected.value = [...next]
+}
+
+async function submitImport(): Promise<void> {
+  const rows = importRows.value.filter((row) => row.valid && importSelected.value.includes(row.index))
+  if (!rows.length) {
+    toast.error('没有可导入的有效记录')
+    return
+  }
+  importBusy.value = true
+  try {
+    const snapshot = await importAccountsAsync({
+      storage: importStorageOf(platformSpec.value),
+      items: importMode.value === 'items' ? rows.map((row) => ({ name: row.name, auth_json: row.authJson })) : [],
+      text: importMode.value === 'text' ? importText.value : '',
+      verify: importVerify.value,
+    })
+    addOpen.value = false
+    startJob(snapshot as unknown as AccountJobSnapshot)
+  } catch (error) {
+    toast.error(failureText('导入账号', error))
+  } finally {
+    importBusy.value = false
+  }
+}
+
+/* ---------------- 扫描本机 ---------------- */
+const scanLoading = ref(false)
+const scanPayload = ref<ScanLocalPayload | null>(null)
+const scanRows = ref<ScanPreviewRow[]>([])
+const scanSelected = ref<string[]>([])
+const scanError = ref('')
+const scanBusy = ref(false)
+
+async function loadScan(): Promise<void> {
+  scanLoading.value = true
+  scanError.value = ''
+  try {
+    const payload = await scanLocalAccounts()
+    scanPayload.value = payload
+    scanRows.value = scanPreviewRows(payload)
+    scanSelected.value = scanRows.value.filter((row) => row.selected).map((row) => row.file)
+  } catch (error) {
+    scanError.value = failureText('扫描本机', error)
+    toast.error(scanError.value)
+  } finally {
+    scanLoading.value = false
+  }
+}
+
+const scanSummaryText = computed(() => scanSummary(scanPayload.value, scanRows.value))
+
+function toggleScanRow(file: string, checked: boolean): void {
+  const next = new Set(scanSelected.value)
+  if (checked) next.add(file)
+  else next.delete(file)
+  scanSelected.value = [...next]
+}
+
+async function submitScan(): Promise<void> {
+  if (!scanSelected.value.length) {
+    toast.error('请先勾选要导入的账号')
+    return
+  }
+  scanBusy.value = true
+  try {
+    const result = await importLocalAccounts(scanSelected.value)
+    toast.success('已导入：' + importLocalText(result))
+    addOpen.value = false
+    await load()
+  } catch (error) {
+    toast.error(failureText('导入本机账号', error))
+  } finally {
+    scanBusy.value = false
+  }
+}
+
+/* ---------------- 手机号登录 ---------------- */
+const phoneCountry = ref('+86')
+const phoneNumber = ref('')
+const phoneCode = ref('')
+const phonePassword = ref('')
+const phoneName = ref('')
+const phoneSession = ref<Record<string, unknown>>({})
+const phoneSending = ref(false)
+const phoneBusy = ref(false)
+const phoneCountdown = ref(0)
+const phoneErrors = ref<Record<string, string>>({})
+const phoneNeedsPassword = ref(false)
+let countdownTimer: ReturnType<typeof setInterval> | null = null
+
+function stopCountdown(): void {
+  if (countdownTimer) {
+    clearInterval(countdownTimer)
+    countdownTimer = null
+  }
+}
+
+function startCountdown(): void {
+  stopCountdown()
+  phoneCountdown.value = 60
+  countdownTimer = setInterval(() => {
+    if (phoneCountdown.value <= 1) {
+      phoneCountdown.value = 0
+      stopCountdown()
+      return
+    }
+    phoneCountdown.value -= 1
+  }, 1000)
+}
+
+function resetPhone(): void {
+  stopCountdown()
+  phoneNumber.value = ''
+  phoneCode.value = ''
+  phonePassword.value = ''
+  phoneName.value = ''
+  phoneSession.value = {}
+  phoneErrors.value = {}
+  phoneCountdown.value = 0
+  phoneNeedsPassword.value = false
+}
+
+function phoneForm(): PhoneForm {
+  return {
+    country: phoneCountry.value,
+    phone: phoneNumber.value,
+    code: phoneCode.value,
+    password: phonePassword.value,
+    name: phoneName.value,
+  }
+}
+
+async function onSendCode(): Promise<void> {
+  const form = phoneForm()
+  const errors = validatePhoneForm({ ...form, code: 'pending' }, false)
+  delete errors.code
+  phoneErrors.value = errors
+  if (Object.keys(errors).length) return
+  phoneSending.value = true
+  try {
+    if (!Object.keys(phoneSession.value).length) {
+      phoneSession.value = await preparePhoneFlow(platformSpec.value, form)
+    }
+    const result = await sendPhoneCode(platformSpec.value, form, phoneSession.value)
+    phoneSession.value = { ...phoneSession.value, ...result }
+    startCountdown()
+    toast.success('验证码已发送到 ' + maskPhone(form.phone))
+  } catch (error) {
+    toast.error(failureText('发送验证码', error))
+  } finally {
+    phoneSending.value = false
+  }
+}
+
+async function onVerifyPhone(): Promise<void> {
+  const form = phoneForm()
+  const errors = validatePhoneForm(form, phoneNeedsPassword.value)
+  phoneErrors.value = errors
+  if (Object.keys(errors).length) return
+  phoneBusy.value = true
+  try {
+    const result = await verifyPhoneCode(platformSpec.value, form, phoneSession.value)
+    if (result.need_password || result.needs_password) {
+      phoneNeedsPassword.value = true
+      toast.info('该手机号是新账号，请设置密码后再提交')
+      return
+    }
+    const name = typeof result.name === 'string' ? result.name : ''
+    toast.success('已登录并添加账号' + (name ? '：' + name : ''))
+    addOpen.value = false
+    resetPhone()
+    await load()
+  } catch (error) {
+    toast.error(failureText('手机号登录', error))
+  } finally {
+    phoneBusy.value = false
+  }
+}
+
+/* ---------------- 浏览器授权 ---------------- */
+const authView = ref<BrowserAuthView>({ state: 'idle', url: '', accountId: 0, message: '' })
+const authBusy = ref(false)
+const authTicks = ref(0)
+let authTimer: ReturnType<typeof setInterval> | null = null
+
+function stopAuthPoll(): void {
+  if (authTimer) {
+    clearInterval(authTimer)
+    authTimer = null
+  }
+}
+
+function resetAuth(): void {
+  stopAuthPoll()
+  authTicks.value = 0
+  authView.value = { state: 'idle', url: '', accountId: 0, message: '' }
+}
+
+async function onBeginAuth(): Promise<void> {
+  authBusy.value = true
+  try {
+    const payload = await beginBrowserAuth(platformSpec.value)
+    const view = authStateOf(payload)
+    authView.value = view
+    if (view.url) {
+      try {
+        window.open(view.url, '_blank', 'noopener,noreferrer')
+      } catch {
+        /* 弹窗被拦就只显示链接 */
+      }
+    }
+    startAuthPoll()
+  } catch (error) {
+    toast.error(failureText('发起授权', error))
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function pollAuthOnce(): Promise<void> {
+  try {
+    const payload = await pollBrowserAuth(platformSpec.value)
+    const view = authStateOf(payload)
+    authView.value = view
+    if (view.state === 'authorized') {
+      stopAuthPoll()
+      toast.success('授权成功，账号已入池')
+      addOpen.value = false
+      resetAuth()
+      await load()
+    } else if (view.state === 'failed') {
+      stopAuthPoll()
+      toast.error('授权失败：' + (view.message || '未知原因'))
+    }
+  } catch (error) {
+    authTicks.value += 1
+    if (authTicks.value >= 3) {
+      stopAuthPoll()
+      toast.error(failureText('轮询授权状态', error))
+    }
+  }
+}
+
+function startAuthPoll(): void {
+  stopAuthPoll()
+  authTicks.value = 0
+  authTimer = setInterval(() => {
+    if (authTicks.value >= 150) {
+      stopAuthPoll()
+      return
+    }
+    void pollAuthOnce()
+  }, 2000)
+}
+
+async function copyAuthUrl(): Promise<void> {
+  if (!authView.value.url) return
+  const ok = await copyText(authView.value.url)
+  if (ok) toast.success('已复制授权地址')
+  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+}
+
+const authStep = computed(() => authStepIndex(authView.value))
 
 async function exportFiltered(): Promise<void> {
   const rows = filteredRows.value
@@ -897,9 +1294,26 @@ async function exportFiltered(): Promise<void> {
 let offPlatform: (() => void) | null = null
 let lastSelector = platformStore.selector
 
+let offAddCommand: (() => void) | null = null
+let offImportCommand: (() => void) | null = null
+
 onMounted(() => {
   lastSelector = platformStore.selector
   void load()
+  offAddCommand = registerCommand({
+    id: 'accounts.add',
+    title: '添加账号',
+    hint: '账号池',
+    keywords: '新增 账号 登录 凭证',
+    run: () => openAddDrawer('manual'),
+  })
+  offImportCommand = registerCommand({
+    id: 'accounts.import',
+    title: '导入账号',
+    hint: '账号池',
+    keywords: '批量 导入 凭证 备份',
+    run: () => openAddDrawer('import'),
+  })
   offPlatform = platformStore.onChange((detail) => {
     if (detail.selector === lastSelector) return
     lastSelector = detail.selector
@@ -909,6 +1323,12 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  offAddCommand?.()
+  offAddCommand = null
+  offImportCommand?.()
+  offImportCommand = null
+  stopAuthPoll()
+  stopCountdown()
   offPlatform?.()
   offPlatform = null
   controller?.abort()
@@ -926,8 +1346,15 @@ watch(statusTab, () => {
   <div class="acc-page">
     <PageHeader title="账号池" :help="HELP_TEXT">
       <template #actions>
-        <Btn variant="default" :icon="Upload" @click="shellNotice('导入账号')">导入</Btn>
-        <Btn variant="quiet" :icon="ScanLine" @click="shellNotice('扫描本机')">扫描本机</Btn>
+        <Btn variant="default" :icon="Upload" @click="openAddDrawer('import')">导入</Btn>
+        <Btn
+          v-if="methodEnabled(platformSpec, 'scan')"
+          variant="quiet"
+          :icon="ScanLine"
+          @click="openAddDrawer('scan')"
+        >
+          扫描本机
+        </Btn>
         <Btn variant="quiet" :icon="Download" @click="exportFiltered">导出</Btn>
         <n-dropdown
           :options="addOptions"
@@ -1059,7 +1486,7 @@ watch(statusTab, () => {
               <Empty :description="hasFilters ? '没有符合筛选的账号。' : '该平台还没有账号。先导入或添加账号。'">
                 <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
                 <template v-else>
-                  <Btn variant="default" size="sm" @click="shellNotice('导入账号')">导入账号</Btn>
+                  <Btn variant="default" size="sm" @click="openAddDrawer('import')">导入账号</Btn>
                   <Btn variant="quiet" size="sm" @click="load()">刷新</Btn>
                 </template>
               </Empty>
@@ -1149,6 +1576,151 @@ watch(statusTab, () => {
         </li>
       </ul>
       <p v-else class="acc-hint">任务没有返回逐条明细。</p>
+    </FormDrawer>
+
+    <!-- S26 添加账号：一个抽屉按方式切换内容（能力声明决定可选项） -->
+    <FormDrawer
+      v-model:show="addOpen"
+      :title="addTitle"
+      size="lg"
+      :submit-text="addSubmitText"
+      :submit-loading="manualBusy || importBusy || scanBusy || phoneBusy || authBusy"
+      :hide-footer="addKind === 'authorize'"
+      @submit="submitAdd"
+    >
+      <template v-if="addKind === 'manual'">
+        <FormField label="名称" hint="留空则自动取真实昵称 / uid。">
+          <n-input v-model:value="manualName" placeholder="例如：主号" maxlength="120" clearable />
+        </FormField>
+        <FormField label="凭证 JSON" required :hint="manualHint(platformSpec)">
+          <n-input
+            v-model:value="manualJson"
+            type="textarea"
+            :rows="10"
+            class="acc-json"
+            placeholder='粘贴授权后的 JSON，例如 {"uid":"...","auth":{...}}'
+          />
+        </FormField>
+      </template>
+
+      <template v-else-if="addKind === 'import'">
+        <FormField
+          label="粘贴凭证"
+          required
+          :hint="importMode === 'items'
+            ? '每行一个 JSON（或一个 JSON 数组）；每项可以是凭证本身或 {name, auth_json}。'
+            : '该平台的备份形态各不相同：直接粘贴导出文件原文（JSONL / JSON 数组）。'"
+        >
+          <n-input
+            v-model:value="importText"
+            type="textarea"
+            :rows="8"
+            class="acc-json"
+            placeholder='{"uid":"...","auth":{...}}'
+          />
+        </FormField>
+        <p class="acc-hint">
+          解析：有效 {{ importPreview.valid }} 条<template v-if="importPreview.invalid"> · 无法解析 {{ importPreview.invalid }} 条</template>
+        </p>
+        <ul v-if="importRows.length" class="acc-scan">
+          <li v-for="row in importRows" :key="row.index" class="acc-scan__row">
+            <n-checkbox
+              :checked="importSelected.includes(row.index)"
+              :disabled="!row.valid"
+              @update:checked="(checked: boolean) => toggleImportRow(row.index, checked)"
+            />
+            <span class="acc-scan__name">{{ row.name || row.uid || ('第 ' + row.index + ' 条') }}</span>
+            <span class="acc-muted">{{ row.valid ? (row.uid ? 'uid ' + row.uid : '结构有效') : row.reason }}</span>
+          </li>
+        </ul>
+        <n-checkbox v-model:checked="importVerify">
+          导入时向上游验证凭证（关闭只做结构校验，速度更快但无法识别伪造签名）
+        </n-checkbox>
+      </template>
+
+      <template v-else-if="addKind === 'scan'">
+        <p class="acc-hint">{{ scanLoading ? '正在扫描客户端登录目录…' : scanSummaryText }}</p>
+        <ErrorBlock v-if="scanError" :title="scanError" :retry="false" compact />
+        <ul v-if="scanRows.length" class="acc-scan">
+          <li v-for="row in scanRows" :key="row.file" class="acc-scan__row">
+            <n-checkbox
+              :checked="scanSelected.includes(row.file)"
+              :disabled="Boolean(row.error) || row.inPool"
+              @update:checked="(checked: boolean) => toggleScanRow(row.file, checked)"
+            />
+            <span class="acc-scan__name">{{ row.name || row.uid || row.file }}</span>
+            <span class="acc-muted">
+              {{ row.error ? row.error : row.inPool ? '已在池子里' : row.active ? '当前登录' : '' }}
+              <template v-if="row.expires"> · 到期 {{ row.expires }}</template>
+            </span>
+          </li>
+        </ul>
+        <Btn variant="quiet" size="sm" :loading="scanLoading" @click="loadScan()">重新扫描</Btn>
+        <p class="acc-hint">token 不会下发到浏览器：勾选后由服务端直接读本机文件入库。</p>
+      </template>
+
+      <template v-else-if="addKind === 'phone'">
+        <div class="acc-phone">
+          <n-select v-model:value="phoneCountry" :options="COUNTRY_CODES" class="acc-phone__country" />
+          <n-input v-model:value="phoneNumber" placeholder="手机号" maxlength="20" />
+        </div>
+        <p v-if="phoneErrors.phone" class="acc-error">{{ phoneErrors.phone }}</p>
+        <div class="acc-phone">
+          <n-input v-model:value="phoneCode" placeholder="验证码" maxlength="8" />
+          <Btn
+            variant="default"
+            :loading="phoneSending"
+            :disabled="phoneCountdown > 0 || phoneSending"
+            @click="onSendCode"
+          >
+            {{ phoneCountdown > 0 ? phoneCountdown + ' 秒后重发' : '获取验证码' }}
+          </Btn>
+        </div>
+        <p v-if="phoneErrors.code" class="acc-error">{{ phoneErrors.code }}</p>
+        <FormField
+          v-if="phoneNeedsPassword"
+          label="设置密码"
+          required
+          :error="phoneErrors.password"
+          hint="该手机号是新账号，上游要求先设置密码。"
+        >
+          <n-input v-model:value="phonePassword" type="password" show-password-on="click" />
+        </FormField>
+        <p class="acc-hint">
+          验证码发到 {{ maskPhone(phoneNumber) || '手机号' }}；成功后会直接入池并按平台规则做登录后自动化。
+        </p>
+      </template>
+
+      <template v-else>
+        <ol class="acc-steps">
+          <li
+            v-for="(step, index) in AUTH_STEPS"
+            :key="step"
+            :class="{ 'is-done': index < authStep, 'is-active': index === authStep }"
+          >
+            <span class="acc-steps__index">{{ index + 1 }}</span>
+            <span>{{ step }}</span>
+          </li>
+        </ol>
+        <p class="acc-hint">
+          当前状态：{{
+            authView.state === 'authorized'
+              ? '已授权'
+              : authView.state === 'failed'
+                ? '授权失败'
+                : authView.state === 'idle'
+                  ? '尚未发起'
+                  : '等待确认'
+          }}
+          <template v-if="authView.message"> · {{ authView.message }}</template>
+        </p>
+        <p v-if="authView.url" class="acc-hint acc-auth-url">
+          <code class="mono">{{ authView.url }}</code>
+          <Btn variant="quiet" size="sm" @click="copyAuthUrl()">复制</Btn>
+          <Btn variant="quiet" size="sm" @click="pollAuthOnce()">立即检查</Btn>
+        </p>
+        <p class="acc-hint">授权地址会在新窗口打开；每 2 秒自动检查一次，成功后自动入池并关闭本抽屉。</p>
+      </template>
     </FormDrawer>
 
     <JobProgress
@@ -1356,5 +1928,91 @@ watch(statusTab, () => {
     flex-wrap: wrap;
     padding: var(--sp-2) var(--sp-4);
   }
+}
+
+.acc-json :deep(textarea) {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.acc-scan {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-1);
+  max-height: 260px;
+  overflow: auto;
+}
+.acc-scan__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-small);
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.acc-scan__name {
+  color: var(--fg);
+  min-width: 120px;
+}
+.acc-phone {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.acc-phone__country {
+  width: 168px;
+  flex: none;
+}
+.acc-error {
+  font-size: var(--fs-small);
+  color: var(--danger);
+}
+.acc-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+.acc-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+}
+.acc-steps__index {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-tiny);
+  color: var(--fg-muted);
+  flex: none;
+}
+.acc-steps li.is-active {
+  color: var(--fg);
+}
+.acc-steps li.is-active .acc-steps__index {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.acc-steps li.is-done {
+  color: var(--ok);
+}
+.acc-steps li.is-done .acc-steps__index {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.acc-auth-url {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  word-break: break-all;
 }
 </style>
