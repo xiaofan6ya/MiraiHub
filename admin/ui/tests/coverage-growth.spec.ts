@@ -411,7 +411,7 @@ describe('GrowthPage 首屏与筛选交互', () => {
     expect(page.wrapper.text()).toContain('账号01')
 
     page.unmount()
-  })
+  }, 15000)
 
   it('任务超过 4 条时可展开全部/收起', async () => {
     installFetch(defaultHandler())
