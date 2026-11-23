@@ -14,7 +14,7 @@
  */
 import { computed, effectScope, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NDropdown, NInput, NSkeleton, type DropdownOption } from 'naive-ui'
+import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
 import {
   Download,
   MoreHorizontal,

@@ -160,7 +160,7 @@ export function fmtTime(value: unknown): string {
   const date = toDate(value)
   if (!date) return String(value).trim().replace('T', ' ')
   const p = beijingParts(date)
-  const now = beijingParts(new Date(Date.now() + BEIJING_OFFSET_MS))
+  const now = beijingParts(new Date())
   if (p.y === now.y && p.mo === now.mo && p.d === now.d) {
     return pad2(p.h) + ':' + pad2(p.mi) + ':' + pad2(p.s)
   }
@@ -202,7 +202,7 @@ export function fmtRelative(value: unknown, now = Date.now()): string {
   if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前'
   if (diff < DAY_MS) return Math.floor(diff / 3600000) + ' 小时前'
   const p = beijingParts(date)
-  const q = beijingParts(new Date(now + BEIJING_OFFSET_MS))
+  const q = beijingParts(new Date(now))
   const dateDay = Date.UTC(p.y, p.mo - 1, p.d)
   const nowDay = Date.UTC(q.y, q.mo - 1, q.d)
   if (diff > 0 && nowDay - dateDay === DAY_MS) return '昨天'

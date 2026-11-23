@@ -14,7 +14,7 @@
  */
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { NInput, NInputNumber, NSkeleton, NSwitch } from 'naive-ui'
+import { NInput, NInputNumber, NSelect, NSkeleton, NSwitch } from 'naive-ui'
 import { FileSearch, FolderOpen, PackageOpen, RefreshCw, ScanSearch, Trash2 } from 'lucide-vue-next'
 import SettingsLayout from '@/layout/SettingsLayout.vue'
 import SettingsCard from '@/layout/SettingsCard.vue'

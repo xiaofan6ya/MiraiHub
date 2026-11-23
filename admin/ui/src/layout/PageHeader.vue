@@ -112,7 +112,7 @@ function go(key: PageKey): void {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--fg-muted);
+  color: var(--fg-2);
   font-size: var(--fs-body);
   line-height: var(--lh-body);
   cursor: pointer;
