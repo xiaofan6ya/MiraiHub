@@ -90,7 +90,7 @@ watch(open, (value) => {
         class="picker"
         :aria-expanded="open ? 'true' : 'false'"
         aria-haspopup="listbox"
-        aria-label="切换平台上下文"
+        :aria-label="'切换平台上下文：' + currentLabel"
       >
         <PlatformLogo :id="currentSpec?.icon || currentId" :size="20" />
         <span class="picker-label">{{ currentLabel }}</span>

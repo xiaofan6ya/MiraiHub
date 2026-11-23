@@ -434,7 +434,7 @@ watch(days, () => {
 .ov-status__right {
   margin-left: auto;
   font-size: var(--fs-small);
-  color: var(--fg-faint);
+  color: var(--fg-muted);
 }
 
 /* ---------- 告警横幅 ---------- */
