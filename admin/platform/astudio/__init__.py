@@ -87,7 +87,8 @@ def install() -> None:
             },
             extra={
                 "task_runners": list(_task_runners().keys()),
-                "actions": ["scan", "import", "export",
+                # begin-auth = 授权登录引导：打开官网 → 桌面端登录 → 自动导入
+                "actions": ["begin-auth", "scan", "import", "export",
                             "refresh-quota", "checkin"],
             },
         ))

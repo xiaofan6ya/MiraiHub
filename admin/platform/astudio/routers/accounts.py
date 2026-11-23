@@ -225,3 +225,34 @@ def usage(limit: int = 50, _: bool = Depends(require_admin),
 def overview(_: bool = Depends(require_admin), db=Depends(get_db)):
     from admin.platform.astudio.platform_gateway import AStudioGateway
     return {"cards": AStudioGateway().overview_cards(db)}
+
+
+# ---------------------------------------------------------------------------
+# 授权登录（引导本机桌面端登录，登录完成自动导入）
+# ---------------------------------------------------------------------------
+class AuthIdIn(BaseModel):
+    auth_id: str = ""
+
+
+@router.post("/auth/begin")
+def auth_begin(_: bool = Depends(require_admin)):
+    from admin.platform.astudio.services import webauth
+
+    return {"ok": True, **webauth.begin()}
+
+
+@router.get("/auth/poll")
+def auth_poll(auth_id: str = "", _: bool = Depends(require_admin),
+              db: Session = Depends(get_db)):
+    from admin.platform.astudio.services import webauth
+
+    if not (auth_id or "").strip():
+        raise HTTPException(400, detail="缺少 auth_id")
+    return webauth.poll(db, auth_id.strip())
+
+
+@router.post("/auth/cancel")
+def auth_cancel(body: AuthIdIn, _: bool = Depends(require_admin)):
+    from admin.platform.astudio.services import webauth
+
+    return webauth.cancel((body.auth_id or "").strip())

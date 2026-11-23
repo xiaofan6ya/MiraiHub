@@ -1033,3 +1033,59 @@ def test_unknown_model_rejected():
             astudio_gateway.dispatch(req, "/v1/chat/completions"))
         assert resp.status_code == 400
         assert "model_not_found" in resp.body.decode("utf-8", "replace")
+
+
+# ---------------------------------------------------------------------------
+# 授权登录（引导本机登录 + 自动导入；离线）
+# ---------------------------------------------------------------------------
+def test_auth_begin_reports_installed(monkeypatch):
+    from admin.platform.astudio.services import webauth
+
+    monkeypatch.setattr(webauth, "_snapshot", lambda: {"/x/userdata/astron-session.json": (1, 2)})
+    begun = webauth.begin()
+    assert begun["installed"] is True
+    assert begun["url"].startswith("https://")
+    assert begun["expires_in"] == webauth.TTL_S
+
+
+def test_auth_begin_when_not_installed(monkeypatch):
+    from admin.platform.astudio.services import webauth
+
+    monkeypatch.setattr(webauth, "_snapshot", lambda: {})
+    begun = webauth.begin()
+    assert begun["installed"] is False
+    assert "装" in begun["hint"]
+
+
+def test_auth_poll_imports_changed_file(monkeypatch):
+    from admin.platform.astudio.services import webauth
+
+    base = {"/p/userdata/astron-session.json": (100, 10)}
+    monkeypatch.setattr(webauth, "_snapshot", lambda: base)
+    begun = webauth.begin()
+
+    # 没变化 → 还是 pending
+    assert webauth.poll(None, begun["auth_id"])["status"] == "pending"
+
+    # 文件变了 → 读记录 + 入库 → done
+    changed = {"/p/userdata/astron-session.json": (200, 12)}
+    monkeypatch.setattr(webauth, "_snapshot", lambda: changed)
+    monkeypatch.setattr(webauth.paths, "read_session", lambda path: {"key": "k", "uid": "u1"})
+
+    class FakeAccount:
+        id = 11
+        name = "u1"
+
+    calls = []
+    monkeypatch.setattr(webauth.astudio_accounts, "import_record",
+                        lambda db, record: (calls.append(record), (FakeAccount(), True))[1])
+    state = webauth.poll(None, begun["auth_id"])
+    assert state["status"] == "done" and state["account_id"] == 11
+    assert calls and calls[0]["key"] == "k"
+
+
+def test_auth_poll_unknown_session():
+    from admin.platform.astudio.services import webauth
+
+    assert webauth.poll(None, "nope")["status"] == "expired"
+    assert webauth.cancel("nope")["status"] == "expired"

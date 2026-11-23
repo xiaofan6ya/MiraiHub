@@ -694,8 +694,11 @@ async def messages(request: Request):
                                  entry="anthropic")
         return await _json_anthropic_native(body, request)
     if body.get("stream"):
-        return await _stream(request, bridge.anthropic_to_openai(body),
-                             upstream="chat", entry="anthropic")
+        # 协议转换是**普通函数**，别写成 `await bridge.anthropic_to_openai(...)`：
+        # 那会把 dict 当协程去 await，运行期直接 TypeError。先转好再进流式。
+        converted = bridge.anthropic_to_openai(body)
+        return await _stream(request, converted, upstream="chat",
+                             entry="anthropic")
     return await _json_anthropic_entry_via_chat(body, request)
 
 
