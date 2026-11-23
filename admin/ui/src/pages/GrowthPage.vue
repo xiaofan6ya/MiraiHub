@@ -12,7 +12,7 @@
  *   2. 「可做」「可领」只看后端字段：actionable / accept_status / summary.claimable。
  *   3. 任务清单接口单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，失败的卡单独报错。
  */
-import { computed, effectScope, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, effectScope, markRaw, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
 import { MoreHorizontal, RefreshCw, Sparkles, Trophy } from 'lucide-vue-next'
@@ -298,7 +298,9 @@ function trackJob(id: string, name: string): void {
   )
   if (!handle) return
   jobScopes.push(scope)
-  jobHandles.value.push({ id, name, handle: handle as unknown as TrackedJobHandle })
+  // useJob 返回的是 ref 句柄；不 markRaw 会被 ref 深响应式二次解包，
+  // jobItems 再读 handle.snapshot.value 就会 TypeError（真实点「做任务」时崩）。
+  jobHandles.value.push({ id, name, handle: markRaw(handle) as unknown as TrackedJobHandle })
 }
 
 const jobItems = computed<JobItem[]>(() =>
