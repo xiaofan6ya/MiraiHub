@@ -166,3 +166,45 @@ def test_legacy_admin_behaviour_unchanged(client, dist):
     assert anon.headers["content-type"].startswith("text/html")
     assert client.get("/admin/assets/console-app.js",
                       follow_redirects=False).status_code == 404
+def test_console_v2_logged_in_redirects(client, dist, monkeypatch, logged_in):
+    """MIRAIHUB_CONSOLE=v2：已登录访问 /admin → 302 到 /admin/v2/。"""
+    monkeypatch.setenv("MIRAIHUB_CONSOLE", "v2")
+    r = client.get("/admin", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/admin/v2/"
+
+
+def test_console_v2_anonymous_serves_new_login(client, dist, monkeypatch):
+    """未登录且新版已构建 → 发 admin/ui/dist/login.html，不再发旧登录壳。"""
+    monkeypatch.setenv("MIRAIHUB_CONSOLE", "v2")
+    (dist / "login.html").write_text("<!doctype html><title>v2-login</title>", encoding="utf-8")
+    r = client.get("/admin", follow_redirects=False)
+    assert r.status_code == 200
+    assert "v2-login" in r.text
+    assert r.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+    assert "content-security-policy" in r.headers
+
+
+def test_console_ui_v1_forces_legacy(client, dist, monkeypatch, logged_in):
+    """?ui=v1 在 v2 模式下也必须回旧版：开关坏了要能一条链接逃生。"""
+    monkeypatch.setenv("MIRAIHUB_CONSOLE", "v2")
+    r = client.get("/admin?ui=v1", follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "/admin/assets/" in r.text
+
+
+def test_console_v2_without_build_falls_back_to_legacy(client, tmp_path, monkeypatch, logged_in):
+    """写对了 v2 但忘了构建/打包漏了 dist：回退旧版，后台不能 404。"""
+    monkeypatch.setenv("MIRAIHUB_CONSOLE", "v2")
+    monkeypatch.setattr(server, "UI_DIST", tmp_path / "never-built")
+    r = client.get("/admin", follow_redirects=False)
+    assert r.status_code == 200
+    assert "/admin/assets/" in r.text
+
+
+def test_console_invalid_mode_falls_back_to_v1(client, dist, monkeypatch):
+    monkeypatch.setenv("MIRAIHUB_CONSOLE", "v3")
+    r = client.get("/admin", follow_redirects=False)
+    assert r.status_code == 200
+    assert "v2-login" not in r.text

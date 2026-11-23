@@ -214,6 +214,12 @@ def prepare() -> None:
     (staging / "desktop/version.json").write_text(json.dumps(metadata), encoding="utf-8")
     shutil.copytree(ROOT / "admin/static", staging / "admin/static")
     shutil.copytree(ROOT / "admin/console", staging / "admin/console")
+    # 新版控制台只带构建产物（admin/ui/dist）；缺构建时明确告警，不静默产出一个没有 v2 的 APK。
+    ui_dist = ROOT / "admin/ui/dist"
+    if ui_dist.is_dir():
+        shutil.copytree(ui_dist, staging / "admin/ui/dist")
+    else:
+        print("WARNING: admin/ui/dist 不存在，APK 将只包含旧版控制台（先在 admin/ui 执行 npm run build）")
     shutil.copytree(ROOT / "admin/data", staging / "admin/data")
     # 平台自带的数据文件（如 trae/data/catalog_*.json）也要进包：
     # 上面的 rglob 只拷 *.py，这些 json 在真机/模拟器上一律缺文件，

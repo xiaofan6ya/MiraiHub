@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NTooltip } from 'naive-ui'
-import { ChevronsLeft, ChevronsRight, LogOut, MonitorSmartphone } from 'lucide-vue-next'
+import { ChevronsLeft, ChevronsRight, LogOut, MonitorSmartphone, Undo2 } from 'lucide-vue-next'
 import { GROUPS, PAGES_BY_KEY, groupEntry, isPageKey, type GroupDef, type PageKey } from '@/router/pages'
 import { useShellBadges } from '@/platform/shellBadges'
 import { useAppInfo } from '@/platform/version'
@@ -139,6 +139,11 @@ function goMaintenance(): void {
         <span v-if="!isCollapsed">登录设备</span>
         <span v-else class="sr-only">登录设备</span>
       </button>
+      <a class="foot-item foot-link" href="/admin?ui=v1" title="切回旧版控制台">
+        <Undo2 :size="16" />
+        <span v-if="!isCollapsed">切回旧版</span>
+        <span v-else class="sr-only">切回旧版</span>
+      </a>
       <button
         type="button"
         class="foot-version"
@@ -360,6 +365,7 @@ function goMaintenance(): void {
 }
 
 .foot-item,
+.foot-link,
 .foot-version {
   display: flex;
   align-items: center;
@@ -373,16 +379,19 @@ function goMaintenance(): void {
   color: var(--fg-2);
   font-size: var(--fs-body);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .foot-item:hover,
+.foot-link:hover,
 .foot-version:hover {
   background: var(--surface-hover);
   color: var(--fg);
 }
 
 .side.collapsed .foot-item,
+.side.collapsed .foot-link,
 .side.collapsed .foot-version {
   justify-content: center;
   padding: 0;

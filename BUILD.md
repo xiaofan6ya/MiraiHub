@@ -89,3 +89,22 @@ git push origin main                                          # 凭据自动取�
 **token 不写进仓库任何文件**：仓库是 public，明文 fine-grained PAT 会被 GitHub secret scanning 直接吊销。要换机器就照上面四处重新落一次，别提交。
 
 公开公告位于 `docs/RELEASE_NOTES_版本号.md`。不要发布内部分析、协议研究、取证资料、私有配置、凭据、签名或构建日志。公开范围见 [迁移约定](docs/PUBLICATION.md)。
+
+
+## 新版控制台（admin/ui）
+
+新版管理后台是独立的 Vite + Vue 3 SPA，源码在 `admin/ui/`，构建产物在 `admin/ui/dist/`。
+
+```bash
+cd admin/ui
+npm ci
+npm run dev      # 开发，代理 /api 到 127.0.0.1:8790
+npm run typecheck
+npm run test
+npm run build    # 产物写入 dist/
+```
+
+- `admin/ui/dist/` 已提交进仓库：Docker / EXE / APK 打包不需要 Node，直接带 dist。
+- **修改前端后必须重新 `npm run build` 并提交 `admin/ui/dist`**，否则线上仍是旧产物。
+- 默认仍是旧版控制台（`MIRAIHUB_CONSOLE=v1`）。设为 `v2` 并重启后：已登录进入 `/admin/v2/`，未登录发新版登录页；`/admin?ui=v1` 可临时回退旧版。
+- 新版登录页是 Vite 多入口 `login.html` → `dist/login.html`；登录成功后跳 `/admin/v2/`。
