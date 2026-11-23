@@ -14,7 +14,7 @@
  */
 import { computed, effectScope, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NDropdown, NInput, NSkeleton, type DropdownOption } from 'naive-ui'
+import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
 import { MoreHorizontal, RefreshCw, Sparkles, Trophy } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {

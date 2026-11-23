@@ -232,7 +232,7 @@ async function copyApi(): Promise<void> {
   border: 1px solid var(--border);
   border-radius: var(--r-chip);
   background: var(--surface);
-  color: var(--fg-faint);
+  color: var(--fg-2);
   font-family: var(--font-sans);
   font-size: var(--fs-tiny);
   line-height: var(--lh-tiny);
