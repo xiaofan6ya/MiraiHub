@@ -12,7 +12,7 @@
  *   3. 卡片上的「今日请求 / 成功率 / TTFT / TPS」来自 /api/platform/speed（成功率为 0–100），
  *      「可用账号 / 剩余额度」来自 /api/accounts 快照（拿不到就只显示账号数，不猜）。
  */
-import { computed, effectScope, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, effectScope, h, markRaw, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
 import {
@@ -491,7 +491,8 @@ function trackJob(id: string, name: string): void {
   )
   if (!handle) return
   jobScopes.push(scope)
-  jobHandles.value.push({ id, name, handle: handle as unknown as TrackedJobHandle })
+  // useJob 返回 ref 句柄；不 markRaw 会被 ref 深响应式解包，jobItems 再读 .value 会崩。
+  jobHandles.value.push({ id, name, handle: markRaw(handle) as unknown as TrackedJobHandle })
 }
 
 const jobItems = computed<JobItem[]>(() =>
