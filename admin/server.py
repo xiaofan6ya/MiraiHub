@@ -1035,10 +1035,41 @@ def _admin_cookie_params(request: Request, max_age: int):
                 secure=https, path="/", max_age=max_age)
 
 
+def _console_mode(request: Request) -> str:
+    """本次请求使用哪套控制台：v1（旧）或 v2（新版）。
+
+    优先级：`?ui=v1` 显式回退 > `MIRAIHUB_CONSOLE` 环境变量 > 默认 v1。
+    非法值一律按 v1 处理，避免写错一个字符就把后台切没。
+    """
+    forced = (request.query_params.get("ui") or "").strip().lower()
+    if forced == "v1":
+        return "v1"
+    mode = (os.environ.get("MIRAIHUB_CONSOLE") or "v1").strip().lower()
+    return mode if mode in ("v1", "v2") else "v1"
+
+
 @app.get("/admin")
 @app.get("/admin/")
 def admin_index(request: Request):
-    """登录门禁：有会话 Cookie → 完整控制台；否则只给中性登录壳。"""
+    """登录门禁：有会话 Cookie → 完整控制台；否则只给中性登录壳。
+
+    S30 切换：`MIRAIHUB_CONSOLE=v2` 且 `admin/ui/dist/index.html` 存在时，
+    已登录 → 302 到 /admin/v2/；未登录 → 发新版 login.html（缺失则回退旧登录页）。
+    `?ui=v1` 可临时回退旧版；默认仍是 v1，行为与切换前一致。
+    """
+    mode = _console_mode(request)
+    ui_index = UI_DIST / "index.html"
+    if mode == "v2" and ui_index.is_file():
+        if _console_allowed(request):
+            return RedirectResponse(url="/admin/v2/", status_code=302,
+                                    headers={"Cache-Control": "no-store"})
+        ui_login = UI_DIST / "login.html"
+        if ui_login.is_file():
+            return FileResponse(ui_login, headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Content-Security-Policy": _ADMIN_CSP,
+            })
+        # 新版登录页缺失时继续走下面的旧登录页，绝不把后台切成 404。
     if _console_allowed(request):
         index = CONSOLE_DIR / "index.html"
         # 兼容旧打包布局（控制台仍在 static/ 的桌面/移动端产物）。
