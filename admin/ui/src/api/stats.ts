@@ -24,6 +24,19 @@
  */
 import { http } from './http'
 import { fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { t as defaultTranslate, type Translate } from '@/i18n'
+
+/**
+ * 文案取当前语言；页面把 useI18n().t 传进来时，computed 会随语言切换重算。
+ * 不传时用默认字典（中文），单测与其它页面无需关心 i18n。
+ */
+function tr(
+  translate: Translate | undefined,
+  key: Parameters<Translate>[0],
+  params?: Record<string, string | number>,
+): string {
+  return (translate ?? defaultTranslate)(key, params)
+}
 
 /* -------------------------------------------------------------------------- */
 /* /api/stats/dashboard                                                        */
@@ -286,47 +299,64 @@ export function bucketLabel(key: string): string {
 }
 
 /** StatStrip 的 5 格：请求 / 成功率 / Token 合计 / 积分 / 平均耗时（设计稿 P3）。 */
-export function toSummaryItems(summary: StatsSummary | null | undefined): StatsStatItem[] {
+export function toSummaryItems(
+  summary: StatsSummary | null | undefined,
+  translate?: Translate,
+): StatsStatItem[] {
   if (!summary) {
     return [
-      { label: '请求数', value: '—' },
-      { label: '成功率', value: '—', tone: 'muted' },
-      { label: 'Token 合计', value: '—' },
-      { label: '积分消耗', value: '—' },
-      { label: '平均耗时', value: '—' },
+      { label: tr(translate, 'stats.summary.requests'), value: '—' },
+      { label: tr(translate, 'stats.summary.successRate'), value: '—', tone: 'muted' },
+      { label: tr(translate, 'stats.summary.tokens'), value: '—' },
+      { label: tr(translate, 'stats.summary.credits'), value: '—' },
+      { label: tr(translate, 'stats.summary.latency'), value: '—' },
     ]
   }
   const rate = summary.success_rate
   return [
     {
-      label: '请求数',
+      label: tr(translate, 'stats.summary.requests'),
       value: fmtInt(summary.requests),
-      foot: '成功 ' + fmtInt(summary.successes) + ' · 失败 ' + fmtInt(summary.failures),
-      help: '含失败请求；平均 RPM ' + fmtCompact(summary.rpm) + ' · 平均 TPM ' + fmtCompact(summary.tpm),
+      foot: tr(translate, 'stats.summary.requestsFoot', {
+        ok: fmtInt(summary.successes),
+        failed: fmtInt(summary.failures),
+      }),
+      help: tr(translate, 'stats.summary.requestsHelp', {
+        rpm: fmtCompact(summary.rpm),
+        tpm: fmtCompact(summary.tpm),
+      }),
     },
     {
-      label: '成功率',
+      label: tr(translate, 'stats.summary.successRate'),
       value: rate === null || rate === undefined ? '—' : fmtPct(rate, 1),
       tone: statToneOf(rate),
-      foot: '成功 ' + fmtInt(summary.successes) + ' 次',
+      foot: tr(translate, 'stats.summary.successFoot', { count: fmtInt(summary.successes) }),
     },
     {
-      label: 'Token 合计',
+      label: tr(translate, 'stats.summary.tokens'),
       value: fmtCompact(summary.total_tokens),
-      foot: '入 ' + fmtCompact(summary.prompt_tokens) + ' · 出 ' + fmtCompact(summary.completion_tokens),
+      foot: tr(translate, 'stats.summary.tokensFoot', {
+        input: fmtCompact(summary.prompt_tokens),
+        output: fmtCompact(summary.completion_tokens),
+      }),
     },
     {
-      label: '积分消耗',
+      label: tr(translate, 'stats.summary.credits'),
       value: fmtCredit(summary.credits),
       foot:
         summary.cache_hit_rate === null || summary.cache_hit_rate === undefined
-          ? '缓存命中率 —'
-          : '缓存命中 ' + fmtPct(summary.cache_hit_rate, 1),
+          ? tr(translate, 'stats.summary.cacheNone')
+          : tr(translate, 'stats.summary.cacheFoot', {
+              rate: fmtPct(summary.cache_hit_rate, 1),
+            }),
     },
     {
-      label: '平均耗时',
+      label: tr(translate, 'stats.summary.latency'),
       value: fmtDuration(summary.avg_latency_ms),
-      foot: '首字 ' + fmtDuration(summary.avg_ttfb_ms) + ' · ' + Number(summary.throughput_tps || 0).toFixed(1) + ' t/s',
+      foot: tr(translate, 'stats.summary.latencyFoot', {
+        ttfb: fmtDuration(summary.avg_ttfb_ms),
+        tps: Number(summary.throughput_tps || 0).toFixed(1),
+      }),
     },
   ]
 }
@@ -350,24 +380,30 @@ export interface RequestTrendData {
  * 后端没有按桶的成功/失败拆分（successes 只有窗口汇总），
  * 所以成功/失败只能放在 StatStrip 脚注里（实现对照里标注了这条差异）。
  */
-export function buildRequestTrend(payload: StatsDashboardPayload | null | undefined): RequestTrendData {
+export function buildRequestTrend(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): RequestTrendData {
   const trend = payload?.trend
   const buckets = Array.isArray(trend?.buckets) ? trend?.buckets ?? [] : []
   const total = Array.isArray(trend?.total_requests) ? (trend?.total_requests ?? []).map((n) => Number(n) || 0) : []
   const series: TrendSeriesData[] = (trend?.series ?? []).map((item) => ({
-    name: String(item.name || '未知模型'),
+    name: String(item.name || tr(translate, 'stats.trend.unknownModel')),
     values: Array.isArray(item.requests) ? item.requests.map((n) => Number(n) || 0) : [],
   }))
   return { buckets, labels: buckets.map(bucketLabel), series, total }
 }
 
 /** 请求趋势的 ECharts option（页面再套 applyLineDefaults）。 */
-export function requestTrendOption(payload: StatsDashboardPayload | null | undefined): Record<string, unknown> {
-  const data = buildRequestTrend(payload)
+export function requestTrendOption(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): Record<string, unknown> {
+  const data = buildRequestTrend(payload, translate)
   const series: Array<Record<string, unknown>> = []
   if (data.total.length) {
     series.push({
-      name: '全部请求',
+      name: tr(translate, 'stats.trend.all'),
       type: 'line',
       data: data.total,
       lineStyle: { width: 2.4 },
@@ -428,16 +464,22 @@ export function buildTokenTrend(usage: StatsUsagePayload | null | undefined): To
 }
 
 /** Token 趋势的 ECharts option（页面再套 applyBarDefaults）。 */
-export function tokenTrendOption(usage: StatsUsagePayload | null | undefined): Record<string, unknown> {
+export function tokenTrendOption(
+  usage: StatsUsagePayload | null | undefined,
+  translate?: Translate,
+): Record<string, unknown> {
   const data = buildTokenTrend(usage)
+  const input = tr(translate, 'stats.legend.input')
+  const output = tr(translate, 'stats.legend.output')
+  const cached = tr(translate, 'stats.legend.cached')
   return {
-    legend: { data: ['输入', '输出', '缓存命中'], top: 0 },
+    legend: { data: [input, output, cached], top: 0 },
     xAxis: { type: 'category', data: data.labels },
     yAxis: { type: 'value' },
     series: [
-      { name: '输入', type: 'bar', stack: 'tokens', data: data.prompt },
-      { name: '输出', type: 'bar', stack: 'tokens', data: data.output },
-      { name: '缓存命中', type: 'bar', stack: 'tokens', data: data.cached },
+      { name: input, type: 'bar', stack: 'tokens', data: data.prompt },
+      { name: output, type: 'bar', stack: 'tokens', data: data.output },
+      { name: cached, type: 'bar', stack: 'tokens', data: data.cached },
     ],
   }
 }
@@ -449,42 +491,60 @@ export interface StatsBarItem {
 }
 
 /** 平台排行：按请求数（dashboard.platforms 已按 requests DESC）。 */
-export function platformBarItems(payload: StatsDashboardPayload | null | undefined): StatsBarItem[] {
+export function platformBarItems(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): StatsBarItem[] {
   return (payload?.platforms ?? []).map((row) => ({
-    label: String(row.label || row.value || '未知平台'),
+    label: String(row.label || row.value || tr(translate, 'stats.bar.unknownPlatform')),
     value: Number(row.requests) || 0,
     tone: rateTone(row.success_rate),
   }))
 }
 
 /** 模型排行：用 ranking（含 top N 之外的模型，按 requests DESC）。 */
-export function modelBarItems(payload: StatsDashboardPayload | null | undefined): StatsBarItem[] {
+export function modelBarItems(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): StatsBarItem[] {
   const rows = payload?.ranking?.length ? payload.ranking : payload?.models ?? []
   return rows.map((row) => ({
-    label: String(row.label || row.model || '未知模型'),
+    label: String(row.label || row.model || tr(translate, 'stats.trend.unknownModel')),
     value: Number(row.requests) || 0,
     tone: rateTone(row.success_rate),
   }))
 }
 
 /** Key 排行：dashboard 没有 Key 维度，用 /api/stats/usage 的 by_key。 */
-export function keyBarItems(usage: StatsUsagePayload | null | undefined): StatsBarItem[] {
+export function keyBarItems(
+  usage: StatsUsagePayload | null | undefined,
+  translate?: Translate,
+): StatsBarItem[] {
   return (usage?.by_key ?? []).map((row) => ({
-    label: String(row.label || '未命名 Key'),
+    label: String(row.label || tr(translate, 'stats.bar.unnamedKey')),
     value: Number(row.requests) || 0,
     tone: 'brand' as StatsTone,
   }))
 }
 
 /** 卡片标题右侧的一句话（空数据时给「—」，不显示 0 冒充无数据）。 */
-export function trendFootnote(payload: StatsDashboardPayload | null | undefined): string {
+export function trendFootnote(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): string {
   const summary = payload?.summary
   if (!summary) return ''
-  return '成功 ' + fmtInt(summary.successes) + ' · 失败 ' + fmtInt(summary.failures)
+  return tr(translate, 'stats.note.successFail', {
+    ok: fmtInt(summary.successes),
+    failed: fmtInt(summary.failures),
+  })
 }
 
-export function cacheFootnote(usage: StatsUsagePayload | null | undefined): string {
+export function cacheFootnote(
+  usage: StatsUsagePayload | null | undefined,
+  translate?: Translate,
+): string {
   const data = buildTokenTrend(usage)
-  if (data.cacheHitRate === null) return '缓存命中 —'
-  return '缓存命中 ' + fmtPct(data.cacheHitRate, 1)
+  if (data.cacheHitRate === null) return tr(translate, 'stats.note.cacheNone')
+  return tr(translate, 'stats.note.cacheHit', { rate: fmtPct(data.cacheHitRate, 1) })
 }

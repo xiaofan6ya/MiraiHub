@@ -36,12 +36,10 @@ import {
 import { useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { fmtInt, fmtTime } from '@/utils/format'
-import { failureText } from '@/utils/error'
+import { errorMessage } from '@/utils/error'
 import { ApiError, isAbortError } from '@/api/http'
 import {
   STATS_DAYS,
-  STATS_DAYS_LABEL,
-  STATS_GRAIN_LABEL,
   buildRequestTrend,
   buildTokenTrend,
   cacheFootnote,
@@ -60,14 +58,11 @@ import {
   type StatsGranularity,
   type StatsUsagePayload,
 } from '@/api/stats'
+import { useI18n } from '@/i18n'
 
-/** 旧版面板副标题（原样保留，收进 ⓘ）。 */
-const HELP_TEXT =
-  '模型调用分析：窗口内的请求、积分、Token、成功率、延迟与吞吐。' +
-  '数据来自本地 usage_logs，聚合在 SQL 侧完成；成功率 = 成功请求 / 全部请求，' +
-  '积分与 Token 只统计成功请求，平均耗时也只取成功样本。' +
-  '时间范围是滚动窗口（近 24 小时 / 近 7 天 / 近 30 天），不是自然日；' +
-  '「今日（自然日）」口径在使用记录页，两处数字不同属正常。'
+const { t } = useI18n()
+/** 旧版面板副标题（原样保留，收进 ⓘ）；语种跟随 useI18n。 */
+const helpText = computed(() => t('page.stats.help'))
 
 const toast = useToast()
 const platformStore = usePlatformStore()
@@ -84,17 +79,20 @@ const granularity = computed(() => normalizeGranularity(table.state.filters.grai
  * days=1 是**滚动 24 小时**（后端 window.start = 当前 - 24h），不是自然日；
  * 页面上的按钮按真实口径写「近 24 小时」，与使用记录页的「今日（自然日）」区分。
  */
-const DAY_LABEL_OVERRIDES: Record<number, string> = { 1: '近 24 小时' }
+const dayOptions = computed<Array<SegmentedOption<string>>>(() =>
+  STATS_DAYS.map((value) => ({
+    label:
+      value === 1
+        ? t('page.stats.range.rolling24')
+        : t('page.stats.range.days', { days: value }),
+    value: String(value),
+  })),
+)
 
-const dayOptions: Array<SegmentedOption<string>> = STATS_DAYS.map((value) => ({
-  label: DAY_LABEL_OVERRIDES[value] ?? STATS_DAYS_LABEL[value],
-  value: String(value),
-}))
-
-const grainOptions: Array<SegmentedOption<string>> = [
-  { label: STATS_GRAIN_LABEL.hour, value: 'hour' },
-  { label: STATS_GRAIN_LABEL.day, value: 'day' },
-]
+const grainOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.stats.grain.hour'), value: 'hour' },
+  { label: t('page.stats.grain.day'), value: 'day' },
+])
 
 function setDays(value: string | number): void {
   const next = normalizeDays(value)
@@ -109,7 +107,7 @@ function setDays(value: string | number): void {
 function setGranularity(value: string | number): void {
   const next: StatsGranularity = value === 'day' ? 'day' : 'hour'
   if (next === 'hour' && days.value > 7) {
-    toast.warning('超过 7 天只支持按天聚合')
+    toast.warning(t('page.stats.grainFallback'))
     return
   }
   table.setFilter('grain', next)
@@ -141,7 +139,7 @@ function prettyDetail(detail: unknown): string {
 
 function errorOf(action: string, error: unknown): { message: string; detail: string } {
   const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-  return { message: failureText(action, error), detail }
+  return { message: t('page.stats.failure', { action, reason: errorMessage(error) }), detail }
 }
 
 async function load(): Promise<void> {
@@ -157,7 +155,7 @@ async function load(): Promise<void> {
       // 补充接口失败不拖垮整页（Token / Key 两张卡单独报错 + 重试）。
       getStatsUsage(query, current.signal).catch((error: unknown) => {
         if (isAbortError(error)) return null
-        usageError.value = errorOf('加载 Token / Key 明细', error)
+        usageError.value = errorOf(t('page.stats.action.loadTokens'), error)
         return null
       }),
     ])
@@ -168,9 +166,14 @@ async function load(): Promise<void> {
     loadedAt.value = new Date()
   } catch (error) {
     if (isAbortError(error)) return
-    loadError.value = errorOf('加载数据看板', error)
+    loadError.value = errorOf(t('page.stats.action.load'), error)
     // 已有数据时刷新失败：只提示，保留旧数据。
-    toast.error(failureText(dashboard.value ? '刷新数据看板' : '加载数据看板', error))
+    toast.error(
+      t('page.stats.failure', {
+        action: t(dashboard.value ? 'page.stats.action.refresh' : 'page.stats.action.load'),
+        reason: errorMessage(error),
+      }),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -183,18 +186,19 @@ async function load(): Promise<void> {
  * 展示数据
  * ------------------------------------------------------------------ */
 
-const summaryItems = computed(() => toSummaryItems(dashboard.value?.summary))
+const summaryItems = computed(() => toSummaryItems(dashboard.value?.summary, t))
 
-const requestTrend = computed(() => buildRequestTrend(dashboard.value))
-const requestNote = computed(() => trendFootnote(dashboard.value))
-const lineOption = computed(() => applyLineDefaults(requestTrendOption(dashboard.value)))
+const requestTrend = computed(() => buildRequestTrend(dashboard.value, t))
+const requestNote = computed(() => trendFootnote(dashboard.value, t))
+const lineOption = computed(() => applyLineDefaults(requestTrendOption(dashboard.value, t)))
 
 const tokenTrend = computed(() => buildTokenTrend(usage.value))
-const barOption = computed(() => applyBarDefaults(tokenTrendOption(usage.value)))
+const tokenNote = computed(() => cacheFootnote(usage.value, t))
+const barOption = computed(() => applyBarDefaults(tokenTrendOption(usage.value, t)))
 
-const platformItems = computed(() => platformBarItems(dashboard.value))
-const modelItems = computed(() => modelBarItems(dashboard.value))
-const keyItems = computed(() => keyBarItems(usage.value))
+const platformItems = computed(() => platformBarItems(dashboard.value, t))
+const modelItems = computed(() => modelBarItems(dashboard.value, t))
+const keyItems = computed(() => keyBarItems(usage.value, t))
 
 const hasRequestTrend = computed(
   () => requestTrend.value.total.length > 0 || requestTrend.value.series.length > 0,
@@ -205,20 +209,26 @@ const isEmptyWindow = computed(() => Number(dashboard.value?.summary?.requests ?
 
 const windowText = computed(() => {
   const window = dashboard.value?.window
-  if (!window) return '近 ' + days.value + ' 天'
-  return '窗口 ' + fmtTime(window.start) + ' → ' + fmtTime(window.end)
+  if (!window) return t('page.stats.windowGuess', { days: days.value })
+  return t('page.stats.window', { start: fmtTime(window.start), end: fmtTime(window.end) })
 })
 
 const updatedText = computed(() => (loadedAt.value ? fmtTime(loadedAt.value) : ''))
 
 const platformNote = computed(() =>
-  platformItems.value.length ? '共 ' + platformItems.value.length + ' 个平台 · 按请求数' : '无数据',
+  platformItems.value.length
+    ? t('page.stats.note.platforms', { count: platformItems.value.length })
+    : t('page.stats.note.none'),
 )
 const modelNote = computed(() =>
-  modelItems.value.length ? '共 ' + modelItems.value.length + ' 个模型 · 按请求数' : '无数据',
+  modelItems.value.length
+    ? t('page.stats.note.models', { count: modelItems.value.length })
+    : t('page.stats.note.none'),
 )
 const keyNote = computed(() =>
-  keyItems.value.length ? 'Top ' + keyItems.value.length + ' · 按请求数' : '无数据',
+  keyItems.value.length
+    ? t('page.stats.note.keys', { count: keyItems.value.length })
+    : t('page.stats.note.none'),
 )
 
 /* ------------------------------------------------------------------ *
@@ -254,21 +264,23 @@ watch([days, granularity], () => {
 
 <template>
   <div class="stats-page">
-    <PageHeader title="数据看板" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
         <Segmented
           :options="dayOptions"
           :model-value="String(days)"
-          aria-label="统计区间"
+          :aria-label="t('page.stats.rangeAria')"
           @update:model-value="setDays"
         />
         <Segmented
           :options="grainOptions"
           :model-value="granularity"
-          aria-label="聚合粒度"
+          :aria-label="t('page.stats.grainAria')"
           @update:model-value="setGranularity"
         />
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">
+          {{ t('page.stats.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -283,7 +295,7 @@ watch([days, granularity], () => {
       v-else-if="firstLoading"
       class="stats-skeleton"
       aria-busy="true"
-      aria-label="数据看板加载中"
+      :aria-label="t('page.stats.loadingAria')"
     >
       <n-skeleton height="96px" />
       <n-skeleton height="280px" />
@@ -302,27 +314,27 @@ watch([days, granularity], () => {
 
       <p class="stats-meta">
         <span>{{ windowText }}</span>
-        <span v-if="days === 1" class="stats-scope">滚动窗口：最近 24 小时，不是自然日</span>
-        <span v-if="updatedText">更新于 {{ updatedText }}</span>
-        <span v-if="dashboard?.source === 'raw'">数据源：原表（汇总表降级）</span>
+        <span v-if="days === 1" class="stats-scope">{{ t('page.stats.rollingScope') }}</span>
+        <span v-if="updatedText">{{ t('page.stats.updatedAt', { time: updatedText }) }}</span>
+        <span v-if="dashboard?.source === 'raw'">{{ t('page.stats.sourceRaw') }}</span>
       </p>
 
-      <Card title="请求趋势" :loading="loading">
+      <Card :title="t('page.stats.card.requests')" :loading="loading">
         <template #extra>
           <span class="stats-note">{{ requestNote }}</span>
         </template>
         <Chart v-if="hasRequestTrend" :option="lineOption" height="260px" />
         <Empty
           v-else
-          :description="isEmptyWindow ? '窗口内没有调用记录。换个时间窗口，或先发起一次调用。' : '没有可画的趋势数据。'"
+          :description="isEmptyWindow ? t('page.stats.empty.requests') : t('page.stats.empty.trend')"
           compact
         />
       </Card>
 
       <div class="stats-grid">
-        <Card title="Token 趋势" :loading="loading">
+        <Card :title="t('page.stats.card.tokens')" :loading="loading">
           <template #extra>
-            <span class="stats-note">{{ cacheFootnote(usage) }}</span>
+            <span class="stats-note">{{ tokenNote }}</span>
           </template>
           <ErrorBlock
             v-if="usageError && !usage"
@@ -332,10 +344,10 @@ watch([days, granularity], () => {
             @retry="load()"
           />
           <Chart v-else-if="hasTokenTrend" :option="barOption" height="240px" />
-          <Empty v-else description="窗口内没有 Token 记录。" compact />
+          <Empty v-else :description="t('page.stats.empty.tokens')" compact />
         </Card>
 
-        <Card title="平台排行">
+        <Card :title="t('page.stats.card.platforms')">
           <template #extra>
             <span class="stats-note">{{ platformNote }}</span>
           </template>
@@ -343,15 +355,15 @@ watch([days, granularity], () => {
             v-if="platformItems.length"
             :items="platformItems"
             :limit="8"
-            unit=" 次"
+            :unit="t('page.stats.unit.requests')"
             :format="fmtInt"
           />
-          <Empty v-else description="窗口内没有平台流量。" compact />
+          <Empty v-else :description="t('page.stats.empty.platforms')" compact />
         </Card>
       </div>
 
       <div class="stats-grid">
-        <Card title="模型排行">
+        <Card :title="t('page.stats.card.models')">
           <template #extra>
             <span class="stats-note">{{ modelNote }}</span>
           </template>
@@ -359,13 +371,13 @@ watch([days, granularity], () => {
             v-if="modelItems.length"
             :items="modelItems"
             :limit="8"
-            unit=" 次"
+            :unit="t('page.stats.unit.requests')"
             :format="fmtInt"
           />
-          <Empty v-else description="窗口内没有模型调用。" compact />
+          <Empty v-else :description="t('page.stats.empty.models')" compact />
         </Card>
 
-        <Card title="Key 排行">
+        <Card :title="t('page.stats.card.keys')">
           <template #extra>
             <span class="stats-note">{{ keyNote }}</span>
           </template>
@@ -380,10 +392,10 @@ watch([days, granularity], () => {
             v-else-if="keyItems.length"
             :items="keyItems"
             :limit="8"
-            unit=" 次"
+            :unit="t('page.stats.unit.requests')"
             :format="fmtInt"
           />
-          <Empty v-else description="窗口内没有 Key 调用记录。" compact />
+          <Empty v-else :description="t('page.stats.empty.keys')" compact />
         </Card>
       </div>
     </template>

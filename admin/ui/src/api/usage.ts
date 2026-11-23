@@ -17,6 +17,16 @@
  */
 import { http, type Query } from './http'
 import { beijingParts, fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { t as defaultTranslate, type MessageKey, type Translate } from '@/i18n'
+
+/** 文案取当前语言；页面传入 useI18n().t 后随语言切换重算，不传时用默认字典（中文）。 */
+function tr(
+  translate: Translate | undefined,
+  key: MessageKey,
+  params?: Record<string, string | number>,
+): string {
+  return (translate ?? defaultTranslate)(key, params)
+}
 
 /* -------------------------------------------------------------------------- */
 /* 后端形状                                                                    */
@@ -241,6 +251,7 @@ export interface UsageWindow {
 export function resolveUsageWindow(
   filters: Pick<UsageFilters, 'start' | 'end'>,
   now = Date.now(),
+  translate?: Translate,
 ): UsageWindow {
   const start = filters.start ? Date.parse(filters.start) : Number.NaN
   const end = filters.end ? Date.parse(filters.end) : Number.NaN
@@ -257,13 +268,18 @@ export function resolveUsageWindow(
     endIso: new Date(endMs).toISOString(),
     days,
     explicit,
-    label: describeWindow(startMs, endMs, explicit),
+    label: describeWindow(startMs, endMs, explicit, translate),
   }
 }
 
 /** 时间窗人话：今日（自然日）/ 2026-11-23 / 2026-11-20 ~ 2026-11-23。 */
-export function describeWindow(startMs: number, endMs: number, explicit: boolean): string {
-  if (!explicit) return '今日（自然日）'
+export function describeWindow(
+  startMs: number,
+  endMs: number,
+  explicit: boolean,
+  translate?: Translate,
+): string {
+  if (!explicit) return tr(translate, 'usage.window.today')
   const a = beijingParts(new Date(startMs))
   const b = beijingParts(new Date(endMs))
   const sameDay = a.y === b.y && a.mo === b.mo && a.d === b.d
@@ -374,6 +390,7 @@ export interface UsageBarSource {
 export function toBarItems(
   rows: UsageBarSource[] | null | undefined,
   metric: 'credits' | 'requests',
+  translate?: Translate,
 ): UsageBarRow[] {
   const list = rows || []
   return list
@@ -381,7 +398,7 @@ export function toBarItems(
       const value = metric === 'credits' ? Number(row.credits) || 0 : Number(row.requests) || 0
       const others = Boolean((row as UsageAccountRow).others)
       return {
-        label: String(row.label || '—'),
+        label: String(row.label || tr(translate, 'usage.bar.empty')),
         value,
         tone: (others ? 'neutral' : 'brand') as UsageBarTone,
       }
@@ -390,16 +407,19 @@ export function toBarItems(
 }
 
 /** 概览 → 6 个统计格（成功口径在 help 里写明）。 */
-export function toStatItems(overview: UsageOverview | null | undefined): UsageStat[] {
+export function toStatItems(
+  overview: UsageOverview | null | undefined,
+  translate?: Translate,
+): UsageStat[] {
   const o = overview
   if (!o) {
     return [
-      { label: '请求数', value: '—' },
-      { label: '成功', value: '—' },
-      { label: '失败', value: '—' },
-      { label: 'Token 输入', value: '—' },
-      { label: 'Token 输出', value: '—' },
-      { label: '积分', value: '—' },
+      { label: tr(translate, 'usage.stat.requests'), value: '—' },
+      { label: tr(translate, 'usage.stat.success'), value: '—' },
+      { label: tr(translate, 'usage.stat.failed'), value: '—' },
+      { label: tr(translate, 'usage.stat.tokenIn'), value: '—' },
+      { label: tr(translate, 'usage.stat.tokenOut'), value: '—' },
+      { label: tr(translate, 'usage.stat.credits'), value: '—' },
     ]
   }
   const requests = Number(o.requests) || 0
@@ -410,40 +430,44 @@ export function toStatItems(overview: UsageOverview | null | undefined): UsageSt
   const avgEach = requests ? (Number(o.credits) || 0) / requests : 0
   return [
     {
-      label: '请求数',
+      label: tr(translate, 'usage.stat.requests'),
       value: fmtInt(requests),
-      foot: o.avg_latency_ms ? '平均耗时 ' + fmtDuration(o.avg_latency_ms) : '平均耗时 —',
-      help: '包含失败请求。平均耗时是成功请求的延迟均值。',
+      foot: o.avg_latency_ms
+        ? tr(translate, 'usage.stat.requestsFoot', { value: fmtDuration(o.avg_latency_ms) })
+        : tr(translate, 'usage.stat.requestsFootNone'),
+      help: tr(translate, 'usage.stat.requestsHelp'),
     },
     {
-      label: '成功',
+      label: tr(translate, 'usage.stat.success'),
       value: fmtInt(ok),
       tone: 'ok',
-      foot: '成功率 ' + fmtPct(okRate),
-      help: "成功 = error_kind 为空或 'success'（后端 _ok_filter 口径）。",
+      foot: tr(translate, 'usage.stat.successFoot', { rate: fmtPct(okRate) }),
+      help: tr(translate, 'usage.stat.successHelp'),
     },
     {
-      label: '失败',
+      label: tr(translate, 'usage.stat.failed'),
       value: fmtInt(failed),
       tone: failed > 0 ? 'danger' : 'muted',
-      foot: '失败率 ' + fmtPct(failRate),
-      help: '请求数 − 成功数；失败请求不产生 Token 与积分。',
+      foot: tr(translate, 'usage.stat.failedFoot', { rate: fmtPct(failRate) }),
+      help: tr(translate, 'usage.stat.failedHelp'),
     },
     {
-      label: 'Token 输入',
+      label: tr(translate, 'usage.stat.tokenIn'),
       value: fmtCompact(o.prompt_tokens),
-      foot: '缓存命中 ' + fmtCompact(o.cached_tokens),
-      help: '只统计成功请求；精确值见 CSV 导出。',
+      foot: tr(translate, 'usage.stat.tokenInFoot', { value: fmtCompact(o.cached_tokens) }),
+      help: tr(translate, 'usage.stat.tokenInHelp'),
     },
     {
-      label: 'Token 输出',
+      label: tr(translate, 'usage.stat.tokenOut'),
       value: fmtCompact(o.completion_tokens),
-      foot: '合计 ' + fmtCompact(o.total_tokens),
+      foot: tr(translate, 'usage.stat.tokenOutFoot', { value: fmtCompact(o.total_tokens) }),
     },
     {
-      label: '积分',
+      label: tr(translate, 'usage.stat.credits'),
       value: fmtCredit(o.credits),
-      foot: '平均每次 ' + (requests ? fmtCredit(avgEach) : '—'),
+      foot: tr(translate, 'usage.stat.creditsFoot', {
+        value: requests ? fmtCredit(avgEach) : '—',
+      }),
     },
   ]
 }
@@ -460,6 +484,7 @@ export function chartBucketLabel(bucket: string, grain: UsageGrain): string {
 export function toTrendOption(
   trend: UsageTrendPoint[] | null | undefined,
   grain: UsageGrain,
+  translate?: Translate,
 ): Record<string, unknown> {
   const rows = trend || []
   const labels = rows.map((row) => chartBucketLabel(row.bucket, grain))
@@ -474,7 +499,13 @@ export function toTrendOption(
   })
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['输入', '输出'], top: 0, right: 0, itemHeight: 8, itemWidth: 12 },
+    legend: {
+      data: [tr(translate, 'usage.legend.input'), tr(translate, 'usage.legend.output')],
+      top: 0,
+      right: 0,
+      itemHeight: 8,
+      itemWidth: 12,
+    },
     grid: { left: 8, right: 8, top: 30, bottom: 4, containLabel: true },
     xAxis: {
       type: 'category',
@@ -487,20 +518,25 @@ export function toTrendOption(
       axisLabel: { formatter: (value: number) => fmtCompact(value) },
     },
     series: [
-      series('输入', (row) => row.prompt_tokens),
-      series('输出', (row) => row.completion_tokens),
+      series(tr(translate, 'usage.legend.input'), (row) => row.prompt_tokens),
+      series(tr(translate, 'usage.legend.output'), (row) => row.completion_tokens),
     ],
   }
 }
 
 /** FilterBar 的汇总文字（与旧版「已筛选」那行同口径）。 */
-export function usageSummary(payload: UsagePayload | null | undefined): string {
+export function usageSummary(
+  payload: UsagePayload | null | undefined,
+  translate?: Translate,
+): string {
   if (!payload) return ''
   const o = payload.overview
-  return (
-    '共 ' + fmtInt(o.requests) + ' 次 · 成功 ' + fmtInt(o.ok_requests) +
-    ' · 失败 ' + fmtInt(o.failed_requests) + ' · 积分 ' + fmtCredit(o.credits)
-  )
+  return tr(translate, 'usage.summary', {
+    requests: fmtInt(o.requests),
+    ok: fmtInt(o.ok_requests),
+    failed: fmtInt(o.failed_requests),
+    credits: fmtCredit(o.credits),
+  })
 }
 
 export function usageHasData(payload: UsagePayload | null | undefined): boolean {
@@ -513,17 +549,46 @@ export function usageChips(
   filters: UsageFilters,
   options: UsageOptionsPayload | null | undefined,
   window: UsageWindow,
+  translate?: Translate,
 ): UsageChip[] {
-  const chips: UsageChip[] = [{ key: 'range', label: '时间', value: window.label }]
+  const chips: UsageChip[] = [
+    { key: 'range', label: tr(translate, 'usage.chip.time'), value: window.label },
+  ]
   const keyName = (options?.keys || []).find((item) => String(item.id) === filters.key)?.name
   const modelLabel = (options?.models || []).find((item) => String(item.value) === filters.model)?.label
   const accountName = (options?.accounts || []).find((item) => String(item.id) === filters.account)?.name
   const platformLabel = (options?.platforms || []).find((item) => String(item.value) === filters.platform)?.label
-  if (filters.platform) chips.push({ key: 'platform', label: '平台', value: platformLabel || filters.platform })
-  if (filters.key) chips.push({ key: 'key', label: 'Key', value: keyName || '#' + filters.key })
-  if (filters.model) chips.push({ key: 'model', label: '模型', value: modelLabel || filters.model })
-  if (filters.account) chips.push({ key: 'account', label: '账号', value: accountName || '#' + filters.account })
-  if (filters.endpoint) chips.push({ key: 'endpoint', label: '端点', value: filters.endpoint })
+  if (filters.platform) {
+    chips.push({
+      key: 'platform',
+      label: tr(translate, 'usage.chip.platform'),
+      value: platformLabel || filters.platform,
+    })
+  }
+  if (filters.key) {
+    chips.push({ key: 'key', label: tr(translate, 'usage.chip.key'), value: keyName || '#' + filters.key })
+  }
+  if (filters.model) {
+    chips.push({
+      key: 'model',
+      label: tr(translate, 'usage.chip.model'),
+      value: modelLabel || filters.model,
+    })
+  }
+  if (filters.account) {
+    chips.push({
+      key: 'account',
+      label: tr(translate, 'usage.chip.account'),
+      value: accountName || '#' + filters.account,
+    })
+  }
+  if (filters.endpoint) {
+    chips.push({
+      key: 'endpoint',
+      label: tr(translate, 'usage.chip.endpoint'),
+      value: filters.endpoint,
+    })
+  }
   return chips
 }
 
@@ -588,43 +653,83 @@ function csvRow(cells: Array<string | number>): string {
 export function usageCsv(
   payload: UsagePayload,
   meta: { windowLabel: string; grain: UsageGrain },
+  translate?: Translate,
 ): string {
   const lines: string[] = []
   const o = payload.overview
-  lines.push(csvRow(['# 使用记录']))
-  lines.push(csvRow(['时间范围', meta.windowLabel, '粒度', meta.grain === 'day' ? '按天' : '按小时']))
+  const t = (key: MessageKey): string => tr(translate, key)
+  lines.push(csvRow(['# ' + t('page.usage.title')]))
+  lines.push(
+    csvRow([
+      t('usage.csv.range'),
+      meta.windowLabel,
+      t('usage.csv.grain'),
+      meta.grain === 'day' ? t('page.usage.grain.day') : t('page.usage.grain.hour'),
+    ]),
+  )
   lines.push('')
-  lines.push(csvRow(['# 概览']))
-  lines.push(csvRow(['指标', '数值']))
-  lines.push(csvRow(['请求数', o.requests]))
-  lines.push(csvRow(['成功', o.ok_requests]))
-  lines.push(csvRow(['失败', o.failed_requests]))
-  lines.push(csvRow(['Token 输入', o.prompt_tokens]))
-  lines.push(csvRow(['Token 输出', o.completion_tokens]))
-  lines.push(csvRow(['Token 合计', o.total_tokens]))
-  lines.push(csvRow(['Token 缓存命中', o.cached_tokens]))
-  lines.push(csvRow(['积分', o.credits]))
-  lines.push(csvRow(['平均耗时(ms)', o.avg_latency_ms]))
+  lines.push(csvRow(['# ' + t('usage.csv.sectionOverview')]))
+  lines.push(csvRow([t('usage.csv.metrics'), t('usage.csv.value')]))
+  lines.push(csvRow([t('usage.stat.requests'), o.requests]))
+  lines.push(csvRow([t('usage.stat.success'), o.ok_requests]))
+  lines.push(csvRow([t('usage.stat.failed'), o.failed_requests]))
+  lines.push(csvRow([t('usage.stat.tokenIn'), o.prompt_tokens]))
+  lines.push(csvRow([t('usage.stat.tokenOut'), o.completion_tokens]))
+  lines.push(csvRow([t('usage.csv.tokenTotal'), o.total_tokens]))
+  lines.push(csvRow([t('usage.csv.tokenCached'), o.cached_tokens]))
+  lines.push(csvRow([t('usage.stat.credits'), o.credits]))
+  lines.push(csvRow([t('usage.csv.latency'), o.avg_latency_ms]))
   lines.push('')
   const section = (title: string, header: string[], rows: Array<Array<string | number>>) => {
     lines.push(csvRow(['# ' + title]))
     lines.push(csvRow(header))
-    if (!rows.length) lines.push(csvRow(['（无数据）']))
+    if (!rows.length) lines.push(csvRow([t('usage.csv.none')]))
     for (const row of rows) lines.push(csvRow(row))
     lines.push('')
   }
-  section('模型分布', ['模型', '平台', '请求(成功)', 'Token', '积分'],
-    (payload.by_model || []).map((row) => [row.label, row.platform_label || row.platform, row.requests, row.tokens, row.credits]))
-  section('Key 使用分布', ['Key', '请求(成功)', 'Token', '积分'],
-    (payload.by_key || []).map((row) => [row.label, row.requests, row.tokens, row.credits]))
-  section('端点分布', ['端点', '请求(成功)', 'Token', '积分'],
-    (payload.by_endpoint || []).map((row) => [row.label, row.requests, row.tokens, row.credits]))
-  section('账号分布', ['账号', '请求(成功)', 'Token', '积分'],
-    (payload.by_account || []).map((row) => [row.label, row.requests, row.tokens, row.credits]))
-  section('请求结果分布', ['结果', '请求(全部)'],
-    (payload.by_result || []).map((row) => [row.label, row.requests]))
-  section('Token 趋势', ['时间桶', '输入', '输出', '缓存命中', '请求', '积分'],
-    (payload.trend || []).map((row) => [row.bucket, row.prompt_tokens, row.completion_tokens, row.cached_tokens, row.requests, row.credits]))
+  const distHeader = (first: string): string[] => [
+    first,
+    t('usage.csv.requestsOk'),
+    t('usage.csv.token'),
+    t('usage.stat.credits'),
+  ]
+  section(
+    t('page.usage.card.models'),
+    [t('usage.csv.model'), t('usage.csv.platform'), t('usage.csv.requestsOk'), t('usage.csv.token'), t('usage.stat.credits')],
+    (payload.by_model || []).map((row) => [row.label, row.platform_label || row.platform, row.requests, row.tokens, row.credits]),
+  )
+  section(
+    t('page.usage.card.keys'),
+    distHeader(t('usage.csv.key')),
+    (payload.by_key || []).map((row) => [row.label, row.requests, row.tokens, row.credits]),
+  )
+  section(
+    t('page.usage.card.endpoints'),
+    distHeader(t('usage.csv.endpoint')),
+    (payload.by_endpoint || []).map((row) => [row.label, row.requests, row.tokens, row.credits]),
+  )
+  section(
+    t('page.usage.card.accounts'),
+    distHeader(t('usage.csv.account')),
+    (payload.by_account || []).map((row) => [row.label, row.requests, row.tokens, row.credits]),
+  )
+  section(
+    t('page.usage.card.results'),
+    [t('usage.csv.result'), t('usage.csv.requestsAll')],
+    (payload.by_result || []).map((row) => [row.label, row.requests]),
+  )
+  section(
+    t('usage.csv.sectionTrend'),
+    [
+      t('usage.csv.bucket'),
+      t('usage.legend.input'),
+      t('usage.legend.output'),
+      t('stats.legend.cached'),
+      t('usage.stat.requests'),
+      t('usage.stat.credits'),
+    ],
+    (payload.trend || []).map((row) => [row.bucket, row.prompt_tokens, row.completion_tokens, row.cached_tokens, row.requests, row.credits]),
+  )
   return lines.join('\n')
 }
 

@@ -142,13 +142,48 @@ async function loadRuntime(): Promise<void> {
   }
 }
 
+/** 提交值是否已经在服务端快照里（数字按字符串比、字符串按 trim 比，与 diffRuntimeFields 同口径）。 */
+function runtimeSameAsField(field: RuntimeField, value: unknown): boolean {
+  if (field.kind === 'bool') return Boolean(value) === Boolean(field.value)
+  const current = field.value === null || field.value === undefined ? '' : String(field.value)
+  return String(value).trim() === current.trim()
+}
+
+/**
+ * 保存后草稿怎么回填：先按服务端快照重置，再把**没被接受**的提交值放回草稿。
+ * 契约 settings.md §4.2「请求失败保留输入、用户可重试」同样适用于部分失败 ——
+ * 后端 errors 里的字段没有落库（runtime_settings.py:save 只 continue），
+ * 一律用 fields 重置会把用户刚填的值静默吞掉，只剩一句「部分配置未保存」。
+ */
+function restoreRejectedDrafts(
+  submitted: Record<string, unknown>,
+  fields: RuntimeField[],
+  accepted: Set<string>,
+): void {
+  const byAttr = new Map(fields.map((field) => [field.attr, field]))
+  for (const [attr, value] of Object.entries(submitted)) {
+    // changed / reverted 是后端明确受理的（reverted = 清空后回落 .env 默认）：草稿跟着快照走。
+    if (accepted.has(attr)) continue
+    const field = byAttr.get(attr)
+    if (field && runtimeSameAsField(field, value)) continue
+    // 目录里已经没有这个字段时也保留草稿：宁可多一条未保存，也不要替用户丢掉输入。
+    runtimeDraft[attr] = value as string | number | boolean | null
+  }
+}
+
 async function saveRuntime(): Promise<void> {
   if (!runtimeDirty.value || runtimeSaving.value) return
+  const submitted = runtimeUpdates.value
   runtimeSaving.value = true
   try {
-    const result = await saveRuntimeConfig(runtimeUpdates.value)
+    const result = await saveRuntimeConfig(submitted)
     runtimeFields.value = Array.isArray(result?.fields) ? result.fields : runtimeFields.value
     syncRuntimeDraft(runtimeFields.value)
+    restoreRejectedDrafts(
+      submitted,
+      runtimeFields.value,
+      new Set([...(result?.changed || []), ...(result?.reverted || [])]),
+    )
     restartPending.value = restartPendingOf(runtimeFields.value, result?.changed)
     const errors = Object.entries(result?.errors || {})
     if (errors.length) {

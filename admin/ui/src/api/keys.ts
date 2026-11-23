@@ -818,3 +818,28 @@ export function toIpOverview(payload: KeyIpsPayload): IpOverviewView {
     })),
   }
 }
+
+/**
+ * 来源 IP 抽屉的空态（切换 Key / 取数前 / 取数失败时先用它清空）。
+ *
+ * 汇总四格与明细同源于 toIpOverview：切 Key 时若不重置，旧 Key 的「来源 IP / 调用次数」
+ * 会一直挂到新 Key 的数据回来为止（新 Key 取数失败则永久串号）。
+ */
+export function emptyIpOverview(): IpOverviewView {
+  return toIpOverview({
+    id: 0,
+    name: '',
+    days: 1,
+    sort: 'requests',
+    direction: 'desc',
+    offset: 0,
+    limit: 0,
+    total_ips: 0,
+    total_requests: 0,
+    active_ips: 0,
+    active_requests: 0,
+    active_scope: '',
+    active: [],
+    items: [],
+  })
+}

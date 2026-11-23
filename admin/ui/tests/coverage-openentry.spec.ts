@@ -240,8 +240,9 @@ describe('OpenEntryPage · 首屏四个区块', () => {
     }
 
     const gateCard = wrapper.find('#openentry-gate')
-    // 已知 src 缺陷（未修）：state = gateStateOf(gate.value) 在 setup 时求值一次，
-    // 状态 Badge 永远显示「已关闭」。这里改用 Switch 的值与危险按钮可用性证明真实状态进了视图。
+    // state 是 computed：页头 Badge 与卡片 Badge 都必须跟着 gate 走（旧版在 setup 时求值一次，永远「已关闭」）。
+    expect(wrapper.find('.ph-actions').text()).toContain('已开放')
+    expect(gateCard.text()).toContain('已开放')
     expect(switchByLabel(wrapper, '自助注册入口总开关')!.props('value')).toBe(true)
     expect(buttonByText(gateCard.element, '关闭入口使全部失效')?.disabled).toBe(false)
     expect(gateCard.text()).toContain('代次 7 · 可用票据 3 · 有效邀请码 1')
@@ -303,6 +304,8 @@ describe('OpenEntryPage · 入口总开关', () => {
     expect(getAdminTickets.mock.calls.length).toBeGreaterThan(1)
     expect(bodyText()).toContain('入口已关闭，旧链接全部失效')
     expect(wrapper.find('#openentry-gate').text()).toContain('已关闭')
+    // 页头 Badge 也随重载后的 gate 变化（不是只在 setup 时算一次）
+    expect(wrapper.find('.ph-actions').text()).toContain('已关闭')
     expect(wrapper.find('#openentry-gate').text()).toContain('代次 8')
   })
 

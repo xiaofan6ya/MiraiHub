@@ -535,15 +535,15 @@ describe('SyncPage 覆盖率补测 · 刷新、重试与密钥工具', () => {
     expect(kvText(wrapper)).toContain('********3b4c')
   })
 
-  // 契约 §三 / §四「刷新失败」要求 compact ErrorBlock **与** Toast 两条都给，
-  // 但页面 refresh() 传的是 load({ silent: true })，catch 里的 toast.error 永不执行，
-  // 所以断言只覆盖已实现的错误块（缺陷见交付说明，未改 src）。
-  it('刷新失败：保留上次数据并给 compact 错误块，可再次重试', async () => {
+  // 契约 §六「刷新失败（已有数据）」：保留旧数据 + 卡片内 compact ErrorBlock **与** Toast 两条都给。
+  // refresh() 走 load() 的默认（非后台静默）路径，所以失败既留错误块也弹 Toast。
+  it('刷新失败：保留上次数据，给 compact 错误块与 Toast，可再次重试', async () => {
     const { wrapper } = await mountPage()
     getSyncConfig.mockRejectedValueOnce(new Error('网关超时'))
     await clickButton(wrapper, '刷新')
 
     expect(wrapper.text()).toContain('刷新同步配置失败，当前显示上次加载的值')
+    expect(bodyText()).toContain('刷新同步配置失败：网关超时')
     await clickButton(wrapper, '展开详细信息')
     expect(wrapper.text()).toContain('网关超时')
     expect(kvText(wrapper)).toContain('https://online.example.com')
@@ -626,6 +626,24 @@ describe('SyncPage 覆盖率补测 · 平台切换', () => {
     // 有未保存修改：保留用户输入，只更新状态行
     expect(inputByPlaceholder(wrapper, 'https://online.example.com').value).toBe('https://typed.example.com')
     expect(wrapper.text()).toContain('有未保存的修改')
+  })
+
+  it('切平台重取失败只留卡片内错误块，不弹 Toast（后台重取走 quiet）', async () => {
+    const { wrapper, pinia } = await mountPage()
+    setActivePinia(pinia)
+    const platform = usePlatformStore()
+    platform.items = [spec('workbuddy'), spec('trae')]
+
+    const before = getSyncConfig.mock.calls.length
+    getSyncConfig.mockRejectedValueOnce(new Error('平台切换时超时'))
+    platform.setCurrent('trae')
+    await settle()
+    await settle()
+
+    expect(getSyncConfig.mock.calls.length).toBe(before + 1)
+    expect(wrapper.text()).toContain('刷新同步配置失败，当前显示上次加载的值')
+    // 后台静默重取不给 Toast：错误原因只收在卡片错误块的「展开详细信息」里
+    expect(bodyText()).not.toContain('失败：平台切换时超时')
   })
 
   it('表单干净时切换平台用最新配置覆盖表单', async () => {

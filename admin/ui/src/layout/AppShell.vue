@@ -64,6 +64,38 @@ const sessionsOpenModel = computed({
 
 let offPlatformChange: (() => void) | null = null
 
+/**
+ * 版本号 / 是否有更新是顶栏的"锦上添花"，不是首屏内容。
+ *
+ * 为什么必须推迟：/api/app/releases 在生产返回 100KB+ 的整包发布清单（后端未压缩），
+ * 首屏就和 /api/overview 抢同一条移动网络 —— 实测它在 0.6s 发起，把概览接口的
+ * 响应挤到 2s 之后，LCP 被拖慢约 0.8s。这里等 load 之后**再安静 2 秒**才发，
+ * 用户一有交互就立刻发，保证徽标不会一直缺。
+ */
+function scheduleAppInfo(): void {
+  const run = (): void => {
+    void loadAppInfo()
+  }
+  const idle = (): void => {
+    const requestIdle = (
+      window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+      }
+    ).requestIdleCallback
+    if (typeof requestIdle === 'function') requestIdle(run, { timeout: 2000 })
+    else globalThis.setTimeout(run, 800)
+  }
+  /** 首屏安静期：load 之后再等 2s，避开 LCP 窗口。 */
+  const quiet = (): void => {
+    globalThis.setTimeout(idle, 2000)
+  }
+  if (document.readyState === 'complete') quiet()
+  else window.addEventListener('load', quiet, { once: true })
+  // 首屏后用户一旦操作，说明已经可用：立刻补齐版本/更新信息。
+  window.addEventListener('pointerdown', run, { once: true, passive: true })
+  window.addEventListener('keydown', run, { once: true })
+}
+
 /** 平台专属页面（成长计划）当前平台不支持时，跳回账号池（旧版 activateTab 的行为）。 */
 function guardPlatformOnlyPage(): void {
   const name = route.name
@@ -77,7 +109,7 @@ onMounted(async () => {
   initShellViewport()
   // 心跳第一拍同时是「会话检查」：401 由 http 层统一回 /admin（带 hash 暂存）。
   heartbeat.start()
-  void loadAppInfo()
+  scheduleAppInfo()
   void initDesktop()
   await platformStore.load()
   void refreshShellBadges()

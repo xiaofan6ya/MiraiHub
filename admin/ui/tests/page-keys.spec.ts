@@ -3,6 +3,7 @@ import {
   buildCurlExamples,
   clientModelId,
   draftToInput,
+  emptyIpOverview,
   filterKeyRows,
   hasFormErrors,
   keyStats,
@@ -320,5 +321,10 @@ describe('用量与来源 IP 抽屉', () => {
     expect(view.rows[0].lastSeen).not.toBe(FMT_EMPTY)
     expect(view.rows[1].lastSeen).toBe(FMT_EMPTY)
     expect(view.rows[1].blocked).toBe(true)
+  })
+
+  it('来源 IP 空态：汇总归零、无明细（切 Key / 取数失败时先清空）', () => {
+    const empty = emptyIpOverview()
+    expect(empty).toEqual({ totalIps: 0, requests: 0, activeIps: 0, activeRequests: 0, rows: [] })
   })
 })

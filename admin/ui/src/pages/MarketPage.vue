@@ -51,18 +51,18 @@ import {
 import { useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { FMT_EMPTY, fmtCompact, fmtCredit, fmtDuration, fmtPct } from '@/utils/format'
-import { failureText } from '@/utils/error'
+import { errorMessage } from '@/utils/error'
 import { ApiError, isAbortError } from '@/api/http'
 import { copyText } from '@/platform/clipboard'
 import {
   MARKET_HOURS,
-  MARKET_HOURS_LABEL,
   filterMarketCards,
   getMarketTrend,
   getModelAggregate,
   indexTrendSeries,
   listModelMarket,
   logLinkFor,
+  marketHoursLabel,
   marketStats,
   normalizeHours,
   normalizeSort,
@@ -80,12 +80,11 @@ import {
   type MarketView,
   type ModelMarketPayload,
 } from '@/api/market'
+import { useI18n } from '@/i18n'
 
-/** 旧版面板副标题原样保留（收进 ⓘ）。 */
-const HELP_TEXT =
-  '按模型看现在能提供什么：价格、近窗口用量、成功率与延迟、可用账号数。' +
-  '可用性 = 活跃账号 − 该模型冷却中的账号；没有定价的模型不计为可用。' +
-  '数据来自小时汇总表，后端缓存 30 秒。'
+const { t } = useI18n()
+/** 旧版面板副标题原样保留（收进 ⓘ）；语种跟随 useI18n。 */
+const helpText = computed(() => t('page.market.help'))
 
 const toast = useToast()
 const router = useRouter()
@@ -107,17 +106,16 @@ const savedHours = ref(readMarketHours())
 
 /** 时间窗口：路由 query 优先，其次 localStorage（契约 §5.5）。 */
 const hours = computed(() => normalizeHours(table.state.filters.hours || savedHours.value))
-const hoursLabel = computed(() => MARKET_HOURS_LABEL[hours.value] || hours.value + ' 小时')
+const hoursLabel = computed(() => marketHoursLabel(hours.value, t))
 
-const viewOptions: Array<SegmentedOption<string>> = [
-  { label: '卡片', value: 'cards' },
-  { label: '列表', value: 'list' },
-]
+const viewOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.market.view.cards'), value: 'cards' },
+  { label: t('page.market.view.list'), value: 'list' },
+])
 
-const hoursOptions: Array<SegmentedOption<string>> = MARKET_HOURS.map((value) => ({
-  label: MARKET_HOURS_LABEL[value],
-  value: String(value),
-}))
+const hoursOptions = computed<Array<SegmentedOption<string>>>(() =>
+  MARKET_HOURS.map((value) => ({ label: marketHoursLabel(value, t), value: String(value) })),
+)
 
 function setView(value: string | number): void {
   const next: MarketView = value === 'list' ? 'list' : 'cards'
@@ -147,7 +145,7 @@ const trendMissing = ref(false)
 
 let controller: AbortController | null = null
 
-const cards = computed(() => toMarketCards(payload.value, aggregate.value, trend.value))
+const cards = computed(() => toMarketCards(payload.value, aggregate.value, trend.value, t))
 
 const firstLoading = computed(() => loading.value && payload.value === null)
 const hasFilters = computed(() =>
@@ -188,8 +186,12 @@ async function load(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载模型广场', error), detail }
-    toast.error(failureText('加载模型广场', error))
+    const failure = t('page.market.failure', {
+      action: t('page.market.action.load'),
+      reason: errorMessage(error),
+    })
+    loadError.value = { message: failure, detail }
+    toast.error(failure)
   } finally {
     if (controller === current) {
       controller = null
@@ -224,24 +226,24 @@ watch(
 )
 
 const platformFilterOptions = computed(() => [
-  { label: '平台：全部', value: '' },
+  { label: t('page.market.filter.platformAll'), value: '' },
   ...platformOptions(cards.value).map((item) => ({ label: item.label, value: item.value })),
 ])
 
-const availabilityOptions = [
-  { label: '只看可用', value: 'available' },
-  { label: '全部模型', value: '' },
-]
+const availabilityOptions = computed(() => [
+  { label: t('page.market.filter.onlyAvailable'), value: 'available' },
+  { label: t('page.market.filter.allModels'), value: '' },
+])
 
 const SORT_VALUES = ['requests:desc', 'price:asc', 'tps:desc', 'success_rate:desc', 'name:asc']
 
-const sortOptions = [
-  { label: '按调用量', value: 'requests:desc' },
-  { label: '按价格', value: 'price:asc' },
-  { label: '按速度', value: 'tps:desc' },
-  { label: '按成功率', value: 'success_rate:desc' },
-  { label: '按名称', value: 'name:asc' },
-]
+const sortOptions = computed(() => [
+  { label: t('page.market.sort.requests'), value: 'requests:desc' },
+  { label: t('page.market.sort.price'), value: 'price:asc' },
+  { label: t('page.market.sort.tps'), value: 'tps:desc' },
+  { label: t('page.market.sort.rate'), value: 'success_rate:desc' },
+  { label: t('page.market.sort.name'), value: 'name:asc' },
+])
 
 const sortValue = computed(() => {
   const key = normalizeSort(table.state.sortBy)
@@ -283,38 +285,60 @@ function onSorter(sorter: SorterPayload | null): void {
 const chips = computed<FilterChip[]>(() => {
   const filters = table.state.filters
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.market.chip.search'), value: filters.q })
   if (filters.platform) {
     const hit = platformFilterOptions.value.find((item) => item.value === filters.platform)
-    list.push({ key: 'platform', label: '平台', value: hit ? hit.label : filters.platform })
+    list.push({
+      key: 'platform',
+      label: t('page.market.chip.platform'),
+      value: hit ? hit.label : filters.platform,
+    })
   }
-  if (filters.available === 'available') list.push({ key: 'available', label: '能力', value: '仅可用' })
+  if (filters.available === 'available') {
+    list.push({
+      key: 'available',
+      label: t('page.market.filter.capability'),
+      value: t('page.market.filter.onlyAvailableShort'),
+    })
+  }
   return list
 })
 
 const summary = computed(() => {
   const current = filteredStats.value
   if (!hasFilters.value) {
-    return '共 ' + stats.value.total + ' 个模型 · 可用 ' + stats.value.available + ' · 请求 ' +
-      fmtCompact(stats.value.requests)
+    return t('page.market.summary.all', {
+      total: stats.value.total,
+      available: stats.value.available,
+      requests: fmtCompact(stats.value.requests),
+    })
   }
-  return '筛选出 ' + current.total + ' / 共 ' + stats.value.total + ' 个模型 · 可用 ' +
-    current.available + ' · 请求 ' + fmtCompact(current.requests)
+  return t('page.market.summary.filtered', {
+    shown: current.total,
+    total: stats.value.total,
+    available: current.available,
+    requests: fmtCompact(current.requests),
+  })
 })
 
 const emptyDescription = computed(() => {
-  if (hasFilters.value) return '没有符合条件的模型。清空筛选后可看到全部模型。'
-  if (stats.value.total === 0) return '模型广场为空，请先添加模型配置。'
-  if (stats.value.available === 0) return '所有模型当前都不可用。'
-  return '没有符合条件的模型。'
+  if (hasFilters.value) return t('page.market.empty.filtered')
+  if (stats.value.total === 0) return t('page.market.empty.none')
+  if (stats.value.available === 0) return t('page.market.empty.unavailable')
+  return t('page.market.empty.plain')
 })
 
 const windowSummary = computed(() => {
   const data = payload.value
   if (!data) return ''
-  const source = data.source === 'rollup' ? '小时汇总' : '原始日志'
-  return '窗口 ' + (MARKET_HOURS_LABEL[data.window_hours] || data.window_hours + ' 小时') +
-    ' · 共 ' + data.total + ' 个模型 · 可用 ' + data.available_models + ' · 数据源 ' + source
+  const source =
+    data.source === 'rollup' ? t('page.market.source.rollup') : t('page.market.source.raw')
+  return t('page.market.window', {
+    window: marketHoursLabel(data.window_hours, t),
+    total: data.total,
+    available: data.available_models,
+    source,
+  })
 })
 
 function onFilterChange(values: Record<string, unknown>): void {
@@ -343,8 +367,8 @@ function resetFilters(): void {
 
 async function copyName(card: MarketCard): Promise<void> {
   const ok = await copyText(card.callName)
-  if (ok) toast.success('已复制 ' + card.callName)
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('page.market.copyDone', { name: card.callName }))
+  else toast.error(t('page.market.copyFailed'))
 }
 
 function openLogs(card: MarketCard): void {
@@ -360,14 +384,14 @@ const Sparkline = defineComponent({
   name: 'MarketSparkline',
   props: {
     values: { type: Array as PropType<number[]>, default: () => [] },
-    label: { type: String, default: '近窗口请求趋势' },
+    label: { type: String, default: '' },
   },
   setup(props) {
     const WIDTH = 120
     const HEIGHT = 28
     return (): VNodeChild => {
       if (!props.values.length) {
-        return h('span', { class: 'mkt-dash', title: '没有分时数据' }, FMT_EMPTY)
+        return h('span', { class: 'mkt-dash', title: t('page.market.spark.none') }, FMT_EMPTY)
       }
       const barWidth = WIDTH / props.values.length
       return h(
@@ -377,7 +401,7 @@ const Sparkline = defineComponent({
           viewBox: '0 0 ' + WIDTH + ' ' + HEIGHT,
           preserveAspectRatio: 'none',
           role: 'img',
-          'aria-label': props.label,
+          'aria-label': props.label || t('page.market.spark.label'),
         },
         props.values.map((ratio, index) =>
           h('rect', {
@@ -396,8 +420,8 @@ const Sparkline = defineComponent({
 
 function sparkOf(card: MarketCard): string {
   return card.sparkTotal === null
-    ? '没有分时数据'
-    : '近窗口 ' + fmtCompact(card.sparkTotal) + ' 次请求（分桶）'
+    ? t('page.market.spark.none')
+    : t('page.market.spark.total', { count: fmtCompact(card.sparkTotal) })
 }
 
 /* ------------------------------------------------------------------ *
@@ -413,7 +437,7 @@ function renderModel(row: TableRow): VNodeChild {
       h(
         'span',
         { class: 'mkt-cell__sub', title: card.platformLabels.join(' · ') },
-        card.platformLabels.join(' · ') || '暂无平台',
+        card.platformLabels.join(' · ') || t('page.market.card.noPlatform'),
       ),
     ]),
   ])
@@ -448,7 +472,7 @@ function renderActions(row: TableRow): VNodeChild {
         icon: Copy,
         onClick: () => void copyName(card),
       },
-      { default: () => '复制' },
+      { default: () => t('page.market.action.copyShort') },
     ),
     h(
       Btn,
@@ -458,7 +482,7 @@ function renderActions(row: TableRow): VNodeChild {
         icon: ScrollText,
         onClick: () => openLogs(card),
       },
-      { default: () => '日志' },
+      { default: () => t('page.market.action.logsShort') },
     ),
   ])
 }
@@ -466,7 +490,7 @@ function renderActions(row: TableRow): VNodeChild {
 const columns = computed<TableColumn[]>(() => [
   {
     key: 'name',
-    title: '模型',
+    title: t('page.market.col.model'),
     mobile: 'title',
     minWidth: 220,
     sortable: true,
@@ -475,7 +499,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'price',
-    title: '倍率',
+    title: t('page.market.col.price'),
     mobile: 'meta',
     width: 96,
     numeric: true,
@@ -485,7 +509,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'requests',
-    title: '请求',
+    title: t('page.market.col.requests'),
     mobile: 'meta',
     width: 96,
     numeric: true,
@@ -495,7 +519,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'success_rate',
-    title: '成功率',
+    title: t('page.market.col.rate'),
     mobile: 'meta',
     width: 96,
     numeric: true,
@@ -517,7 +541,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'latency',
-    title: '延迟',
+    title: t('page.market.col.latency'),
     mobile: 'hidden',
     width: 88,
     numeric: true,
@@ -528,7 +552,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'tps',
-    title: '吞吐',
+    title: t('page.market.col.tps'),
     mobile: 'hidden',
     width: 96,
     numeric: true,
@@ -541,14 +565,14 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'spark',
-    title: '近窗口趋势',
+    title: t('page.market.col.spark'),
     mobile: 'hidden',
     width: 140,
     render: (row: TableRow) => h(Sparkline, { values: (row as unknown as MarketCard).spark }),
   },
   {
     key: 'credits',
-    title: '积分',
+    title: t('page.market.col.credits'),
     mobile: 'meta',
     width: 96,
     numeric: true,
@@ -556,7 +580,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'status',
-    title: '状态',
+    title: t('page.market.col.status'),
     mobile: 'meta',
     width: 104,
     render: (row: TableRow) => {
@@ -564,13 +588,18 @@ const columns = computed<TableColumn[]>(() => [
       return h(
         Badge,
         { tone: card.available ? 'ok' : 'danger' },
-        { default: () => (card.available ? '可用' : '不可用') },
+        {
+          default: () =>
+            card.available
+              ? t('page.market.state.available')
+              : t('page.market.state.unavailable'),
+        },
       )
     },
   },
   {
     key: 'callName',
-    title: '调用名',
+    title: t('page.market.col.callName'),
     mobile: 'subtitle',
     minWidth: 180,
     render: (row: TableRow) =>
@@ -578,7 +607,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.market.col.actions'),
     mobile: 'actions',
     width: 132,
     hideable: false,
@@ -620,21 +649,23 @@ watch(hours, () => {
 
 <template>
   <div class="market-page">
-    <PageHeader title="模型广场" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
         <Segmented
           :options="viewOptions"
           :model-value="view"
-          aria-label="视图切换"
+          :aria-label="t('page.market.viewAria')"
           @update:model-value="setView"
         />
         <Segmented
           :options="hoursOptions"
           :model-value="String(hours)"
-          aria-label="时间窗口"
+          :aria-label="t('page.market.hoursAria')"
           @update:model-value="setHours"
         />
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">
+          {{ t('page.market.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -652,7 +683,7 @@ watch(hours, () => {
             <n-input
               class="market-filter__search"
               :value="search"
-              placeholder="搜索模型名 / 调用名"
+              :placeholder="t('page.market.searchPlaceholder')"
               clearable
               @update:value="
                 (value: string) => {
@@ -677,7 +708,7 @@ watch(hours, () => {
               class="market-filter__select"
               :value="sortValue"
               :options="sortOptions"
-              aria-label="排序"
+              :aria-label="t('page.market.sortAria')"
               @update:value="onSortSelect"
             />
           </template>
@@ -692,7 +723,12 @@ watch(hours, () => {
           @retry="load()"
         />
 
-        <div v-else-if="firstLoading" class="market-skeleton" aria-busy="true" aria-label="模型广场加载中">
+        <div
+          v-else-if="firstLoading"
+          class="market-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.market.loadingAria')"
+        >
           <div v-for="index in 7" :key="index" class="market-skeleton__card">
             <n-skeleton text :repeat="4" />
           </div>
@@ -720,30 +756,38 @@ watch(hours, () => {
                     </Chip>
                     <Chip
                       v-if="card.platformLabels.length > 3"
-                      :title="card.platformLabels.slice(3).join('、')"
+                      :title="card.platformLabels.slice(3).join(t('page.market.chipsJoin'))"
                     >
                       +{{ card.platformLabels.length - 3 }}
                     </Chip>
-                    <span v-if="!card.platformCount" class="market-dash">暂无平台</span>
+                    <span v-if="!card.platformCount" class="market-dash">
+                      {{ t('page.market.card.noPlatform') }}
+                    </span>
                   </div>
                 </div>
                 <Badge :tone="card.available ? 'ok' : 'danger'">
-                  {{ card.available ? '可用' : '不可用' }}
+                  {{
+                    card.available
+                      ? t('page.market.state.available')
+                      : t('page.market.state.unavailable')
+                  }}
                 </Badge>
               </header>
 
               <div class="market-card__price">
                 <b>{{ priceText(card) }}</b>
-                <span>{{ card.free ? '全部平台免费' : '每千 Token 倍率' }}</span>
+                <span>
+                  {{ card.free ? t('page.market.card.freeNote') : t('page.market.card.priceNote') }}
+                </span>
               </div>
 
               <dl class="market-card__stats">
                 <div>
-                  <dt>平台数</dt>
+                  <dt>{{ t('page.market.card.platforms') }}</dt>
                   <dd class="tnum">{{ card.platformCount }}</dd>
                 </div>
                 <div>
-                  <dt>成功率</dt>
+                  <dt>{{ t('page.market.card.rate') }}</dt>
                   <dd class="tnum" :class="'is-' + rateTone(card.successRate)">
                     {{ fmtPct(card.successRate) }}
                   </dd>
@@ -756,17 +800,22 @@ watch(hours, () => {
 
               <div class="market-card__spark">
                 <span class="market-card__spark-label">
-                  近 {{ hoursLabel }} {{ fmtCompact(card.requests) }} 次
+                  {{
+                    t('page.market.card.spark', {
+                      window: hoursLabel,
+                      count: fmtCompact(card.requests),
+                    })
+                  }}
                 </span>
                 <Sparkline :values="card.spark" :label="sparkOf(card)" />
               </div>
 
               <footer class="market-card__foot">
                 <Btn variant="quiet" size="sm" :icon="Copy" @click="copyName(card)">
-                  复制模型名
+                  {{ t('page.market.action.copy') }}
                 </Btn>
                 <Btn variant="quiet" size="sm" :icon="ScrollText" @click="openLogs(card)">
-                  查看日志
+                  {{ t('page.market.action.logs') }}
                 </Btn>
                 <code class="market-card__call" :title="card.callName">{{ card.callName }}</code>
               </footer>
@@ -775,9 +824,11 @@ watch(hours, () => {
 
           <Empty v-else :description="emptyDescription">
             <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
-              清除筛选
+              {{ t('page.market.clearFilters') }}
             </Btn>
-            <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="load()">刷新</Btn>
+            <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="load()">
+              {{ t('page.market.refresh') }}
+            </Btn>
           </Empty>
 
           <div v-if="pageData.pageCount > 1" class="market-pager">
@@ -787,11 +838,16 @@ watch(hours, () => {
               :disabled="pageData.page <= 1"
               @click="table.setPage(pageData.page - 1)"
             >
-              上一页
+              {{ t('page.market.pager.prev') }}
             </Btn>
             <span class="market-pager__text tnum">
-              第 {{ pageData.page }} / {{ pageData.pageCount }} 页 · 共
-              {{ pageData.total }} 个模型
+              {{
+                t('page.market.pager', {
+                  page: pageData.page,
+                  count: pageData.pageCount,
+                  total: pageData.total,
+                })
+              }}
             </span>
             <Btn
               variant="quiet"
@@ -799,7 +855,7 @@ watch(hours, () => {
               :disabled="pageData.page >= pageData.pageCount"
               @click="table.setPage(pageData.page + 1)"
             >
-              下一页
+              {{ t('page.market.pager.next') }}
             </Btn>
           </div>
         </template>
@@ -824,9 +880,11 @@ watch(hours, () => {
           <template #empty>
             <Empty :description="emptyDescription">
               <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
-                清除筛选
+                {{ t('page.market.clearFilters') }}
               </Btn>
-              <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="load()">刷新</Btn>
+              <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="load()">
+                {{ t('page.market.refresh') }}
+              </Btn>
             </Empty>
           </template>
         </DataTable>
@@ -834,7 +892,7 @@ watch(hours, () => {
         <p v-if="windowSummary" class="market-window">
           {{ windowSummary }}
           <span v-if="trendMissing" class="market-window__hint">
-            · 分时趋势只覆盖 Top 模型，其余不画 sparkline
+            {{ t('page.market.windowHint') }}
           </span>
         </p>
       </div>

@@ -11,6 +11,7 @@ import { createPinia } from 'pinia'
 import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import UsagePage from '@/pages/UsagePage.vue'
+import { setLocale } from '@/i18n'
 import { cnDayStart } from '@/api/usage'
 import type { UsageOptionsPayload, UsagePayload } from '@/api/usage'
 import * as usageApi from '@/api/usage'
@@ -189,5 +190,35 @@ describe('UsagePage 时间范围口径', () => {
 
     expect(wrapper.text()).toContain('该时间范围内没有任何请求记录。')
     expect(wrapper.findAll('.chart-stub')).toHaveLength(0)
+  })
+})
+
+describe('UsagePage 中英切换', () => {
+  it('切到英文：6 格统计 / 汇总 / chips / 页脚口径出英文', async () => {
+    vi.mocked(platformsApi.listPlatforms).mockResolvedValue({ items: [] } as never)
+    vi.mocked(platformsApi.getCurrentPlatform).mockResolvedValue({ platform: 'workbuddy', realm: '' } as never)
+    vi.mocked(platformsApi.putCurrentPlatform).mockResolvedValue(undefined as never)
+    getUsageStats.mockResolvedValue(stats())
+    getUsageOptions.mockResolvedValue(options())
+
+    setLocale('zh-CN')
+    const { wrapper } = await mountPage()
+    expect(wrapper.text()).toContain('共 862 次 · 成功 850 · 失败 12 · 积分 729.31')
+
+    setLocale('en-US')
+    await flush()
+
+    expect(wrapper.find('h1').text()).toContain('Usage')
+    const labels = wrapper.findAll('.mh-stat__label > span').map((item) => item.text())
+    expect(labels).toEqual(['Requests', 'Success', 'Failed', 'Input tokens', 'Output tokens', 'Credits'])
+    expect(wrapper.text()).toContain('862 requests · 850 OK · 12 failed · 729.31 credits')
+    expect(wrapper.find('.mh-filter__chips').text()).toContain('Today (calendar day)')
+    expect(wrapper.find('.usage-footnote').text()).toContain('calendar day) from 00:00 Beijing time')
+    expect(wrapper.text()).not.toContain('使用记录')
+
+    setLocale('zh-CN')
+    await flush()
+    expect(wrapper.text()).toContain('使用记录')
+    expect(wrapper.text()).toContain('共 862 次 · 成功 850 · 失败 12 · 积分 729.31')
   })
 })

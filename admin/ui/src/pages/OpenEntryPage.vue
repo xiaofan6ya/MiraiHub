@@ -80,7 +80,8 @@ const ticketsLoading = ref(false)
 const ticketsError = ref('')
 const tickets = ref<AdminTicketsPayload | null>(null)
 
-const state = gateStateOf(gate.value)
+/** 页头与入口卡片的 Badge 都读它：必须随 gate 变化求值（setup 时算一次会永远停在「已关闭」）。 */
+const state = computed(() => gateStateOf(gate.value))
 const meta = computed(() => gateMetaText(gate.value))
 const platformSummary = computed(() => platformFlagSummary(config.value?.platforms))
 

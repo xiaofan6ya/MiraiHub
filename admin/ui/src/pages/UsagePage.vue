@@ -38,7 +38,7 @@ import {
 import { useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
-import { failureText } from '@/utils/error'
+import { errorMessage } from '@/utils/error'
 import { fmtCredit, fmtInt } from '@/utils/format'
 import {
   USAGE_FILTER_DEFAULTS,
@@ -65,12 +65,11 @@ import {
   type UsagePayload,
   type UsageOptionsPayload,
 } from '@/api/usage'
+import { useI18n } from '@/i18n'
 
-/** 旧版面板副标题原样保留（收进 ⓘ）。 */
-const HELP_TEXT =
-  '统计平台全部 Key 的用量：请求数、Token、积分与平均耗时。数据来自本地 usage_logs，随请求实时累计。' +
-  '成功 = error_kind 为空或 success；Token 与积分只统计成功请求，请求数含失败。' +
-  '时间范围默认「今日（自然日）」= 北京时间 00:00 起；数据看板的「近 24 小时」是滚动窗口，两处数字不同属正常。'
+const { t } = useI18n()
+/** 旧版面板副标题原样保留（收进 ⓘ）；语种跟随 useI18n。 */
+const helpText = computed(() => t('page.usage.help'))
 
 const toast = useToast()
 const router = useRouter()
@@ -82,14 +81,14 @@ const table = useTableQuery('usage', {
 
 /** useTableQuery 的 filters 是 Record<string, string>：默认值已覆盖全部键，这里收窄成强类型。 */
 const filters = table.state.filters as unknown as UsageFilters
-const window = computed(() => resolveUsageWindow(filters))
+const window = computed(() => resolveUsageWindow(filters, Date.now(), t))
 const win = window
 const grain = computed(() => normalizeGrain(filters.grain, window.value.days))
 
-const grainOptions: Array<SegmentedOption<string>> = [
-  { label: '按小时', value: 'hour' },
-  { label: '按天', value: 'day' },
-]
+const grainOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.usage.grain.hour'), value: 'hour' },
+  { label: t('page.usage.grain.day'), value: 'day' },
+])
 
 /* ------------------------------------------------------------------ *
  * 取数
@@ -126,8 +125,12 @@ async function loadStats(refresh = false): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载使用记录', error), detail }
-    toast.error(failureText('加载使用记录', error))
+    const failure = t('page.usage.failure', {
+      action: t('page.usage.action.load'),
+      reason: errorMessage(error),
+    })
+    loadError.value = { message: failure, detail }
+    toast.error(failure)
   } finally {
     if (controller === current) {
       controller = null
@@ -164,7 +167,7 @@ async function loadOptions(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     // 选项拉取失败不阻塞统计（旧版同样吞掉）
-    console.warn('[usage] 筛选项加载失败', error)
+    console.warn('[usage] failed to load filter options', error)
   } finally {
     if (optionsController === current) optionsController = null
   }
@@ -206,7 +209,7 @@ const rangeValue = computed<[number, number] | null>({
     const [start, end] = value
     if (!Number.isFinite(start) || !Number.isFinite(end)) return
     if (start > end) {
-      toast.error('开始时间不能晚于结束时间')
+      toast.error(t('page.usage.dateOrder'))
       return
     }
     table.setFilters({ start: new Date(start).toISOString(), end: new Date(end).toISOString() })
@@ -229,8 +232,10 @@ function setGrain(value: string | number): void {
   table.setFilter('grain', String(value))
 }
 
-const chips = computed<FilterChip[]>(() => usageChips(filters, options.value, window.value))
-const summary = computed(() => usageSummary(payload.value))
+const chips = computed<FilterChip[]>(() =>
+  usageChips(filters, options.value, window.value, t),
+)
+const summary = computed(() => usageSummary(payload.value, t))
 const hasFilters = computed(() =>
   Boolean(
     filters.platform ||
@@ -243,9 +248,7 @@ const hasFilters = computed(() =>
   ),
 )
 const emptyNote = computed(() =>
-  hasFilters.value
-    ? '当前筛选条件下没有记录，试试放宽时间范围或清除筛选。'
-    : '该时间范围内没有任何请求记录。',
+  hasFilters.value ? t('page.usage.empty.filtered') : t('page.usage.empty.none'),
 )
 
 /* ------------------------------------------------------------------ *
@@ -264,29 +267,35 @@ const platformOptions = computed(() => {
       value: spec.storage_platform || spec.id,
     }))
     .filter((item) => item.value && !seen.has(item.value))
-  return [{ label: '全部平台（全网关）', value: '' }, ...fromOptions, ...fallback]
+  return [{ label: t('page.usage.option.allPlatforms'), value: '' }, ...fromOptions, ...fallback]
 })
 
 const keyOptions = computed(() => [
-  { label: '全部 Key', value: '' },
-  ...(options.value?.keys || []).map((item) => ({ label: item.name || '#' + item.id, value: String(item.id) })),
+  { label: t('page.usage.option.allKeys'), value: '' },
+  ...(options.value?.keys || []).map((item) => ({
+    label: item.name || '#' + item.id,
+    value: String(item.id),
+  })),
 ])
 
 const modelOptions = computed(() => [
-  { label: '全部模型', value: '' },
-  ...(options.value?.models || []).map((item) => ({ label: item.label || item.value, value: item.value })),
+  { label: t('page.usage.option.allModels'), value: '' },
+  ...(options.value?.models || []).map((item) => ({
+    label: item.label || item.value,
+    value: item.value,
+  })),
 ])
 
 const accountOptions = computed(() => [
-  { label: '全部账号', value: '' },
+  { label: t('page.usage.option.allAccounts'), value: '' },
   ...(options.value?.accounts || []).map((item) => ({
-    label: (item.name || '账号 ' + item.id) + ' · #' + item.id,
+    label: (item.name || t('page.usage.option.account', { id: item.id })) + ' · #' + item.id,
     value: String(item.id),
   })),
 ])
 
 const endpointOptions = computed(() => [
-  { label: '全部端点', value: '' },
+  { label: t('page.usage.option.allEndpoints'), value: '' },
   ...(options.value?.use_cases || []).map((item) => ({ label: item, value: item })),
 ])
 
@@ -294,24 +303,30 @@ const endpointOptions = computed(() => [
  * 统计条 / 趋势 / 分布
  * ------------------------------------------------------------------ */
 
-const statItems = computed(() => toStatItems(payload.value?.overview))
+const statItems = computed(() => toStatItems(payload.value?.overview, t))
 const trendRows = computed(() => payload.value?.trend || [])
-const trendOption = computed(() => applyLineDefaults(toTrendOption(trendRows.value, grain.value)))
+const trendOption = computed(() =>
+  applyLineDefaults(toTrendOption(trendRows.value, grain.value, t)),
+)
 
 const modelMetric = computed(() => metricOf(payload.value?.by_model))
 const keyMetric = computed(() => metricOf(payload.value?.by_key))
 const endpointMetric = computed(() => metricOf(payload.value?.by_endpoint))
 
-const modelBars = computed(() => toBarItems(payload.value?.by_model, modelMetric.value))
-const keyBars = computed(() => toBarItems(payload.value?.by_key, keyMetric.value))
-const endpointBars = computed(() => toBarItems(payload.value?.by_endpoint, endpointMetric.value))
-const accountBars = computed(() => toBarItems(payload.value?.by_account, 'requests'))
-const resultBars = computed(() => toBarItems(payload.value?.by_result, 'requests'))
+const modelBars = computed(() => toBarItems(payload.value?.by_model, modelMetric.value, t))
+const keyBars = computed(() => toBarItems(payload.value?.by_key, keyMetric.value, t))
+const endpointBars = computed(() =>
+  toBarItems(payload.value?.by_endpoint, endpointMetric.value, t),
+)
+const accountBars = computed(() => toBarItems(payload.value?.by_account, 'requests', t))
+const resultBars = computed(() => toBarItems(payload.value?.by_result, 'requests', t))
 
 const numberFormat = (value: number): string => fmtInt(value)
 
 function metricText(metric: 'credits' | 'requests'): string {
-  return metric === 'credits' ? '按积分' : '按成功请求数'
+  return metric === 'credits'
+    ? t('page.usage.metric.credits')
+    : t('page.usage.metric.requests')
 }
 
 function rowFormat(metric: 'credits' | 'requests'): (value: number) => string {
@@ -360,11 +375,14 @@ function onBarClick(kind: UsageLogKind, event: MouseEvent): void {
 function exportCsv(): void {
   const data = payload.value
   if (!data || !usageHasData(data)) {
-    toast.error('导出失败：当前筛选下没有数据')
+    toast.error(t('page.usage.exportEmpty'))
     return
   }
-  saveText(usageCsv(data, { windowLabel: window.value.label, grain: grain.value }), usageFilename())
-  toast.success('已导出使用记录 CSV')
+  saveText(
+    usageCsv(data, { windowLabel: window.value.label, grain: grain.value }, t),
+    usageFilename(),
+  )
+  toast.success(t('page.usage.exportDone'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -414,10 +432,14 @@ watch(
 
 <template>
   <div class="usage-page">
-    <PageHeader title="使用记录" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
-        <Btn variant="default" :icon="Download" :disabled="!payload" @click="exportCsv">导出</Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="refresh">刷新</Btn>
+        <Btn variant="default" :icon="Download" :disabled="!payload" @click="exportCsv">
+          {{ t('page.usage.export') }}
+        </Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="refresh">
+          {{ t('page.usage.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -435,38 +457,42 @@ watch(
             class="usage-select"
             :value="filters.platform"
             :options="platformOptions"
-            aria-label="按平台筛选"
+            :aria-label="t('page.usage.filter.platformAria')"
             @update:value="(value: string | null) => applyFilter('platform', value)"
           />
           <n-select
             class="usage-select"
             :value="filters.key"
             :options="keyOptions"
-            aria-label="按 Key 筛选"
+            :aria-label="t('page.usage.filter.keyAria')"
             @update:value="(value: string | null) => applyFilter('key', value)"
           />
           <n-select
             class="usage-select"
             :value="filters.model"
             :options="modelOptions"
-            aria-label="按模型筛选"
+            :aria-label="t('page.usage.filter.modelAria')"
             @update:value="(value: string | null) => applyFilter('model', value)"
           />
           <n-select
             class="usage-select"
             :value="filters.account"
             :options="accountOptions"
-            aria-label="按账号筛选"
+            :aria-label="t('page.usage.filter.accountAria')"
             @update:value="(value: string | null) => applyFilter('account', value)"
           />
           <n-select
             class="usage-select"
             :value="filters.endpoint"
             :options="endpointOptions"
-            aria-label="按端点筛选"
+            :aria-label="t('page.usage.filter.endpointAria')"
             @update:value="(value: string | null) => applyFilter('endpoint', value)"
           />
-          <DateRange v-model="rangeValue" :width="300" placeholder="默认今日（自然日）" />
+          <DateRange
+            v-model="rangeValue"
+            :width="300"
+            :placeholder="t('page.usage.filter.datePlaceholder')"
+          />
         </template>
       </FilterBar>
     </Card>
@@ -478,7 +504,12 @@ watch(
       @retry="reload"
     />
 
-    <div v-else-if="firstLoading" class="usage-skeleton" aria-busy="true" aria-label="使用记录加载中">
+    <div
+      v-else-if="firstLoading"
+      class="usage-skeleton"
+      aria-busy="true"
+      :aria-label="t('page.usage.loadingAria')"
+    >
       <div class="usage-skeleton__strip"><n-skeleton text :repeat="2" /></div>
       <div class="usage-skeleton__card"><n-skeleton text :repeat="6" /></div>
       <div class="usage-skeleton__grid">
@@ -491,24 +522,28 @@ watch(
     <template v-else>
       <StatStrip :items="statItems" :columns="6" />
 
-      <Card title="Token 使用趋势" :loading="loading && !!payload">
+      <Card :title="t('page.usage.card.trend')" :loading="loading && !!payload">
         <template #extra>
           <Segmented
             :options="grainOptions"
             :model-value="grain"
-            aria-label="趋势粒度"
+            :aria-label="t('page.usage.grainAria')"
             @update:model-value="setGrain"
           />
         </template>
         <Chart v-if="trendRows.length" :option="trendOption" height="240px" />
         <Empty v-else compact :description="emptyNote">
-          <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
-          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">刷新</Btn>
+          <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
+            {{ t('page.usage.clearFilters') }}
+          </Btn>
+          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">
+            {{ t('page.usage.refresh') }}
+          </Btn>
         </Empty>
       </Card>
 
       <div class="usage-grid usage-grid--3">
-        <Card title="模型分布">
+        <Card :title="t('page.usage.card.models')">
           <template #extra>
             <span class="usage-metric">{{ metricText(modelMetric) }}</span>
             <Btn
@@ -518,14 +553,14 @@ watch(
               :disabled="!modelBars.length"
               @click="openLogs('model')"
             >
-              日志
+              {{ t('page.usage.action.logs') }}
             </Btn>
           </template>
           <div
             v-if="modelBars.length"
             class="usage-bars"
             role="group"
-            aria-label="模型分布，点击行查看该模型日志"
+            :aria-label="t('page.usage.group.modelsAria')"
             @click="onBarClick('model', $event)"
           >
             <BarList :items="modelBars" :format="rowFormat(modelMetric)" />
@@ -533,7 +568,7 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card title="Key 使用分布">
+        <Card :title="t('page.usage.card.keys')">
           <template #extra>
             <span class="usage-metric">{{ metricText(keyMetric) }}</span>
             <Btn
@@ -543,14 +578,14 @@ watch(
               :disabled="!keyBars.length"
               @click="openLogs('key')"
             >
-              日志
+              {{ t('page.usage.action.logs') }}
             </Btn>
           </template>
           <div
             v-if="keyBars.length"
             class="usage-bars"
             role="group"
-            aria-label="Key 使用分布，点击行查看该 Key 日志"
+            :aria-label="t('page.usage.group.keysAria')"
             @click="onBarClick('key', $event)"
           >
             <BarList :items="keyBars" :format="rowFormat(keyMetric)" />
@@ -558,10 +593,10 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card title="端点分布">
+        <Card :title="t('page.usage.card.endpoints')">
           <template #extra>
             <span class="usage-metric">{{ metricText(endpointMetric) }}</span>
-            <span class="usage-hint">端点维度暂不支持跳日志</span>
+            <span class="usage-hint">{{ t('page.usage.card.endpointHint') }}</span>
           </template>
           <div v-if="endpointBars.length" class="usage-bars">
             <BarList :items="endpointBars" :format="rowFormat(endpointMetric)" />
@@ -571,9 +606,9 @@ watch(
       </div>
 
       <div class="usage-grid usage-grid--2">
-        <Card title="账号分布">
+        <Card :title="t('page.usage.card.accounts')">
           <template #extra>
-            <span class="usage-metric">按成功请求数</span>
+            <span class="usage-metric">{{ t('page.usage.metric.requests') }}</span>
             <Btn
               variant="quiet"
               size="sm"
@@ -581,14 +616,14 @@ watch(
               :disabled="!accountBars.length"
               @click="openLogs('account')"
             >
-              日志
+              {{ t('page.usage.action.logs') }}
             </Btn>
           </template>
           <div
             v-if="accountBars.length"
             class="usage-bars"
             role="group"
-            aria-label="账号分布，点击行查看该账号日志"
+            :aria-label="t('page.usage.group.accountsAria')"
             @click="onBarClick('account', $event)"
           >
             <BarList :items="accountBars" :format="numberFormat" />
@@ -596,9 +631,9 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card title="请求结果分布">
+        <Card :title="t('page.usage.card.results')">
           <template #extra>
-            <span class="usage-metric">全部请求</span>
+            <span class="usage-metric">{{ t('page.usage.metric.allRequests') }}</span>
             <Btn
               variant="quiet"
               size="sm"
@@ -606,14 +641,14 @@ watch(
               :disabled="!resultBars.length"
               @click="openLogs('result')"
             >
-              日志
+              {{ t('page.usage.action.logs') }}
             </Btn>
           </template>
           <div
             v-if="resultBars.length"
             class="usage-bars"
             role="group"
-            aria-label="请求结果分布，点击行查看该类日志"
+            :aria-label="t('page.usage.group.resultsAria')"
             @click="onBarClick('result', $event)"
           >
             <BarList :items="resultBars" :format="numberFormat" />
@@ -622,11 +657,7 @@ watch(
         </Card>
       </div>
 
-      <p v-if="payload" class="usage-footnote">
-        口径：成功 = error_kind 为空或 success；Token 与积分只统计成功请求，请求数含失败。
-        非「成功」的结果行统一跳 result=error（/api/logs 只有成功/错误两档）。
-        时间范围默认「今日（自然日）」= 北京时间 00:00 起；数据看板的「近 24 小时」是滚动窗口，两处数字不同属正常。
-      </p>
+      <p v-if="payload" class="usage-footnote">{{ t('page.usage.footnote') }}</p>
     </template>
   </div>
 </template>

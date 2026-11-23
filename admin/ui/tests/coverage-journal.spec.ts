@@ -11,6 +11,7 @@ import { createPinia } from 'pinia'
 import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import JournalPage from '@/pages/JournalPage.vue'
+import { setLocale } from '@/i18n'
 import * as journalApi from '@/api/journal'
 import type { CreditEventPayload } from '@/api/journal'
 import * as platformsApi from '@/api/platforms'
@@ -142,5 +143,32 @@ describe('JournalPage 首屏统计加载态', () => {
 
     expect(wrapper.text()).toContain('共 0 条')
     expect(wrapper.text()).toContain('还没有流水记录。账号刷新或签到后会自动记账。')
+  })
+})
+
+describe('JournalPage 中英切换', () => {
+  it('切到英文：类型 / 来源前缀 / 汇总 / 翻页文案出英文', async () => {
+    vi.mocked(platformsApi.listPlatforms).mockResolvedValue({ items: [] } as never)
+    vi.mocked(platformsApi.getCurrentPlatform).mockResolvedValue({ platform: 'workbuddy', realm: '' } as never)
+    vi.mocked(platformsApi.putCurrentPlatform).mockResolvedValue(undefined as never)
+    listCreditEvents.mockResolvedValue(payload())
+
+    setLocale('zh-CN')
+    const { wrapper } = await mountPage()
+    expect(wrapper.text()).toContain('共 317 条 · 本页净变化 +120')
+    expect(wrapper.text()).toContain('快速翻页（不统计总数）')
+
+    setLocale('en-US')
+    await flush()
+
+    expect(wrapper.find('h1').text()).toContain('Credit history')
+    expect(wrapper.text()).toContain('records: 317 · page net +120')
+    expect(wrapper.text()).toContain('Page 1 / 7')
+    expect(wrapper.text()).toContain('Fast paging (skip total count)')
+    expect(wrapper.text()).toContain('Balance')
+
+    setLocale('zh-CN')
+    await flush()
+    expect(wrapper.text()).toContain('共 317 条 · 本页净变化 +120')
   })
 })

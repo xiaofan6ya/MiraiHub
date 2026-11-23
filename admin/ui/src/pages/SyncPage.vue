@@ -113,8 +113,8 @@ function rememberRecord(next: SyncPushRecord): void {
 interface LoadOptions {
   /** 保存/推送成功后强制用响应覆盖表单。 */
   forceForm?: boolean
-  /** 刷新失败时是否弹 Toast（首次加载失败交给 ErrorBlock）。 */
-  silent?: boolean
+  /** 后台重取（切平台）失败时只留卡片内 ErrorBlock，不弹 Toast（首次加载失败同样交给 ErrorBlock）。 */
+  quiet?: boolean
 }
 
 async function load(options: LoadOptions = {}): Promise<void> {
@@ -129,7 +129,8 @@ async function load(options: LoadOptions = {}): Promise<void> {
     if (options.forceForm || isFirst || !hadChanges) applyForm(payload)
   } catch (error) {
     loadError.value = error
-    if (!isFirst && !options.silent) toast.error(failureText('刷新同步配置', error))
+    // 契约 sync.md §六：刷新失败要「保留旧数据 + 卡片内 compact ErrorBlock + Toast」两条都给。
+    if (!isFirst && !options.quiet) toast.error(failureText('刷新同步配置', error))
   } finally {
     refreshing.value = false
     firstLoad.value = false
@@ -137,7 +138,8 @@ async function load(options: LoadOptions = {}): Promise<void> {
 }
 
 function refresh(): void {
-  void load({ silent: true })
+  // 用户主动点刷新：失败必须给 Toast（§六「刷新失败」），不能只留卡片内错误块。
+  void load()
 }
 
 function onUrlBlur(): void {
@@ -222,7 +224,7 @@ onMounted(() => {
   void load()
   // 旧版切平台会重跑 loadSyncConfig()（console-app.js:3349），这里保持同样行为。
   stopPlatformWatch = platform.onChange(() => {
-    void load({ silent: true })
+    void load({ quiet: true })
   })
 })
 

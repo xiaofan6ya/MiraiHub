@@ -16,6 +16,16 @@
  * 页面只做摆放：筛选 / 排序 / 分页 / sparkline 分桶全部在这里的纯函数完成，可直接单测。
  */
 import { http } from './http'
+import { t as defaultTranslate, type MessageKey, type Translate } from '@/i18n'
+
+/** 文案取当前语言；页面传入 useI18n().t 后随语言切换重算，不传时用默认字典（中文）。 */
+function tr(
+  translate: Translate | undefined,
+  key: MessageKey,
+  params?: Record<string, string | number>,
+): string {
+  return (translate ?? defaultTranslate)(key, params)
+}
 
 /* -------------------------------------------------------------------------- */
 /* 后端形状                                                                    */
@@ -128,10 +138,18 @@ export interface DashboardPayload {
 /** 时间窗口（小时）。设计稿只保留 24h / 3d / 7d（旧版还有 1h，本次不做）。 */
 export const MARKET_HOURS = [24, 72, 168] as const
 export type MarketHours = (typeof MARKET_HOURS)[number]
-export const MARKET_HOURS_LABEL: Record<number, string> = {
-  24: '24 小时',
-  72: '3 天',
-  168: '7 天',
+const MARKET_HOURS_LABEL_KEY: Record<number, MessageKey> = {
+  24: 'market.hours.24',
+  72: 'market.hours.72',
+  168: 'market.hours.168',
+}
+
+/** 时间窗口文案（24 小时 / 3 天 / 7 天），未知值回落到「N 小时」。 */
+export function marketHoursLabel(hours: unknown, translate?: Translate): string {
+  const value = normalizeHours(hours)
+  const key = MARKET_HOURS_LABEL_KEY[value]
+  if (!key) return tr(translate, 'page.market.hoursFallback', { hours: value })
+  return tr(translate, key)
 }
 
 /** 主接口：近 N 小时的用量 + 定价 + 可用账号。 */
@@ -362,6 +380,7 @@ export function toMarketCards(
   payload: ModelMarketPayload | null | undefined,
   aggregate?: AggregatePayload | null,
   trend?: DashboardTrend | null,
+  translate?: Translate,
 ): MarketCard[] {
   const items = Array.isArray(payload?.items) ? payload!.items : []
   const callNames = indexCallNames(aggregate)
@@ -378,7 +397,7 @@ export function toMarketCards(
       const exhausted = Math.max(0, Number(item.exhausted_accounts) || 0)
       return {
         key: String(item.key || item.name || ''),
-        name: String(item.name || item.key || '未知模型'),
+        name: String(item.name || item.key || tr(translate, 'market.row.unknownModel')),
         platforms,
         platformLabels: labels.length ? labels : platforms,
         platformCount: platforms.length,
@@ -547,9 +566,12 @@ export function rateTone(rate: number | null | undefined): 'ok' | 'warn' | 'dang
 }
 
 /** 倍率文案（契约 §3.2）：免费 / ×1.00 / 未定价。 */
-export function priceText(card: Pick<MarketCard, 'free' | 'multiplier'>): string {
-  if (card.free) return '免费'
-  if (card.multiplier === null) return '未定价'
+export function priceText(
+  card: Pick<MarketCard, 'free' | 'multiplier'>,
+  translate?: Translate,
+): string {
+  if (card.free) return tr(translate, 'market.price.free')
+  if (card.multiplier === null) return tr(translate, 'market.price.none')
   return '×' + Number(card.multiplier).toFixed(2)
 }
 
