@@ -6,8 +6,7 @@
 （不依赖 npm run build 是否跑过），把几件事钉死：
 
 1. 未登录 /admin/v2 → 303 回旧版 /admin（登录页全站只留一份）；
-2. 未登录 /admin/v2/assets/* → 404，与旧版 console_asset 一致，不暴露
-   「文件存在但你没权限」；
+2. 未登录 /admin/v2/assets/* 与 login.html → 200（登录页依赖），入口与深链仍 303/404；
 3. ../ 穿越 → 404，且**不**参与 SPA 回退（否则任意路径都能变 200）；
 4. 通过闸门后：入口 HTML 不缓存并带 CSP，assets/ 下的内容哈希文件
    immutable 长缓存，其它文件 no-cache，深链回退到入口 HTML；
@@ -71,13 +70,19 @@ def test_anonymous_entry_redirects_to_legacy_console(client, dist):
         assert r.headers["location"] == "/admin", path
 
 
-def test_anonymous_asset_is_404(client, dist):
-    """与 console_asset 一致：不告诉探测者文件是否存在。"""
-    existing = client.get("/admin/v2/assets/index-abc123.js", follow_redirects=False)
-    missing = client.get("/admin/v2/assets/nope-000.js", follow_redirects=False)
-    assert existing.status_code == 404
-    assert missing.status_code == 404
-    assert existing.json() == missing.json()
+def test_anonymous_login_assets_are_public(client, dist):
+    """登录页引用的 JS/CSS 必须公开，否则 /admin 发出去的登录页会白屏。
+
+    入口 HTML / 深层路径仍要求会话；缺失资源仍然 404。
+    """
+    (dist / "assets" / "login-abc.css").write_text("/* login */", encoding="utf-8")
+    for path in ("/admin/v2/assets/index-abc123.js",
+                 "/admin/v2/assets/login-abc.css",
+                 "/admin/v2/login.html"):
+        assert client.get(path, follow_redirects=False).status_code == 200, path
+    assert client.get("/admin/v2/", follow_redirects=False).status_code == 303
+    assert client.get("/admin/v2/deep/route", follow_redirects=False).status_code == 404
+    assert client.get("/admin/v2/assets/nope-000.js", follow_redirects=False).status_code == 404
 
 
 def test_traversal_is_404(client, dist, logged_in):

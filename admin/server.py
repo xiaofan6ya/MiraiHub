@@ -1409,15 +1409,18 @@ def ui_v2_asset(file_path: str, request: Request):
     但 `login.html` 是独立入口，未来也可能改成 history 模式，所以非
     `assets/` 的未知路径统一回入口页，不让刷新直接吃 404。
     """
-    if not _console_allowed(request):
+    # 登录页本身是公开入口：它引用的 JS/CSS 必须能在未登录时加载，
+    # 否则 /admin 发出去的 login.html 会白屏（浏览器报一堆 assets 404）。
+    # 只放行 assets/ 与 login.html；入口 HTML、SPA 深链、其他文件继续要求会话。
+    public_entry = file_path.replace("\\", "/") == "login.html"
+    is_asset = file_path.replace("\\", "/").startswith("assets/")
+    if not _console_allowed(request) and not (is_asset or public_entry):
         raise HTTPException(status_code=404)
     root = UI_DIST.resolve()
     try:
         target = (root / file_path).resolve()
     except OSError:
         raise HTTPException(status_code=404) from None
-    # 统一按 URL 语义判断前缀：Windows 上 file_path 可能带反斜杠。
-    is_asset = file_path.replace("\\", "/").startswith("assets/")
     escaped = not str(target).startswith(str(root) + os.sep)
     if escaped or not target.is_file():
         # 资源缺失就是「构建不完整」，直说 404 比给一个入口页更好排查。
