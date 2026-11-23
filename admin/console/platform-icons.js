@@ -88,6 +88,13 @@
     // （512×512 RGBA，奶白圆角底 + 深灰「点阵上扬」图形），缩放到 256。
     // 自带底色 ⇒ tone=color，深浅主题都能直接用。
     krowork: { src: "/admin/assets/logos/krowork-256.png", tone: "color" },
+    // AStudio（讯飞 Astron Studio）：素材取自桌面端 `Contents/Resources/icon.icns`
+    // （1024 多尺寸，导出 256）。蓝紫圆角方块 + 星芒图形，四角透明、自带底色。
+    astudio: { src: "/admin/assets/logos/astudio-256.png", tone: "color" },
+    // 科搭 Codar：官方 `codar-icon.png`（256×256 RGBA）。原图是**白底**紫色
+    // 字形，白底放到深色主题里就是一块白方块 —— 这里按边缘泛洪把白底抠成
+    // 透明（只吃接近纯白的外圈，字形本身不动），两种主题都能直接用。
+    codar: { src: "/admin/assets/logos/codar-256.png", tone: "color" },
   };
 
   /* 兜底：不要用「加号」（看着像「新建平台」）。 */
@@ -127,6 +134,9 @@
     "wps-lingxi": "wps",
     wps_lingxi: "wps",
     wps: "wps",
+    // AStudio / 科搭 Codar（各只有一个区，没有 :cn / :intl 分家）
+    astudio: "astudio",
+    codar: "codar",
     // 豆包（桌面客户端 Cookie 登录态）
     doubao: "doubao",
     "doubao-cn": "doubao",
