@@ -1585,7 +1585,6 @@ watch(statusTab, () => {
       size="lg"
       :submit-text="addSubmitText"
       :submit-loading="manualBusy || importBusy || scanBusy || phoneBusy || authBusy"
-      :hide-footer="addKind === 'authorize'"
       @submit="submitAdd"
     >
       <template v-if="addKind === 'manual'">
