@@ -390,7 +390,17 @@ describe('SettingsPage · 运行配置保存', () => {
     expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 
-  it('数字与字符串控件改动都进入 diff（清空字符串 = 回落 .env）', async () => {
+  it('数字与字符串控件改动都进入 diff（清空字符串 = 回落 .env），保存后按快照回填', async () => {
+    saveRuntimeConfig.mockResolvedValueOnce({
+      changed: ['GATEWAY_REQUEST_TIMEOUT'],
+      reverted: ['UPSTREAM_CLIENT_NAME'],
+      errors: {},
+      fields: runtimeFields().map((field) => {
+        if (field.attr === 'GATEWAY_REQUEST_TIMEOUT') return { ...field, value: 90, overridden: true }
+        if (field.attr === 'UPSTREAM_CLIENT_NAME') return { ...field, value: 'miraihub', overridden: false }
+        return field
+      }),
+    })
     const { wrapper } = await mountPage()
 
     const number = wrapper
@@ -412,11 +422,16 @@ describe('SettingsPage · 运行配置保存', () => {
       GATEWAY_REQUEST_TIMEOUT: 90,
       UPSTREAM_CLIENT_NAME: '',
     })
+    // changed / reverted 都算受理：清空字符串（回落默认）不应被当成「未保存」
+    expect(number!.props('value')).toBe(90)
+    expect(text!.props('value')).toBe('miraihub')
+    expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 
-  it('保存返回 errors 时用错误 Toast 列出未保存项', async () => {
+  it('保存返回 errors 时用错误 Toast 列出未保存项，未落库的改动留在草稿里', async () => {
+    // 后端 save() 对 errors 里的字段只 continue（不落库），所以响应里 changed 与 errors 不会重叠。
     saveRuntimeConfig.mockResolvedValue({
-      changed: ['ENABLE_DOCS'],
+      changed: [],
       reverted: [],
       errors: { ENABLE_DOCS: '需要重启才能生效' },
       fields: runtimeFields(),
@@ -431,6 +446,42 @@ describe('SettingsPage · 运行配置保存', () => {
 
     expect(bodyText()).toContain('部分配置未保存')
     expect(bodyText()).toContain('ENABLE_DOCS 需要重启才能生效')
+    // errors 里的字段后端没有落库（runtime_settings.py:save 只 continue）：
+    // 用返回的 fields 快照重置草稿会把用户刚改的值静默丢掉，所以值要留在草稿里、仍算未保存。
+    expect(docSwitch!.props('value')).toBe(true)
+    expect(wrapper.text()).toContain('有未保存的修改')
+    expect(buttonByText(wrapper.find('#settings-runtime').element, '保存配置')?.disabled).toBe(false)
+  })
+
+  it('部分成功：成功的字段回填服务端值，未保存项留草稿，重试只再提交未保存项', async () => {
+    saveRuntimeConfig.mockResolvedValueOnce({
+      changed: ['GATEWAY_REQUEST_TIMEOUT'],
+      reverted: [],
+      errors: { ENABLE_DOCS: '需要重启才能生效' },
+      fields: runtimeFields().map((field) =>
+        field.attr === 'GATEWAY_REQUEST_TIMEOUT' ? { ...field, value: 90, overridden: true } : field,
+      ),
+    })
+    const { wrapper } = await mountPage()
+    const number = wrapper
+      .findAllComponents(NInputNumber)
+      .find((item) => (item.attributes('aria-label') || '') === '网关总时限（秒）')
+    const docSwitch = wrapper
+      .findAllComponents(NSwitch)
+      .find((item) => (item.attributes('aria-label') || '') === '开放 API 文档')
+    number!.vm.$emit('update:value', 90)
+    docSwitch!.vm.$emit('update:value', true)
+    await flush()
+    await click(wrapper.element, '保存配置')
+
+    expect(saveRuntimeConfig).toHaveBeenNthCalledWith(1, { GATEWAY_REQUEST_TIMEOUT: 90, ENABLE_DOCS: true })
+    // 落库的字段回到服务端快照（90，不再算改动）；失败的开关仍在草稿里
+    expect(number!.props('value')).toBe(90)
+    expect(docSwitch!.props('value')).toBe(true)
+    expect(wrapper.text()).toContain('有未保存的修改')
+
+    await click(wrapper.element, '保存配置')
+    expect(saveRuntimeConfig).toHaveBeenNthCalledWith(2, { ENABLE_DOCS: true })
   })
 
   it('保存失败时提示「保存运行配置失败」且改动不丢', async () => {

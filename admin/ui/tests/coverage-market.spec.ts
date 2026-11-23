@@ -6,6 +6,7 @@ import { createPinia } from 'pinia'
 import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import MarketPage from '@/pages/MarketPage.vue'
+import { setLocale } from '@/i18n'
 import * as marketApi from '@/api/market'
 import type { ModelMarketPayload } from '@/api/market'
 
@@ -61,5 +62,30 @@ describe('MarketPage 覆盖率补测', () => {
     const before = listMarket.mock.calls.length
     if (retry) { await retry.trigger('click'); await flush() }
     expect(listMarket.mock.calls.length).toBeGreaterThan(before)
+  })
+})
+describe('MarketPage 中英切换', () => {
+  it('切到英文：页头 / 价格 / 汇总 / 状态出英文', async () => {
+    listMarket.mockResolvedValue(payload)
+    getAggregate.mockResolvedValue(null as never)
+    getTrend.mockResolvedValue({ trend: [] } as never)
+
+    setLocale('zh-CN')
+    const { wrapper } = await mountPage()
+    expect(wrapper.text()).toContain('共 1 个模型 · 可用 1')
+
+    setLocale('en-US')
+    await flush()
+
+    expect(wrapper.find('h1').text()).toContain('Model market')
+    expect(wrapper.text()).toContain('models: 1 · available: 1')
+    expect(wrapper.text()).toContain('Available')
+    expect(wrapper.text()).toContain('×1.00')
+    expect(wrapper.text()).not.toContain('模型广场')
+
+    setLocale('zh-CN')
+    await flush()
+    expect(wrapper.text()).toContain('模型广场')
+    expect(wrapper.text()).toContain('共 1 个模型 · 可用 1')
   })
 })

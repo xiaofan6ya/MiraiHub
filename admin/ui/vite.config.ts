@@ -120,9 +120,55 @@ function preloadFirstRoute(routeChunkName: string, minBytes: number): Plugin {
   }
 }
 
+/**
+ * 把入口 CSS 内联进 index.html，消掉 render-blocking 的样式请求。
+ *
+ * Vite 默认把入口 CSS 产出成 <link rel="stylesheet">：浏览器必须等它下载 + 解析完
+ * 才能首次绘制，两个文件各占一跳 RTT（Lighthouse mobile 实测 wastedMs 330 + 180）。
+ * 入口 CSS 只有几 KB（tokens + base + 字体 face + 外壳组件样式），内联进 HTML 后
+ * 跟着文档一起到达，不再单独阻塞；页面级异步 CSS 仍按 chunk 懒加载。
+ *
+ * 只对 index.html 生效：login.html 是另一条入口，样式集不同。
+ */
+function inlineEntryCss(): Plugin {
+  const LINK = /<link[^>]+rel="stylesheet"[^>]*>/g
+  const HREF = /href="([^"]+)"/
+  return {
+    name: 'mh-inline-entry-css',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html, ctx) {
+        if (!/(^|\/)index\.html$/.test(ctx.path)) return html
+        const bundle = ctx.bundle
+        if (!bundle) return html
+        const byFileName = new Map<string, { source: unknown }>()
+        for (const file of Object.values(bundle) as Array<{ type: string; fileName: string; source?: unknown }>) {
+          if (file.type !== 'asset') continue
+          byFileName.set(file.fileName, file as { source: unknown })
+          byFileName.set(file.fileName.split('/').pop() || file.fileName, file as { source: unknown })
+        }
+        return html.replace(LINK, (tag) => {
+          const href = HREF.exec(tag)?.[1]
+          if (!href) return tag
+          // href 形如 /admin/v2/assets/index-xxxx.css —— 只取文件名去匹配产物。
+          const name = href.split('/').pop() || ''
+          const asset = byFileName.get(name)
+          if (!asset) return tag
+          const css =
+            typeof asset.source === 'string'
+              ? asset.source
+              : new TextDecoder('utf-8').decode(asset.source as Uint8Array)
+          return '<style data-mh-entry-css>' + css + '</style>'
+        })
+      },
+    },
+  }
+}
+
 export default defineConfig({
   base: '/admin/v2/',
-  plugins: [vue(), preloadFirstRoute('OverviewPage', 4096)],
+  plugins: [vue(), preloadFirstRoute('OverviewPage', 4096), inlineEntryCss()],
   resolve: {
     alias: {
       '@': '/src',

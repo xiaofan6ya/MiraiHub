@@ -48,6 +48,7 @@ import {
   createKey,
   deleteKey,
   draftToInput,
+  emptyIpOverview,
   filterKeyRows,
   getNetwork,
   getSelectionPolicy,
@@ -75,9 +76,9 @@ import {
   type AccountOption,
   type AggregateModelsPayload,
   type ApiKeyItem,
+  type IpOverviewView,
   type KeyFormDraft,
   type KeyFormErrors,
-  type KeyIpRow,
   type KeyRow,
   type KeySortKey,
   type KeyUsagePayload,
@@ -193,6 +194,14 @@ const groups = ref<Array<{ id: number; name: string; effective_count?: number }>
 const platforms = ref<PlatformOption[]>([])
 const accountOptions = ref<AccountOption[]>([])
 const accountsLoading = ref(false)
+/** 创建 / 编辑抽屉的候选数据：分组、平台、账号。 */
+const auxLoading = ref(false)
+/** 按来源记失败：分组 / 平台 / 账号任一失败，就给出「重新加载」入口。 */
+const auxFailures = ref({ groups: false, platforms: false, accounts: false })
+const auxFailed = computed(
+  () => auxFailures.value.groups || auxFailures.value.platforms || auxFailures.value.accounts,
+)
+/** 本次打开抽屉是否已经取过候选；失败后会复位，下次打开或点「重新加载」都会重新取。 */
 let auxLoaded = false
 
 const groupOptions = computed(() => [
@@ -232,11 +241,7 @@ const ipLoading = ref(false)
 const ipError = ref('')
 const ipDays = ref('1')
 const ipKeyName = ref('')
-const ipItems = ref<KeyIpRow[]>([])
-const ipOverview = ref(toIpOverview({
-  id: 0, name: '', days: 1, sort: 'requests', direction: 'desc', offset: 0, limit: 100,
-  total_ips: 0, total_requests: 0, active_ips: 0, active_requests: 0, active_scope: '', active: [], items: [],
-}))
+const ipOverview = ref<IpOverviewView>(emptyIpOverview())
 let ipKeyId = 0
 const modelsOpen = ref(false)
 const modelTerm = ref('')
@@ -263,7 +268,12 @@ const ipColumns = computed<TableColumn[]>(() => [
 ])
 
 const modelHits = computed(() => searchModelChips(models.value, modelTerm.value))
-const ipRows = computed<TableRow[]>(() => ipItems.value as unknown as TableRow[])
+/**
+ * 明细行必须走 toIpOverview 的 rows：原始 KeyIpRow 的 models 是对象数组、
+ * 时间是 last_seen、并发是 active_requests，直接绑给 DataTable 会渲染成
+ * 「[object Object]」并把「最近调用 / 并发」两列留空。
+ */
+const ipRows = computed<TableRow[]>(() => ipOverview.value.rows as unknown as TableRow[])
 
 /* ------------------------------ 取数 ------------------------------ */
 function prettyDetail(detail: unknown): string {
@@ -318,36 +328,76 @@ async function loadAccessories(): Promise<void> {
   }
 }
 
-async function loadAccountOptions(search: string): Promise<void> {
+/** 账号候选（服务端搜索）；返回 false 表示这次取数失败。 */
+async function loadAccountOptions(search: string): Promise<boolean> {
   accountsLoading.value = true
   try {
     const payload = await listAccountOptions({ search, pageSize: 50 })
     accountOptions.value = Array.isArray(payload?.items) ? payload.items : (payload?.accounts || [])
+    auxFailures.value.accounts = false
+    return true
   } catch {
     accountOptions.value = []
+    auxFailures.value.accounts = true
+    return false
   } finally {
     accountsLoading.value = false
   }
 }
 
+async function loadGroups(): Promise<void> {
+  try {
+    const payload = await listGroupOptions()
+    groups.value = Array.isArray(payload?.items) ? payload.items : []
+    auxFailures.value.groups = false
+  } catch {
+    groups.value = []
+    auxFailures.value.groups = true
+  }
+}
+
+async function loadPlatforms(): Promise<void> {
+  try {
+    const payload = await listPlatformOptions()
+    const seen = new Map<string, string>()
+    for (const item of payload?.items || []) {
+      const storage = String(item.storage_platform || item.id || '').toLowerCase()
+      if (!storage || seen.has(storage)) continue
+      seen.set(storage, String(item.label || storage))
+    }
+    platforms.value = [...seen].map(([storage, label]) => ({ storage, label }))
+    auxFailures.value.platforms = false
+  } catch {
+    platforms.value = []
+    auxFailures.value.platforms = true
+  }
+}
+
+/**
+ * 预取创建 / 编辑抽屉的候选数据。
+ *
+ * 失败后必须复位 auxLoaded：新版第一版把它置 true 就再没复位，
+ * 一次接口抖动（分组 / 平台 / 账号任一失败）会让下拉在整个页面生命周期里一直是空的，
+ * 只能刷新整页。现在失败会保留 auxFailed 并复位，重新打开抽屉或点「重新加载」都会重取。
+ */
 async function ensureAuxLoaded(): Promise<void> {
-  if (auxLoaded) return
+  if (auxLoaded || auxLoading.value) return
   auxLoaded = true
-  void listGroupOptions()
-    .then((payload) => { groups.value = Array.isArray(payload?.items) ? payload.items : [] })
-    .catch(() => { groups.value = [] })
-  void listPlatformOptions()
-    .then((payload) => {
-      const seen = new Map<string, string>()
-      for (const item of payload?.items || []) {
-        const storage = String(item.storage_platform || item.id || '').toLowerCase()
-        if (!storage || seen.has(storage)) continue
-        seen.set(storage, String(item.label || storage))
-      }
-      platforms.value = [...seen].map(([storage, label]) => ({ storage, label }))
-    })
-    .catch(() => { platforms.value = [] })
-  await loadAccountOptions('')
+  auxLoading.value = true
+  auxFailures.value = { groups: false, platforms: false, accounts: false }
+  try {
+    await Promise.all([loadGroups(), loadPlatforms(), loadAccountOptions('')])
+  } finally {
+    auxLoading.value = false
+    if (auxFailed.value) auxLoaded = false
+  }
+}
+
+/** 抽屉里的「重新加载」入口：强制重取一次，不看 auxLoaded。 */
+async function reloadAux(): Promise<void> {
+  if (auxLoading.value) return
+  auxLoaded = false
+  await ensureAuxLoaded()
 }
 
 /* ------------------------------ 筛选 / 排序 ------------------------------ */
@@ -672,11 +722,10 @@ async function loadIps(): Promise<void> {
   ipError.value = ''
   try {
     const payload = await keyIps(ipKeyId, { days: Number(ipDays.value) || 1 })
-    ipItems.value = payload.items || []
     ipOverview.value = toIpOverview(payload)
   } catch (error) {
     ipError.value = errorMessage(error)
-    ipItems.value = []
+    ipOverview.value = emptyIpOverview()
   } finally {
     ipLoading.value = false
   }
@@ -686,7 +735,9 @@ async function openIps(row: KeyRow): Promise<void> {
   ipKeyId = row.id
   ipKeyName.value = row.name
   ipDays.value = '1'
-  ipItems.value = []
+  // 先清空：汇总与明细都是上一个 Key 的，等新数据回来再填（失败也保持空态）。
+  ipOverview.value = emptyIpOverview()
+  ipError.value = ''
   ipOpen.value = true
   await loadIps()
 }
@@ -867,6 +918,13 @@ onBeforeUnmount(() => {
       :submit-loading="submitting"
       @submit="submit"
     >
+      <ErrorBlock
+        v-if="auxFailed"
+        compact
+        title="分组 / 平台 / 账号候选加载失败，对应下拉可能为空。"
+        retry-label="重新加载"
+        @retry="reloadAux"
+      />
       <Section title="基本" first>
         <div class="keys-form">
           <FormField label="名称" :required="Boolean(editing)" :error="errors.name" hint="创建时可留空，后端会填「未命名」。">

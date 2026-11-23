@@ -30,18 +30,18 @@ import {
   type TableRow,
 } from '@/components'
 import { useTableQuery, useToast } from '@/composables'
-import { errorMessage, failureText } from '@/utils/error'
+import { errorMessage } from '@/utils/error'
 import { FMT_EMPTY, fmtInt } from '@/utils/format'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
 import {
-  KIND_OPTIONS,
   accountOptions,
   canGoNext,
   csvFilename,
   filterJournalRows,
   importingHint,
   kindMeta,
+  kindOptions,
   listCreditEvents,
   pageState,
   rangeToQuery,
@@ -53,10 +53,11 @@ import {
   type CreditEventPayload,
   type JournalRow,
 } from '@/api/journal'
+import { useI18n } from '@/i18n'
 
-const HELP_TEXT =
-  '查看奖励与余额变动，追溯每一笔积分。确认奖励与余额观察分别记录，不能相加统计；' +
-  '历史未保存的来源和余额显示为未记录。平台归属来自当前平台上下文（后端流水表没有平台列）。'
+const { t } = useI18n()
+/** 旧版面板副标题（原样保留，收进 ⓘ）；语种跟随 useI18n。 */
+const helpText = computed(() => t('page.journal.help'))
 
 const FAST_KEY = 'mh.journal.fast'
 
@@ -76,12 +77,14 @@ let stopPlatformWatch: (() => void) | null = null
 
 const fast = ref(false)
 
-const platformLabel = computed(() => platform.currentSpec?.label || platform.currentId || '当前平台')
+const platformLabel = computed(
+  () => platform.currentSpec?.label || platform.currentId || t('page.journal.platformFallback'),
+)
 const platformOptions = computed(() =>
   (platform.platforms || []).map((item) => ({ label: item.label || item.id, value: item.id })),
 )
 
-const rows = computed(() => toJournalRows(payload.value?.items, platformLabel.value))
+const rows = computed(() => toJournalRows(payload.value?.items, platformLabel.value, t))
 const filteredRows = computed(() => filterJournalRows(rows.value, { q: table.state.filters.q }))
 
 const SORTERS: Record<string, (a: JournalRow, b: JournalRow) => number> = {
@@ -108,9 +111,9 @@ const summary = computed(() => summarize(filteredRows.value, page.value.total))
  */
 const summaryText = computed(() => {
   if (payload.value !== null) return summary.value.text
-  return loading.value ? '加载中…' : ''
+  return loading.value ? t('page.journal.loading') : ''
 })
-const importHint = computed(() => importingHint(payload.value))
+const importHint = computed(() => importingHint(payload.value, t))
 const hasFilters = computed(() =>
   Boolean(
     table.state.filters.account ||
@@ -123,11 +126,15 @@ const hasFilters = computed(() =>
 )
 
 const accountSelectOptions = computed(() =>
-  accountOptions(payload.value?.accounts).map((item) => ({ label: item.label, value: String(item.value) })),
+  accountOptions(payload.value?.accounts, t).map((item) => ({
+    label: item.label,
+    value: String(item.value),
+  })),
 )
 const sourceSelectOptions = computed(() =>
-  sourceOptions(payload.value?.sources).map((item) => ({ label: item.label, value: item.value })),
+  sourceOptions(payload.value?.sources, t).map((item) => ({ label: item.label, value: item.value })),
 )
+const kindSelectOptions = computed(() => kindOptions(t))
 
 /** 日期区间在路由里存 ISO 字符串，控件要毫秒时间戳。 */
 const rangeValue = computed<[number, number] | null>(() => {
@@ -142,28 +149,41 @@ const chips = computed<FilterChip[]>(() => {
   const list: FilterChip[] = []
   if (filters.account) {
     const option = accountSelectOptions.value.find((item) => item.value === filters.account)
-    if (option && filters.account !== '0') list.push({ key: 'account', label: '账号', value: option.label })
+    if (option && filters.account !== '0') {
+      list.push({ key: 'account', label: t('page.journal.chip.account'), value: option.label })
+    }
   }
   if (filters.kind) {
-    const option = KIND_OPTIONS.find((item) => item.value === filters.kind)
-    list.push({ key: 'kind', label: '类型', value: option?.label || filters.kind })
+    const option = kindSelectOptions.value.find((item) => item.value === filters.kind)
+    list.push({ key: 'kind', label: t('page.journal.chip.kind'), value: option?.label || filters.kind })
   }
   if (filters.source) {
-    const label = sourceOptions(payload.value?.sources).find((item) => item.value === filters.source)?.label
-    list.push({ key: 'source', label: '来源', value: label || filters.source })
+    const label = sourceOptions(payload.value?.sources, t).find(
+      (item) => item.value === filters.source,
+    )?.label
+    list.push({ key: 'source', label: t('page.journal.chip.source'), value: label || filters.source })
   }
   if (filters.start && filters.end) {
-    list.push({ key: 'range', label: '时间', value: filters.start.slice(0, 16).replace('T', ' ') + ' ~ ' + filters.end.slice(11, 16) })
+    list.push({
+      key: 'range',
+      label: t('page.journal.chip.time'),
+      value: filters.start.slice(0, 16).replace('T', ' ') + ' ~ ' + filters.end.slice(11, 16),
+    })
   }
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.journal.chip.search'), value: filters.q })
   return list
 })
 
 const emptyDescription = computed(() =>
-  hasFilters.value
-    ? '没有符合条件的流水。清空筛选后可看到全部记录。'
-    : '还没有流水记录。账号刷新或签到后会自动记账。',
+  hasFilters.value ? t('page.journal.empty.filtered') : t('page.journal.empty.none'),
 )
+
+/** 页码文案：快速翻页时不写总页数（与旧版一致）。 */
+const pageText = computed(() => {
+  const head = t('page.journal.pager.indicator', { page: page.value.page })
+  if (fast.value) return head + t('page.journal.pager.noTotal')
+  return head + t('page.journal.pager.count', { count: page.value.pageCount })
+})
 
 const search = ref(table.state.filters.q)
 watch(
@@ -209,7 +229,14 @@ async function load(): Promise<void> {
       message: errorMessage(error),
       detail: error instanceof ApiError && error.detail ? prettyDetail(error.detail) : '',
     }
-    toast.error(failureText(payload.value === null ? '加载积分流水' : '刷新积分流水', error))
+    toast.error(
+      t('page.journal.failure', {
+        action: t(
+          payload.value === null ? 'page.journal.action.load' : 'page.journal.action.refresh',
+        ),
+        reason: errorMessage(error),
+      }),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -292,14 +319,19 @@ function sortOrderOf(key: string): 'ascend' | 'descend' | false {
 
 function exportCsv(): void {
   if (!filteredRows.value.length) {
-    toast.error('导出失败：当前页没有可导出的记录')
+    toast.error(t('page.journal.exportEmpty'))
     return
   }
   try {
-    saveCsv(toCsv(filteredRows.value), csvFilename())
-    toast.success('已导出当前页 ' + filteredRows.value.length + ' 条流水')
+    saveCsv(toCsv(filteredRows.value, t), csvFilename())
+    toast.success(t('page.journal.exportDone', { count: filteredRows.value.length }))
   } catch (error) {
-    toast.error(failureText('导出流水', error))
+    toast.error(
+      t('page.journal.failure', {
+        action: t('page.journal.action.export'),
+        reason: errorMessage(error),
+      }),
+    )
   }
 }
 
@@ -318,7 +350,10 @@ function cellBalance(row: TableRow): VNodeChild {
   const item = row as JournalRow
   return h(
     'span',
-    { class: item.balanceRecorded ? 'tnum' : 'journal-muted', title: item.balanceRecorded ? '' : '历史记录未保存余额' },
+    {
+      class: item.balanceRecorded ? 'tnum' : 'journal-muted',
+      title: item.balanceRecorded ? '' : t('page.journal.balanceMissing'),
+    },
     item.balanceText,
   )
 }
@@ -326,19 +361,19 @@ function cellBalance(row: TableRow): VNodeChild {
 const columns = computed<TableColumn[]>(() => [
   {
     key: 'time',
-    title: '时间',
+    title: t('page.journal.col.time'),
     mobile: 'title',
     width: 140,
     sortable: true,
     sortOrder: sortOrderOf('time'),
     render: (row: TableRow) => h('span', { title: String(row.fullTime || '') }, String(row.time || FMT_EMPTY)),
   },
-  { key: 'accountText', title: '账号', mobile: 'subtitle', minWidth: 180 },
-  { key: 'platformText', title: '平台', mobile: 'meta', width: 140 },
-  { key: 'kindLabel', title: '类型', mobile: 'meta', width: 120, render: cellKind },
+  { key: 'accountText', title: t('page.journal.col.account'), mobile: 'subtitle', minWidth: 180 },
+  { key: 'platformText', title: t('page.journal.col.platform'), mobile: 'meta', width: 140 },
+  { key: 'kindLabel', title: t('page.journal.col.kind'), mobile: 'meta', width: 120, render: cellKind },
   {
     key: 'deltaText',
-    title: '变动',
+    title: t('page.journal.col.delta'),
     mobile: 'meta',
     width: 110,
     numeric: true,
@@ -348,7 +383,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'balanceText',
-    title: '余额',
+    title: t('page.journal.col.balance'),
     mobile: 'meta',
     width: 120,
     numeric: true,
@@ -358,7 +393,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'note',
-    title: '说明',
+    title: t('page.journal.col.note'),
     mobile: 'meta',
     minWidth: 220,
     render: (row: TableRow) =>
@@ -390,10 +425,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="journal-page">
-    <PageHeader title="积分流水" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">刷新</Btn>
-        <Btn variant="default" :icon="Download" @click="exportCsv">导出</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">
+          {{ t('page.journal.refresh') }}
+        </Btn>
+        <Btn variant="default" :icon="Download" @click="exportCsv">
+          {{ t('page.journal.export') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -412,7 +451,7 @@ onBeforeUnmount(() => {
               class="journal-filter__select"
               :value="platform.currentId"
               :options="platformOptions"
-              aria-label="平台"
+              :aria-label="t('page.journal.platformAria')"
               @update:value="onPlatform"
             />
             <n-select
@@ -424,7 +463,7 @@ onBeforeUnmount(() => {
             <n-select
               class="journal-filter__select"
               :value="table.state.filters.kind"
-              :options="KIND_OPTIONS"
+              :options="kindSelectOptions"
               @update:value="(value: string) => applyFilter('kind', value)"
             />
             <n-select
@@ -437,7 +476,7 @@ onBeforeUnmount(() => {
             <n-input
               class="journal-filter__search"
               :value="search"
-              placeholder="搜索账号 / 来源 / 说明（当前页）"
+              :placeholder="t('page.journal.searchPlaceholder')"
               clearable
               @update:value="
                 (value: string) => {
@@ -453,12 +492,17 @@ onBeforeUnmount(() => {
       <div class="journal-body">
         <ErrorBlock
           v-if="loadError && payload === null"
-          :title="'加载积分流水失败：' + loadError.message"
+          :title="t('page.journal.errorTitle', { message: loadError.message })"
           :detail="loadError.detail"
           @retry="load()"
         />
 
-        <div v-else-if="firstLoading" class="journal-skeleton" aria-busy="true" aria-label="流水加载中">
+        <div
+          v-else-if="firstLoading"
+          class="journal-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.journal.loadingAria')"
+        >
           <n-skeleton v-for="index in 6" :key="index" height="44px" />
         </div>
 
@@ -478,41 +522,47 @@ onBeforeUnmount(() => {
           >
             <template #empty>
               <Empty :description="emptyDescription">
-                <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
+                <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
+                  {{ t('page.journal.clearFilters') }}
+                </Btn>
               </Empty>
             </template>
           </DataTable>
 
           <div class="journal-footer">
             <p class="journal-hint">
-              {{ importHint || '变更列：正数为奖励，负数为消耗；余额观察可能包含消费、奖励、到期或对账修正。' }}
+              {{ importHint || t('page.journal.footer.note') }}
             </p>
             <div class="journal-pager">
-              <Btn variant="default" size="sm" :disabled="!page.hasPrev || loading" @click="goPage(page.page - 1)">
-                上一页
+              <Btn
+                variant="default"
+                size="sm"
+                :disabled="!page.hasPrev || loading"
+                @click="goPage(page.page - 1)"
+              >
+                {{ t('page.journal.pager.prev') }}
               </Btn>
-              <span class="journal-page-text tnum">
-                第 {{ page.page }} 页<template v-if="!fast"> / {{ page.pageCount }}</template>
-                <template v-if="fast">（未统计总数）</template>
-              </span>
+              <span class="journal-page-text tnum">{{ pageText }}</span>
               <Btn
                 variant="default"
                 size="sm"
                 :disabled="!canGoNext(fast, page, sortedRows.length) || loading"
                 @click="goPage(page.page + 1)"
               >
-                下一页
+                {{ t('page.journal.pager.next') }}
               </Btn>
               <label class="journal-fast">
                 <n-switch :value="fast" size="small" @update:value="toggleFast" />
-                <span>快速翻页（不统计总数）</span>
+                <span>{{ t('page.journal.fast') }}</span>
               </label>
             </div>
           </div>
 
           <p class="journal-hint journal-hint--foot">
-            排序只作用于当前页（后端按时间倒序返回、不支持排序参数）；搜索同样只在当前页过滤。
-            <template v-if="!fast">共 {{ fmtInt(page.total) }} 条。</template>
+            {{ t('page.journal.footer.hint') }}
+            <template v-if="!fast">
+              {{ t('page.journal.footer.total', { count: fmtInt(page.total) }) }}
+            </template>
           </p>
         </template>
       </div>

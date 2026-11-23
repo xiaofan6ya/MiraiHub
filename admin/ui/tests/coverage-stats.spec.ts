@@ -15,6 +15,7 @@ import { createPinia } from 'pinia'
 import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import StatsPage from '@/pages/StatsPage.vue'
+import { setLocale } from '@/i18n'
 import { ApiError } from '@/api/http'
 import * as statsApi from '@/api/stats'
 import type { StatsDashboardPayload, StatsUsagePayload } from '@/api/stats'
@@ -531,5 +532,29 @@ describe('StatsPage 覆盖率补测', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.find('.stats-meta').text()).toContain('数据源：原表（汇总表降级）')
+  })
+})
+
+describe('StatsPage 中英切换', () => {
+  it('切到英文：模板与数据文案一起出英文，切回中文逐字还原', async () => {
+    setLocale('zh-CN')
+    const { wrapper } = await mountPage()
+
+    expect(wrapper.text()).toContain('成功 12,300 · 失败 200')
+
+    setLocale('en-US')
+    await flush()
+
+    expect(wrapper.find('h1').text()).toContain('Dashboard')
+    expect(wrapper.text()).toContain('Request trend')
+    expect(wrapper.text()).toContain('platforms: 2 · by requests')
+    expect(wrapper.text()).toContain('OK 12,300 · failed 200')
+    expect(wrapper.text()).toContain('Cache hit 10.0%')
+    expect(wrapper.text()).not.toContain('数据看板')
+
+    setLocale('zh-CN')
+    await flush()
+    expect(wrapper.text()).toContain('数据看板')
+    expect(wrapper.text()).toContain('成功 12,300 · 失败 200')
   })
 })

@@ -321,6 +321,22 @@ function drawerText(): string {
   return bodies[bodies.length - 1].textContent || ''
 }
 
+/** 当前打开的只读抽屉里 KV 的值列（汇总四格）。 */
+function drawerKvValues(): string[] {
+  const bodies = Array.from(document.querySelectorAll('.mh-detail__body')) as HTMLElement[]
+  const body = bodies[bodies.length - 1]
+  if (!body) throw new Error('no detail drawer open | body=' + bodyText().slice(0, 200))
+  return Array.from(body.querySelectorAll('.mh-kv__value')).map((el) => (el.textContent || '').trim())
+}
+
+/** 表格「来源 IP」列的入口按钮（手机卡片视图与桌面表格都只有一个 .keys-ips__count/行）。 */
+function ipCountButton(index = 0): HTMLElement {
+  const list = Array.from(document.querySelectorAll('.keys-ips__count')) as HTMLElement[]
+  const target = list[index]
+  if (!target) throw new Error('ip count button not found: ' + index + ' | have=' + list.length)
+  return target
+}
+
 function buttonsIn(root: ParentNode): HTMLButtonElement[] {
   return Array.from(root.querySelectorAll('button')) as HTMLButtonElement[]
 }
@@ -757,6 +773,44 @@ describe('KeysPage 创建 / 编辑抽屉', () => {
     )
   })
 
+  it('创建抽屉的候选接口失败时给出「重新加载」入口，点击后重新取数并补回候选', async () => {
+    const { wrapper } = await mountPage()
+    listGroupOptions.mockRejectedValueOnce(new ApiError(500, '分组服务超时'))
+    listAccountOptions.mockRejectedValueOnce(new ApiError(502, '账号服务超时'))
+
+    await clickButton(headerActions(), '创建 Key')
+    expect(bodyText()).toContain('分组 / 平台 / 账号候选加载失败')
+    expect(listGroupOptions).toHaveBeenCalledTimes(1)
+
+    const groupSelect = () =>
+      wrapper
+        .findAllComponents(NSelect)
+        .find((select) => ((select.props('options') || []) as SelectOptionLike[]).some((option) => option.label === '不限制（全部可用模型）'))
+    const optionLabels = () => ((groupSelect()!.props('options') || []) as SelectOptionLike[]).map((option) => option.label)
+    expect(optionLabels()).toEqual(['不限制（全部可用模型）'])
+
+    await clickButton(document, '重新加载')
+    expect(listGroupOptions).toHaveBeenCalledTimes(2)
+    expect(listAccountOptions).toHaveBeenCalledTimes(2)
+    expect(bodyText()).not.toContain('分组 / 平台 / 账号候选加载失败')
+    expect(optionLabels()).toContain('便宜模型组（5 个模型）')
+  })
+
+  it('候选接口失败不会永久锁死：重新打开抽屉会自动重取', async () => {
+    await mountPage()
+    listGroupOptions.mockRejectedValueOnce(new ApiError(500, '分组服务超时'))
+
+    await clickButton(headerActions(), '创建 Key')
+    expect(listGroupOptions).toHaveBeenCalledTimes(1)
+    expect(bodyText()).toContain('分组 / 平台 / 账号候选加载失败')
+
+    await clickButton(drawerFooter(), '取消')
+    await clickButton(headerActions(), '创建 Key')
+    expect(listGroupOptions).toHaveBeenCalledTimes(2)
+    expect(listAccountOptions).toHaveBeenCalledTimes(2)
+    expect(bodyText()).not.toContain('分组 / 平台 / 账号候选加载失败')
+  })
+
   it('创建失败弹出错误 Toast', async () => {
     createKey.mockRejectedValue(new ApiError(400, '名称重复'))
     await mountPage()
@@ -920,6 +974,9 @@ describe('KeysPage 抽屉（用量 / 来源 IP / 全部模型 / 接入指南）'
     expect(drawer).toContain('10.0.0.8')
     expect(drawer).toContain('10.0.0.9')
     expect(drawer).toContain('调用次数')
+    // 使用模型是对象数组，必须走 toIpOverview 的拼接口径，不能渲染成 [object Object]
+    expect(drawer).toContain('glm-5.3-flash')
+    expect(drawer).not.toContain('[object Object]')
 
     const sevenDays = Array.from(document.querySelectorAll('.mh-seg__item')).find(
       (el) => (el.textContent || '').includes('7 天'),
@@ -935,6 +992,66 @@ describe('KeysPage 抽屉（用量 / 来源 IP / 全部模型 / 接入指南）'
     ;(cards()[0].querySelector('.keys-ips__count') as HTMLElement).click()
     await settle()
     expect(bodyText()).toContain('读取来源 IP 失败：统计库超时')
+  })
+
+  it('来源 IP 明细绑定 toIpOverview 的 rows：使用模型拼接，最近调用与并发不再空列', async () => {
+    // 桌面表格默认 virtual-scroll，jsdom 量不到高度就不渲染行；入口用手机卡片视图点，
+    // 断言落在抽屉自己那张表（virtual-scroll=false）的 data 上，与视口模式无关。
+    const { wrapper } = await mountPage()
+    ipCountButton(0).click()
+    await settle()
+
+    const ipTable = wrapper.findAllComponents(DataTable).find((table) => table.props('tableId') === 'keys-ips')
+    expect(ipTable, 'keys-ips DataTable').toBeTruthy()
+    const data = ipTable!.props('data') as Array<Record<string, unknown>>
+    expect(data).toHaveLength(2)
+    expect(data[0].models).toBe('glm-5.3-flash')
+    expect(String(data[0].lastSeen)).toContain('11-23')
+    expect(data[0].active).toBe(2)
+    // 没有模型时是空串（join 的结果），不是 [object Object]
+    expect(data[1].models).toBe('')
+    expect(JSON.stringify(data)).not.toContain('[object Object]')
+  })
+
+  it('切换 Key 时来源 IP 汇总与明细立即清空，旧 Key 的数据不会串到新 Key', async () => {
+    let release: (value: KeyIpsPayload) => void = () => undefined
+    keyIps.mockImplementation((id) =>
+      id === 7
+        ? Promise.resolve(ipsPayload())
+        : new Promise<KeyIpsPayload>((resolve) => { release = resolve }),
+    )
+    await mountPage()
+
+    ;(cards()[0].querySelector('.keys-ips__count') as HTMLElement).click()
+    await settle()
+    expect(drawerText()).toContain('10.0.0.8')
+    expect(drawerKvValues()).toEqual(['2', '30', '1', '2'])
+
+    // 切到另一个 Key：第二次取数还没回来，汇总必须已经是 0，明细里不能残留上一个 Key 的 IP
+    ;(cards()[1].querySelector('.keys-ips__count') as HTMLElement).click()
+    await settle()
+    expect(bodyText()).toContain('来源 IP · 旧测试 Key')
+    expect(drawerKvValues()).toEqual(['0', '0', '0', '0'])
+    expect(drawerText()).not.toContain('10.0.0.8')
+
+    release(ipsPayload({
+      id: 8,
+      name: '旧测试 Key',
+      total_ips: 1,
+      total_requests: 7,
+      active_ips: 0,
+      active_requests: 0,
+      active: [],
+      items: [{
+        ip: '10.0.0.77', requests: 7, failed: 2, credits: 0.5, tokens: 90,
+        last_seen: '2026-11-23T04:00:00', active_requests: 0, blocked: false, blocked_id: null,
+        models: [{ model: 'gpt-6.1-sol', requests: 7, tokens: 90, last_seen: null, recent: true }],
+      }],
+    }))
+    await settle()
+    expect(drawerKvValues()).toEqual(['1', '7', '0', '0'])
+    expect(drawerText()).toContain('10.0.0.77')
+    expect(drawerText()).toContain('gpt-6.1-sol')
   })
 
   it('全部模型抽屉可搜索调用名，无匹配给出提示', async () => {
