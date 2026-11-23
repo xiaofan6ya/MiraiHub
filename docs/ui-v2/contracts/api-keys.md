@@ -714,3 +714,60 @@ API Key 详情
    → loadKeys()
    → GET /api/keys?page=1 ✓
 ```
+
+
+---
+
+## 实现对照（S14 /keys 新版实现，2026-11-23）
+
+新版实现：`admin/ui/src/pages/KeysPage.vue` + `admin/ui/src/api/keys.ts` + `admin/ui/tests/page-keys.spec.ts`。
+结构按设计稿 P12：PageHeader（接入指南 / 选号策略 / 创建 Key）+ 对接信息卡 + FilterBar + DataTable + FormDrawer(640) + 5 个抽屉/弹窗。
+视图状态（page/size/sort/order/q/group/status）通过 `useTableQuery('keys')` 同步到路由 query。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 对接信息卡：连接地址下拉 | 对接信息卡「连接地址」`n-select` | 已实现：`GET /api/app/network` + 当前访问地址 + 本机 + 内网 IPv4（与旧版 `loadShareInfo` 的 choices 一致），默认当前访问 |
+| OpenAI 地址（含 /v1） | 同上，`Copyable` | 已实现：`{origin}/v1` |
+| Claude / Anthropic 地址（不含 /v1） | 同上，`Copyable` | 已实现：`{origin}`（旧版注释：再带 /v1 会变成 /v1/v1/messages） |
+| 鉴权说明 + ⓘ 原文 | 对接信息卡「鉴权」行 + `HelpTip` | 已实现：旧版「两套协议共用同一批 Key…填错会变成 /v1/v1/messages」原文保留 |
+| 可用模型 chips（前 12 + 平台数） | 对接信息卡「可用模型」 | 已实现：`GET /api/models/aggregate`，同一模型跨平台合一，chip 显示平台数，点击复制调用名（带平台后缀，旧版 `modelClientId` 口径） |
+| 「全部 N ▸」模型抽屉 | `DetailDrawer` + 搜索 + 各平台明细 | 已实现：按名字/调用名/上游 id 搜索，每个平台一行（平台名 + 调用名 chip + 倍率） |
+| 接入指南 `DetailDrawer`（5 页签） | 「接入指南」→ `DetailDrawer` + `NTabs` | 已实现：OpenAI 协议 / Claude Code·Anthropic / 语音转文字 / AI 生图 / AI 生视频，内容按旧版 5 个 `<details>` 原文迁移 |
+| 接入指南地址与模型自动填 | `buildCurlExamples(origin, firstModel)` | 已实现（部分差异）：OpenAI/Claude 的地址与文本模型取当前连接地址 + 第一个可用模型；语音/生图/生视频沿用旧版文档里的专用模型 id（`workbuddy-asr` / `hunyuan-image-alpha` / `kling-video-v3`）——这三类端点的模型与文本模型不同类，替换成第一个文本模型会给出不可用示例 |
+| 搜索名称 | FilterBar「搜索名称 / 备注 / 账号」 | 已实现（客户端过滤：`filterKeyRows`），300ms 防抖后写 query，刷新/分享不丢 |
+| 分组筛选 | FilterBar 分组下拉 | 已实现（新版补充）：全部 / 未绑定分组 / 具体分组（`GET /api/groups`） |
+| 状态筛选 | FilterBar 状态下拉 | 已实现（新版补充）：全部 / 正常 / 已停用 |
+| 表格列：名称 | DataTable 首列 | 已实现：名称 + 副标题「公共账号池 / 独占账号：X / 独占 N 个账号」 |
+| 表格列：Key（mask + 复制） | DataTable 第二列 | 已实现：后端 `masked`（前 10 + **** + 后 4），复制按钮先 `GET /api/keys/{id}/view` 再写剪贴板（旧版 `copyKeyValue`） |
+| 表格列：限额 / 已用 + Meter | DataTable 第三列 | 已实现：不限额显示 ∞ +「不限额」；有限额显示已用/限额 + Meter（≥60% warn、≥90% danger），口径见 `toKeyRow` |
+| 表格列：并发 | DataTable 第四列 | 已实现：空=全局 / 0=不限 / N；副行显示频率（旧版 tooltip 文案内联） |
+| 表格列：来源 IP | DataTable 第五列 | 已实现：`ip_summary` 的「N 个 / 24h」+ 前 3 个 IP Badge，点击打开来源 IP 抽屉 |
+| 表格列：分组 | DataTable 第六列 | 已实现：绑定分组给 brand Badge，未绑定显示「全部模型」 |
+| 表格列：到期 | DataTable 第七列 | 有差异：后端 `ApiKey` 模型**没有到期字段**（`admin/models.py:134`），列固定显示 — 并在 tooltip 说明；不伪造到期数据 |
+| 表格列：状态 | DataTable 第八列 | 已实现：正常（ok）/ 已停用（neutral） |
+| 行操作：编辑 | RowActions 第一个 | 已实现 |
+| 行操作：复制 Key | RowActions 第二个 | 已实现（同 Key 列复制按钮） |
+| ⋯ 重置用量 | RowActions 溢出菜单 | 已实现：确认「重置已用额度？」→ `PATCH {reset_used:true}` |
+| ⋯ 启用 / 停用 | RowActions 溢出菜单 | 已实现：`PATCH {status}`；与旧版一致不弹确认（可随时恢复），Toast「已停用 / 已启用」 |
+| ⋯ 查看用量 | RowActions 溢出菜单 | 已实现：`GET /api/keys/{id}/usage` → 抽屉四格 + Meter（旧版 `viewKeyUsage`） |
+| ⋯ 删除 | RowActions 溢出菜单（危险色） | 已实现：确认「删除该 Key？」+ 后果说明 → `DELETE` |
+| 查看完整 Key | Key 列复制按钮（`/view`） | 已实现：410（创建于查看功能上线前）由 Toast 显示后端 detail；旧版眼睛按钮的「可随时查看」行为保留在复制/创建弹窗说明里 |
+| 创建 FormDrawer 640px | `FormDrawer size="lg"` | 已实现：基本（名称 / 模型分组 / 备注）、额度（不限额 + 总额度 / 并发上限 / 每分钟请求数）、模型与账号（聚合路由 / 独占平台 / 独占账号多选，搜索走服务端）、访问与有效期（只读说明） |
+| 编辑：重置已用额度 | 编辑抽屉「重置已用额度」 | 已实现（旧版 `ekReset`）：勾选后 `reset_used:true` |
+| 表单校验以旧版为准 | `validateKeyForm` | 已实现：编辑时名称必填（旧版 `submitEditKey`）；额度/并发/频率必须非负数字（并发与频率要求整数）；勾选不限额时清空额度 |
+| 创建成功完整 Key 弹窗 | `n-modal`「Key 已创建」 | 已实现：`Copyable` + 文案「可随时在列表里点『复制 Key』再次查看完整值」——旧版 Key 可通过 `/view` 随时查看，因此**不**做一次性展示 |
+| 「严格到期优先 ⓘ」 | 页头「选号策略」按钮 + `HelpTip` | 有差异：旧版/后端没有本页开关（`PUT /api/credits/selection-policy` 在「积分到期」页），新版展示当前策略名与说明，点击跳 `/credits` 修改；未在 Key 页提供假的开关 |
+| 来源 IP 绑定（设计稿「访问-来源IP」） | 表单「访问与有效期」只读说明 | 有差异：`KeyIn` / `PATCH` 均无来源 IP 字段，`key-ip.js` 是只读统计（含封禁动作，属 IP 管理页）；因此表单不提供绑定，来源 IP 以抽屉只读展示 |
+| 来源 IP 抽屉（统计） | 行内「N 个 / 24h」→ `DetailDrawer` | 已实现：`GET /api/keys/{id}/ips`，时间范围 1/7/30 天，汇总四格 + 明细表（调用次数/失败/积分/Token/最近调用/使用模型/并发/封禁状态）；封禁/解封按边界交给「IP 管理」页 |
+| 危险操作确认 | `useConfirm` | 已实现：删除、重置用量需确认；启停按旧版直接生效 |
+| 四种状态 | 页面 + 各卡片 | 已实现：首次加载 6 行骨架；刷新保留旧数据 + 卡片 loading 与按钮 loading；空（无 Key / 筛选无结果，各带下一步按钮）；错误 `ErrorBlock` + 重试，辅助接口（策略/网络/聚合模型）失败只降级对应区域 |
+| 筛选/分页/排序同步路由 | `useTableQuery('keys')` | 已实现：`?q=&group=&status=&page=&size=&sort=&order=`；名称/已用/并发列可排序 |
+| 手机 375px | DataTable `mobile` 标注 + 页面媒体查询 | 已实现：名称=title、Key=subtitle、额度/并发/IP/分组/到期/状态=meta、操作=actions；对接信息行与筛选控件在 ≤640px 全宽堆叠 |
+| 平台上下文 | — | 不适用：`/api/keys` 不读 `X-Platform`（后端 `keys.py` 无 platform scope 收窄），页面不订阅 `usePlatformStore().onChange` |
+| 旧版「账号调度策略」入口 | 页头选号策略按钮 | 已实现（等价迁移为跳转 /credits） |
+
+### 无法验证
+
+- 真实后端联调（本环境无 8790 服务）：列表/创建/编辑/启停/重置/删除/用量/来源 IP 均只经单测与类型检查验证。
+- 依赖真实数据的展示：`/api/models/aggregate` 的平台明细、`/api/app/network` 的内网 IP、`/api/accounts` 的账号候选（服务端搜索）。
+- 创建后再次查看完整 Key（`/view`）与 410 老 Key 的真实返回。

@@ -385,3 +385,51 @@ GET /api/stats/dashboard?days={1|7|30}&granularity={hour|day}&platform=&model=&t
 | 模型搜索 | 排行表 | 保留（排行表可搜索） | ✓ |
 | 自定义时间范围 | 时间选择器 | 暂不实现（固定 1/7/30） | ⏳ |
 
+---
+
+## 实现对照
+
+> 本节由 S17 实现时追加（原 1–387 行未改动）。上文是旧版看板的完整功能描述；
+> 新版按设计稿 `06-pages-a.md` P3 与「以 dashboard.js 实际图表为准」的要求实现，
+> 与上文不一致处逐行标注了原因。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 页面骨架（页头 + StatStrip + 主图 + 次级卡片栅格 2 列） | `src/pages/StatsPage.vue` | 已实现 |
+| 时间范围 今日 / 7 天 / 30 天 | `Segmented` + `normalizeDays`（`src/api/stats.ts`） | 已实现 |
+| 粒度 按小时 / 按天；超过 7 天自动降级为按天 | `normalizeGranularity` + `setDays/setGranularity`（与 dashboard.js:580-596 同规则） | 已实现 |
+| 刷新按钮 + 最近更新时间 | 页头 `刷新`（loading 转圈）+ `更新于 HH:mm:ss` | 已实现 |
+| StatStrip：请求数 / 成功率 / Token 合计 / 积分消耗 / 平均耗时 | `toSummaryItems`（`summary`） | 已实现（设计稿 P3 的 5 格；旧版 7 张 KPI + 性能健康条按 P3 合并） |
+| 请求趋势折线（设计稿写「成功/失败」） | `buildRequestTrend` / `requestTrendOption`（`trend`） | 已实现（有差异：后端 `trend.series` 只有**按模型的请求数**、无按桶成功/失败拆分，dashboard.js 同口径；成功/失败改为 StatStrip 脚注 + 卡片副标题「成功 X · 失败 Y」） |
+| Token 趋势堆叠柱（输入 / 输出 / 缓存命中） | `buildTokenTrend` / `tokenTrendOption`（`/api/stats/usage` 的 `trend[]`） | 已实现（输入 = `prompt_tokens - cached_tokens`，缓存命中单独一段；堆叠合计 = Token 总量，避免重复计数） |
+| 平台排行 BarList | `platformBarItems`（`dashboard.platforms`，按 requests DESC） | 已实现（条形 tone 按成功率三档着色） |
+| 模型排行 BarList | `modelBarItems`（优先 `dashboard.ranking`，含 top N 之外的模型） | 已实现 |
+| Key 排行 BarList | `keyBarItems`（`/api/stats/usage` 的 `by_key`） | 已实现（dashboard 接口没有 Key 维度，契约上文未列此接口，本次补充调用） |
+| 首次加载骨架 | 4 段 `NSkeleton`（StatStrip / 主图 / 两行卡片） | 已实现 |
+| 刷新保留旧数据 | `Card loading` 右上角 14px 转圈 + 页头按钮 loading；失败只 Toast 不清表 | 已实现 |
+| 空状态 | 各图表/排行内 `Empty`（窗口内没有调用记录 / 没有 Token / 没有平台流量…） | 已实现 |
+| 错误状态 + 重试 | `ErrorBlock`（首屏失败替换内容区；Token/Key 的补充接口失败只在各自卡片内报错，不影响 KPI 与平台/模型排行） | 已实现 |
+| 成功率着色（dashboard.js:88-93 三档） | `rateTone`：≥99.5% ok / ≥97% warn / 其余 danger / 无样本 muted | 已实现（上文 §3.2 写 98%/90%，以 dashboard.js 实际口径为准） |
+| 数字格式（缩写 / 千分位 / 积分 / 百分比 / 耗时） | `src/utils/format.ts` 的 `fmtCompact / fmtInt / fmtCredit / fmtPct / fmtDuration` | 已实现（统一走全站格式，替代旧版 `cnum/credit/latency`） |
+| 时间桶标签（小时 HH:mm、天 MM/DD） | `bucketLabel` | 已实现 |
+| 筛选/窗口状态同步路由 query（`days` / `grain`） | `useTableQuery('stats')` | 已实现（刷新/前进后退/分享链接都还原；本页没有表格，分页/排序不适用） |
+| 平台上下文订阅 + 卸载取消 | `usePlatformStore().onChange`（selector 变化才重取） | 已实现（说明：`/api/stats/dashboard` 按 `?platform=` 显式筛选、不读 `X-Platform`，切平台时数据口径不变，仅按旧版「切平台即刷新」的行为重新取数） |
+| 手机 375px 单列卡片 | `@media (max-width:1023px)` 栅格降为单列；StatStrip 由组件自带 2 列 | 已实现 |
+| 图表视图切换（消耗分布柱/面积） | — | 未做（P3 固定为请求趋势 + Token 堆叠两图，不再提供视图切换） |
+| 模型调用分析三视图（趋势/分布/排行） | 请求趋势 + 模型排行两张卡 | 已实现（有差异：P3 拆成独立卡片，不再用页签切换） |
+| 平台贡献点击筛选 / 模型行跳转模型广场 / 错误分类跳转 | — | 未做（P3 未列出；错误分类与平台点击筛选属旧版交互，后续如需再加） |
+| 失败分类卡片（error_kind） | — | 未做（P3 未列出；数据仍在 `dashboard.errors`，接口已保留） |
+| 旧版「消耗分布（按模型堆叠）」 | — | 未做（P3 用 Token 输入/输出/缓存命中替代；`dashboard.distribution` 未消费） |
+| 单元测试（分桶标签 / 格式化 / 图 option / 排行 / 空值） | `tests/page-stats.spec.ts`（19 个用例，用后端真实响应形状） | 已实现 |
+
+### 口径核对（以 dashboard.js 与后端实际字段为准）
+
+- `summary.requests` 含失败；`successes = error_kind in ('', 'success')`；`credits` / `total_tokens` 只算成功请求。
+- `success_rate` 无请求时为 `null`（显示 `—`，不是 0%）；`avg_latency_ms` / `avg_ttfb_ms` 只取成功样本。
+- `rpm` / `tpm` 的分母是 `window.minutes`（滚动窗口的实际分钟数），不是固定 1440。
+- `trend.series[].requests` 是**按模型、按桶**的请求数；`trend.total_requests` 是全部模型合计（含 top N 之外的模型），新版折线第一条即「全部请求」。
+- `distribution.series[].metric` 是**每条系列各自**的 `credits` / `tokens`（不是接口级字段），旧版按每条系列自己判断单位。
+- `platforms[]` 的键是 `value`（不是 `platform`）；`ranking[].share` = `requests / summary.requests`；`errors[]` 只有 `kind` / `count`，占比由前端用 `summary.failures` 算。
+- `/api/stats/usage` 的 `trend[].requests` 只统计成功请求（`_ok_filter`）；`cached_tokens` 是 `prompt_tokens` 的子集，所以 Token 堆叠图的「输入」必须先减去缓存段。
+
+

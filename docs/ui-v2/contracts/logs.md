@@ -487,3 +487,49 @@ data: {}
 - ✓ Keyset分页（vs 旧版OFFSET分页）
 - ✓ 状态着色规则统一（vs 旧版零散）
 - ✓ 诊断数据嵌入详情（vs 旧版另开弹窗）
+
+
+---
+
+## 实现对照（S15，`admin/ui/src/pages/LogsPage.vue`）
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 请求详情记录：开关（PUT capture/settings） | `LogsPage.vue` 顶部卡片 + `api/logs.ts:setCaptureEnabled` | 已实现 |
+| 状态行：已开启/关闭 · 缓存 N/200 条 · MiB · 单条 8 MiB · 60 分钟过期 · 重启清空 | `captureStatusText()`（`GET /api/logs/capture/settings` 的真实字段） | 已实现 |
+| 刷新状态 / 清空详情缓存（确认） | `loadCapture()` / `clearCapture()`（`DELETE /api/logs/capture/cache`） | 已实现 |
+| 说明 HelpTip（凭据脱敏、不写库、重启/过期/淘汰丢失） | 卡片 `#extra` 的 `HelpTip` | 已实现 |
+| FilterBar：平台（/api/platforms，按落库平台去重） | 平台 `NSelect` | 已实现 |
+| FilterBar：账号（`/api/logs/accounts?compact=true`，窗口内有记录的账号，选项带次数/积分） | 账号 `NSelect` | 已实现 |
+| FilterBar：时间范围 今日/近 1 小时/近 1/3/7/30 天/不限 + 自定义起止日期 | `resolveTimeWindow()` + 两个 `NDatePicker` | 已实现 |
+| FilterBar：模型 / Key / 调用结果 / 客户端 IP | `NInput` / `NSelect` | 已实现 |
+| 快速翻页（不统计总数） | `fast` 过滤项 → `buildLogQuery` 不传 `with_total` | 已实现 |
+| 重置 / 已筛选 chips（可单个移除） | `FilterBar` `chips` / `@remove` / `resetFilters` | 已实现 |
+| 已筛选统计「当前筛选共 N 次 · 成功 X · 错误 Y」 | `summaryStatText()`（`/api/logs/summary` 的 total/ok/failed，跟筛选走、与分页无关） | 已实现 |
+| 按账号汇总：可折叠（默认展开） | 卡片 `#extra` 按钮 + `summaryOpen` | 已实现 |
+| 汇总列：账号 · 请求数 · 失败 · 积分 · Token · 命中率 · 平均耗时 · 最近使用 · 积分占比 Meter | `summaryColumns` + `toAccountSummaryRows()` | 已实现 |
+| 汇总行点击 = 按该账号筛选 | `applyAccountFilter` → `account_id` 过滤项 | 已实现 |
+| 未记录账号 / 未选号固定置底、文字弱化 | `toAccountSummaryRows()` 排序 + `unattributed` | 已实现 |
+| 请求动态：近 15 分钟每分钟请求/错误小柱图 + 最近 5 条明细 | `buildLiveBars()` + `liveRecent`（`/api/logs/requests`） | 已实现（差异：旧版用哨兵 SSE 数据源，这里改用 `/api/logs/requests` 5 秒轮询，避免日志页再占一条 SSE；暂停/恢复/文档隐藏暂停/连续失败 3 次自动暂停都在） |
+| 请求动态：暂停 / 恢复 | `usePolling` + `toggleLive()` | 已实现 |
+| 文档隐藏时暂停 | `usePolling({ pauseWhenHidden: true })` | 已实现 |
+| 连续失败 3 次停止并显示原因 + 恢复按钮 | `usePolling(maxFailures: 3)` + `pausedMessage` + ErrorBlock | 已实现 |
+| 表格新行推送（SSE `/api/logs/usage/stream` + 票据 + reauth 重连） | `openUsageStream()` / `requestStreamTicket()` | 已实现 |
+| SSE 不可用 / 连续 3 次断开 → 8 秒轮询兜底 | `usageFallback`（`GET /api/logs/requests?include_history=false` 比对 usage_revision） | 已实现 |
+| 日志 DataTable 列：时间 · Key · 模型（含思考强度）· 平台/账号 · 端点 · 结果 Badge · Token 入/出/缓存 · 命中率 · 积分（warn）· 耗时 TTFT/总 + TPS · IP · 详情 | `columns` + `toLogRow()` | 已实现 |
+| keyset 分页（before_id + cursors），第 1 页才统计总数 | `loadList()` + `buildLogQuery()` + 自定义分页条 | 已实现（深链接 page>1 无游标时退回 `page/page_size` 的 OFFSET） |
+| 虚拟滚动 | DataTable `:virtual-scroll="true"` | 已实现 |
+| 行点击 → DetailDrawer | `openDetail()` + `DetailDrawer` | 已实现 |
+| 详情概要 KV（时间/平台/账号/Key/模型/端点/结果/Token/命中/积分/耗时/TPS/IP/seq/思考强度） | `detailKv` + `KV` | 已实现 |
+| 详情错误与诊断（error_kind + diagnostic JSON） | 「错误与诊断」`Section` + `CodeBlock` | 已实现 |
+| 详情请求正文 / 上游正文：按 64 KiB 分页读取、Headers + body CodeBlock | `loadIngress()` / `loadUpstream()` + `getCaptureBody()` | 已实现 |
+| 复制 curl（method/url/未脱敏请求头/正文；跳过 [REDACTED]） | `buildCurl()` + `copyCurl()` | 已实现 |
+| 下载完整 JSONL（NDJSON） | `downloadLogCapture()`（`download()`） | 已实现 |
+| 导出 / 导出诊断（CSV，诊断最多最近 1000 条） | `exportLogs()` + `downloadLogsExport()` | 已实现 |
+| 从其他页带 `model / key / result / account / platform / start / end` 进入 | useTableQuery 的 filters 同名键，地址栏直读 | 已实现 |
+| 筛选 / 分页同步路由 query | `useTableQuery('logs')`（page/size + 11 个筛选键） | 已实现 |
+| 四态：首次加载骨架 / 刷新保留旧数据 / 空（带清除筛选）/ 错误（ErrorBlock 重试） | 列表、汇总、请求动态、详情各自处理 | 已实现 |
+| 手机 375px 卡片模式 | DataTable 列 `mobile` 标注 + ≤640px 筛选控件全宽 | 已实现 |
+| 平台切换重取 | `usePlatformStore().onChange`（卸载取消） | 已实现 |
+| 按账号汇总跟随平台筛选 | — | 有差异：后端 `log_summary` 不接 platform/realm（logs.py:1128），汇总按全网关口径；平台筛选只作用于列表。旧版同样如此，已在页面注释与契约 §2 注明。 |
+| 详情抽屉内正文「展开全部」一次读完 | 分页按钮「继续读取」 | 有差异：按后端 64 KiB 分页逐页读取（避免一次把 8 MiB 正文塞进 DOM），不是一次性展开。 |
