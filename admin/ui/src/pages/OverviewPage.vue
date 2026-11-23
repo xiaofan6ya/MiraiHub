@@ -589,7 +589,7 @@ watch(days, () => {
 
 .ov-monitor__label.is-faint,
 .ov-monitor__count.is-faint {
-  color: var(--fg-faint);
+  color: var(--fg-muted);
 }
 
 .ov-conclusion {
