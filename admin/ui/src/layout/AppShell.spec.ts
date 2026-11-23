@@ -82,6 +82,10 @@ function stubFetch(): void {
         payload = { version: '1.1.4', releases_url: '' }
       } else if (url.includes('/api/app/releases')) {
         payload = { available: false, releases: [] }
+      } else if (url.includes('/api/')) {
+        // 其他页面（S06-S30）进入时会各自取数；外壳用例只关心路由可打开，
+        // 让这些请求保持 pending，避免用假数据触发页面内的字段适配。
+        return new Promise<Response>(() => undefined)
       }
       return new Response(JSON.stringify(payload), {
         status: 200,
@@ -163,15 +167,19 @@ describe('应用外壳', () => {
     expect(wrapper.findAll('.item-label')).toHaveLength(0)
   })
 
-  it('24 个占位页都能点开，标题/侧栏高亮/文档标题同步', async () => {
+  it('24 个页面都能点开，标题/侧栏高亮/文档标题同步', async () => {
     const { router, wrapper } = await mountShell(1440)
+    // 已接入真实页面的 key；其余仍应是 _Placeholder（逐页交付，路由表始终完整）。
+    const implemented = new Set(['maintenance', 'sync', 'alerts', 'groups'])
     for (const page of PAGES) {
       await router.push('/' + page.key)
+      // 已实现页面是 defineAsyncComponent：等动态 import 解析完再断言。
+      await flushPromises()
       await flushPromises()
       const title = wrapper.find('h1.ph-title')
       expect(title.exists(), page.key).toBe(true)
       expect(title.text().trim()).toBe(page.title)
-      expect(wrapper.find('.placeholder').exists()).toBe(true)
+      expect(wrapper.find('.placeholder').exists(), page.key).toBe(!implemented.has(page.key))
       const active = wrapper.find('.side-item.active')
       expect(active.exists(), page.key).toBe(true)
       expect(active.text()).toBe(page.group)
