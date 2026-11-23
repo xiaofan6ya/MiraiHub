@@ -410,7 +410,7 @@ function select(lane: RibbonLane): void {
 
 .mh-ribbon__empty-text {
   font-size: var(--fs-small);
-  color: var(--fg-faint);
+  color: var(--fg-muted);
   margin-bottom: var(--sp-2);
 }
 
