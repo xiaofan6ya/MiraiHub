@@ -17,6 +17,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { http } from '@/api/http'
+import { t } from '@/i18n'
 
 export type ServiceStatus = 'ok' | 'down' | 'reconnecting'
 
@@ -128,9 +129,9 @@ export const useHeartbeatStore = defineStore('heartbeat', () => {
 
   /** 状态文字（顶栏/侧栏共用，避免各写一份）。 */
   const statusText = computed<string>(() => {
-    if (status.value === 'ok') return '运行中'
-    if (status.value === 'reconnecting') return '重连中…'
-    return '连接中断'
+    if (status.value === 'ok') return t('shell.heartbeatOk')
+    if (status.value === 'reconnecting') return t('shell.heartbeatReconnecting')
+    return t('shell.heartbeatDown')
   })
 
   const statusTone = computed<'ok' | 'warn' | 'danger'>(() => {

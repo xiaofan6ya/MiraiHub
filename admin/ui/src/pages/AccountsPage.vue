@@ -48,7 +48,6 @@ import { fmtCredit, fmtDuration, fmtInt, fmtRelative } from '@/utils/format'
 import { failureText } from '@/utils/error'
 import { ApiError, isAbortError, download } from '@/api/http'
 import {
-  ACCOUNT_STATUS_LABEL,
   accountFeatures,
   accountTabCounts,
   addAccountModes,
@@ -88,6 +87,7 @@ import {
   addAccountManually,
   addMethodsFor,
   addResultText,
+  countryCodes,
   authStateOf,
   authStepIndex,
   beginBrowserAuth,
@@ -115,13 +115,11 @@ import {
   type ScanLocalPayload,
   type ScanPreviewRow,
 } from '@/api/account-add'
-
-const HELP_TEXT =
-  '统一管理账号、可用积分与登录状态。列表跟随顶栏的平台上下文；' +
-  '剩余额度与今日消耗只统计成功请求；冷却/熔断按 gateway_state 展示。' +
-  '批量与整池操作是后台任务，关闭页面后仍在服务端继续执行。'
+import { useI18n } from '@/i18n'
 
 const toast = useToast()
+const { t } = useI18n()
+const helpText = computed(() => t('page.accounts.help'))
 const confirm = useConfirm()
 const platformStore = usePlatformStore()
 
@@ -184,8 +182,13 @@ async function load(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载账号池', error), detail }
-    toast.error(failureText(items.value ? '刷新账号池' : '加载账号池', error))
+    loadError.value = {
+      message: failureText(t(items.value ? 'page.accounts.reloadFailed' : 'page.accounts.loadFailed'), error),
+      detail,
+    }
+    toast.error(
+      failureText(t(items.value ? 'page.accounts.reloadFailed' : 'page.accounts.loadFailed'), error),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -212,9 +215,17 @@ const hasFilters = computed(() =>
   Boolean(table.state.filters.q || table.state.filters.min || table.state.filters.max || statusTab.value !== 'all'),
 )
 
+const STATUS_LABEL_KEY = {
+  all: 'status.account.all',
+  active: 'status.account.active',
+  disabled: 'status.account.disabled',
+  cooling: 'status.account.cooling',
+  breaker: 'status.account.breaker',
+} as const
+
 const statusOptions = computed<Array<SegmentedOption<string>>>(() =>
   (['all', 'active', 'disabled', 'cooling', 'breaker'] as const).map((key) => ({
-    label: ACCOUNT_STATUS_LABEL[key] + ' ' + counts.value[key],
+    label: t(STATUS_LABEL_KEY[key]) + ' ' + counts.value[key],
     value: key,
   })),
 )
@@ -223,7 +234,11 @@ const summary = computed(() => {
   const rows = filteredRows.value
   const remain = rows.reduce((sum, row) => sum + row.balanceRemain, 0)
   const available = rows.filter((row) => row.balanceRemain > 0).length
-  return '共 ' + rows.length + ' 个账号 · 可用 ' + available + ' · 剩余积分 ' + fmtCredit(remain)
+  return t('page.accounts.summary', {
+    total: rows.length,
+    available,
+    remain: fmtCredit(remain),
+  })
 })
 
 const search = ref(table.state.filters.q)
@@ -237,12 +252,16 @@ watch(
 const chips = computed<FilterChip[]>(() => {
   const filters = table.state.filters
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.accounts.chipSearch'), value: filters.q })
   if (statusTab.value !== 'all') {
-    list.push({ key: 'status', label: '状态', value: ACCOUNT_STATUS_LABEL[statusTab.value] })
+    list.push({
+      key: 'status',
+      label: t('page.accounts.chipStatus'),
+      value: t(STATUS_LABEL_KEY[statusTab.value]),
+    })
   }
-  if (filters.min) list.push({ key: 'min', label: '积分 ≥', value: String(filters.min) })
-  if (filters.max) list.push({ key: 'max', label: '积分 ≤', value: String(filters.max) })
+  if (filters.min) list.push({ key: 'min', label: t('page.accounts.chipMin'), value: String(filters.min) })
+  if (filters.max) list.push({ key: 'max', label: t('page.accounts.chipMax'), value: String(filters.max) })
   return list
 })
 
@@ -324,7 +343,7 @@ function renderBalance(row: TableRow): VNodeChild {
     h(Meter, {
       value: item.balancePct,
       tone: item.balanceTone,
-      'aria-label': item.name + ' 剩余额度占比',
+      'aria-label': t('page.accounts.balanceAria', { name: item.name }),
     }),
     h('span', { class: 'acc-balance__text tnum' }, fmtInt(item.balanceRemain) + ' / ' + fmtInt(item.balanceTotal)),
   ])
@@ -335,7 +354,7 @@ function renderToday(row: TableRow): VNodeChild {
   const zero = item.todayCredits <= 0 && item.todayRequests <= 0
   return h(
     'span',
-    { class: zero ? 'acc-zero' : 'acc-num', title: item.todayRequests + ' 次请求' },
+    { class: zero ? 'acc-zero' : 'acc-num', title: t('page.accounts.todayTitle', { count: item.todayRequests }) },
     fmtCredit(item.todayCredits),
   )
 }
@@ -358,14 +377,17 @@ function renderNote(row: TableRow): VNodeChild {
 
 function actionList(item: AccountRow): Array<{ key: string; label: string; danger?: boolean }> {
   const actions: Array<{ key: string; label: string; danger?: boolean }> = [
-    { key: 'refresh', label: '刷新额度' },
-    { key: 'check', label: '检测' },
-    { key: 'edit', label: '编辑' },
-    { key: item.status === 'active' ? 'disable' : 'enable', label: item.status === 'active' ? '禁用' : '启用' },
-    { key: 'detail', label: '详情' },
+    { key: 'refresh', label: t('page.accounts.actRefresh') },
+    { key: 'check', label: t('page.accounts.actCheck') },
+    { key: 'edit', label: t('page.accounts.actEdit') },
+    {
+      key: item.status === 'active' ? 'disable' : 'enable',
+      label: item.status === 'active' ? t('page.accounts.actDisable') : t('page.accounts.actEnable'),
+    },
+    { key: 'detail', label: t('page.accounts.actDetail') },
   ]
-  if (item.features.checkin) actions.push({ key: 'checkin', label: '签到' })
-  actions.push({ key: 'delete', label: '删除', danger: true })
+  if (item.features.checkin) actions.push({ key: 'checkin', label: t('page.accounts.actCheckin') })
+  actions.push({ key: 'delete', label: t('common.delete'), danger: true })
   return actions
 }
 
@@ -383,7 +405,7 @@ function renderActions(row: TableRow): VNodeChild {
 const baseColumns = computed<TableColumn[]>(() => [
   {
     key: 'name',
-    title: '账号',
+    title: t('page.accounts.colAccount'),
     mobile: 'title',
     minWidth: 190,
     sortable: true,
@@ -392,14 +414,14 @@ const baseColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'status',
-    title: '状态',
+    title: t('page.accounts.colStatus'),
     mobile: 'title',
     width: 96,
     render: renderStatus,
   },
   {
     key: 'balance',
-    title: '剩余额度',
+    title: t('page.accounts.colBalance'),
     mobile: 'meta',
     minWidth: 190,
     sortable: true,
@@ -408,7 +430,7 @@ const baseColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'today',
-    title: '今日消耗',
+    title: t('page.accounts.colToday'),
     mobile: 'meta',
     width: 110,
     numeric: true,
@@ -416,28 +438,28 @@ const baseColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'expire',
-    title: '到期',
+    title: t('page.accounts.colExpire'),
     mobile: 'meta',
     width: 130,
     render: renderExpire,
   },
   {
     key: 'lastUsed',
-    title: '最近使用',
+    title: t('page.accounts.colLastUsed'),
     mobile: 'meta',
     width: 120,
     render: renderLastUsed,
   },
   {
     key: 'note',
-    title: '备注',
+    title: t('page.accounts.colNote'),
     mobile: 'subtitle',
     minWidth: 130,
     render: renderNote,
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.accounts.colActions'),
     mobile: 'actions',
     width: 168,
     hideable: false,
@@ -455,28 +477,36 @@ function renderToken(row: TableRow): VNodeChild {
   const expired = item.raw.token_state === 'expired' || item.raw.renewal_state === 'expired'
   const expiring = item.raw.token_state === 'expiring' || item.raw.renewal_state === 'expiring'
   const days = item.raw.token_days_left
-  const text = days === null || days === undefined ? (item.raw.token_state || '未知') : days + ' 天'
-  const title = '令牌：' + text + ' · 续期剩余：' +
-    (item.raw.renewal_days_left === null || item.raw.renewal_days_left === undefined ? '未知' : item.raw.renewal_days_left + ' 天')
+  const text =
+    days === null || days === undefined
+      ? item.raw.token_state || t('page.accounts.tokenUnknown')
+      : t('page.accounts.tokenDays', { days })
+  const title = t('page.accounts.tokenTitle', {
+    text,
+    renewal:
+      item.raw.renewal_days_left === null || item.raw.renewal_days_left === undefined
+        ? t('page.accounts.tokenUnknown')
+        : t('page.accounts.tokenDays', { days: item.raw.renewal_days_left }),
+  })
   return h('span', {
     class: expired ? 'acc-expire is-danger' : expiring ? 'acc-expire is-warn' : 'acc-muted',
     title,
   }, text)
 }
 
-const tokenColumn: TableColumn = {
+const tokenColumn = computed<TableColumn>(() => ({
   key: 'token',
-  title: '令牌',
+  title: t('page.accounts.colToken'),
   mobile: 'meta',
   width: 96,
   render: renderToken,
-}
+}))
 
 const columns = computed<TableColumn[]>(() => {
   const list = baseColumns.value.slice()
   if (!showTokenColumn.value) return list
   const index = list.findIndex((column) => column.key === 'lastUsed')
-  list.splice(index < 0 ? list.length : index, 0, tokenColumn)
+  list.splice(index < 0 ? list.length : index, 0, tokenColumn.value)
   return list
 })
 
@@ -506,11 +536,11 @@ async function runBulk(action: 'enable' | 'disable' | 'refresh' | 'check' | 'del
   if (!rows.length || bulkBusy.value) return
   if (action === 'delete') {
     const ok = await confirm({
-      title: '删除 ' + rows.length + ' 个账号？',
-      message: '删除后无法恢复；绑定了 API Key 的账号会先被跳过（需先解绑）。',
-      okText: '删除',
+      title: t('page.accounts.deleteManyTitle', { count: rows.length }),
+      message: t('page.accounts.deleteManyBody'),
+      okText: t('common.delete'),
       danger: true,
-      requireText: '删除',
+      requireText: t('page.accounts.deleteRequire'),
     })
     if (!ok) return
   }
@@ -518,17 +548,31 @@ async function runBulk(action: 'enable' | 'disable' | 'refresh' | 'check' | 'del
   try {
     const result = await bulkAccounts(action, rows.map((row) => row.id))
     const label =
-      action === 'enable' ? '启用' : action === 'disable' ? '禁用' :
-      action === 'refresh' ? '刷新额度' : action === 'check' ? '检测' : '删除'
+      action === 'enable'
+        ? t('page.accounts.bulkEnable')
+        : action === 'disable'
+          ? t('page.accounts.bulkDisable')
+          : action === 'refresh'
+            ? t('page.accounts.bulkRefresh')
+            : action === 'check'
+              ? t('page.accounts.bulkCheck')
+              : t('common.delete')
     if (result.errors?.length) {
-      toast.error('已' + label + ' ' + result.affected + ' 个账号，失败 ' + result.errors.length + ' 个：' + result.errors[0])
+      toast.error(
+        t('page.accounts.bulkPartial', {
+          label,
+          affected: result.affected,
+          failed: result.errors.length,
+          first: result.errors[0],
+        }),
+      )
     } else {
-      toast.success('已' + label + ' ' + result.affected + ' 个账号')
+      toast.success(t('page.accounts.bulkDone', { label, affected: result.affected }))
     }
     clearSelection()
     await load()
   } catch (error) {
-    toast.error(failureText('批量' + action, error))
+    toast.error(failureText(t('page.accounts.bulkFailed', { action }), error))
   } finally {
     bulkBusy.value = false
   }
@@ -545,7 +589,7 @@ async function startExport(body: Parameters<typeof exportAccountsAsync>[0]): Pro
     const snapshot = await exportAccountsAsync(body)
     startJob(snapshot, { exportJob: true })
   } catch (error) {
-    toast.error(failureText('导出账号', error))
+    toast.error(failureText(t('page.accounts.exportFailed'), error))
   }
 }
 
@@ -562,14 +606,14 @@ const job = useJob(undefined, {
   intervalMs: 1500,
   onFinish: (snapshot) => {
     const data = snapshot as unknown as AccountJobSnapshot
-    if (data.status === 'failed') toast.error(jobDoneText(data))
-    else toast.success(jobDoneText(data))
+    if (data.status === 'failed') toast.error(jobDoneText(data, t))
+    else toast.success(jobDoneText(data, t))
     if (pendingExport.value) {
       pendingExport.value = false
       const token = exportTokenOf(data)
       if (token) {
         void download('/api/accounts/export-download', { token }).catch((error: unknown) => {
-          toast.error(failureText('下载导出文件', error))
+          toast.error(failureText(t('page.accounts.downloadFailed'), error))
         })
       }
     }
@@ -580,8 +624,8 @@ const job = useJob(undefined, {
 const jobSnapshot = computed<AccountJobSnapshot | null>(
   () => (job.snapshot.value as unknown as AccountJobSnapshot | null) ?? null,
 )
-const jobItem = computed<JobItem | null>(() => toJobItem(jobSnapshot.value))
-const jobTitle = computed(() => jobSnapshot.value?.title || '账号任务')
+const jobItem = computed<JobItem | null>(() => toJobItem(jobSnapshot.value, t))
+const jobTitle = computed(() => jobSnapshot.value?.title || t('page.accounts.jobTitle'))
 const jobPercent = computed(() => Number(job.snapshot.value?.percent) || 0)
 const jobDone = computed(() => Number(job.snapshot.value?.done) || 0)
 const jobTotal = computed(() => Number(job.snapshot.value?.total) || 0)
@@ -590,50 +634,50 @@ const jobItems = computed(() => jobSnapshot.value?.items || [])
 
 function startJob(snapshot: AccountJobSnapshot, options: { exportJob?: boolean } = {}): void {
   if (!snapshot || !snapshot.job_id) {
-    toast.error('任务启动失败：后端没有返回任务 ID')
+    toast.error(t('page.accounts.jobNoId'))
     return
   }
   pendingExport.value = Boolean(options.exportJob)
   jobVisible.value = true
   job.start(snapshot.job_id)
-  if (snapshot.status === 'running') toast.info('任务已启动，可在右下角查看进度')
+  if (snapshot.status === 'running') toast.info(t('page.accounts.jobStarted'))
 }
 
 async function refreshAll(): Promise<void> {
   const total = allRows.value.length
   if (!total) {
-    toast.warning('当前平台没有可刷新的账号')
+    toast.warning(t('page.accounts.refreshNone'))
     return
   }
   const ok = await confirm({
-    title: '刷新 ' + total + ' 个账号的额度？',
-    message: '将逐个请求上游刷新余额与到期快照，后台执行，可关闭页面。',
-    okText: '开始刷新',
+    title: t('page.accounts.refreshTitle', { count: total }),
+    message: t('page.accounts.refreshBody'),
+    okText: t('page.accounts.refreshOk'),
   })
   if (!ok) return
   try {
     startJob(await refreshBatch())
   } catch (error) {
-    toast.error(failureText('刷新全部额度', error))
+    toast.error(failureText(t('page.accounts.refreshFailed'), error))
   }
 }
 
 async function checkAll(): Promise<void> {
   const ids = allRows.value.map((row) => row.id)
   if (!ids.length) {
-    toast.warning('当前平台没有可检测的账号')
+    toast.warning(t('page.accounts.checkNone'))
     return
   }
   const ok = await confirm({
-    title: '检测 ' + ids.length + ' 个账号？',
-    message: '逐号做余额、模型目录与一次真实对话检查（会消耗少量额度）。',
-    okText: '开始检测',
+    title: t('page.accounts.checkTitle', { count: ids.length }),
+    message: t('page.accounts.checkBody'),
+    okText: t('page.accounts.checkOk'),
   })
   if (!ok) return
   try {
     startJob(await healthCheckBatch(ids))
   } catch (error) {
-    toast.error(failureText('检测账号', error))
+    toast.error(failureText(t('page.accounts.checkFailed'), error))
   }
 }
 
@@ -642,33 +686,33 @@ const features = computed(() => accountFeatures(allRows.value[0]?.platform || pl
 async function runGrowth(): Promise<void> {
   const ids = allRows.value.filter((row) => row.statusKey === 'active').map((row) => row.id)
   if (!ids.length) {
-    toast.warning('当前平台没有已启用的账号')
+    toast.warning(t('page.accounts.growthNone'))
     return
   }
   const ok = await confirm({
-    title: '执行成长任务？',
-    message: '将自动参与并完成可自动化任务，随后自动领奖（单账号可能需要几分钟）。',
-    okText: '开始执行',
+    title: t('page.accounts.growthTitle'),
+    message: t('page.accounts.growthBody'),
+    okText: t('page.accounts.growthOk'),
   })
   if (!ok) return
   try {
     startJob(await growthRunAsync(ids))
   } catch (error) {
-    toast.error(failureText('执行成长任务', error))
+    toast.error(failureText(t('page.accounts.growthFailed'), error))
   }
 }
 
 async function runCatTravel(): Promise<void> {
   const ok = await confirm({
-    title: '执行猫猫旅行？',
-    message: '流程：同意协议 → 首次领养（+300）→ 派出 → 领奖，按当前平台已启用账号执行。',
-    okText: '开始执行',
+    title: t('page.accounts.catTitle'),
+    message: t('page.accounts.catBody'),
+    okText: t('page.accounts.growthOk'),
   })
   if (!ok) return
   try {
     startJob(await catTravelBatchAsync())
   } catch (error) {
-    toast.error(failureText('执行猫猫旅行', error))
+    toast.error(failureText(t('page.accounts.catFailed'), error))
   }
 }
 
@@ -684,7 +728,7 @@ async function reloadJob(): Promise<void> {
     job.start(id)
     jobVisible.value = true
   } catch (error) {
-    toast.error(failureText('读取任务进度', error))
+    toast.error(failureText(t('page.accounts.jobReloadFailed'), error))
   }
 }
 
@@ -705,10 +749,12 @@ async function onRowAction(row: AccountRow, key: string): Promise<void> {
 async function refreshOne(row: AccountRow): Promise<void> {
   try {
     const result = await refreshAccount(row.id)
-    toast.success('已刷新「' + row.name + '」：剩余 ' + fmtInt(result.balance_remain))
+    toast.success(
+      t('page.accounts.refreshedOne', { name: row.name, remain: fmtInt(result.balance_remain) }),
+    )
     await load()
   } catch (error) {
-    toast.error(failureText('刷新「' + row.name + '」', error))
+    toast.error(failureText(t('page.accounts.refreshOne', { name: row.name }), error))
   }
 }
 
@@ -716,56 +762,80 @@ async function checkOne(row: AccountRow): Promise<void> {
   try {
     startJob(await healthCheckAccount(row.id))
   } catch (error) {
-    toast.error(failureText('检测「' + row.name + '」', error))
+    toast.error(failureText(t('page.accounts.checkOne', { name: row.name }), error))
   }
 }
 
 async function toggleOne(row: AccountRow, enable: boolean): Promise<void> {
   const ok = await confirm({
-    title: (enable ? '启用「' : '禁用「') + row.name + '」？',
-    message: enable
-      ? '启用后清除冷却/熔断残留，账号重新参与调度。'
-      : '禁用后该账号不再接请求；绑定关系与历史记录保留。',
-    okText: enable ? '启用' : '禁用',
+    title: enable
+      ? t('page.accounts.toggleTitleEnable', { name: row.name })
+      : t('page.accounts.toggleTitleDisable', { name: row.name }),
+    message: enable ? t('page.accounts.toggleBodyEnable') : t('page.accounts.toggleBodyDisable'),
+    okText: enable ? t('page.accounts.actEnable') : t('page.accounts.actDisable'),
     danger: !enable,
   })
   if (!ok) return
   try {
     await patchAccount(row.id, { status: enable ? 'active' : 'disabled' })
-    toast.success((enable ? '已启用「' : '已禁用「') + row.name + '」')
+    toast.success(
+      enable
+        ? t('page.accounts.toggledEnable', { name: row.name })
+        : t('page.accounts.toggledDisable', { name: row.name }),
+    )
     await load()
   } catch (error) {
-    toast.error(failureText((enable ? '启用「' : '禁用「') + row.name + '」', error))
+    toast.error(
+      failureText(
+        enable
+          ? t('page.accounts.toggleTitleEnable', { name: row.name })
+          : t('page.accounts.toggleTitleDisable', { name: row.name }),
+        error,
+      ),
+    )
   }
 }
 
 async function checkinOne(row: AccountRow): Promise<void> {
   try {
     const result = await runAccountTask(row.id, 'checkin')
-    if (result.supported === false) toast.warning(result.reason || '该平台没有单账号签到入口')
-    else if (result.ok) toast.success('已签到「' + row.name + '」' + (result.summary ? '：' + result.summary : ''))
-    else toast.error('签到失败：' + (result.summary || result.reason || '未知原因'))
+    if (result.supported === false) {
+      toast.warning(result.reason || t('page.accounts.checkinUnsupported'))
+    } else if (result.ok) {
+      toast.success(
+        t('page.accounts.checkinDone', {
+          name: row.name,
+          summary: result.summary ? t('page.accounts.checkinSummary', { summary: result.summary }) : '',
+        }),
+      )
+    } else {
+      toast.error(
+        t('page.accounts.checkinFailed', {
+          reason: result.summary || result.reason || t('page.accounts.authUnknownReason'),
+        }),
+      )
+    }
     await load()
   } catch (error) {
-    toast.error(failureText('签到「' + row.name + '」', error))
+    toast.error(failureText(t('page.accounts.checkinOne', { name: row.name }), error))
   }
 }
 
 async function removeOne(row: AccountRow): Promise<void> {
   const ok = await confirm({
-    title: '删除账号「' + row.name + '」？',
-    message: '删除后无法恢复；已绑定 API Key 的账号会被拒绝删除，请先解绑。',
-    okText: '删除',
+    title: t('page.accounts.deleteOneTitle', { name: row.name }),
+    message: t('page.accounts.deleteOneBody'),
+    okText: t('common.delete'),
     danger: true,
   })
   if (!ok) return
   try {
     await deleteAccount(row.id)
-    toast.success('已删除「' + row.name + '」')
+    toast.success(t('page.accounts.deletedOne', { name: row.name }))
     clearSelection()
     await load()
   } catch (error) {
-    toast.error(failureText('删除「' + row.name + '」', error))
+    toast.error(failureText(t('page.accounts.deleteOneTitle', { name: row.name }), error))
   }
 }
 
@@ -793,7 +863,7 @@ async function saveEdit(): Promise<void> {
   if (!target) return
   const name = editForm.name.trim()
   if (!name) {
-    editError.value = '请填写账号名称'
+    editError.value = t('page.accounts.editNameRequired')
     return
   }
   editError.value = ''
@@ -803,11 +873,11 @@ async function saveEdit(): Promise<void> {
       name,
       max_in_flight: editForm.maxInFlight === null ? null : Number(editForm.maxInFlight),
     })
-    toast.success('已保存「' + name + '」')
+    toast.success(t('page.accounts.saved', { name }))
     editOpen.value = false
     await load()
   } catch (error) {
-    toast.error(failureText('保存账号', error))
+    toast.error(failureText(t('page.accounts.saveFailed'), error))
   } finally {
     saving.value = false
   }
@@ -827,18 +897,24 @@ const detailKv = computed(() => {
   const row = detailTarget.value
   if (!row) return []
   return [
-    { label: '账号 ID', value: String(row.id), mono: true },
-    { label: '名称', value: row.name },
+    { label: t('page.accounts.kvId'), value: String(row.id), mono: true },
+    { label: t('page.accounts.kvName'), value: row.name },
     { label: 'UID', value: row.uid || '—', mono: true },
-    { label: '平台', value: row.platform || '—', mono: true },
-    { label: '域名', value: row.domain || '—', mono: true },
-    { label: '状态', value: row.statusLabel + '（' + row.statusTitle + '）' },
-    { label: '剩余 / 总额', value: fmtInt(row.balanceRemain) + ' / ' + fmtInt(row.balanceTotal) },
-    { label: '积分到期', value: row.expireText },
-    { label: '最近同步', value: row.raw.last_sync_at ? fmtRelative(row.raw.last_sync_at) : '—' },
-    { label: '最近使用', value: row.lastUsedText },
-    { label: '绑定 Key', value: row.boundKeyName || '—' },
-    { label: '并发上限', value: row.raw.max_in_flight === null || row.raw.max_in_flight === undefined ? '跟随全局' : String(row.raw.max_in_flight) },
+    { label: t('page.accounts.kvPlatform'), value: row.platform || '—', mono: true },
+    { label: t('page.accounts.kvDomain'), value: row.domain || '—', mono: true },
+    { label: t('page.accounts.kvStatus'), value: row.statusLabel + ' · ' + row.statusTitle },
+    { label: t('page.accounts.kvBalance'), value: fmtInt(row.balanceRemain) + ' / ' + fmtInt(row.balanceTotal) },
+    { label: t('page.accounts.kvExpire'), value: row.expireText },
+    { label: t('page.accounts.kvLastSync'), value: row.raw.last_sync_at ? fmtRelative(row.raw.last_sync_at) : '—' },
+    { label: t('page.accounts.kvLastUsed'), value: row.lastUsedText },
+    { label: t('page.accounts.kvBoundKey'), value: row.boundKeyName || '—' },
+    {
+      label: t('page.accounts.kvMaxInFlight'),
+      value:
+        row.raw.max_in_flight === null || row.raw.max_in_flight === undefined
+          ? t('page.accounts.kvFollowGlobal')
+          : String(row.raw.max_in_flight),
+    },
   ]
 })
 
@@ -847,7 +923,7 @@ const detailPackages = computed<AccountCreditPackage[]>(() => {
   if (!payload) return []
   const packages = Array.isArray(payload.packages) ? payload.packages : []
   return packages.map((item) => ({
-    display_name: item.name || '积分包',
+    display_name: item.name || t('page.accounts.detailPackage'),
     remaining: item.remain,
     total: item.total,
     expire_label: item.deduction_end || '',
@@ -869,7 +945,7 @@ async function loadCreditDetails(id: number, refresh: boolean): Promise<void> {
   try {
     creditDetails.value = await getCreditDetails(id, refresh)
   } catch (error) {
-    detailError.value = failureText('加载积分明细', error)
+    detailError.value = failureText(t('page.accounts.detailLoadFailed'), error)
   } finally {
     detailLoading.value = false
   }
@@ -892,7 +968,7 @@ async function openLimits(): Promise<void> {
     const payload = await getModelLimits()
     limitsRows.value = Array.isArray(payload?.items) ? payload.items : []
   } catch (error) {
-    limitsError.value = failureText('加载模型额度', error)
+    limitsError.value = failureText(t('page.accounts.limitsLoadFailed'), error)
   } finally {
     limitsLoading.value = false
   }
@@ -903,7 +979,7 @@ async function openLimits(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 const addOptions = computed(() =>
-  addMethodsFor(platformStore.currentSpec).map((method) => ({
+  addMethodsFor(platformStore.currentSpec, t).map((method) => ({
     key: method.key,
     label: method.label,
     disabled: Boolean(method.disabledReason),
@@ -917,25 +993,41 @@ const addOptions = computed(() =>
 type AddDrawerKind = 'manual' | 'import' | 'scan' | 'phone' | 'authorize'
 
 const platformSpec = computed(() => platformStore.currentSpec)
-const platformName = computed(() => platformStore.currentSpec?.label || platformStore.currentId || '当前平台')
-const addMethods = computed(() => addMethodsFor(platformSpec.value))
+const platformName = computed(
+  () => platformStore.currentSpec?.label || platformStore.currentId || t('page.accounts.currentPlatform'),
+)
+const addMethods = computed(() => addMethodsFor(platformSpec.value, t))
+const countryOptions = computed(() => countryCodes(t))
+
+/** 授权步骤条：接口层只给状态，文案在这里按语言取。 */
+const authSteps = computed(() => [
+  t('page.accounts.authStepOpen'),
+  t('page.accounts.authStepWait'),
+  t('page.accounts.authStepPool'),
+])
 
 const addOpen = ref(false)
 const addKind = ref<AddDrawerKind>('manual')
-const addTitleMap: Record<AddDrawerKind, string> = {
-  manual: '手动添加账号',
-  import: '导入账号',
-  scan: '扫描本机',
-  phone: '手机号登录',
-  authorize: '浏览器授权登录',
-}
-const addTitle = computed(() => addTitleMap[addKind.value] + ' · ' + platformName.value)
+const ADD_TITLE_KEY = {
+  manual: 'page.accounts.addModeManual',
+  import: 'page.accounts.importAccounts',
+  scan: 'page.accounts.scan',
+  phone: 'add.method.phone',
+  authorize: 'add.method.authorize',
+} as const
+const addTitle = computed(() =>
+  t('page.accounts.addJoin', { title: t(ADD_TITLE_KEY[addKind.value]), platform: platformName.value }),
+)
 const addSubmitText = computed(() => {
-  if (addKind.value === 'import') return '导入 ' + importSelected.value.length + ' 个'
-  if (addKind.value === 'scan') return '导入选中 ' + scanSelected.value.length + ' 个'
-  if (addKind.value === 'phone') return '登录并添加'
-  if (addKind.value === 'authorize') return '重新发起授权'
-  return '添加账号'
+  if (addKind.value === 'import') {
+    return t('page.accounts.addSubmitImport', { count: importSelected.value.length })
+  }
+  if (addKind.value === 'scan') {
+    return t('page.accounts.addSubmitScan', { count: scanSelected.value.length })
+  }
+  if (addKind.value === 'phone') return t('page.accounts.addSubmitPhone')
+  if (addKind.value === 'authorize') return t('page.accounts.addSubmitAuthorize')
+  return t('page.accounts.addSubmit')
 })
 
 function openAddDrawer(kind: AddDrawerKind): void {
@@ -958,7 +1050,7 @@ function openAddDrawer(kind: AddDrawerKind): void {
 function onAddMode(key: string): void {
   const mode = key as AddMethodKey
   if (!methodEnabled(platformSpec.value, mode)) {
-    toast.warning('当前平台不支持「' + key + '」这种方式')
+    toast.warning(t('page.accounts.addUnsupported', { key }))
     return
   }
   openAddDrawer(mode as AddDrawerKind)
@@ -980,17 +1072,17 @@ const manualBusy = ref(false)
 async function submitManual(): Promise<void> {
   const text = manualJson.value.trim()
   if (!text) {
-    toast.error('请粘贴凭证 JSON')
+    toast.error(t('page.accounts.manualJsonRequired'))
     return
   }
   manualBusy.value = true
   try {
     const result = await addAccountManually({ name: manualName.value.trim(), auth_json: text })
-    toast.success(addResultText(result, platformName.value))
+    toast.success(addResultText(result, platformName.value, t))
     addOpen.value = false
     await load()
   } catch (error) {
-    toast.error(failureText('添加账号', error))
+    toast.error(failureText(t('page.accounts.addSubmit'), error))
   } finally {
     manualBusy.value = false
   }
@@ -1001,7 +1093,7 @@ const importText = ref('')
 const importVerify = ref(true)
 const importBusy = ref(false)
 const importSelected = ref<number[]>([])
-const importPreview = computed(() => parseImportText(importText.value))
+const importPreview = computed(() => parseImportText(importText.value, t))
 const importRows = computed(() => importPreview.value.rows)
 const importMode = computed(() => importModeOf(platformSpec.value))
 
@@ -1019,7 +1111,7 @@ function toggleImportRow(index: number, checked: boolean): void {
 async function submitImport(): Promise<void> {
   const rows = importRows.value.filter((row) => row.valid && importSelected.value.includes(row.index))
   if (!rows.length) {
-    toast.error('没有可导入的有效记录')
+    toast.error(t('page.accounts.importNone'))
     return
   }
   importBusy.value = true
@@ -1033,7 +1125,7 @@ async function submitImport(): Promise<void> {
     addOpen.value = false
     startJob(snapshot as unknown as AccountJobSnapshot)
   } catch (error) {
-    toast.error(failureText('导入账号', error))
+    toast.error(failureText(t('page.accounts.importFailed'), error))
   } finally {
     importBusy.value = false
   }
@@ -1053,17 +1145,17 @@ async function loadScan(): Promise<void> {
   try {
     const payload = await scanLocalAccounts()
     scanPayload.value = payload
-    scanRows.value = scanPreviewRows(payload)
+    scanRows.value = scanPreviewRows(payload, t)
     scanSelected.value = scanRows.value.filter((row) => row.selected).map((row) => row.file)
   } catch (error) {
-    scanError.value = failureText('扫描本机', error)
+    scanError.value = failureText(t('page.accounts.scanScanFailed'), error)
     toast.error(scanError.value)
   } finally {
     scanLoading.value = false
   }
 }
 
-const scanSummaryText = computed(() => scanSummary(scanPayload.value, scanRows.value))
+const scanSummaryText = computed(() => scanSummary(scanPayload.value, scanRows.value, t))
 
 function toggleScanRow(file: string, checked: boolean): void {
   const next = new Set(scanSelected.value)
@@ -1074,17 +1166,17 @@ function toggleScanRow(file: string, checked: boolean): void {
 
 async function submitScan(): Promise<void> {
   if (!scanSelected.value.length) {
-    toast.error('请先勾选要导入的账号')
+    toast.error(t('page.accounts.scanSelectFirst'))
     return
   }
   scanBusy.value = true
   try {
     const result = await importLocalAccounts(scanSelected.value)
-    toast.success('已导入：' + importLocalText(result))
+    toast.success(t('page.accounts.scanImported', { summary: importLocalText(result, t) }))
     addOpen.value = false
     await load()
   } catch (error) {
-    toast.error(failureText('导入本机账号', error))
+    toast.error(failureText(t('page.accounts.scanFailed'), error))
   } finally {
     scanBusy.value = false
   }
@@ -1148,7 +1240,7 @@ function phoneForm(): PhoneForm {
 
 async function onSendCode(): Promise<void> {
   const form = phoneForm()
-  const errors = validatePhoneForm({ ...form, code: 'pending' }, false)
+  const errors = validatePhoneForm({ ...form, code: 'pending' }, false, t)
   delete errors.code
   phoneErrors.value = errors
   if (Object.keys(errors).length) return
@@ -1157,12 +1249,12 @@ async function onSendCode(): Promise<void> {
     if (!Object.keys(phoneSession.value).length) {
       phoneSession.value = await preparePhoneFlow(platformSpec.value, form)
     }
-    const result = await sendPhoneCode(platformSpec.value, form, phoneSession.value)
+    const result = await sendPhoneCode(platformSpec.value, form, phoneSession.value, t)
     phoneSession.value = { ...phoneSession.value, ...result }
     startCountdown()
-    toast.success('验证码已发送到 ' + maskPhone(form.phone))
+    toast.success(t('page.accounts.phoneSent', { phone: maskPhone(form.phone) }))
   } catch (error) {
-    toast.error(failureText('发送验证码', error))
+    toast.error(failureText(t('page.accounts.phoneSendFailed'), error))
   } finally {
     phoneSending.value = false
   }
@@ -1170,24 +1262,26 @@ async function onSendCode(): Promise<void> {
 
 async function onVerifyPhone(): Promise<void> {
   const form = phoneForm()
-  const errors = validatePhoneForm(form, phoneNeedsPassword.value)
+  const errors = validatePhoneForm(form, phoneNeedsPassword.value, t)
   phoneErrors.value = errors
   if (Object.keys(errors).length) return
   phoneBusy.value = true
   try {
-    const result = await verifyPhoneCode(platformSpec.value, form, phoneSession.value)
+    const result = await verifyPhoneCode(platformSpec.value, form, phoneSession.value, t)
     if (result.need_password || result.needs_password) {
       phoneNeedsPassword.value = true
-      toast.info('该手机号是新账号，请设置密码后再提交')
+      toast.info(t('page.accounts.phoneNeedPassword'))
       return
     }
     const name = typeof result.name === 'string' ? result.name : ''
-    toast.success('已登录并添加账号' + (name ? '：' + name : ''))
+    toast.success(
+      name ? t('page.accounts.phoneAddedNamed', { name }) : t('page.accounts.phoneAdded'),
+    )
     addOpen.value = false
     resetPhone()
     await load()
   } catch (error) {
-    toast.error(failureText('手机号登录', error))
+    toast.error(failureText(t('page.accounts.phoneFailed'), error))
   } finally {
     phoneBusy.value = false
   }
@@ -1215,7 +1309,7 @@ function resetAuth(): void {
 async function onBeginAuth(): Promise<void> {
   authBusy.value = true
   try {
-    const payload = await beginBrowserAuth(platformSpec.value)
+    const payload = await beginBrowserAuth(platformSpec.value, t)
     const view = authStateOf(payload)
     authView.value = view
     if (view.url) {
@@ -1227,7 +1321,7 @@ async function onBeginAuth(): Promise<void> {
     }
     startAuthPoll()
   } catch (error) {
-    toast.error(failureText('发起授权', error))
+    toast.error(failureText(t('page.accounts.authBeginFailed'), error))
   } finally {
     authBusy.value = false
   }
@@ -1235,24 +1329,24 @@ async function onBeginAuth(): Promise<void> {
 
 async function pollAuthOnce(): Promise<void> {
   try {
-    const payload = await pollBrowserAuth(platformSpec.value)
+    const payload = await pollBrowserAuth(platformSpec.value, t)
     const view = authStateOf(payload)
     authView.value = view
     if (view.state === 'authorized') {
       stopAuthPoll()
-      toast.success('授权成功，账号已入池')
+      toast.success(t('page.accounts.authSuccess'))
       addOpen.value = false
       resetAuth()
       await load()
     } else if (view.state === 'failed') {
       stopAuthPoll()
-      toast.error('授权失败：' + (view.message || '未知原因'))
+      toast.error(t('page.accounts.authFailed', { reason: view.message || t('page.accounts.authUnknownReason') }))
     }
   } catch (error) {
     authTicks.value += 1
     if (authTicks.value >= 3) {
       stopAuthPoll()
-      toast.error(failureText('轮询授权状态', error))
+      toast.error(failureText(t('page.accounts.authPollFailed'), error))
     }
   }
 }
@@ -1272,8 +1366,8 @@ function startAuthPoll(): void {
 async function copyAuthUrl(): Promise<void> {
   if (!authView.value.url) return
   const ok = await copyText(authView.value.url)
-  if (ok) toast.success('已复制授权地址')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('page.accounts.authCopied'))
+  else toast.error(t('common.copyFailed'))
 }
 
 const authStep = computed(() => authStepIndex(authView.value))
@@ -1281,7 +1375,7 @@ const authStep = computed(() => authStepIndex(authView.value))
 async function exportFiltered(): Promise<void> {
   const rows = filteredRows.value
   if (!rows.length) {
-    toast.warning('当前筛选结果为空，没有可导出的账号')
+    toast.warning(t('page.accounts.exportEmpty'))
     return
   }
   await startExport({ ids: rows.map((row) => row.id), format: 'raw' })
@@ -1302,16 +1396,16 @@ onMounted(() => {
   void load()
   offAddCommand = registerCommand({
     id: 'accounts.add',
-    title: '添加账号',
-    hint: '账号池',
-    keywords: '新增 账号 登录 凭证',
+    title: t('page.accounts.commandAdd'),
+    hint: t('page.accounts.commandHint'),
+    keywords: t('page.accounts.commandAddKeywords'),
     run: () => openAddDrawer('manual'),
   })
   offImportCommand = registerCommand({
     id: 'accounts.import',
-    title: '导入账号',
-    hint: '账号池',
-    keywords: '批量 导入 凭证 备份',
+    title: t('page.accounts.commandImport'),
+    hint: t('page.accounts.commandHint'),
+    keywords: t('page.accounts.commandImportKeywords'),
     run: () => openAddDrawer('import'),
   })
   offPlatform = platformStore.onChange((detail) => {
@@ -1344,25 +1438,29 @@ watch(statusTab, () => {
 
 <template>
   <div class="acc-page">
-    <PageHeader title="账号池" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
-        <Btn variant="default" :icon="Upload" @click="openAddDrawer('import')">导入</Btn>
+        <Btn variant="default" :icon="Upload" @click="openAddDrawer('import')">
+          {{ t('page.accounts.import') }}
+        </Btn>
         <Btn
           v-if="methodEnabled(platformSpec, 'scan')"
           variant="quiet"
           :icon="ScanLine"
           @click="openAddDrawer('scan')"
         >
-          扫描本机
+          {{ t('page.accounts.scan') }}
         </Btn>
-        <Btn variant="quiet" :icon="Download" @click="exportFiltered">导出</Btn>
+        <Btn variant="quiet" :icon="Download" @click="exportFiltered">
+          {{ t('page.accounts.export') }}
+        </Btn>
         <n-dropdown
           :options="addOptions"
           trigger="click"
           @select="(key: string | number) => onAddMode(String(key))"
         >
           <Btn variant="primary" :icon="Plus">
-            添加账号
+            {{ t('page.accounts.add') }}
             <ChevronDown :size="14" />
           </Btn>
         </n-dropdown>
@@ -1376,7 +1474,12 @@ watch(statusTab, () => {
       @retry="load()"
     />
 
-    <div v-else-if="firstLoading" class="acc-skeleton" aria-busy="true" aria-label="账号池加载中">
+    <div
+      v-else-if="firstLoading"
+      class="acc-skeleton"
+      aria-busy="true"
+      :aria-label="t('page.accounts.loadingAria')"
+    >
       <n-skeleton height="40px" />
       <n-skeleton height="420px" />
     </div>
@@ -1386,7 +1489,7 @@ watch(statusTab, () => {
         <Segmented
           :options="statusOptions"
           :model-value="statusTab"
-          aria-label="按账号状态筛选"
+          :aria-label="t('page.accounts.statusAria')"
           scrollable
           @update:model-value="setStatus"
         />
@@ -1406,7 +1509,7 @@ watch(statusTab, () => {
               <n-input
                 class="acc-filter__search"
                 :value="search"
-                placeholder="搜索名称 / UID / 域名"
+                :placeholder="t('page.accounts.searchPlaceholder')"
                 clearable
                 @update:value="
                   (value: string) => {
@@ -1418,14 +1521,14 @@ watch(statusTab, () => {
               <n-input
                 class="acc-filter__num"
                 :value="table.state.filters.min"
-                placeholder="积分 ≥"
+                :placeholder="t('page.accounts.minPlaceholder')"
                 clearable
                 @update:value="(value: string) => change('min', value)"
               />
               <n-input
                 class="acc-filter__num"
                 :value="table.state.filters.max"
-                placeholder="积分 ≤"
+                :placeholder="t('page.accounts.maxPlaceholder')"
                 clearable
                 @update:value="(value: string) => change('max', value)"
               />
@@ -1438,8 +1541,10 @@ watch(statusTab, () => {
           <span class="acc-jobbar__name">{{ jobTitle }}</span>
           <Meter :value="jobPercent" :tone="jobRunning ? 'brand' : jobItem?.status === 'failed' ? 'danger' : 'ok'" />
           <span class="acc-jobbar__num tnum">{{ jobDone }} / {{ jobTotal }}</span>
-          <Btn variant="quiet" size="sm" @click="showJobDetail">查看详情</Btn>
-          <Btn v-if="!jobRunning" variant="quiet" size="sm" @click="jobVisible = false">隐藏</Btn>
+          <Btn variant="quiet" size="sm" @click="showJobDetail">{{ t('job.view') }}</Btn>
+          <Btn v-if="!jobRunning" variant="quiet" size="sm" @click="jobVisible = false">
+            {{ t('page.accounts.hide') }}
+          </Btn>
         </div>
 
         <div class="acc-body">
@@ -1456,7 +1561,7 @@ watch(statusTab, () => {
             :page-size="table.state.pageSize"
             :item-count="pageData.total"
             :page-sizes="[50, 100, 200]"
-            empty-description="该平台还没有账号"
+            :empty-description="t('page.accounts.tableEmpty')"
             @update:page="table.setPage"
             @update:page-size="table.setPageSize"
             @update:sorter="onSorter"
@@ -1464,30 +1569,60 @@ watch(statusTab, () => {
           >
             <template #toolbar>
               <Btn variant="quiet" size="sm" :icon="RefreshCw" :loading="jobRunning" @click="refreshAll">
-                刷新全部
+                {{ t('page.accounts.toolbarRefreshAll') }}
               </Btn>
-              <Btn variant="quiet" size="sm" @click="openLimits">模型额度与冷却</Btn>
-              <Btn variant="quiet" size="sm" @click="checkAll">检测全部</Btn>
-              <Btn v-if="features.growth" variant="quiet" size="sm" @click="runGrowth">成长任务</Btn>
-              <Btn v-if="features.catTravel" variant="quiet" size="sm" @click="runCatTravel">猫猫旅行</Btn>
-              <Btn v-if="jobSnapshot" variant="quiet" size="sm" @click="reloadJob">查看任务</Btn>
+              <Btn variant="quiet" size="sm" @click="openLimits">
+                {{ t('page.accounts.toolbarLimits') }}
+              </Btn>
+              <Btn variant="quiet" size="sm" @click="checkAll">
+                {{ t('page.accounts.toolbarCheckAll') }}
+              </Btn>
+              <Btn v-if="features.growth" variant="quiet" size="sm" @click="runGrowth">
+                {{ t('page.accounts.toolbarGrowth') }}
+              </Btn>
+              <Btn v-if="features.catTravel" variant="quiet" size="sm" @click="runCatTravel">
+                {{ t('page.accounts.toolbarCat') }}
+              </Btn>
+              <Btn v-if="jobSnapshot" variant="quiet" size="sm" @click="reloadJob">
+                {{ t('page.accounts.viewJob') }}
+              </Btn>
             </template>
 
             <template #bulk>
-              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('enable')">启用</Btn>
-              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('disable')">禁用</Btn>
-              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('refresh')">刷新额度</Btn>
-              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('check')">检测</Btn>
-              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="exportSelection">导出选中</Btn>
-              <Btn variant="danger" size="sm" :disabled="bulkBusy" @click="runBulk('delete')">删除</Btn>
+              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('enable')">
+                {{ t('page.accounts.bulkEnable') }}
+              </Btn>
+              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('disable')">
+                {{ t('page.accounts.bulkDisable') }}
+              </Btn>
+              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('refresh')">
+                {{ t('page.accounts.bulkRefresh') }}
+              </Btn>
+              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="runBulk('check')">
+                {{ t('page.accounts.bulkCheck') }}
+              </Btn>
+              <Btn variant="quiet" size="sm" :disabled="bulkBusy" @click="exportSelection">
+                {{ t('page.accounts.exportSelection') }}
+              </Btn>
+              <Btn variant="danger" size="sm" :disabled="bulkBusy" @click="runBulk('delete')">
+                {{ t('common.delete') }}
+              </Btn>
             </template>
 
             <template #empty>
-              <Empty :description="hasFilters ? '没有符合筛选的账号。' : '该平台还没有账号。先导入或添加账号。'">
-                <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
+              <Empty
+                :description="
+                  hasFilters ? t('page.accounts.emptyFiltered') : t('page.accounts.emptyPlatform')
+                "
+              >
+                <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
+                  {{ t('page.accounts.clearFilters') }}
+                </Btn>
                 <template v-else>
-                  <Btn variant="default" size="sm" @click="openAddDrawer('import')">导入账号</Btn>
-                  <Btn variant="quiet" size="sm" @click="load()">刷新</Btn>
+                  <Btn variant="default" size="sm" @click="openAddDrawer('import')">
+                    {{ t('page.accounts.importAccounts') }}
+                  </Btn>
+                  <Btn variant="quiet" size="sm" @click="load()">{{ t('common.refresh') }}</Btn>
                 </template>
               </Empty>
             </template>
@@ -1499,25 +1634,45 @@ watch(statusTab, () => {
     <!-- 编辑账号 -->
     <FormDrawer
       v-model:show="editOpen"
-      title="编辑账号"
+      :title="t('page.accounts.editTitle')"
       :submit-loading="saving"
       @submit="saveEdit"
     >
-      <FormField label="账号名称" required :error="editError" hint="用于后台展示；原始凭据不会被修改。">
-        <n-input v-model:value="editForm.name" placeholder="例如：主号" maxlength="64" clearable />
+      <FormField
+        :label="t('page.accounts.editName')"
+        required
+        :error="editError"
+        :hint="t('page.accounts.editNameHint')"
+      >
+        <n-input
+          v-model:value="editForm.name"
+          :placeholder="t('page.accounts.editNamePlaceholder')"
+          maxlength="64"
+          clearable
+        />
       </FormField>
-      <FormField label="并发上限" hint="留空跟随全局；0 表示不限。">
-        <n-input-number v-model:value="editForm.maxInFlight" :min="0" placeholder="跟随全局" clearable />
+      <FormField :label="t('page.accounts.editMax')" :hint="t('page.accounts.editMaxHint')">
+        <n-input-number
+          v-model:value="editForm.maxInFlight"
+          :min="0"
+          :placeholder="t('page.accounts.editMaxPlaceholder')"
+          clearable
+        />
       </FormField>
-      <p class="acc-hint">后端没有账号备注字段：列表的「备注」列展示绑定的 API Key。</p>
+      <p class="acc-hint">{{ t('page.accounts.editNote') }}</p>
     </FormDrawer>
 
     <!-- 详情 -->
-    <FormDrawer v-model:show="detailOpen" :title="'账号详情 · ' + (detailTarget?.name || '')" size="lg" hide-footer>
+    <FormDrawer
+      v-model:show="detailOpen"
+      :title="t('page.accounts.detailTitle', { name: detailTarget?.name || '' })"
+      size="lg"
+      hide-footer
+    >
       <KV v-if="detailTarget" :items="detailKv" label-width="96px" />
       <section class="acc-section">
         <div class="acc-section__head">
-          <span>积分明细</span>
+          <span>{{ t('page.accounts.detailCredits') }}</span>
           <Btn
             v-if="detailTarget"
             variant="quiet"
@@ -1525,22 +1680,22 @@ watch(statusTab, () => {
             :loading="detailLoading"
             @click="loadCreditDetails(detailTarget.id, true)"
           >
-            重新采集
+            {{ t('page.accounts.detailRecollect') }}
           </Btn>
         </div>
-        <p v-if="detailLoading" class="acc-hint">正在读取积分明细…</p>
+        <p v-if="detailLoading" class="acc-hint">{{ t('page.accounts.detailLoading') }}</p>
         <ErrorBlock v-else-if="detailError" :title="detailError" compact @retry="detailTarget && loadCreditDetails(detailTarget.id, false)" />
-        <p v-else-if="!detailPackages.length" class="acc-hint">没有积分包明细（未采集或该平台不返回明细）。</p>
+        <p v-else-if="!detailPackages.length" class="acc-hint">{{ t('page.accounts.detailEmpty') }}</p>
         <ul v-else class="acc-packages">
           <li v-for="(pkg, index) in detailPackages" :key="index" class="acc-packages__row">
-            <span class="acc-packages__name">{{ pkg.display_name || '积分包' }}</span>
+            <span class="acc-packages__name">{{ pkg.display_name || t('page.accounts.detailPackage') }}</span>
             <span class="tnum">{{ fmtCredit(pkg.remaining) }} / {{ fmtCredit(pkg.total) }}</span>
-            <span class="acc-muted">{{ pkg.expire_label || '长期有效' }}</span>
+            <span class="acc-muted">{{ pkg.expire_label || t('page.accounts.detailLongTerm') }}</span>
           </li>
         </ul>
       </section>
       <section v-if="detailTarget?.raw.model_limits?.length" class="acc-section">
-        <div class="acc-section__head"><span>模型冷却</span></div>
+        <div class="acc-section__head"><span>{{ t('page.accounts.detailCooldowns') }}</span></div>
         <ul class="acc-packages">
           <li v-for="limit in detailTarget.raw.model_limits" :key="limit.model + limit.kind" class="acc-packages__row">
             <span class="acc-packages__name mono">{{ limit.model }}</span>
@@ -1552,9 +1707,14 @@ watch(statusTab, () => {
     </FormDrawer>
 
     <!-- 模型额度与冷却 -->
-    <FormDrawer v-model:show="limitsOpen" title="模型额度与冷却" size="lg" hide-footer>
-      <p class="acc-hint">只读：当前窗口内处于冷却/日额度耗尽的账号 × 模型。</p>
-      <p v-if="limitsLoading" class="acc-hint">正在加载…</p>
+    <FormDrawer
+      v-model:show="limitsOpen"
+      :title="t('page.accounts.limitsTitle')"
+      size="lg"
+      hide-footer
+    >
+      <p class="acc-hint">{{ t('page.accounts.limitsIntro') }}</p>
+      <p v-if="limitsLoading" class="acc-hint">{{ t('common.loading') }}</p>
       <ErrorBlock v-else-if="limitsError" :title="limitsError" compact @retry="openLimits" />
       <ul v-else-if="limitsRows.length" class="acc-packages">
         <li v-for="(row, index) in limitsRows" :key="index" class="acc-packages__row">
@@ -1563,19 +1723,25 @@ watch(statusTab, () => {
           <span class="tnum">{{ fmtDuration((Number(row.remaining_seconds) || 0) * 1000) }}</span>
         </li>
       </ul>
-      <Empty v-else description="当前没有模型冷却记录。" compact />
+      <Empty v-else :description="t('page.accounts.limitsEmpty')" compact />
     </FormDrawer>
 
     <!-- 任务详情 -->
     <FormDrawer v-model:show="jobDetailOpen" :title="jobTitle" size="lg" hide-footer>
-      <p class="acc-hint">{{ jobDoneText(jobSnapshot) }} · {{ jobDone }} / {{ jobTotal }}</p>
+      <p class="acc-hint">{{ jobDoneText(jobSnapshot, t) }} · {{ jobDone }} / {{ jobTotal }}</p>
       <ul v-if="jobItems.length" class="acc-packages">
         <li v-for="(row, index) in jobItems" :key="index" class="acc-packages__row">
           <span class="acc-packages__name">{{ row.account || row.name || ('#' + String(row.account_id || index)) }}</span>
-          <span class="acc-muted">{{ row.summary || row.reason || (row.ok === false ? '失败' : '完成') }}</span>
+          <span class="acc-muted">
+            {{
+              row.summary ||
+              row.reason ||
+              (row.ok === false ? t('page.accounts.jobItemFailed') : t('page.accounts.jobItemDone'))
+            }}
+          </span>
         </li>
       </ul>
-      <p v-else class="acc-hint">任务没有返回逐条明细。</p>
+      <p v-else class="acc-hint">{{ t('page.accounts.jobDetailEmpty') }}</p>
     </FormDrawer>
 
     <!-- S26 添加账号：一个抽屉按方式切换内容（能力声明决定可选项） -->
@@ -1588,27 +1754,38 @@ watch(statusTab, () => {
       @submit="submitAdd"
     >
       <template v-if="addKind === 'manual'">
-        <FormField label="名称" hint="留空则自动取真实昵称 / uid。">
-          <n-input v-model:value="manualName" placeholder="例如：主号" maxlength="120" clearable />
+        <FormField :label="t('page.accounts.manualName')" :hint="t('page.accounts.manualNameHint')">
+          <n-input
+            v-model:value="manualName"
+            :placeholder="t('page.accounts.manualNamePlaceholder')"
+            maxlength="120"
+            clearable
+          />
         </FormField>
-        <FormField label="凭证 JSON" required :hint="manualHint(platformSpec)">
+        <FormField
+          :label="t('page.accounts.manualJson')"
+          required
+          :hint="manualHint(platformSpec, t)"
+        >
           <n-input
             v-model:value="manualJson"
             type="textarea"
             :rows="10"
             class="acc-json"
-            placeholder='粘贴授权后的 JSON，例如 {"uid":"...","auth":{...}}'
+            :placeholder="t('page.accounts.manualJsonPlaceholder')"
           />
         </FormField>
       </template>
 
       <template v-else-if="addKind === 'import'">
         <FormField
-          label="粘贴凭证"
+          :label="t('page.accounts.importPaste')"
           required
-          :hint="importMode === 'items'
-            ? '每行一个 JSON（或一个 JSON 数组）；每项可以是凭证本身或 {name, auth_json}。'
-            : '该平台的备份形态各不相同：直接粘贴导出文件原文（JSONL / JSON 数组）。'"
+          :hint="
+            importMode === 'items'
+              ? t('page.accounts.importHintItems')
+              : t('page.accounts.importHintText')
+          "
         >
           <n-input
             v-model:value="importText"
@@ -1619,7 +1796,11 @@ watch(statusTab, () => {
           />
         </FormField>
         <p class="acc-hint">
-          解析：有效 {{ importPreview.valid }} 条<template v-if="importPreview.invalid"> · 无法解析 {{ importPreview.invalid }} 条</template>
+          {{ t('page.accounts.importParsed', { valid: importPreview.valid }) }}<template
+            v-if="importPreview.invalid"
+          >
+            {{ t('page.accounts.importParsedInvalid', { invalid: importPreview.invalid }) }}</template
+          >
         </p>
         <ul v-if="importRows.length" class="acc-scan">
           <li v-for="row in importRows" :key="row.index" class="acc-scan__row">
@@ -1628,17 +1809,23 @@ watch(statusTab, () => {
               :disabled="!row.valid"
               @update:checked="(checked: boolean) => toggleImportRow(row.index, checked)"
             />
-            <span class="acc-scan__name">{{ row.name || row.uid || ('第 ' + row.index + ' 条') }}</span>
-            <span class="acc-muted">{{ row.valid ? (row.uid ? 'uid ' + row.uid : '结构有效') : row.reason }}</span>
+            <span class="acc-scan__name">
+              {{ row.name || row.uid || t('page.accounts.importRowName', { index: row.index }) }}
+            </span>
+            <span class="acc-muted">
+              {{ row.valid ? (row.uid ? 'uid ' + row.uid : t('page.accounts.importStructureOk')) : row.reason }}
+            </span>
           </li>
         </ul>
         <n-checkbox v-model:checked="importVerify">
-          导入时向上游验证凭证（关闭只做结构校验，速度更快但无法识别伪造签名）
+          {{ t('page.accounts.importVerify') }}
         </n-checkbox>
       </template>
 
       <template v-else-if="addKind === 'scan'">
-        <p class="acc-hint">{{ scanLoading ? '正在扫描客户端登录目录…' : scanSummaryText }}</p>
+        <p class="acc-hint">
+          {{ scanLoading ? t('page.accounts.scanLoading') : scanSummaryText }}
+        </p>
         <ErrorBlock v-if="scanError" :title="scanError" :retry="false" compact />
         <ul v-if="scanRows.length" class="acc-scan">
           <li v-for="row in scanRows" :key="row.file" class="acc-scan__row">
@@ -1649,51 +1836,79 @@ watch(statusTab, () => {
             />
             <span class="acc-scan__name">{{ row.name || row.uid || row.file }}</span>
             <span class="acc-muted">
-              {{ row.error ? row.error : row.inPool ? '已在池子里' : row.active ? '当前登录' : '' }}
-              <template v-if="row.expires"> · 到期 {{ row.expires }}</template>
+              {{
+                row.error
+                  ? row.error
+                  : row.inPool
+                    ? t('page.accounts.scanInPool')
+                    : row.active
+                      ? t('page.accounts.scanActive')
+                      : ''
+              }}
+              <template v-if="row.expires">
+                {{ t('page.accounts.scanExpires', { time: row.expires }) }}
+              </template>
             </span>
           </li>
         </ul>
-        <Btn variant="quiet" size="sm" :loading="scanLoading" @click="loadScan()">重新扫描</Btn>
-        <p class="acc-hint">token 不会下发到浏览器：勾选后由服务端直接读本机文件入库。</p>
+        <Btn variant="quiet" size="sm" :loading="scanLoading" @click="loadScan()">
+          {{ t('page.accounts.scanRescan') }}
+        </Btn>
+        <p class="acc-hint">{{ t('page.accounts.scanNotice') }}</p>
       </template>
 
       <template v-else-if="addKind === 'phone'">
         <div class="acc-phone">
-          <n-select v-model:value="phoneCountry" :options="COUNTRY_CODES" class="acc-phone__country" />
-          <n-input v-model:value="phoneNumber" placeholder="手机号" maxlength="20" />
+          <n-select v-model:value="phoneCountry" :options="countryOptions" class="acc-phone__country" />
+          <n-input
+            v-model:value="phoneNumber"
+            :placeholder="t('page.accounts.phonePlaceholderNumber')"
+            maxlength="20"
+          />
         </div>
         <p v-if="phoneErrors.phone" class="acc-error">{{ phoneErrors.phone }}</p>
         <div class="acc-phone">
-          <n-input v-model:value="phoneCode" placeholder="验证码" maxlength="8" />
+          <n-input
+            v-model:value="phoneCode"
+            :placeholder="t('page.accounts.phonePlaceholderCode')"
+            maxlength="8"
+          />
           <Btn
             variant="default"
             :loading="phoneSending"
             :disabled="phoneCountdown > 0 || phoneSending"
             @click="onSendCode"
           >
-            {{ phoneCountdown > 0 ? phoneCountdown + ' 秒后重发' : '获取验证码' }}
+            {{
+              phoneCountdown > 0
+                ? t('page.accounts.phoneResend', { seconds: phoneCountdown })
+                : t('page.accounts.phoneGetCode')
+            }}
           </Btn>
         </div>
         <p v-if="phoneErrors.code" class="acc-error">{{ phoneErrors.code }}</p>
         <FormField
           v-if="phoneNeedsPassword"
-          label="设置密码"
+          :label="t('page.accounts.phonePasswordLabel')"
           required
           :error="phoneErrors.password"
-          hint="该手机号是新账号，上游要求先设置密码。"
+          :hint="t('page.accounts.phonePasswordHint')"
         >
           <n-input v-model:value="phonePassword" type="password" show-password-on="click" />
         </FormField>
         <p class="acc-hint">
-          验证码发到 {{ maskPhone(phoneNumber) || '手机号' }}；成功后会直接入池并按平台规则做登录后自动化。
+          {{
+            t('page.accounts.phoneNotice', {
+              phone: maskPhone(phoneNumber) || t('page.accounts.phonePlaceholderNumber'),
+            })
+          }}
         </p>
       </template>
 
       <template v-else>
         <ol class="acc-steps">
           <li
-            v-for="(step, index) in AUTH_STEPS"
+            v-for="(step, index) in authSteps"
             :key="step"
             :class="{ 'is-done': index < authStep, 'is-active': index === authStep }"
           >
@@ -1702,23 +1917,30 @@ watch(statusTab, () => {
           </li>
         </ol>
         <p class="acc-hint">
-          当前状态：{{
-            authView.state === 'authorized'
-              ? '已授权'
-              : authView.state === 'failed'
-                ? '授权失败'
-                : authView.state === 'idle'
-                  ? '尚未发起'
-                  : '等待确认'
+          {{
+            t('page.accounts.authStatus', {
+              state:
+                authView.state === 'authorized'
+                  ? t('page.accounts.authAuthorized')
+                  : authView.state === 'failed'
+                    ? t('page.accounts.authFailedState')
+                    : authView.state === 'idle'
+                      ? t('page.accounts.authIdle')
+                      : t('page.accounts.authWaiting'),
+            })
           }}
           <template v-if="authView.message"> · {{ authView.message }}</template>
         </p>
         <p v-if="authView.url" class="acc-hint acc-auth-url">
           <code class="mono">{{ authView.url }}</code>
-          <Btn variant="quiet" size="sm" @click="copyAuthUrl()">复制</Btn>
-          <Btn variant="quiet" size="sm" @click="pollAuthOnce()">立即检查</Btn>
+          <Btn variant="quiet" size="sm" @click="copyAuthUrl()">
+            {{ t('page.accounts.authCopy') }}
+          </Btn>
+          <Btn variant="quiet" size="sm" @click="pollAuthOnce()">
+            {{ t('page.accounts.authCheckNow') }}
+          </Btn>
         </p>
-        <p class="acc-hint">授权地址会在新窗口打开；每 2 秒自动检查一次，成功后自动入池并关闭本抽屉。</p>
+        <p class="acc-hint">{{ t('page.accounts.authNotice') }}</p>
       </template>
     </FormDrawer>
 

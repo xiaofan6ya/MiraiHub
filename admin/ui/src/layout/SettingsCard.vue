@@ -2,8 +2,10 @@
 /** 设置型页面的区块卡片：标题 + 说明 + 未保存 Badge + 独立保存。 */
 import Badge from '@/components/base/Badge.vue'
 import Btn from '@/components/base/Btn.vue'
+import { computed } from 'vue'
+import { useI18n } from '@/i18n'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     title: string
     description?: string
@@ -18,7 +20,7 @@ withDefaults(
     description: undefined,
     dirty: false,
     loading: false,
-    saveLabel: '保存',
+    saveLabel: undefined,
     saveDisabled: false,
     hideSave: false,
     hideReset: false,
@@ -26,6 +28,9 @@ withDefaults(
 )
 
 const emit = defineEmits<{ (event: 'save'): void; (event: 'reset'): void }>()
+const { t } = useI18n()
+
+const saveText = computed(() => props.saveLabel ?? t('common.save'))
 </script>
 
 <template>
@@ -34,7 +39,7 @@ const emit = defineEmits<{ (event: 'save'): void; (event: 'reset'): void }>()
       <div class="head-text">
         <h2 class="card-title">
           {{ title }}
-          <Badge v-if="dirty" tone="warn">未保存</Badge>
+          <Badge v-if="dirty" tone="warn">{{ t('settingsCard.unsaved') }}</Badge>
         </h2>
         <p v-if="description" class="card-desc">{{ description }}</p>
       </div>
@@ -44,9 +49,11 @@ const emit = defineEmits<{ (event: 'save'): void; (event: 'reset'): void }>()
     <div class="card-body"><slot /></div>
 
     <footer v-if="!hideSave" class="card-foot">
-      <Btn v-if="!hideReset" variant="quiet" :disabled="loading" @click="emit('reset')">取消</Btn>
+      <Btn v-if="!hideReset" variant="quiet" :disabled="loading" @click="emit('reset')">
+        {{ t('common.cancel') }}
+      </Btn>
       <Btn variant="primary" :loading="loading" :disabled="saveDisabled" @click="emit('save')">
-        {{ saveLabel }}
+        {{ saveText }}
       </Btn>
     </footer>
   </section>

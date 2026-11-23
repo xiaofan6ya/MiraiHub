@@ -7,6 +7,7 @@ import { GROUPS, PAGES_BY_KEY, groupEntry, isPageKey, type GroupDef, type PageKe
 import { useShellBadges } from '@/platform/shellBadges'
 import { useAppInfo } from '@/platform/version'
 import { iconComponent } from './icons'
+import { groupTitle, useI18n } from '@/i18n'
 
 /**
  * 侧栏（03-shell §2.1）：宽 224px，9 个分组项 36px；
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const { expiringAccounts } = useShellBadges()
 const { version, hasUpdate, load: loadAppInfo } = useAppInfo()
 
@@ -44,7 +46,9 @@ const versionText = computed(() => (version.value ? 'v' + version.value : 'v…'
 
 /** 账号组的提示点：有积分即将到期的账号时亮起（旧版 refreshShellBadges 的用途）。 */
 const accountsDot = computed(() => expiringAccounts.value > 0)
-const accountsDotTip = computed(() => '有 ' + expiringAccounts.value + ' 个账号积分即将到期')
+const accountsDotTip = computed(() =>
+  t('shell.accountsExpiring', { count: expiringAccounts.value }),
+)
 
 /** 品牌图标由后端提供：写成变量而不是字面量 src，避免被 Vite 当静态资源解析。 */
 const appIconUrl = '/api/app/icon'
@@ -75,13 +79,13 @@ function goMaintenance(): void {
       <img class="brand-logo" :src="appIconUrl" alt="MiraiHub" width="28" height="28" />
       <div v-if="!isCollapsed" class="brand-text">
         <div class="brand-title">MiraiHub</div>
-        <div class="brand-sub">管理后台</div>
+        <div class="brand-sub">{{ t('shell.brandSub') }}</div>
       </div>
       <button
         v-if="isDrawer"
         type="button"
         class="collapse-btn drawer-close"
-        aria-label="关闭导航"
+        :aria-label="t('shell.closeNav')"
         @click="emit('navigate')"
       >
         <ChevronsLeft :size="16" />
@@ -90,8 +94,8 @@ function goMaintenance(): void {
         v-else
         type="button"
         class="collapse-btn"
-        :aria-label="isCollapsed ? '展开侧栏' : '收起侧栏'"
-        :title="isCollapsed ? '展开侧栏' : '收起侧栏'"
+        :aria-label="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')"
+        :title="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')"
         @click="emit('toggle-collapse')"
       >
         <ChevronsRight v-if="isCollapsed" :size="16" />
@@ -99,7 +103,7 @@ function goMaintenance(): void {
       </button>
     </div>
 
-    <nav class="side-nav" aria-label="主导航">
+    <nav class="side-nav" :aria-label="t('shell.mainNav')">
       <n-tooltip
         v-for="group in GROUPS"
         :key="group.key"
@@ -116,7 +120,7 @@ function goMaintenance(): void {
             @click="go(group)"
           >
             <component :is="groupIcon(group)" :size="18" class="item-icon" />
-            <span v-if="!isCollapsed" class="item-label">{{ group.title }}</span>
+            <span v-if="!isCollapsed" class="item-label">{{ groupTitle(group.key) }}</span>
             <span
               v-if="group.key === 'accounts' && accountsDot"
               class="item-dot warn"
@@ -126,7 +130,7 @@ function goMaintenance(): void {
             />
           </button>
         </template>
-        <span class="tip-row">{{ group.title }}</span>
+        <span class="tip-row">{{ groupTitle(group.key) }}</span>
         <span v-if="group.key === 'accounts' && accountsDot" class="tip-sub">
           {{ accountsDotTip }}
         </span>
@@ -136,27 +140,27 @@ function goMaintenance(): void {
     <footer class="side-foot">
       <button type="button" class="foot-item" @click="emit('open-sessions')">
         <MonitorSmartphone :size="16" />
-        <span v-if="!isCollapsed">登录设备</span>
-        <span v-else class="sr-only">登录设备</span>
+        <span v-if="!isCollapsed">{{ t('shell.sessions') }}</span>
+        <span v-else class="sr-only">{{ t('shell.sessions') }}</span>
       </button>
-      <a class="foot-item foot-link" href="/admin?ui=v1" title="切回旧版控制台">
+      <a class="foot-item foot-link" href="/admin?ui=v1" :title="t('shell.legacyConsoleTip')">
         <Undo2 :size="16" />
-        <span v-if="!isCollapsed">切回旧版</span>
-        <span v-else class="sr-only">切回旧版</span>
+        <span v-if="!isCollapsed">{{ t('shell.legacyConsole') }}</span>
+        <span v-else class="sr-only">{{ t('shell.legacyConsole') }}</span>
       </a>
       <button
         type="button"
         class="foot-version"
-        :title="hasUpdate ? '有新版本，前往更新与备份' : '更新与备份'"
+        :title="hasUpdate ? t('shell.hasUpdateTip') : t('shell.updates')"
         @click="goMaintenance"
       >
         <span class="ver">{{ versionText }}</span>
-        <span v-if="hasUpdate" class="has-update">有更新</span>
+        <span v-if="hasUpdate" class="has-update">{{ t('shell.hasUpdate') }}</span>
       </button>
       <button type="button" class="foot-item" @click="emit('logout')">
         <LogOut :size="16" />
-        <span v-if="!isCollapsed">退出登录</span>
-        <span v-else class="sr-only">退出登录</span>
+        <span v-if="!isCollapsed">{{ t('shell.logout') }}</span>
+        <span v-else class="sr-only">{{ t('shell.logout') }}</span>
       </button>
     </footer>
   </aside>

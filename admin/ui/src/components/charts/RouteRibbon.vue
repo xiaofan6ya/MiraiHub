@@ -8,6 +8,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Badge from '../base/Badge.vue'
 import PlatformLogo from '../identity/PlatformLogo.vue'
 import { usePrefersReducedMotion } from '../_internal/media'
+import { useI18n } from '@/i18n'
 import {
   RIBBON_LANE_HEIGHT,
   healthColor,
@@ -31,12 +32,15 @@ const props = withDefaults(
     /** 单位后缀（默认「次」） */
     unit?: string
   }>(),
-  { metric: 'count', unit: '次' },
+  { metric: 'count', unit: undefined },
 )
 
 const emit = defineEmits<{ (event: 'select', platformId: string): void }>()
 
 const reducedMotion = usePrefersReducedMotion()
+const { t, localeTag } = useI18n()
+/** 单位可被页面覆盖，默认跟随语言（中文「次」/ 英文 reqs）。 */
+const unitText = computed(() => props.unit ?? t('ribbon.unit'))
 
 const wrap = ref<HTMLElement | null>(null)
 const width = ref(560)
@@ -75,7 +79,7 @@ function rateText(lane: RibbonLane): string {
 }
 
 function fmt(value: number): string {
-  return Number.isFinite(value) ? value.toLocaleString('zh-CN') : '0'
+  return Number.isFinite(value) ? value.toLocaleString(localeTag.value) : '0'
 }
 
 /** 每条线路的几何与配色。 */
@@ -119,15 +123,15 @@ function select(lane: RibbonLane): void {
     <div class="mh-ribbon__mobile">
       <div class="mh-ribbon__mobile-head">
         <span class="mh-ribbon__source-label">{{ source.label }}</span>
-        <span class="mh-ribbon__source-total tnum">{{ fmt(total) }} {{ unit }}</span>
+        <span class="mh-ribbon__source-total tnum">{{ fmt(total) }} {{ unitText }}</span>
       </div>
-      <p v-if="isEmpty" class="mh-ribbon__empty-text">暂无流量</p>
+      <p v-if="isEmpty" class="mh-ribbon__empty-text">{{ t('ribbon.noTraffic') }}</p>
       <ul class="mh-ribbon__bars">
         <li v-for="lane in lanes" :key="lane.id" class="mh-ribbon__bar-row" @click="select(lane)">
           <div class="mh-ribbon__bar-head">
             <PlatformLogo :id="lane.logo || lane.id" :size="18" />
             <span class="mh-ribbon__bar-name">{{ lane.name }}</span>
-            <Badge v-if="lane.preferred" tone="brand">首选</Badge>
+            <Badge v-if="lane.preferred" tone="brand">{{ t('ribbon.preferred') }}</Badge>
             <span class="mh-ribbon__bar-count tnum">{{ fmt(valueOf(lane)) }}</span>
             <span
               class="mh-ribbon__bar-rate tnum"
@@ -152,7 +156,7 @@ function select(lane: RibbonLane): void {
       <div class="mh-ribbon__origin">
         <span class="mh-ribbon__source-label">{{ source.label }}</span>
         <span class="mh-ribbon__source-total tnum">{{ fmt(total) }}</span>
-        <span class="mh-ribbon__source-unit">{{ unit }}/今日</span>
+        <span class="mh-ribbon__source-unit">{{ t('ribbon.sourceUnit', { unit: unitText }) }}</span>
       </div>
       <div ref="wrap" class="mh-ribbon__canvas">
         <svg
@@ -189,14 +193,14 @@ function select(lane: RibbonLane): void {
             </circle>
           </g>
         </svg>
-        <span v-if="isEmpty" class="mh-ribbon__empty">暂无流量</span>
+        <span v-if="isEmpty" class="mh-ribbon__empty">{{ t('ribbon.noTraffic') }}</span>
       </div>
       <ul class="mh-ribbon__lanes">
         <li v-for="item in geometry" :key="item.lane.id" class="mh-ribbon__lane">
           <button class="mh-ribbon__lane-btn" type="button" @click="select(item.lane)">
             <PlatformLogo :id="item.lane.logo || item.lane.id" :size="18" />
             <span class="mh-ribbon__lane-name">{{ item.lane.name }}</span>
-            <Badge v-if="item.lane.preferred" tone="brand">首选</Badge>
+            <Badge v-if="item.lane.preferred" tone="brand">{{ t('ribbon.preferred') }}</Badge>
             <span class="mh-ribbon__lane-count tnum">{{ fmt(valueOf(item.lane)) }}</span>
             <span class="mh-ribbon__lane-rate tnum" :style="{ color: item.color }">
               {{ rateText(item.lane) }}

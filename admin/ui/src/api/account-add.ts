@@ -11,6 +11,7 @@
  */
 import { http } from './http'
 import { fmtTime } from '@/utils/format'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* ------------------------------------------------------------------ *
  * 类型
@@ -217,21 +218,25 @@ export function flowOf(spec: PlatformAddSpec | null | undefined): AuthFlowSpec |
  *   · 扫描本机：只在 supports_local_scan 为真时出现（服务端读本机登录目录）；
  *   · import-only 平台（auth_mode）不显示授权类入口，只留导入/手动。
  */
-export function addMethodsFor(spec: PlatformAddSpec | null | undefined): AddMethod[] {
+export function addMethodsFor(
+  spec: PlatformAddSpec | null | undefined,
+  translate?: Translate,
+): AddMethod[] {
+  const tr = translate ?? defaultTranslate
   const methods: AddMethod[] = []
   const flow = flowOf(spec)
   const authMode = String(spec?.auth_mode || '').toLowerCase()
   const importOnly = authMode === 'import-only'
   if (flow?.kind === 'phone' && flow.send && flow.verify && !importOnly) {
-    methods.push({ key: 'phone', label: '手机号登录' })
+    methods.push({ key: 'phone', label: tr('add.method.phone') })
   }
   if (flow?.kind === 'browser' && flow.begin && flow.poll && !importOnly) {
-    methods.push({ key: 'authorize', label: '浏览器授权登录' })
+    methods.push({ key: 'authorize', label: tr('add.method.authorize') })
   }
-  methods.push({ key: 'manual', label: '手动添加' })
-  methods.push({ key: 'import', label: '导入账号' })
+  methods.push({ key: 'manual', label: tr('add.method.manual') })
+  methods.push({ key: 'import', label: tr('add.method.import') })
   if (spec?.supports_local_scan && !importOnly) {
-    methods.push({ key: 'scan', label: '扫描本机' })
+    methods.push({ key: 'scan', label: tr('add.method.scan') })
   }
   return methods
 }
@@ -308,28 +313,48 @@ export function preparePhoneFlow(spec: PlatformAddSpec | null | undefined, form:
   return http('POST', flow.prepare.path, { body: flow.prepare.body ? flow.prepare.body(form) : {} })
 }
 
-export function sendPhoneCode(spec: PlatformAddSpec | null | undefined, form: PhoneForm, session: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function sendPhoneCode(
+  spec: PlatformAddSpec | null | undefined,
+  form: PhoneForm,
+  session: Record<string, unknown>,
+  translate?: Translate,
+): Promise<Record<string, unknown>> {
+  const tr = translate ?? defaultTranslate
   const flow = flowOf(spec)
-  if (!flow?.send) return Promise.reject(new Error('该平台没有短信登录接口'))
+  if (!flow?.send) return Promise.reject(new Error(tr('add.phone.noSms')))
   return http('POST', flow.send.path, { body: flow.send.body(form, session) })
 }
 
-export function verifyPhoneCode(spec: PlatformAddSpec | null | undefined, form: PhoneForm, session: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function verifyPhoneCode(
+  spec: PlatformAddSpec | null | undefined,
+  form: PhoneForm,
+  session: Record<string, unknown>,
+  translate?: Translate,
+): Promise<Record<string, unknown>> {
+  const tr = translate ?? defaultTranslate
   const flow = flowOf(spec)
-  if (!flow?.verify) return Promise.reject(new Error('该平台没有短信登录接口'))
+  if (!flow?.verify) return Promise.reject(new Error(tr('add.phone.noSms')))
   return http('POST', flow.verify.path, { body: flow.verify.body(form, session) })
 }
 
-export function beginBrowserAuth(spec: PlatformAddSpec | null | undefined): Promise<Record<string, unknown>> {
+export function beginBrowserAuth(
+  spec: PlatformAddSpec | null | undefined,
+  translate?: Translate,
+): Promise<Record<string, unknown>> {
+  const tr = translate ?? defaultTranslate
   const flow = flowOf(spec)
-  if (!flow?.begin) return Promise.reject(new Error('该平台没有浏览器授权接口'))
+  if (!flow?.begin) return Promise.reject(new Error(tr('add.phone.noBrowser')))
   const platformId = String(spec?.id || storageOf(spec))
   return http('POST', flow.begin.path, { body: flow.begin.body ? flow.begin.body(platformId) : {} })
 }
 
-export function pollBrowserAuth(spec: PlatformAddSpec | null | undefined): Promise<Record<string, unknown>> {
+export function pollBrowserAuth(
+  spec: PlatformAddSpec | null | undefined,
+  translate?: Translate,
+): Promise<Record<string, unknown>> {
+  const tr = translate ?? defaultTranslate
   const flow = flowOf(spec)
-  if (!flow?.poll) return Promise.reject(new Error('该平台没有浏览器授权接口'))
+  if (!flow?.poll) return Promise.reject(new Error(tr('add.phone.noBrowser')))
   return http('GET', flow.poll.path)
 }
 
@@ -355,7 +380,8 @@ function pickString(source: Record<string, unknown>, keys: string[]): string {
  *   3. 单个 JSON 对象（含 auth_json 字段，或本身就是凭证）。
  * 结构解析失败的行走 invalid，导入时跳过（不偷偷丢数据）。
  */
-export function parseImportText(text: string): ImportParseResult {
+export function parseImportText(text: string, translate?: Translate): ImportParseResult {
+  const tr = translate ?? defaultTranslate
   const raw = String(text || '').trim()
   if (!raw) return { rows: [], items: [], text: '', valid: 0, invalid: 0 }
 
@@ -383,7 +409,15 @@ export function parseImportText(text: string): ImportParseResult {
   for (const record of records) {
     index += 1
     if (!record || typeof record !== 'object') {
-      rows.push({ index, name: '', uid: '', authJson: '', valid: false, reason: '不是 JSON 对象', selected: false })
+      rows.push({
+        index,
+        name: '',
+        uid: '',
+        authJson: '',
+        valid: false,
+        reason: tr('add.import.notObject'),
+        selected: false,
+      })
       continue
     }
     const object = record as Record<string, unknown>
@@ -399,14 +433,22 @@ export function parseImportText(text: string): ImportParseResult {
       uid,
       authJson,
       valid,
-      reason: valid ? '' : '缺少可用的凭证 JSON',
+      reason: valid ? '' : tr('add.import.missingCredential'),
       selected: valid,
     })
     if (valid) items.push({ name, auth_json: authJson })
   }
   for (const error of errors) {
     index += 1
-    rows.push({ index, name: '', uid: '', authJson: '', valid: false, reason: 'JSON 解析失败：' + error, selected: false })
+    rows.push({
+      index,
+      name: '',
+      uid: '',
+      authJson: '',
+      valid: false,
+      reason: tr('add.import.parseFailed', { error }),
+      selected: false,
+    })
   }
   const valid = rows.filter((row) => row.valid).length
   return { rows, items, text: raw, valid, invalid: rows.length - valid }
@@ -422,14 +464,18 @@ function safeParse(text: string): Record<string, unknown> | null {
 }
 
 /** 扫描结果 → 预览行（默认全选可导入项，已在池子里的不勾选）。 */
-export function scanPreviewRows(payload: ScanLocalPayload | null): ScanPreviewRow[] {
+export function scanPreviewRows(
+  payload: ScanLocalPayload | null,
+  translate?: Translate,
+): ScanPreviewRow[] {
+  const tr = translate ?? defaultTranslate
   const activeUid = String(payload?.active_uid || '')
   return (payload?.items || []).map((item, index) => {
     const uid = String(item.uid || '')
     const rawExpires = item.expires ?? item.expires_at ?? ''
     return {
       file: String(item.file || 'item-' + (index + 1)),
-      name: String(item.nickname || item.name || uid || '未命名'),
+      name: String(item.nickname || item.name || uid || tr('page.accounts.scanUnnamed')),
       uid,
       expires: rawExpires ? String(rawExpires) : '',
       inPool: Boolean(item.in_pool ?? item.pooled ?? item.exists),
@@ -441,13 +487,20 @@ export function scanPreviewRows(payload: ScanLocalPayload | null): ScanPreviewRo
 }
 
 /** 扫描汇总文案（旧版「发现 N 个，其中 M 个已在池子里」）。 */
-export function scanSummary(payload: ScanLocalPayload | null, rows: ScanPreviewRow[]): string {
+export function scanSummary(
+  payload: ScanLocalPayload | null,
+  rows: ScanPreviewRow[],
+  translate?: Translate,
+): string {
   if (!payload) return ''
-  if (!payload.exists) return '没有找到客户端登录目录：' + (payload.dir || '未知路径')
+  const tr = translate ?? defaultTranslate
+  if (!payload.exists) {
+    return tr('add.scan.noDir', { dir: payload.dir || tr('add.scan.unknownPath') })
+  }
   return (
-    '发现 ' + rows.length + ' 个客户端账号' +
-    (payload.pool_only ? ' · 池子里有 ' + payload.pool_only + ' 个本机没有的账号' : '') +
-    ' · 目录：' + payload.dir
+    tr('add.scan.found', { count: rows.length }) +
+    (payload.pool_only ? tr('add.scan.poolOnly', { count: payload.pool_only }) : '') +
+    tr('add.scan.dir', { dir: payload.dir })
   )
 }
 
@@ -485,13 +538,18 @@ export function authStepIndex(view: BrowserAuthView): number {
 }
 
 /** 手机号校验（宽松：只挡空值与明显不合法；真实校验在上游）。 */
-export function validatePhoneForm(form: PhoneForm, needsPassword = false): Record<string, string> {
+export function validatePhoneForm(
+  form: PhoneForm,
+  needsPassword = false,
+  translate?: Translate,
+): Record<string, string> {
+  const tr = translate ?? defaultTranslate
   const errors: Record<string, string> = {}
   const digits = String(form.phone || '').replace(/\D/g, '')
-  if (!digits) errors.phone = '请填写手机号'
-  else if (digits.length < 6 || digits.length > 15) errors.phone = '手机号长度不正确'
-  if (!String(form.code || '').trim()) errors.code = '请填写验证码'
-  if (needsPassword && !String(form.password || '').trim()) errors.password = '新账号需要设置密码'
+  if (!digits) errors.phone = tr('add.phone.missing')
+  else if (digits.length < 6 || digits.length > 15) errors.phone = tr('add.phone.length')
+  if (!String(form.code || '').trim()) errors.code = tr('add.phone.code')
+  if (needsPassword && !String(form.password || '').trim()) errors.password = tr('add.phone.password')
   return errors
 }
 
@@ -504,12 +562,14 @@ export function maskPhone(phone: string): string {
 }
 
 /** 手动添加的凭证提示（按平台给出可复制的说明，不含平台分支逻辑的副作用）。 */
-export function manualHint(spec: PlatformAddSpec | null | undefined): string {
+export function manualHint(
+  spec: PlatformAddSpec | null | undefined,
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
   const storage = storageOf(spec)
-  if (storage === 'workbuddy' || storage === 'codebuddy') {
-    return '粘贴 auth 之后的授权 JSON（客户端 data 目录里的 .info 内容）。服务端会做结构校验并真调上游验证。'
-  }
-  return '粘贴该平台的凭证 JSON（token / cookie / 账号密码等，字段以平台为准）。服务端会做结构校验并真调上游验证。'
+  if (storage === 'workbuddy' || storage === 'codebuddy') return tr('add.manual.hintWorkbuddy')
+  return tr('add.manual.hintOther')
 }
 
 /** 导入时后端要的 storage 键。 */
@@ -539,22 +599,50 @@ export const COUNTRY_CODES: Array<{ label: string; value: string }> = [
   { label: '+65 新加坡', value: '+65' },
 ]
 
+const COUNTRY_KEY: Record<string, Parameters<Translate>[0]> = {
+  '+86': 'add.country.cn',
+  '+852': 'add.country.hk',
+  '+853': 'add.country.mo',
+  '+886': 'add.country.tw',
+  '+1': 'add.country.na',
+  '+81': 'add.country.jp',
+  '+65': 'add.country.sg',
+}
+
+/** 区号候选（文案跟随语言；value 不变）。 */
+export function countryCodes(translate?: Translate): Array<{ label: string; value: string }> {
+  const tr = translate ?? defaultTranslate
+  return COUNTRY_CODES.map((item) => ({
+    label: COUNTRY_KEY[item.value] ? tr(COUNTRY_KEY[item.value]) : item.label,
+    value: item.value,
+  }))
+}
+
 /** 添加成功后的账号文案（旧版 submitAddAccount 的三种结果）。 */
-export function addResultText(result: AddAccountResult, platformLabel: string): string {
-  if (result.duplicated) {
-    return '该账号已存在（#' + result.id + '），已用新凭证覆盖更新'
-  }
-  return '已添加 ' + (result.name || '账号') + '（' + platformLabel + '）'
+export function addResultText(
+  result: AddAccountResult,
+  platformLabel: string,
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
+  if (result.duplicated) return tr('add.result.duplicated', { id: result.id })
+  return tr('add.result.added', {
+    name: result.name || tr('add.result.account'),
+    platform: platformLabel,
+  })
 }
 
 /** 导入结果文案（added / updated / skipped / errors）。 */
-export function importLocalText(result: ImportLocalResult): string {
+export function importLocalText(result: ImportLocalResult, translate?: Translate): string {
+  const tr = translate ?? defaultTranslate
   const parts = [
-    '新增 ' + (result.added || 0),
-    '更新 ' + (result.updated || 0),
-    '跳过 ' + (result.skipped || 0),
+    tr('add.import.added', { count: result.added || 0 }),
+    tr('add.import.updated', { count: result.updated || 0 }),
+    tr('add.import.skipped', { count: result.skipped || 0 }),
   ]
-  if (result.errors && result.errors.length) parts.push('失败 ' + result.errors.length)
+  if (result.errors && result.errors.length) {
+    parts.push(tr('add.import.failed', { count: result.errors.length }))
+  }
   return parts.join(' · ')
 }
 

@@ -51,6 +51,7 @@ import {
   toSignalRows,
   toStats,
   type AccountSignalRow,
+  type SentinelStat,
   type SentinelStatus,
   type SignalRow,
   type TrafficPayload,
@@ -113,7 +114,25 @@ function refresh(): void {
 
 /* ------------------------------ 视图模型 ------------------------------ */
 const banner = computed(() => toBanner(status.value, traffic.value))
-const stats = computed(() => toStats(status.value, traffic.value))
+
+/**
+ * traffic 的口径是 window=3600（contracts/sentinel §2.1 的 /api/sentinel/traffic），
+ * 滚动 1 小时，不是自然日 —— 统计格不能沿用「今日」，否则与使用记录的
+ * 「今日（自然日）」对不上。覆盖放在页面这层：toStats 仍是接口字段的直译。
+ */
+const STAT_LABEL_OVERRIDES: Record<string, Partial<SentinelStat>> = {
+  今日请求: {
+    label: '近 1 小时请求',
+    help: '窗口 1 小时（/api/sentinel/traffic?window=3600），滚动统计；不是使用记录页的「今日（自然日）」。',
+  },
+}
+
+const stats = computed(() =>
+  toStats(status.value, traffic.value).map((item) => {
+    const patch = STAT_LABEL_OVERRIDES[item.label]
+    return patch ? { ...item, ...patch } : item
+  }),
+)
 const ribbon = computed(() => toRibbon(traffic.value))
 const health = computed(() => toPlatformHealth(traffic.value))
 const liveRows = computed(() => toLiveRows(traffic.value, 50))
@@ -515,9 +534,9 @@ const columns = computed<TableColumn[]>(() =>
 
           <Card title="平台健康">
             <template #extra>
-              <span class="sentinel-hint">成功率 · 失败 / 超时 · 今日请求</span>
+              <span class="sentinel-hint">成功率 · 失败 / 超时 · 近 1 小时请求</span>
             </template>
-            <Empty v-if="!health.length" compact description="今天还没有请求。" />
+            <Empty v-if="!health.length" compact description="近 1 小时还没有请求。" />
             <div v-for="row in health" :key="row.platform" class="sentinel-health">
               <div class="sentinel-health__head">
                 <span class="sentinel-health__name">{{ row.label }}</span>

@@ -101,6 +101,15 @@ const sortedRows = computed<JournalRow[]>(() => {
 
 const page = computed(() => pageState(payload.value, table.state.pageSize))
 const summary = computed(() => summarize(filteredRows.value, page.value.total))
+
+/**
+ * 首屏数据没回来之前不能报「共 0 条」：0 条（真的没有流水）和「还没取到」是两件事。
+ * payload 为空时给加载态，拿到响应后才显示条数统计。
+ */
+const summaryText = computed(() => {
+  if (payload.value !== null) return summary.value.text
+  return loading.value ? '加载中…' : ''
+})
 const importHint = computed(() => importingHint(payload.value))
 const hasFilters = computed(() =>
   Boolean(
@@ -392,7 +401,7 @@ onBeforeUnmount(() => {
       <div class="journal-filter">
         <FilterBar
           :chips="chips"
-          :summary="summary.text"
+          :summary="summaryText"
           :loading="loading"
           @change="onFilterChange"
           @reset="resetFilters"

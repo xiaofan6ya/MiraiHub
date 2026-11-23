@@ -5,6 +5,7 @@ import { Copy, Eye, EyeOff } from 'lucide-vue-next'
 import { NButton } from 'naive-ui'
 import { copyText, useComponentToast } from '../_internal/feedback'
 import { maskValue } from '../_internal/text'
+import { t } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -27,8 +28,8 @@ const display = computed(() => {
 
 async function onCopy(): Promise<void> {
   const ok = await copyText(props.value)
-  if (ok) toast.success('已复制')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('common.copied'))
+  else toast.error(t('common.copyFailed'))
 }
 </script>
 
@@ -40,8 +41,8 @@ async function onCopy(): Promise<void> {
       quaternary
       size="tiny"
       class="mh-copy__btn"
-      :aria-label="revealed ? '隐藏明文' : '显示明文'"
-      :title="revealed ? '隐藏明文' : '显示明文'"
+      :aria-label="revealed ? t('common.hideValue') : t('common.showValue')"
+      :title="revealed ? t('common.hideValue') : t('common.showValue')"
       @click="revealed = !revealed"
     >
       <template #icon><component :is="revealed ? EyeOff : Eye" :size="14" /></template>
@@ -50,8 +51,8 @@ async function onCopy(): Promise<void> {
       quaternary
       size="tiny"
       class="mh-copy__btn"
-      aria-label="复制"
-      title="复制"
+      :aria-label="t('common.copy')"
+      :title="t('common.copy')"
       @click="onCopy"
     >
       <template #icon><Copy :size="14" /></template>

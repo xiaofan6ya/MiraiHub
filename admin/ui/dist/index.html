@@ -4,13 +4,170 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/admin/v2/favicon.svg" />
     <title>MiraiHub 管理后台</title>
-    <script type="module" crossorigin src="/admin/v2/assets/index-CHy1kb61.js"></script>
-    <link rel="modulepreload" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-GEDmboVY.js">
+    <!--
+      首屏占位（第五阶段「性能」项）。
+
+      为什么放在 HTML 里：没有这段的话，浏览器要等 index.js（≈128KB gzip）下载、
+      解析、执行完才第一次绘制，FCP 只能落在 2.9s 左右（Lighthouse mobile）。
+
+      三条纪律：
+        1) 只用 tokens.css 里的同值常量。内联样式在外部样式表之前解析，用不了 var()，
+           所以这里把 --bg / --surface / --border / --fg-muted / --topbar-h 等抄成字面量；
+           改令牌时这段也要跟着改（值必须一致，否则会看到换色闪烁）。
+        2) 不引入任何新视觉元素：只有顶栏底色、两条灰条、一行提示文字。提示文字是
+           FCP 的必要条件 —— 纯色块不算一次内容绘制，浏览器不会因此上报 FCP。
+        3) 不需要拆除脚本：Vue 挂载时会清空 #app 的子节点，这段骨架自然消失。
+    -->
+    <style>
+      html {
+        background: #f3f5f8;
+        color: #171a21;
+        font-family: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "MiSans",
+          "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 22px;
+        -webkit-font-smoothing: antialiased;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+      #app {
+        min-height: 100vh;
+      }
+      .mh-boot {
+        min-height: 100vh;
+        background: #f3f5f8;
+      }
+      .mh-boot__top {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        height: 56px;
+        padding: 0 16px;
+        background: #ffffff;
+        border-bottom: 1px solid #e3e6ec;
+      }
+      .mh-boot__bar {
+        display: block;
+        border-radius: 5px;
+        background: #edeff3;
+      }
+      .mh-boot__bar--title {
+        width: 120px;
+        height: 14px;
+      }
+      .mh-boot__main {
+        padding: 16px;
+      }
+      .mh-boot__hint {
+        margin: 0;
+        font-size: 12px;
+        line-height: 18px;
+        color: #6b7280;
+      }
+      .mh-boot__lines {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .mh-boot__line {
+        height: 64px;
+        border: 1px solid #edeff3;
+        border-radius: 10px;
+        background: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #12151b;
+          color: #e6e9ef;
+        }
+        .mh-boot {
+          background: #12151b;
+        }
+        .mh-boot__top {
+          background: #1a1e26;
+          border-bottom-color: #2b303b;
+        }
+        .mh-boot__bar {
+          background: #20242d;
+        }
+        .mh-boot__hint {
+          color: #8d95a3;
+        }
+        .mh-boot__line {
+          border-color: #242833;
+          background: #1a1e26;
+        }
+      }
+      html[data-theme="light"] {
+        background: #f3f5f8;
+        color: #171a21;
+      }
+      html[data-theme="light"] .mh-boot {
+        background: #f3f5f8;
+      }
+      html[data-theme="light"] .mh-boot__top {
+        background: #ffffff;
+        border-bottom-color: #e3e6ec;
+      }
+      html[data-theme="light"] .mh-boot__bar {
+        background: #edeff3;
+      }
+      html[data-theme="light"] .mh-boot__hint {
+        color: #6b7280;
+      }
+      html[data-theme="light"] .mh-boot__line {
+        border-color: #edeff3;
+        background: #ffffff;
+      }
+      html[data-theme="dark"] {
+        background: #12151b;
+        color: #e6e9ef;
+      }
+      html[data-theme="dark"] .mh-boot {
+        background: #12151b;
+      }
+      html[data-theme="dark"] .mh-boot__top {
+        background: #1a1e26;
+        border-bottom-color: #2b303b;
+      }
+      html[data-theme="dark"] .mh-boot__bar {
+        background: #20242d;
+      }
+      html[data-theme="dark"] .mh-boot__hint {
+        color: #8d95a3;
+      }
+      html[data-theme="dark"] .mh-boot__line {
+        border-color: #242833;
+        background: #1a1e26;
+      }
+    </style>
+    <script type="module" crossorigin src="/admin/v2/assets/index-DocwBQ0H.js"></script>
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/vendor-vue-01Qz8dz3.js">
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-ND5k2sci.js">
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/vendor-naive-SrciwSnN.js">
     <link rel="stylesheet" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-Mue2mPt5.css">
-    <link rel="stylesheet" crossorigin href="/admin/v2/assets/index-BqoFCi4X.css">
+    <link rel="stylesheet" crossorigin href="/admin/v2/assets/index-BoyVQRXq.css">
+      <link rel="modulepreload" crossorigin href="/admin/v2/assets/FormField.vue_vue_type_style_index_0_scoped_ab743373_lang-D4uMCivT.js">
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/RouteRibbon-Bbworcr_.js">
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/OverviewPage-D6Pv72Oc.js">
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="mh-boot">
+        <div class="mh-boot__top"><span class="mh-boot__bar mh-boot__bar--title"></span></div>
+        <div class="mh-boot__main">
+          <p class="mh-boot__hint" role="status">正在加载…</p>
+          <div class="mh-boot__lines">
+            <span class="mh-boot__line"></span>
+            <span class="mh-boot__line"></span>
+          </div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

@@ -9,6 +9,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import { useDialog } from 'naive-ui'
 import PageHeader from './PageHeader.vue'
 import Badge from '@/components/base/Badge.vue'
+import { useI18n } from '@/i18n'
 
 export interface SettingsSection {
   id: string
@@ -27,6 +28,7 @@ const props = withDefaults(
 )
 
 const dialog = useDialog()
+const { t } = useI18n()
 const activeId = ref(props.sections[0]?.id ?? '')
 let observer: IntersectionObserver | null = null
 
@@ -70,10 +72,10 @@ onBeforeRouteLeave(() => {
   if (!props.dirty) return true
   return new Promise<boolean>((resolve) => {
     dialog.warning({
-      title: '有未保存的修改',
-      content: '离开这一页会丢失未保存的修改，确定离开？',
-      positiveText: '离开',
-      negativeText: '继续编辑',
+      title: t('settingsLayout.leaveTitle'),
+      content: t('settingsLayout.leaveBody'),
+      positiveText: t('settingsLayout.leave'),
+      negativeText: t('settingsLayout.keepEditing'),
       onPositiveClick: () => resolve(true),
       onNegativeClick: () => resolve(false),
       onClose: () => resolve(false),
@@ -82,7 +84,7 @@ onBeforeRouteLeave(() => {
   })
 })
 
-const dirtyLabel = computed(() => (props.dirty ? '有未保存的修改' : ''))
+const dirtyLabel = computed(() => (props.dirty ? t('settingsLayout.unsaved') : ''))
 </script>
 
 <template>
@@ -95,7 +97,7 @@ const dirtyLabel = computed(() => (props.dirty ? '有未保存的修改' : ''))
     </PageHeader>
 
     <div class="settings-body">
-      <nav class="settings-nav" aria-label="页内导航">
+      <nav class="settings-nav" :aria-label="t('settingsLayout.nav')">
         <button
           v-for="section in sections"
           :key="section.id"

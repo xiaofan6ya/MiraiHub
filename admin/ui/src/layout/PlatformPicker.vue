@@ -5,6 +5,7 @@ import { Check, ChevronDown, Search } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import type { PlatformSpec } from '@/api/platforms'
 import PlatformLogo from '@/components/identity/PlatformLogo.vue'
+import { useI18n } from '@/i18n'
 
 /**
  * 顶栏「平台上下文」选择器（03-shell §2.2）。
@@ -15,6 +16,7 @@ import PlatformLogo from '@/components/identity/PlatformLogo.vue'
  * 依赖平台的页面各自重新取数 —— 外壳不重复发任何平台请求。
  */
 const store = usePlatformStore()
+const { t } = useI18n()
 
 const open = ref(false)
 const query = ref('')
@@ -23,10 +25,10 @@ const inputRef = ref<InstanceType<typeof NInput> | null>(null)
 const platforms = computed<PlatformSpec[]>(() => store.platforms)
 const currentId = computed(() => store.currentId)
 const currentSpec = computed(() => store.currentSpec)
-const currentLabel = computed(() => currentSpec.value?.label || currentId.value || '平台')
+const currentLabel = computed(() => currentSpec.value?.label || currentId.value || t('picker.platform'))
 const currentCount = computed(() => {
   const total = store.countOf(currentId.value)
-  return typeof total === 'number' ? total + ' 个账号' : ''
+  return typeof total === 'number' ? t('picker.accountCount', { count: total }) : ''
 })
 
 const filtered = computed<PlatformSpec[]>(() => {
@@ -54,9 +56,9 @@ function countText(item: PlatformSpec): string {
   const total = store.countOf(item.id)
   if (typeof total !== 'number') return '—'
   const realm = store.current.realm
-  if (!realm || item.id !== currentId.value) return total + ' 个账号'
+  if (!realm || item.id !== currentId.value) return t('picker.accountCount', { count: total })
   const perRealm = store.realmCountOf(item.id, realm)
-  if (typeof perRealm !== 'number') return total + ' 个账号'
+  if (typeof perRealm !== 'number') return t('picker.accountCount', { count: total })
   return perRealm + ' / ' + total
 }
 
@@ -90,7 +92,7 @@ watch(open, (value) => {
         class="picker"
         :aria-expanded="open ? 'true' : 'false'"
         aria-haspopup="listbox"
-        :aria-label="'切换平台上下文：' + currentLabel"
+        :aria-label="t('picker.switchAria', { name: currentLabel })"
       >
         <PlatformLogo :id="currentSpec?.icon || currentId" :size="20" />
         <span class="picker-label">{{ currentLabel }}</span>
@@ -105,9 +107,9 @@ watch(open, (value) => {
           ref="inputRef"
           v-model:value="query"
           size="small"
-          placeholder="搜索平台"
+          :placeholder="t('picker.search')"
           clearable
-          aria-label="搜索平台"
+          :aria-label="t('picker.search')"
         >
           <template #prefix>
             <Search :size="14" />
@@ -115,7 +117,7 @@ watch(open, (value) => {
         </n-input>
       </div>
 
-      <div class="picker-list" role="listbox" aria-label="平台列表">
+      <div class="picker-list" role="listbox" :aria-label="t('picker.list')">
         <button
           v-for="item in filtered"
           :key="item.id"
@@ -136,7 +138,7 @@ watch(open, (value) => {
           <Check v-if="item.id === currentId" :size="14" class="row-check" />
         </button>
         <p v-if="!filtered.length" class="picker-empty">
-          {{ platforms.length ? '没有匹配的平台' : '平台列表加载中…' }}
+          {{ platforms.length ? t('picker.noMatch') : t('picker.loading') }}
         </p>
       </div>
     </div>

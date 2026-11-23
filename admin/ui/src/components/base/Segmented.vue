@@ -1,6 +1,8 @@
 <script setup lang="ts">
 /** 分段控件：高 28px、--surface-2 底、选中项纸底 + 1px 边框。 */
+import { computed } from 'vue'
 import type { SegmentedOption } from './segmented'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -10,10 +12,12 @@ const props = withDefaults(
     /** 手机上允许横向滚动 */
     scrollable?: boolean
   }>(),
-  { modelValue: undefined, ariaLabel: '分段切换', scrollable: false },
+  { modelValue: undefined, ariaLabel: undefined, scrollable: false },
 )
 
 const emit = defineEmits<{ (event: 'update:modelValue', value: string | number): void }>()
+const { t } = useI18n()
+const labelText = computed(() => props.ariaLabel ?? t('common.segmentedAria'))
 
 function select(value: string | number): void {
   if (value === props.modelValue) return
@@ -26,7 +30,7 @@ function select(value: string | number): void {
     class="mh-seg"
     :class="{ 'mh-seg--scroll': scrollable }"
     role="radiogroup"
-    :aria-label="ariaLabel"
+    :aria-label="labelText"
   >
     <button
       v-for="option in options"

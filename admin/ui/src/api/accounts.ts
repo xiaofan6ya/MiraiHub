@@ -18,6 +18,7 @@
  */
 import { http } from './http'
 import { fmtCredit, fmtExpiry, fmtInt, fmtRelative, expiryTone } from '@/utils/format'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 export const ACCOUNT_STATUS_TABS = ['all', 'active', 'disabled', 'cooling', 'breaker'] as const
 export type AccountStatusTab = (typeof ACCOUNT_STATUS_TABS)[number]
@@ -328,40 +329,70 @@ export interface AccountStatusMeta {
   title: string
 }
 
-const GATEWAY_REASON_LABEL: Record<string, string> = {
-  cooling: '冷却中',
-  breaker: '熔断中',
-  degraded: '降级中',
-  manual_disabled: '手动禁用',
-  session_dead: '登录失效',
-  hard_credit: '额度耗尽',
-  account_fault: '上游拒绝',
-  upstream_5xx: '上游 5xx',
-  transport: '网络异常',
-}
-
-function reasonLabel(reason: string): string {
-  const key = String(reason || '').trim().toLowerCase()
-  return GATEWAY_REASON_LABEL[key] || (key ? key : '冷却中')
-}
-
 /** 状态：后端 gateway_state + gateway_reason → 5 个页签之一 + Badge 文案。 */
-export function accountStatusMeta(item: Pick<AccountItem, 'status' | 'gateway_state' | 'gateway_reason' | 'gateway_until'>): AccountStatusMeta {
+const REASON_KEY: Record<string, string> = {
+  cooling: 'status.reason.cooling',
+  breaker: 'status.reason.breaker',
+  degraded: 'status.reason.degraded',
+  manual_disabled: 'status.reason.manual_disabled',
+  session_dead: 'status.reason.session_dead',
+  hard_credit: 'status.reason.hard_credit',
+  account_fault: 'status.reason.account_fault',
+  upstream_5xx: 'status.reason.upstream_5xx',
+  transport: 'status.reason.transport',
+}
+
+export function accountStatusMeta(
+  item: Pick<AccountItem, 'status' | 'gateway_state' | 'gateway_reason' | 'gateway_until'>,
+  translate?: Translate,
+): AccountStatusMeta {
+  const tr = translate ?? defaultTranslate
   if (String(item.status || '') !== 'active') {
-    return { key: 'disabled', label: '已禁用', tone: 'neutral', title: '手动禁用或登录失效；启用后重新参与调度' }
+    return {
+      key: 'disabled',
+      label: tr('status.account.disabled'),
+      tone: 'neutral',
+      title: tr('status.account.disabledTitle'),
+    }
   }
   const reason = String(item.gateway_reason || '').trim().toLowerCase()
   if (String(item.gateway_state || '') === 'cooling') {
     const key: AccountStatusKey =
       reason === 'breaker' ? 'breaker' : reason === 'degraded' ? 'degraded' : 'cooling'
-    const label = reason === 'breaker' ? '熔断' : reason === 'degraded' ? '降级' : '冷却'
-    const title = reasonLabel(reason) + (item.gateway_until ? ' · 至 ' + String(item.gateway_until).replace('T', ' ').slice(0, 16) : '')
+    const label =
+      reason === 'breaker'
+        ? tr('status.account.breakerShort')
+        : reason === 'degraded'
+          ? tr('status.account.degradedShort')
+          : tr('status.account.coolingShort')
+    const reasonKey = REASON_KEY[reason]
+    const reasonText = reasonKey
+      ? tr(reasonKey as Parameters<Translate>[0])
+      : reason || tr('status.reason.cooling')
+    const title =
+      reasonText +
+      (item.gateway_until
+        ? ' · ' +
+          tr('status.account.until', {
+            time: String(item.gateway_until).replace('T', ' ').slice(0, 16),
+          })
+        : '')
     return { key, label, tone: 'warn', title }
   }
   if (String(item.gateway_state || '') === 'disabled') {
-    return { key: 'disabled', label: '已禁用', tone: 'neutral', title: '当前不参与调度' }
+    return {
+      key: 'disabled',
+      label: tr('status.account.disabled'),
+      tone: 'neutral',
+      title: tr('status.account.disabledTitleOther'),
+    }
   }
-  return { key: 'active', label: '活跃', tone: 'ok', title: '可正常接请求' }
+  return {
+    key: 'active',
+    label: tr('status.account.activeShort'),
+    tone: 'ok',
+    title: tr('status.account.activeTitle'),
+  }
 }
 
 /** 账号 / UID 脱敏：保留首 3 与末 4（与旧版账号列的展示口径一致）。 */
@@ -417,17 +448,24 @@ function clampPct(value: number): number {
 export function toAccountRows(
   items: AccountItem[] | null | undefined,
   usage?: Map<number, AccountUsageToday> | null,
+  translate?: Translate,
 ): AccountRow[] {
+  const tr = translate ?? defaultTranslate
   return (items || []).map((item) => {
-    const status = accountStatusMeta(item)
+    const status = accountStatusMeta(item, translate)
     const remain = Number(item.balance_remain) || 0
     const total = Math.max(Number(item.balance_total) || 0, remain)
     const pct = total > 0 ? clampPct((remain / total) * 100) : 0
     const expireAt = item.credits_soonest_expire_at ?? null
     const used = usage?.get(item.id)
-    const tokenText = item.token_supported && item.token_state
-      ? '令牌 ' + (item.token_days_left === null || item.token_days_left === undefined ? item.token_state : item.token_days_left + ' 天')
-      : ''
+    const tokenText =
+      item.token_supported && item.token_state
+        ? tr('page.accounts.colToken') +
+          ' ' +
+          (item.token_days_left === null || item.token_days_left === undefined
+            ? item.token_state
+            : tr('page.accounts.tokenDays', { days: item.token_days_left }))
+        : ''
     return {
       key: String(item.id),
       id: item.id,
@@ -453,7 +491,9 @@ export function toAccountRows(
       lastUsedTitle: item.last_used_at || '',
       todayCredits: Number(used?.credits) || 0,
       todayRequests: Number(used?.requests) || 0,
-      note: item.bound_key_name ? '绑定 Key：' + item.bound_key_name : '',
+      note: item.bound_key_name
+        ? tr('page.accounts.boundKeyNote', { name: item.bound_key_name })
+        : '',
       boundKeyName: String(item.bound_key_name || ''),
       features: accountFeatures(item.platform),
       tokenText,
@@ -577,7 +617,10 @@ export interface AccountJobItem {
 }
 
 /** jobrunner.snapshot → JobProgress 的 JobItem。 */
-export function toJobItem(snapshot: AccountJobSnapshot | null | undefined): AccountJobItem | null {
+export function toJobItem(
+  snapshot: AccountJobSnapshot | null | undefined,
+  translate?: Translate,
+): AccountJobItem | null {
   if (!snapshot || !snapshot.job_id) return null
   const result = (snapshot.result || {}) as Record<string, unknown>
   const rows = Array.isArray(snapshot.items) ? snapshot.items : []
@@ -590,7 +633,7 @@ export function toJobItem(snapshot: AccountJobSnapshot | null | undefined): Acco
   const failedStatus = snapshot.status === 'failed'
   return {
     id: snapshot.job_id,
-    name: String(snapshot.title || snapshot.phase || '账号任务'),
+    name: String(snapshot.title || snapshot.phase || (translate ?? defaultTranslate)('page.accounts.jobTitle')),
     status: running ? 'running' : failedStatus ? 'failed' : 'done',
     percent: Math.min(100, Math.max(0, Number(snapshot.percent) || 0)),
     succeeded: succeeded || undefined,
@@ -600,14 +643,22 @@ export function toJobItem(snapshot: AccountJobSnapshot | null | undefined): Acco
 }
 
 /** 任务完成文案：后端 result.summary 优先，否则按完成/总数拼。 */
-export function jobDoneText(snapshot: AccountJobSnapshot | null | undefined): string {
-  if (!snapshot) return '任务已结束'
+export function jobDoneText(
+  snapshot: AccountJobSnapshot | null | undefined,
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
+  if (!snapshot) return tr('page.accounts.jobFinished')
   const result = (snapshot.result || {}) as Record<string, unknown>
   if (typeof result.summary === 'string' && result.summary.trim()) return result.summary.trim()
-  if (snapshot.status === 'failed') return '任务失败：' + (snapshot.error || '未知错误')
+  if (snapshot.status === 'failed') {
+    return tr('page.accounts.jobFailedText', {
+      error: snapshot.error || tr('page.accounts.jobUnknownError'),
+    })
+  }
   const total = Number(snapshot.total) || 0
   const done = Number(snapshot.done) || 0
-  return '任务完成：' + done + '/' + total
+  return tr('page.accounts.jobDoneText', { done, total })
 }
 
 /** 导出任务完成后的下载 token（result.file_token）。 */
@@ -653,21 +704,23 @@ export interface AddAccountMode { key: 'phone' | 'authorize' | 'manual' | 'impor
 /** 「添加账号 ▾」的模式：来自平台能力声明（不支持的方式不出现）。 */
 export function addAccountModes(
   spec: { id?: string; storage_platform?: string; auth_mode?: string; actions?: string[] } | null | undefined,
+  translate?: Translate,
 ): AddAccountMode[] {
+  const tr = translate ?? defaultTranslate
   const storage = String(spec?.storage_platform || spec?.id || '').toLowerCase()
   const actions = Array.isArray(spec?.actions) ? spec!.actions! : []
   const authMode = String(spec?.auth_mode || '').toLowerCase()
   const modes: AddAccountMode[] = []
   if (storage === 'workbuddy' || storage === 'codebuddy') {
-    modes.push({ key: 'phone', label: '手机号登录' })
+    modes.push({ key: 'phone', label: tr('add.method.phone') })
   }
   if (actions.includes('begin-auth') || authMode.includes('web')) {
-    modes.push({ key: 'authorize', label: '浏览器授权登录' })
+    modes.push({ key: 'authorize', label: tr('add.method.authorize') })
   }
   if (storage === 'workbuddy' || storage === 'codebuddy' || authMode.includes('manual')) {
-    modes.push({ key: 'manual', label: '手动添加' })
+    modes.push({ key: 'manual', label: tr('add.method.manual') })
   }
   // 导入是所有平台都支持的入口（旧版「添加与迁移账号」区对所有平台都给了导入）。
-  modes.push({ key: 'import', label: '导入账号' })
+  modes.push({ key: 'import', label: tr('add.method.import') })
   return modes
 }

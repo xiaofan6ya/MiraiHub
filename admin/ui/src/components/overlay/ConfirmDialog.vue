@@ -8,6 +8,7 @@ import { computed, ref, watch } from 'vue'
 import { NCheckbox, NInput, NModal } from 'naive-ui'
 import Btn from '../base/Btn.vue'
 import { canConfirm } from './confirmGate'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -29,8 +30,8 @@ const props = withDefaults(
   {
     content: undefined,
     danger: false,
-    confirmText: '确定',
-    cancelText: '取消',
+    confirmText: undefined,
+    cancelText: undefined,
     requireText: undefined,
     requireCheckbox: undefined,
     loading: false,
@@ -43,8 +44,12 @@ const emit = defineEmits<{
   (event: 'cancel'): void
 }>()
 
+const { t } = useI18n()
 const typed = ref('')
 const checked = ref(false)
+
+const confirmLabel = computed(() => props.confirmText ?? t('common.confirm'))
+const cancelLabel = computed(() => props.cancelText ?? t('common.cancel'))
 
 watch(
   () => props.show,
@@ -58,7 +63,7 @@ watch(
 
 const needCheckbox = computed(() => Boolean(props.requireCheckbox))
 const checkboxLabel = computed(() =>
-  typeof props.requireCheckbox === 'string' ? props.requireCheckbox : '我已了解后果',
+  typeof props.requireCheckbox === 'string' ? props.requireCheckbox : t('confirm.understood'),
 )
 
 const allowed = computed(() =>
@@ -94,7 +99,7 @@ function cancel(): void {
       <p v-if="content" class="mh-confirm__content">{{ content }}</p>
       <div v-if="requireText" class="mh-confirm__gate">
         <p class="mh-confirm__gate-hint">
-          请输入 <code class="mono">{{ requireText }}</code> 以确认
+          {{ t('confirm.typeToConfirm', { text: requireText }) }}
         </p>
         <n-input v-model:value="typed" :placeholder="requireText" size="small" />
       </div>
@@ -104,7 +109,7 @@ function cancel(): void {
     </div>
     <template #footer>
       <div class="mh-confirm__actions">
-        <Btn variant="default" @click="cancel">{{ cancelText }}</Btn>
+        <Btn variant="default" @click="cancel">{{ cancelLabel }}</Btn>
         <Btn
           :variant="danger ? 'danger' : 'primary'"
           :solid="danger"
@@ -112,7 +117,7 @@ function cancel(): void {
           :loading="loading"
           @click="emit('confirm')"
         >
-          {{ confirmText }}
+          {{ confirmLabel }}
         </Btn>
       </div>
     </template>

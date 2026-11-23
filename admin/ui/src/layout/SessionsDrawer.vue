@@ -11,6 +11,7 @@ import {
   type SessionsPayload,
 } from '@/api/session'
 import { isPhone } from './shellState'
+import { useI18n } from '@/i18n'
 
 /**
  * 登录设备抽屉（06-pages-d P25）。
@@ -21,6 +22,7 @@ const emit = defineEmits<{ (event: 'update:open', value: boolean): void }>()
 
 const message = useMessage()
 const dialog = useDialog()
+const { t } = useI18n()
 
 const payload = ref<SessionsPayload | null>(null)
 const loading = ref(false)
@@ -32,7 +34,7 @@ const show = computed({
   set: (value: boolean) => emit('update:open', value),
 })
 const width = computed(() => (isPhone.value ? '100%' : 480))
-const summary = computed(() => sessionsSummary(payload.value))
+const summary = computed(() => sessionsSummary(payload.value, t))
 
 /** 当前设备置顶，其余按后端顺序（最近活跃排前面）。 */
 const rows = computed(() => {
@@ -47,10 +49,10 @@ function formatTime(value: string | null): string {
 }
 
 function stateBadge(row: { state: string; current: boolean }): { text: string; tone: string } {
-  if (row.current) return { text: '本机', tone: 'ok' }
-  if (row.state === 'active') return { text: '在线', tone: 'ok' }
-  if (row.state === 'revoked') return { text: '已踢下线', tone: 'warn' }
-  return { text: '已过期', tone: 'warn' }
+  if (row.current) return { text: t('sessions.current'), tone: 'ok' }
+  if (row.state === 'active') return { text: t('sessions.online'), tone: 'ok' }
+  if (row.state === 'revoked') return { text: t('sessions.revoked'), tone: 'warn' }
+  return { text: t('sessions.expired'), tone: 'warn' }
 }
 
 async function load(): Promise<void> {
@@ -76,10 +78,10 @@ async function kick(sid: string): Promise<void> {
   busySid.value = sid
   try {
     await revokeSession(sid)
-    message.success('已踢下线')
+    message.success(t('sessions.kickSuccess'))
     await load()
   } catch (err) {
-    message.error('踢下线失败：' + (err instanceof Error ? err.message : String(err)))
+    message.error(t('sessions.kickFailed', { error: err instanceof Error ? err.message : String(err) }))
   } finally {
     busySid.value = ''
   }
@@ -87,18 +89,18 @@ async function kick(sid: string): Promise<void> {
 
 function ban(sid: string): void {
   dialog.warning({
-    title: '拉黑这台设备？',
-    content: '拉黑后这台机器的所有后续登录都会被拒绝（不只是当前这次）。可以在「已拉黑设备」里解除。',
-    positiveText: '拉黑',
-    negativeText: '取消',
+    title: t('sessions.banTitle'),
+    content: t('sessions.banBody'),
+    positiveText: t('sessions.banPositive'),
+    negativeText: t('common.cancel'),
     onPositiveClick: async () => {
       busySid.value = sid
       try {
         await banSession(sid)
-        message.success('已拉黑该设备')
+        message.success(t('sessions.banSuccess'))
         await load()
       } catch (err) {
-        message.error('拉黑失败：' + (err instanceof Error ? err.message : String(err)))
+        message.error(t('sessions.banFailed', { error: err instanceof Error ? err.message : String(err) }))
       } finally {
         busySid.value = ''
       }
@@ -108,17 +110,17 @@ function ban(sid: string): void {
 
 function kickOthers(): void {
   dialog.warning({
-    title: '踢掉其它设备？',
-    content: '将踢掉除本机外的全部登录设备，它们在下一个请求时就要重新登录。',
-    positiveText: '踢掉其它设备',
-    negativeText: '取消',
+    title: t('sessions.kickOthersTitle'),
+    content: t('sessions.kickOthersBody'),
+    positiveText: t('sessions.kickOthersPositive'),
+    negativeText: t('common.cancel'),
     onPositiveClick: async () => {
       try {
         const result = await revokeOtherSessions()
-        message.success('已踢下线 ' + (result.revoked || 0) + ' 台设备')
+        message.success(t('sessions.kickedCount', { count: result.revoked || 0 }))
         await load()
       } catch (err) {
-        message.error('操作失败：' + (err instanceof Error ? err.message : String(err)))
+        message.error(t('sessions.operationFailed', { error: err instanceof Error ? err.message : String(err) }))
       }
     },
   })
@@ -127,10 +129,10 @@ function kickOthers(): void {
 async function unban(banId: number): Promise<void> {
   try {
     await unbanDevice(banId)
-    message.success('已解除拉黑')
+    message.success(t('sessions.unbanSuccess'))
     await load()
   } catch (err) {
-    message.error('解除失败：' + (err instanceof Error ? err.message : String(err)))
+    message.error(t('sessions.unbanFailed', { error: err instanceof Error ? err.message : String(err) }))
   }
 }
 </script>
@@ -138,27 +140,25 @@ async function unban(banId: number): Promise<void> {
 <template>
   <n-drawer v-model:show="show" placement="right" :width="width" :block-scroll="true">
     <n-drawer-content
-      title="登录设备"
+      :title="t('sessions.title')"
       closable
       :native-scrollbar="false"
       body-content-style="padding: 0 20px 20px"
     >
-      <p class="sess-note">
-        允许多台设备同时在线。凭证不可搬运：会话与设备标识绑定，把 Cookie 复制到另一台机器也过不了校验。
-      </p>
+      <p class="sess-note">{{ t('sessions.subtitle') }}</p>
 
-      <div v-if="loading && !payload" class="sess-state">加载中…</div>
+      <div v-if="loading && !payload" class="sess-state">{{ t('sessions.loading') }}</div>
       <div v-else-if="error" class="sess-state error">
-        <span>读取失败：{{ error }}</span>
-        <button type="button" class="sess-btn" @click="load">重试</button>
+        <span>{{ t('sessions.loadFailed', { error }) }}</span>
+        <button type="button" class="sess-btn" @click="load">{{ t('sessions.retry') }}</button>
       </div>
-      <div v-else-if="!rows.length" class="sess-state">没有登录记录</div>
+      <div v-else-if="!rows.length" class="sess-state">{{ t('sessions.empty') }}</div>
 
       <ul v-else class="sess-list">
         <li v-for="row in rows" :key="row.sid" class="sess-row">
           <div class="sess-body">
             <div class="sess-title">
-              <span class="sess-name">{{ row.label || '未知设备' }}</span>
+              <span class="sess-name">{{ row.label || t('sessions.unknownDevice') }}</span>
               <span class="badge" :class="'badge-' + stateBadge(row).tone">
                 {{ stateBadge(row).text }}
               </span>
@@ -166,9 +166,9 @@ async function unban(banId: number): Promise<void> {
             <div class="sess-meta">
               <span>{{ row.ip || '—' }}</span>
               <span class="dot-sep">·</span>
-              <span>登录 {{ formatTime(row.created_at) }}</span>
+              <span>{{ t('sessions.loginAt', { time: formatTime(row.created_at) }) }}</span>
               <span class="dot-sep">·</span>
-              <span>最近活动 {{ formatTime(row.last_seen_at) }}</span>
+              <span>{{ t('sessions.lastSeen', { time: formatTime(row.last_seen_at) }) }}</span>
             </div>
           </div>
           <div v-if="row.state === 'active' && !row.current" class="sess-ops">
@@ -178,7 +178,7 @@ async function unban(banId: number): Promise<void> {
               :disabled="busySid === row.sid"
               @click="kick(row.sid)"
             >
-              踢下线
+              {{ t('sessions.kick') }}
             </button>
             <button
               type="button"
@@ -186,20 +186,20 @@ async function unban(banId: number): Promise<void> {
               :disabled="busySid === row.sid"
               @click="ban(row.sid)"
             >
-              拉黑
+              {{ t('sessions.ban') }}
             </button>
           </div>
-          <span v-else-if="row.current" class="sess-current">当前设备</span>
+          <span v-else-if="row.current" class="sess-current">{{ t('sessions.currentDevice') }}</span>
         </li>
       </ul>
 
       <div v-if="bans.length" class="sess-bans">
-        <p class="sess-bans-title">已拉黑设备</p>
+        <p class="sess-bans-title">{{ t('sessions.banned') }}</p>
         <div v-for="item in bans" :key="item.id" class="sess-ban-row">
           <span class="sess-ban-text">
-            {{ item.label || '未知设备' }} · {{ item.ip || '—' }} · {{ item.reason || '' }}
+            {{ item.label || t('sessions.unknownDevice') }} · {{ item.ip || '—' }} · {{ item.reason || '' }}
           </span>
-          <button type="button" class="sess-btn" @click="unban(item.id)">解除</button>
+          <button type="button" class="sess-btn" @click="unban(item.id)">{{ t('sessions.unban') }}</button>
         </div>
       </div>
 
@@ -207,8 +207,8 @@ async function unban(banId: number): Promise<void> {
         <div class="sess-footer">
           <span class="sess-summary">{{ summary }}</span>
           <div class="sess-footer-ops">
-            <button type="button" class="sess-btn" @click="load">刷新</button>
-            <button type="button" class="sess-btn danger" @click="kickOthers">踢掉其它设备</button>
+            <button type="button" class="sess-btn" @click="load">{{ t('sessions.refresh') }}</button>
+            <button type="button" class="sess-btn danger" @click="kickOthers">{{ t('sessions.kickOthers') }}</button>
           </div>
         </div>
       </template>

@@ -139,9 +139,17 @@ export function unbanDevice(banId: number): Promise<{ ok: boolean }> {
 }
 
 /** 登录设备面板标题里的"在线 / 上限"文案，避免各页面自己拼。 */
-export function sessionsSummary(payload: SessionsPayload | null): string {
+export function sessionsSummary(
+  payload: SessionsPayload | null,
+  translate?: (key: 'sessions.summary' | 'sessions.summaryCap', params: Record<string, string | number>) => string,
+): string {
   if (!payload) return ''
   const online = payload.active || 0
+  if (translate) {
+    return payload.max_devices
+      ? translate('sessions.summaryCap', { online, max: payload.max_devices })
+      : translate('sessions.summary', { online })
+  }
   const cap = payload.max_devices ? '（上限 ' + payload.max_devices + '）' : ''
   return '当前 ' + online + ' 台在线' + cap
 }

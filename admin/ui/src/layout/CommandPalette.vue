@@ -9,6 +9,7 @@ import type { PlatformSpec } from '@/api/platforms'
 import { useCommands } from './commandRegistry'
 import { apiBaseUrl, copyText } from '@/platform/clipboard'
 import { useTheme } from '@/theme/useTheme'
+import { groupTitle, pageTitle, useI18n } from '@/i18n'
 
 /**
  * 命令面板（03-shell §2.4）：Ctrl/⌘+K 打开，居中 560px 浮层；
@@ -42,6 +43,7 @@ const router = useRouter()
 const message = useMessage()
 const { commands } = useCommands()
 const { cycle, mode: themeMode } = useTheme()
+const { t } = useI18n()
 const platformStore = usePlatformStore()
 const platforms = computed<PlatformSpec[]>(() => platformStore.platforms)
 const currentId = computed(() => platformStore.currentId)
@@ -53,10 +55,16 @@ const activeIndex = ref(0)
 const inputRef = ref<HTMLInputElement | null>(null)
 
 const themeLabel = computed(() =>
-  themeMode.value === 'light' ? '浅色' : themeMode.value === 'dark' ? '深色' : '跟随系统',
+  themeMode.value === 'light'
+    ? t('shell.themeLight')
+    : themeMode.value === 'dark'
+      ? t('shell.themeDark')
+      : t('shell.themeSystem'),
 )
 
-const platformSubtitle = computed(() => currentSpec.value?.label || currentId.value || '未选择')
+const platformSubtitle = computed(
+  () => currentSpec.value?.label || currentId.value || t('cmdk.notSelected'),
+)
 
 function close(): void {
   emit('update:open', false)
@@ -72,13 +80,15 @@ const platformItems = computed<PaletteItem[]>(() => {
   const items: PaletteItem[] = platforms.value.map((platform) => ({
     id: 'platform.' + platform.id,
     title: platform.label,
-    sub: platform.realm_label || (platform.realm === 'cn' ? '国内版' : platform.realm === 'intl' ? '国际版' : ''),
+    sub:
+      platform.realm_label ||
+      (platform.realm === 'cn' ? t('cmdk.realmCn') : platform.realm === 'intl' ? t('cmdk.realmIntl') : ''),
     keywords: platform.id + ' ' + platform.storage_platform,
     run: () => {
       platformStore.setCurrent(platform.id, platform.realm || '')
     },
   }))
-  return [{ id: 'platform.back', title: '返回', sub: '命令列表', run: backToRoot }, ...items]
+  return [{ id: 'platform.back', title: t('cmdk.back'), sub: t('cmdk.backSub'), run: backToRoot }, ...items]
 })
 
 const operationItems = computed<PaletteItem[]>(() => {
@@ -86,29 +96,29 @@ const operationItems = computed<PaletteItem[]>(() => {
   const items: PaletteItem[] = [
     {
       id: 'op.copy-api',
-      title: '复制 API 地址',
+      title: t('cmdk.copyApi'),
       sub: apiBaseUrl(),
       run: async () => {
         const url = apiBaseUrl()
         const ok = await copyText(url)
-        if (ok) message.success('已复制 ' + url)
-        else message.error('复制失败，请手动选中地址')
+        if (ok) message.success(t('common.copied') + ' ' + url)
+        else message.error(t('common.copyFailed'))
       },
     },
     {
       id: 'op.theme',
-      title: '切换主题',
-      sub: '当前：' + themeLabel.value,
-      keywords: '主题 theme 浅色 深色 跟随系统',
+      title: t('cmdk.switchTheme'),
+      sub: t('cmdk.currentTheme', { theme: themeLabel.value }),
+      keywords: t('cmdk.keywordsTheme'),
       run: () => {
         cycle()
       },
     },
     {
       id: 'op.platform',
-      title: '切换平台',
+      title: t('cmdk.switchPlatform'),
       sub: platformSubtitle.value,
-      keywords: '平台 platform 上下文',
+      keywords: t('cmdk.keywordsPlatform'),
       run: () => {
         view.value = 'platforms'
         query.value = ''
@@ -127,8 +137,8 @@ const operationItems = computed<PaletteItem[]>(() => {
   }
   items.push({
     id: 'op.logout',
-    title: '退出登录',
-    keywords: 'logout 注销',
+    title: t('cmdk.logout'),
+    keywords: t('cmdk.keywordsLogout'),
     run: () => {
       emit('logout')
     },
@@ -139,8 +149,8 @@ const operationItems = computed<PaletteItem[]>(() => {
 const pageItems = computed<PaletteItem[]>(() =>
   PAGES.map((page) => ({
     id: 'page.' + page.key,
-    title: page.title,
-    sub: page.group,
+    title: pageTitle(page.key),
+    sub: groupTitle(page.groupKey),
     keywords: page.key,
     run: () => {
       void router.push('/' + page.key)
@@ -159,13 +169,13 @@ function matched(items: PaletteItem[], keyword: string): PaletteItem[] {
 const sections = computed<PaletteSection[]>(() => {
   if (view.value === 'platforms') {
     const items = matched(operationItems.value, query.value)
-    return items.length ? [{ name: '切换平台', items }] : []
+    return items.length ? [{ name: t('cmdk.platformSection'), items }] : []
   }
   const pages = matched(pageItems.value, query.value)
   const ops = matched(operationItems.value, query.value)
   const result: PaletteSection[] = []
-  if (pages.length) result.push({ name: '页面', items: pages })
-  if (ops.length) result.push({ name: '操作', items: ops })
+  if (pages.length) result.push({ name: t('cmdk.sectionPages'), items: pages })
+  if (ops.length) result.push({ name: t('cmdk.sectionOps'), items: ops })
   return result
 })
 
@@ -223,7 +233,9 @@ async function runItem(item: PaletteItem | null): Promise<void> {
     if (result !== 'stay') close()
   } catch (error) {
     console.warn('[cmdk] 命令执行失败', error)
-    message.error('操作失败：' + (error instanceof Error ? error.message : String(error)))
+    message.error(
+      t('cmdk.operationFailed', { message: error instanceof Error ? error.message : String(error) }),
+    )
   }
 }
 
@@ -269,7 +281,7 @@ onBeforeUnmount(() => {
   <teleport to="body">
     <transition name="cmdk-fade">
       <div v-if="open" class="cmdk-overlay" @click.self="close">
-        <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="命令面板">
+        <div class="cmdk-panel" role="dialog" aria-modal="true" :aria-label="t('cmdk.title')">
           <div class="cmdk-head">
             <Search :size="16" class="cmdk-search-icon" />
             <input
@@ -279,13 +291,13 @@ onBeforeUnmount(() => {
               type="text"
               autocomplete="off"
               spellcheck="false"
-              :placeholder="view === 'platforms' ? '搜索平台' : '搜索页面或操作'"
-              aria-label="搜索页面或操作"
+              :placeholder="view === 'platforms' ? t('cmdk.searchPlatforms') : t('cmdk.searchPagesOrOps')"
+              :aria-label="t('cmdk.searchPagesOrOps')"
             />
             <kbd class="cmdk-kbd">Esc</kbd>
           </div>
 
-          <div class="cmdk-body" role="listbox" aria-label="命令结果">
+          <div class="cmdk-body" role="listbox" :aria-label="t('cmdk.results')">
             <template v-for="section in sections" :key="section.name">
               <div class="cmdk-section">{{ section.name }}</div>
               <button
@@ -304,13 +316,13 @@ onBeforeUnmount(() => {
                 <CornerDownLeft v-if="isActive(item.id)" :size="14" class="cmdk-item-enter" />
               </button>
             </template>
-            <p v-if="!flatItems.length" class="cmdk-empty">没有匹配的结果</p>
+            <p v-if="!flatItems.length" class="cmdk-empty">{{ t('cmdk.noMatches') }}</p>
           </div>
 
           <footer class="cmdk-foot">
-            <span>↑↓ 选择</span>
-            <span>↵ 执行</span>
-            <span>Esc 关闭</span>
+            <span>{{ t('cmdk.selectHint') }}</span>
+            <span>{{ t('cmdk.runHint') }}</span>
+            <span>{{ t('cmdk.closeHint') }}</span>
           </footer>
         </div>
       </div>

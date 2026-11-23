@@ -69,7 +69,8 @@ import {
 /** 旧版面板副标题原样保留（收进 ⓘ）。 */
 const HELP_TEXT =
   '统计平台全部 Key 的用量：请求数、Token、积分与平均耗时。数据来自本地 usage_logs，随请求实时累计。' +
-  '成功 = error_kind 为空或 success；Token 与积分只统计成功请求，请求数含失败。'
+  '成功 = error_kind 为空或 success；Token 与积分只统计成功请求，请求数含失败。' +
+  '时间范围默认「今日（自然日）」= 北京时间 00:00 起；数据看板的「近 24 小时」是滚动窗口，两处数字不同属正常。'
 
 const toast = useToast()
 const router = useRouter()
@@ -624,6 +625,7 @@ watch(
       <p v-if="payload" class="usage-footnote">
         口径：成功 = error_kind 为空或 success；Token 与积分只统计成功请求，请求数含失败。
         非「成功」的结果行统一跳 result=error（/api/logs 只有成功/错误两档）。
+        时间范围默认「今日（自然日）」= 北京时间 00:00 起；数据看板的「近 24 小时」是滚动窗口，两处数字不同属正常。
       </p>
     </template>
   </div>

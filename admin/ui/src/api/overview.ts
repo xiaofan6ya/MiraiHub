@@ -21,8 +21,21 @@
 import { http } from './http'
 import { fmtCompact, fmtCredit, fmtInt, fmtPct } from '@/utils/format'
 import { getStatsDashboard, statToneOf, type StatsDashboardPayload } from './stats'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 export const OVERVIEW_DAYS = [1, 7, 30] as const
+
+/**
+ * 文案取当前语言；页面把 useI18n().t 传进来时，computed 会随语言切换重算。
+ * 不传时用默认字典（中文），单测无需关心 i18n。
+ */
+function tr(
+  translate: Translate | undefined,
+  key: Parameters<Translate>[0],
+  params?: Record<string, string | number>,
+): string {
+  return (translate ?? defaultTranslate)(key, params)
+}
 export type OverviewDays = (typeof OVERVIEW_DAYS)[number]
 
 /** 只认 1 / 7 / 30（旧版 data-ov-days 的三个按钮）。 */
@@ -31,10 +44,10 @@ export function normalizeOverviewDays(value: unknown): OverviewDays {
   return n === 7 ? 7 : n === 30 ? 30 : 1
 }
 
-export function daysLabel(days: number): string {
-  if (days === 7) return '近 7 天'
-  if (days === 30) return '近 30 天'
-  return '今日'
+export function daysLabel(days: number, translate?: Translate): string {
+  if (days === 7) return tr(translate, 'overview.days.last7')
+  if (days === 30) return tr(translate, 'overview.days.last30')
+  return tr(translate, 'overview.days.today')
 }
 
 /* 后端形状（字段名与 overview_router.py 完全一致） */
@@ -202,6 +215,7 @@ export function buildBalanceHero(
   today: OverviewWindow | null | undefined,
   win: OverviewWindow | null | undefined,
   averageCredits: number | null | undefined,
+  translate?: Translate,
 ): OverviewHero {
   const acc = accounts || {
     total: 0,
@@ -225,16 +239,19 @@ export function buildBalanceHero(
     ratio,
     ratioText: Math.round(ratio * 100) + '%',
     tone,
-    caption: '总额度 ' + fmtInt(total) + ' · ' + (Number(acc.total) || 0) + ' 个账号',
+    caption: tr(translate, 'overview.hero.caption', {
+      total: fmtInt(total),
+      accounts: Number(acc.total) || 0,
+    }),
     note:
       Number(acc.disabled_balance) > 0
-        ? '另有 ' + fmtInt(acc.disabled_balance) + ' 在已禁用账号上，不参与统计'
+        ? tr(translate, 'overview.hero.disabledNote', { amount: fmtInt(acc.disabled_balance) })
         : '',
     rows: [
-      { label: '今日', value: fmtCredit(today?.credits) },
-      { label: days + ' 天', value: fmtCredit(win?.credits) },
+      { label: tr(translate, 'overview.hero.today'), value: fmtCredit(today?.credits) },
+      { label: tr(translate, 'overview.days.nDays', { days }), value: fmtCredit(win?.credits) },
       {
-        label: '户均',
+        label: tr(translate, 'overview.hero.average'),
         value:
           averageCredits === null || averageCredits === undefined
             ? '—'
@@ -248,14 +265,15 @@ export function buildBalanceHero(
 export function buildUsageItems(
   win: OverviewWindow | null | undefined,
   days: number,
+  translate?: Translate,
 ): OverviewStatItem[] {
   if (!win) {
     return [
-      { label: '请求数', value: '—' },
-      { label: '成功率', value: '—', tone: 'muted' },
-      { label: '输入 Token', value: '—' },
-      { label: '输出 Token', value: '—' },
-      { label: 'Token 合计', value: '—' },
+      { label: tr(translate, 'overview.usage.requests'), value: '—' },
+      { label: tr(translate, 'overview.usage.successRate'), value: '—', tone: 'muted' },
+      { label: tr(translate, 'overview.usage.input'), value: '—' },
+      { label: tr(translate, 'overview.usage.output'), value: '—' },
+      { label: tr(translate, 'overview.usage.total'), value: '—' },
     ]
   }
   const requests = Number(win.requests) || 0
@@ -263,22 +281,25 @@ export function buildUsageItems(
   const rate = requests > 0 ? ok / requests : null
   return [
     {
-      label: '请求数',
+      label: tr(translate, 'overview.usage.requests'),
       value: fmtInt(requests),
-      foot: '成功 ' + fmtInt(ok) + ' · 失败 ' + fmtInt(Math.max(0, requests - ok)),
-      help: daysLabel(days) + '：请求数含失败，Token 只算成功请求',
+      foot: tr(translate, 'overview.usage.requestsFoot', {
+        ok: fmtInt(ok),
+        failed: fmtInt(Math.max(0, requests - ok)),
+      }),
+      help: tr(translate, 'overview.usage.requestsHelp', { range: daysLabel(days, translate) }),
     },
     {
-      label: '成功率',
+      label: tr(translate, 'overview.usage.successRate'),
       value: rate === null ? '—' : fmtPct(rate, 1),
       tone: statToneOf(rate),
     },
-    { label: '输入 Token', value: fmtCompact(win.prompt_tokens) },
-    { label: '输出 Token', value: fmtCompact(win.completion_tokens) },
+    { label: tr(translate, 'overview.usage.input'), value: fmtCompact(win.prompt_tokens) },
+    { label: tr(translate, 'overview.usage.output'), value: fmtCompact(win.completion_tokens) },
     {
-      label: 'Token 合计',
+      label: tr(translate, 'overview.usage.total'),
       value: fmtCompact(win.total_tokens),
-      foot: '缓存命中 ' + fmtCompact(win.cached_tokens),
+      foot: tr(translate, 'overview.usage.cacheFoot', { count: fmtCompact(win.cached_tokens) }),
     },
   ]
 }
@@ -307,13 +328,24 @@ export interface MonitorRowData {
   faint: boolean
 }
 
-export function buildMonitorRows(monitor: OverviewMonitor | null | undefined): MonitorRowData[] {
+const MONITOR_LABEL_KEY = {
+  active: 'overview.monitor.active',
+  cooling: 'overview.monitor.cooling',
+  breaker: 'overview.monitor.breaker',
+  no_balance: 'overview.monitor.noBalance',
+  disabled: 'overview.monitor.disabled',
+} as const
+
+export function buildMonitorRows(
+  monitor: OverviewMonitor | null | undefined,
+  translate?: Translate,
+): MonitorRowData[] {
   const total = Number(monitor?.total) || 0
   return MONITOR_ROWS.map((row) => {
     const count = Number(monitor?.[row.key]) || 0
     return {
       key: row.key,
-      label: row.label,
+      label: tr(translate, MONITOR_LABEL_KEY[row.key]),
       count,
       pct: total > 0 ? (count / total) * 100 : 0,
       tone: row.tone,
@@ -332,21 +364,46 @@ export interface MonitorConclusion {
 /** 结论一句：全部正常，或指出最该看的那类账号并给出落点。 */
 export function monitorConclusion(
   monitor: OverviewMonitor | null | undefined,
+  translate?: Translate,
 ): MonitorConclusion {
   const total = Number(monitor?.total) || 0
-  if (total <= 0) return { text: '还没有账号，先去账号池添加', tone: 'warn', to: '/accounts' }
+  if (total <= 0) {
+    return { text: tr(translate, 'overview.conclusion.noAccounts'), tone: 'warn', to: '/accounts' }
+  }
   const active = Number(monitor?.active) || 0
-  if (active >= total) return { text: '全部账号正常', tone: 'ok', to: '' }
+  if (active >= total) {
+    return { text: tr(translate, 'overview.conclusion.allOk'), tone: 'ok', to: '' }
+  }
   const cooling = Number(monitor?.cooling) || 0
   if (cooling > 0) {
-    return { text: cooling + ' 个账号冷却中，查看', tone: 'warn', to: '/accounts?status=cooldown' }
+    return {
+      text: tr(translate, 'overview.conclusion.cooling', { count: cooling }),
+      tone: 'warn',
+      to: '/accounts?status=cooldown',
+    }
   }
   const breaker = Number(monitor?.breaker) || 0
-  if (breaker > 0) return { text: breaker + ' 个账号熔断中，查看', tone: 'warn', to: '/accounts' }
+  if (breaker > 0) {
+    return {
+      text: tr(translate, 'overview.conclusion.breaker', { count: breaker }),
+      tone: 'warn',
+      to: '/accounts',
+    }
+  }
   const noBalance = Number(monitor?.no_balance) || 0
-  if (noBalance > 0) return { text: noBalance + ' 个账号额度耗尽，查看', tone: 'warn', to: '/credits' }
+  if (noBalance > 0) {
+    return {
+      text: tr(translate, 'overview.conclusion.noBalance', { count: noBalance }),
+      tone: 'warn',
+      to: '/credits',
+    }
+  }
   const disabled = Number(monitor?.disabled) || 0
-  return { text: disabled + ' 个账号已禁用，查看', tone: 'warn', to: '/accounts' }
+  return {
+    text: tr(translate, 'overview.conclusion.disabled', { count: disabled }),
+    tone: 'warn',
+    to: '/accounts',
+  }
 }
 
 export interface OverviewAlert {
@@ -366,23 +423,24 @@ export interface OverviewAlert {
 export function buildAlerts(
   payload: OverviewPayload | null | undefined,
   sentinel: SentinelStatusPayload | null | undefined,
+  translate?: Translate,
 ): OverviewAlert[] {
   const alerts: OverviewAlert[] = []
   const affected = Number(sentinel?.accounts_affected) || 0
   if (sentinel?.tripped) {
     alerts.push({
       level: 'danger',
-      title: affected + ' 个账号被上游封控，已达批次阈值',
-      detail: '最近 5 分钟 · 建议暂停该平台，避免连坐',
-      actionLabel: '浏览详情',
+      title: tr(translate, 'overview.alert.trippedTitle', { count: affected }),
+      detail: tr(translate, 'overview.alert.trippedDetail'),
+      actionLabel: tr(translate, 'overview.alert.actionDetails'),
       to: '/sentinel',
     })
   } else if (affected > 0) {
     alerts.push({
       level: 'danger',
-      title: affected + ' 个账号被上游拒绝过（403 / 11140 / 4015）',
-      detail: '最近 5 分钟 · 去风控哨兵看信号明细',
-      actionLabel: '浏览详情',
+      title: tr(translate, 'overview.alert.rejectedTitle', { count: affected }),
+      detail: tr(translate, 'overview.alert.rejectedDetail'),
+      actionLabel: tr(translate, 'overview.alert.actionDetails'),
       to: '/sentinel',
     })
   }
@@ -390,9 +448,9 @@ export function buildAlerts(
   if (paused > 0) {
     alerts.push({
       level: 'warn',
-      title: '有 ' + paused + ' 个平台处于暂停状态',
-      detail: '暂停期间请求直接返回 503，不打上游',
-      actionLabel: '查看',
+      title: tr(translate, 'overview.alert.pausedTitle', { count: paused }),
+      detail: tr(translate, 'overview.alert.pausedDetail'),
+      actionLabel: tr(translate, 'overview.alert.actionView'),
       to: '/sentinel',
     })
   }
@@ -401,9 +459,9 @@ export function buildAlerts(
   if (cooling > 0) {
     alerts.push({
       level: 'warn',
-      title: cooling + ' 个账号冷却 / 熔断中',
-      detail: '冷却结束后自动重试；可在账号池查看剩余时间',
-      actionLabel: '查看',
+      title: tr(translate, 'overview.alert.coolingTitle', { count: cooling }),
+      detail: tr(translate, 'overview.alert.coolingDetail'),
+      actionLabel: tr(translate, 'overview.alert.actionView'),
       to: '/accounts?status=cooldown',
     })
   }
@@ -411,11 +469,14 @@ export function buildAlerts(
   if (used !== null && used !== undefined && Number(used) >= 0.8) {
     alerts.push({
       level: 'warn',
-      title: '剩余额度不足 ' + Math.round((1 - Number(used)) * 100) + '%',
-      detail:
-        '剩余 ' + fmtInt(payload?.accounts?.balance_remain) +
-        ' / 总额度 ' + fmtInt(payload?.accounts?.balance_total),
-      actionLabel: '查看',
+      title: tr(translate, 'overview.alert.lowBalanceTitle', {
+        percent: Math.round((1 - Number(used)) * 100),
+      }),
+      detail: tr(translate, 'overview.alert.lowBalanceDetail', {
+        remain: fmtInt(payload?.accounts?.balance_remain),
+        total: fmtInt(payload?.accounts?.balance_total),
+      }),
+      actionLabel: tr(translate, 'overview.alert.actionView'),
       to: '/credits',
     })
   }
@@ -432,7 +493,10 @@ export interface CacheBlock {
 }
 
 /** 缓存命中卡：Ring + 3 个 KV + 说明。命中率着色按契约 §3.2（≥10% ok / ≥5% warn）。 */
-export function buildCache(cache: OverviewCache | null | undefined): CacheBlock {
+export function buildCache(
+  cache: OverviewCache | null | undefined,
+  translate?: Translate,
+): CacheBlock {
   const rate = cache?.rate
   const value =
     rate === null || rate === undefined ? 0 : Math.min(100, Math.max(0, Number(rate) * 100))
@@ -449,11 +513,11 @@ export function buildCache(cache: OverviewCache | null | undefined): CacheBlock 
     text: rate === null || rate === undefined ? '—' : Math.round(value) + '%',
     tone,
     kv: [
-      { label: '输入命中', value: fmtCompact(cache?.cached_tokens) },
-      { label: '输入总量', value: fmtCompact(cache?.prompt_tokens) },
-      { label: '样本请求', value: fmtInt(cache?.samples) },
+      { label: tr(translate, 'overview.cache.inputHit'), value: fmtCompact(cache?.cached_tokens) },
+      { label: tr(translate, 'overview.cache.inputTotal'), value: fmtCompact(cache?.prompt_tokens) },
+      { label: tr(translate, 'overview.cache.samples'), value: fmtInt(cache?.samples) },
     ],
-    note: cache?.note || '只统计含缓存字段的上游响应',
+    note: cache?.note || tr(translate, 'overview.cache.defaultNote'),
   }
 }
 
@@ -482,6 +546,7 @@ export interface OverviewLane {
 export function buildLanes(
   traffic: StatsDashboardPayload | null | undefined,
   specs: OverviewPlatformSpec[] | null | undefined,
+  translate?: Translate,
 ): OverviewLane[] {
   const list = specs || []
   const rows = traffic?.platforms || []
@@ -494,7 +559,7 @@ export function buildLanes(
         list.find((item) => String(item.storage_platform || '').toLowerCase() === lower)
       return {
         id: id || String(row.label || ''),
-        name: String(row.label || id || '未知平台'),
+        name: String(row.label || id || tr(translate, 'overview.lane.unknownPlatform')),
         logo: String(spec?.icon || id || ''),
         count: Number(row.requests) || 0,
         successRate: row.success_rate ?? null,

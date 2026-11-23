@@ -27,6 +27,7 @@ import { refreshShellBadges } from '@/platform/shellBadges'
 import { consumeNextHash } from '@/api/auth'
 import { logout } from '@/api/session'
 import { initDesktop } from '@/platform/desktop'
+import { pageTitle, useI18n } from '@/i18n'
 
 /**
  * 应用外壳（03-shell §2）：侧栏 + 顶栏 + 内容区，以及三个全局浮层
@@ -37,6 +38,7 @@ import { initDesktop } from '@/platform/desktop'
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
+const { t, locale } = useI18n()
 const platformStore = usePlatformStore()
 const heartbeat = useHeartbeatStore()
 const { load: loadAppInfo } = useAppInfo()
@@ -99,17 +101,17 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => route.fullPath,
+  [() => route.fullPath, () => locale.value],
   () => {
     closeMobileNav()
     const name = route.name
     if (isPageKey(name)) {
       rememberLastTab(PAGES_BY_KEY[name].groupKey, name)
-      document.title = PAGES_BY_KEY[name].title + ' · MiraiHub'
+      document.title = t('app.documentTitle', { title: pageTitle(name) })
       return
     }
     const title = route.meta.title
-    document.title = (title ? String(title) : '管理后台') + ' · MiraiHub'
+    document.title = t('app.documentTitle', { title: title ? String(title) : t('shell.brandSub') })
   },
   { immediate: true },
 )
@@ -117,10 +119,10 @@ watch(
 /** 退出登录：确认框标题是问句，动作与按钮同词（01-direction §8）。 */
 function confirmLogout(): void {
   dialog.warning({
-    title: '退出登录？',
-    content: '退出后需要重新登录；其它设备上的登录不受影响。',
-    positiveText: '退出登录',
-    negativeText: '取消',
+    title: t('shell.logoutTitle'),
+    content: t('shell.logoutBody'),
+    positiveText: t('shell.logoutConfirm'),
+    negativeText: t('common.cancel'),
     onPositiveClick: () => {
       void logout()
     },

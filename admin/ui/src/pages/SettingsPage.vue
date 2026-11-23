@@ -25,6 +25,7 @@ import FormField from '@/components/overlay/FormField.vue'
 import KV from '@/components/base/KV.vue'
 import Meter from '@/components/data/Meter.vue'
 import Section from '@/components/base/Section.vue'
+import LanguageCard from '@/layout/LanguageCard.vue'
 import DataTable from '@/components/data/DataTable.vue'
 import Empty from '@/components/base/Empty.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
@@ -69,22 +70,24 @@ import {
   type SourceHit,
   type UnpackProgress,
 } from '@/api/settings'
-
-const HELP_TEXT =
-  '常用 .env 项可以在这里动态改（exe / apk 部署没有配置文件，改这里即时生效；标「重启后生效」的项保存后需要重启服务）。' +
-  '出口代理节点用于批量任务的出口 IP —— 一个 IP 上跑几十个号会被上游拉黑。'
+import { useI18n } from '@/i18n'
 
 const toast = useToast()
+const { t, locale } = useI18n()
+const helpText = computed(() => t('page.settings.help'))
 const confirm = useConfirm()
 const router = useRouter()
 
-const sections = [
-  { id: 'settings-runtime', title: '运行配置' },
-  { id: 'settings-proxies', title: '出口代理节点' },
-  { id: 'settings-invitation', title: 'WorkBuddy 邀请绑定' },
-  { id: 'settings-password', title: '修改登录密码' },
-  { id: 'settings-appsource', title: '逆向产物' },
-]
+const sections = computed(() => [
+  { id: 'settings-language', title: t('page.settings.sections.language') },
+  { id: 'settings-runtime', title: t('page.settings.sections.runtime') },
+  { id: 'settings-proxies', title: t('page.settings.sections.proxies') },
+  { id: 'settings-invitation', title: t('page.settings.sections.invitation') },
+  { id: 'settings-password', title: t('page.settings.sections.password') },
+  { id: 'settings-appsource', title: t('page.settings.sections.appsource') },
+])
+
+
 
 /* ------------------------------------------------------------------ *
  * 运行配置
@@ -97,7 +100,7 @@ const runtimeFields = ref<RuntimeField[]>([])
 const runtimeDraft = reactive<Record<string, string | number | boolean | null>>({})
 const restartPending = ref<RuntimeField[]>([])
 
-const runtimeGroups = computed(() => groupRuntimeFields(runtimeFields.value))
+const runtimeGroups = computed(() => groupRuntimeFields(runtimeFields.value, t))
 
 function setRuntimeDraft(attr: string, value: string | number | boolean | null): void {
   runtimeDraft[attr] = value
@@ -133,7 +136,7 @@ async function loadRuntime(): Promise<void> {
     runtimeFields.value = Array.isArray(payload?.fields) ? payload.fields : []
     syncRuntimeDraft(runtimeFields.value)
   } catch (error) {
-    runtimeError.value = failureText('加载运行配置', error)
+    runtimeError.value = failureText(t('page.settings.runtime.loadFailed'), error)
   } finally {
     runtimeLoading.value = false
   }
@@ -149,12 +152,16 @@ async function saveRuntime(): Promise<void> {
     restartPending.value = restartPendingOf(runtimeFields.value, result?.changed)
     const errors = Object.entries(result?.errors || {})
     if (errors.length) {
-      toast.error('部分配置未保存：' + errors.map(([attr, msg]) => attr + ' ' + msg).join('；'))
+      toast.error(
+        t('page.settings.runtime.partialFailed', {
+          errors: errors.map(([attr, msg]) => attr + ' ' + msg).join('; '),
+        }),
+      )
     } else {
-      toast.success('已保存 ' + (result?.changed?.length || 0) + ' 项运行配置')
+      toast.success(t('page.settings.runtime.saved', { count: result?.changed?.length || 0 }))
     }
   } catch (error) {
-    toast.error(failureText('保存运行配置', error))
+    toast.error(failureText(t('page.settings.runtime.saveFailed'), error))
   } finally {
     runtimeSaving.value = false
   }
@@ -176,12 +183,12 @@ const proxyDraft = ref({ label: '', url: '', max_concurrency: 1, pool: '' })
 const proxyNodes = computed(() =>
   filterProxies(proxyData.value?.items || [], { pool: proxyPool.value, q: proxyQuery.value }),
 )
-const proxySummary = computed(() => proxySummaryText(proxyData.value?.summary))
+const proxySummary = computed(() => proxySummaryText(proxyData.value?.summary, t))
 
-const proxyColumns: TableColumn[] = [
+const proxyColumns = computed<TableColumn[]>(() => [
   {
     key: 'label',
-    title: '名称',
+    title: t('page.settings.proxies.colName'),
     minWidth: 120,
     mobile: 'title',
     render: (row: TableRow) => {
@@ -191,53 +198,63 @@ const proxyColumns: TableColumn[] = [
   },
   {
     key: 'url',
-    title: '地址',
+    title: t('page.settings.proxies.colUrl'),
     minWidth: 220,
     mobile: 'subtitle',
     render: (row: TableRow) => h('span', { class: 'mono' }, (row as unknown as ProxyNode).url),
   },
   {
     key: 'max_concurrency',
-    title: '并发',
+    title: t('page.settings.proxies.colConcurrency'),
     width: 80,
     mobile: 'meta',
     render: (row: TableRow) => String((row as unknown as ProxyNode).max_concurrency),
   },
   {
     key: 'pool',
-    title: '分组',
+    title: t('page.settings.proxies.colPool'),
     width: 100,
     mobile: 'hidden',
-    render: (row: TableRow) => (row as unknown as ProxyNode).pool || '默认组',
+    render: (row: TableRow) => (row as unknown as ProxyNode).pool || t('page.settings.proxies.defaultPool'),
   },
   {
     key: 'state',
-    title: '状态',
+    title: t('page.settings.proxies.colState'),
     width: 100,
     mobile: 'meta',
     render: (row: TableRow) => {
-      const state = proxyStateOf(row as unknown as ProxyNode)
+      const state = proxyStateOf(row as unknown as ProxyNode, t)
       return h(Badge, { tone: state.tone }, { default: () => state.label })
     },
   },
   {
     key: 'ops',
-    title: '操作',
+    title: t('page.settings.proxies.colOps'),
     width: 190,
     mobile: 'actions',
     render: (row: TableRow) => {
       const node = row as unknown as ProxyNode
       const buttons = [
-        h(Btn, { size: 'sm', variant: 'quiet', onClick: () => toggleProxy(node) }, { default: () => (node.enabled ? '停用' : '启用') }),
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: () => toggleProxy(node) }, {
+          default: () => (node.enabled ? t('page.settings.proxies.disable') : t('page.settings.proxies.enable')),
+        }),
       ]
       if (node.blocked) {
-        buttons.push(h(Btn, { size: 'sm', variant: 'quiet', onClick: () => unblockProxyNode(node) }, { default: () => '解除静默' }))
+        buttons.push(
+          h(Btn, { size: 'sm', variant: 'quiet', onClick: () => unblockProxyNode(node) }, {
+            default: () => t('page.settings.proxies.unblock'),
+          }),
+        )
       }
-      buttons.push(h(Btn, { size: 'sm', variant: 'danger', onClick: () => removeProxy(node) }, { default: () => '删除' }))
+      buttons.push(
+        h(Btn, { size: 'sm', variant: 'danger', onClick: () => removeProxy(node) }, {
+          default: () => t('common.delete'),
+        }),
+      )
       return h('div', { class: 'st-ops' }, buttons)
     },
   },
-]
+])
 
 async function loadProxies(): Promise<void> {
   proxyLoading.value = true
@@ -245,7 +262,7 @@ async function loadProxies(): Promise<void> {
   try {
     proxyData.value = await listProxies()
   } catch (error) {
-    proxyError.value = failureText('加载代理节点', error)
+    proxyError.value = failureText(t('page.settings.proxies.loadFailed'), error)
   } finally {
     proxyLoading.value = false
   }
@@ -260,7 +277,7 @@ function openProxyDrawer(): void {
 }
 
 async function submitProxy(): Promise<void> {
-  const error = validateProxyInput(proxyDraft.value)
+  const error = validateProxyInput(proxyDraft.value, t)
   if (error) {
     toast.error(error)
     return
@@ -269,10 +286,10 @@ async function submitProxy(): Promise<void> {
   try {
     await createProxy({ ...proxyDraft.value })
     proxyDrawer.value = false
-    toast.success('已添加出口节点')
+    toast.success(t('page.settings.proxies.added'))
     await loadProxies()
   } catch (err) {
-    toast.error(failureText('添加代理节点', err))
+    toast.error(failureText(t('page.settings.proxies.addFailed'), err))
   } finally {
     proxySubmitting.value = false
   }
@@ -281,37 +298,37 @@ async function submitProxy(): Promise<void> {
 async function toggleProxy(node: ProxyNode): Promise<void> {
   try {
     await patchProxy(node.id, { enabled: node.enabled ? 0 : 1 })
-    toast.success(node.enabled ? '已停用节点' : '已启用节点')
+    toast.success(node.enabled ? t('page.settings.proxies.disabled') : t('page.settings.proxies.enabled'))
     await loadProxies()
   } catch (error) {
-    toast.error(failureText('切换节点状态', error))
+    toast.error(failureText(t('page.settings.proxies.toggleFailed'), error))
   }
 }
 
 async function unblockProxyNode(node: ProxyNode): Promise<void> {
   try {
     await unblockProxy(node.id)
-    toast.success('已解除静默')
+    toast.success(t('page.settings.proxies.unblocked'))
     await loadProxies()
   } catch (error) {
-    toast.error(failureText('解除静默', error))
+    toast.error(failureText(t('page.settings.proxies.unblockFailed'), error))
   }
 }
 
 async function removeProxy(node: ProxyNode): Promise<void> {
   const ok = await confirm({
-    title: '删除出口节点？',
-    message: '正在使用它的任务会退回直连，可能因同 IP 高频被上游拉黑。',
-    okText: '删除',
+    title: t('page.settings.proxies.deleteTitle'),
+    message: t('page.settings.proxies.deleteBody'),
+    okText: t('common.delete'),
     danger: true,
   })
   if (!ok) return
   try {
     await deleteProxy(node.id)
-    toast.success('已删除节点')
+    toast.success(t('page.settings.proxies.deleted'))
     await loadProxies()
   } catch (error) {
-    toast.error(failureText('删除代理节点', error))
+    toast.error(failureText(t('page.settings.proxies.deleteFailed'), error))
   }
 }
 
@@ -335,7 +352,7 @@ async function loadInvitation(): Promise<void> {
     invitation.value = await getInvitation()
     invitationInput.value = invitation.value?.invite_code || ''
   } catch (error) {
-    invitationError.value = failureText('读取邀请设置', error)
+    invitationError.value = failureText(t('page.settings.invitation.loadFailed'), error)
   } finally {
     invitationLoading.value = false
   }
@@ -345,17 +362,19 @@ async function saveInvitationValue(value: string): Promise<void> {
   try {
     invitation.value = await saveInvitation(value)
     invitationInput.value = invitation.value?.invite_code || ''
-    toast.success(invitation.value?.enabled ? '邀请绑定已保存' : '邀请绑定已停用')
+    toast.success(
+      invitation.value?.enabled ? t('page.settings.invitation.saved') : t('page.settings.invitation.savedOff'),
+    )
   } catch (error) {
-    toast.error(failureText('保存邀请绑定', error))
+    toast.error(failureText(t('page.settings.invitation.saveFailed'), error))
   }
 }
 
 async function disableInvitation(): Promise<void> {
   const ok = await confirm({
-    title: '停用邀请绑定？',
-    message: '停用后新注册的账号不再自动绑定这个邀请码，已绑定的账号不受影响。',
-    okText: '停用',
+    title: t('page.settings.invitation.disableTitle'),
+    message: t('page.settings.invitation.disableBody'),
+    okText: t('page.settings.invitation.disable'),
   })
   if (!ok) return
   await saveInvitationValue('')
@@ -372,7 +391,7 @@ const passwordDirty = computed(
 )
 
 async function submitPassword(): Promise<void> {
-  const error = validatePasswordChange(passwordDraft.old, passwordDraft.next, passwordDraft.confirm)
+  const error = validatePasswordChange(passwordDraft.old, passwordDraft.next, passwordDraft.confirm, t)
   if (error) {
     toast.error(error)
     return
@@ -384,9 +403,13 @@ async function submitPassword(): Promise<void> {
     passwordDraft.next = ''
     passwordDraft.confirm = ''
     const revoked = Number(result?.revoked_sessions || 0)
-    toast.success('密码已修改，其他设备需要重新登录' + (revoked ? '（已吊销 ' + revoked + ' 个会话）' : ''))
+    toast.success(
+      revoked
+        ? t('page.settings.password.savedRevoked', { count: revoked })
+        : t('page.settings.password.saved'),
+    )
   } catch (error) {
-    toast.error(failureText('修改密码', error))
+    toast.error(failureText(t('page.settings.password.saveFailed'), error))
   } finally {
     passwordSaving.value = false
   }
@@ -410,7 +433,7 @@ const searching = ref(false)
 const searchHits = ref<SourceHit[]>([])
 const searchNote = ref('')
 
-const sourceLines = computed(() => sourceStatusLines(sourceStatus.value))
+const sourceLines = computed(() => sourceStatusLines(sourceStatus.value, t))
 const sourceDirty = computed(
   () =>
     installDraft.value.trim() !== String(sourceStatus.value?.install_dir || '') ||
@@ -428,7 +451,7 @@ async function loadSource(): Promise<void> {
   } catch (error) {
     // DEV_TOOLS=0 / 生产环境：后端整路由 404 → 卡片降级说明
     sourceMissing.value = true
-    sourceError.value = failureText('加载逆向产物状态', error)
+    sourceError.value = failureText(t('page.settings.appsource.loadFailed'), error)
   } finally {
     sourceLoading.value = false
   }
@@ -441,27 +464,31 @@ async function runSourceAction(action: 'detect' | 'plan' | 'unpack' | 'remove'):
     if (action === 'detect') {
       sourceStatus.value = await detectAppSource()
       installDraft.value = sourceStatus.value?.install_dir || ''
-      toast.success(sourceStatus.value?.install_dir ? '已重新扫描安装目录' : '未扫描到安装目录')
+      toast.success(
+        sourceStatus.value?.install_dir
+          ? t('page.settings.appsource.rescanned')
+          : t('page.settings.appsource.scanMissing'),
+      )
     } else if (action === 'plan') {
       const plan = await planUnpack()
-      toast.info('预检完成：' + JSON.stringify(plan).slice(0, 160))
+      toast.info(t('page.settings.appsource.planDone', { detail: JSON.stringify(plan).slice(0, 160) }))
     } else if (action === 'unpack') {
       await startUnpack()
       unpacking.value = true
-      toast.info('拆包任务已启动')
+      toast.info(t('page.settings.appsource.unpackStarted'))
     } else {
       const ok = await confirm({
-        title: '删除逆向产物？',
-        message: '只删除「逆向产物目录」下的文件，不影响客户端本体。',
-        okText: '删除',
+        title: t('page.settings.appsource.removeTitle'),
+        message: t('page.settings.appsource.removeBody'),
+        okText: t('common.delete'),
         danger: true,
       })
       if (!ok) return
       sourceStatus.value = await removeUnpackedSource()
-      toast.success('已删除逆向产物')
+      toast.success(t('page.settings.appsource.removed'))
     }
   } catch (error) {
-    toast.error(failureText('逆向产物操作', error))
+    toast.error(failureText(t('page.settings.appsource.actionFailed'), error))
   } finally {
     sourceBusy.value = ''
   }
@@ -469,7 +496,7 @@ async function runSourceAction(action: 'detect' | 'plan' | 'unpack' | 'remove'):
 
 async function saveInstallDir(): Promise<void> {
   if (!installDraft.value.trim() && !outputDraft.value.trim()) {
-    toast.error('请填写客户端安装目录')
+    toast.error(t('page.settings.appsource.installRequired'))
     return
   }
   sourceBusy.value = 'locate'
@@ -480,9 +507,9 @@ async function saveInstallDir(): Promise<void> {
     })
     installDraft.value = sourceStatus.value?.install_dir || installDraft.value
     outputDraft.value = sourceStatus.value?.source_dir || outputDraft.value
-    toast.success('路径已校验并保存')
+    toast.success(t('page.settings.appsource.pathSaved'))
   } catch (error) {
-    toast.error(failureText('校验安装目录', error))
+    toast.error(failureText(t('page.settings.appsource.validateFailed'), error))
   } finally {
     sourceBusy.value = ''
   }
@@ -490,16 +517,16 @@ async function saveInstallDir(): Promise<void> {
 
 async function saveOutputDir(): Promise<void> {
   if (!outputDraft.value.trim()) {
-    toast.error('请填写逆向产物输出目录')
+    toast.error(t('page.settings.appsource.outputRequired'))
     return
   }
   sourceBusy.value = 'locate-source'
   try {
     sourceStatus.value = await locateAppSource({ source_dir: outputDraft.value })
     outputDraft.value = sourceStatus.value?.source_dir || outputDraft.value
-    toast.success('已设为输出目录')
+    toast.success(t('page.settings.appsource.outputSet'))
   } catch (error) {
-    toast.error(failureText('设置输出目录', error))
+    toast.error(failureText(t('page.settings.appsource.outputFailed'), error))
   } finally {
     sourceBusy.value = ''
   }
@@ -508,7 +535,7 @@ async function saveOutputDir(): Promise<void> {
 async function runSearch(): Promise<void> {
   const q = searchQuery.value.trim()
   if (!q) {
-    toast.error('请填写检索关键字')
+    toast.error(t('page.settings.appsource.searchKeyword'))
     return
   }
   searching.value = true
@@ -516,11 +543,14 @@ async function runSearch(): Promise<void> {
   try {
     const payload = await searchAppSource(q, 50)
     searchHits.value = payload?.files || []
-    if (!payload?.ok) searchNote.value = String(payload?.reason || '逆向产物尚未产出')
-    else if (!searchHits.value.length) searchNote.value = '没有匹配的文件'
+    if (!payload?.ok) {
+      searchNote.value = String(payload?.reason || t('page.settings.appsource.notReady'))
+    } else if (!searchHits.value.length) {
+      searchNote.value = t('page.settings.appsource.noMatches')
+    }
   } catch (error) {
     searchHits.value = []
-    searchNote.value = failureText('检索', error)
+    searchNote.value = failureText(t('page.settings.appsource.search'), error)
   } finally {
     searching.value = false
   }
@@ -535,12 +565,12 @@ const unpackPoll = usePolling(
       unpackProgress.value = progress
       if (progress?.running === false) {
         unpacking.value = false
-        toast.success('拆包完成')
+        toast.success(t('page.settings.appsource.unpackDone'))
         await loadSource()
       }
     } catch (error) {
       unpacking.value = false
-      toast.error(failureText('读取拆包进度', error))
+      toast.error(failureText(t('page.settings.appsource.progressFailed'), error))
     }
   },
   1500,
@@ -569,15 +599,23 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <SettingsLayout title="设置" :help="HELP_TEXT" :sections="sections" :dirty="dirty">
+  <SettingsLayout
+    :title="t('page.settings.title')"
+    :help="helpText"
+    :sections="sections"
+    :dirty="dirty"
+  >
+    <!-- 0. 界面语言（本地偏好，不写入后端配置） -->
+    <LanguageCard />
+
     <!-- 1. 运行配置 -->
     <SettingsCard
       id="settings-runtime"
-      title="运行配置"
-      description="常用 .env 项动态改（exe / apk 部署没有配置文件，改这里即时生效）。只提交改动项；清空 = 回落 .env 默认。"
+      :title="t('page.settings.runtime.title')"
+      :description="t('page.settings.runtime.description')"
       :dirty="runtimeDirty"
       :loading="runtimeSaving"
-      save-label="保存配置"
+      :save-label="t('page.settings.runtime.saveLabel')"
       :save-disabled="!runtimeDirty"
       @save="saveRuntime"
       @reset="loadRuntime"
@@ -586,8 +624,15 @@ onBeforeUnmount(() => {
       <ErrorBlock v-else-if="runtimeError" :title="runtimeError" retry @retry="loadRuntime" />
       <template v-else>
         <div v-if="restartPending.length" class="st-banner">
-          <Badge tone="warn">重启后生效</Badge>
-          <span>有 {{ restartPending.length }} 项修改需要重启服务后生效：{{ restartPending.map((item) => item.label).join('、') }}</span>
+          <Badge tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
+          <span>
+            {{
+              t('page.settings.runtime.restartBanner', {
+                count: restartPending.length,
+                labels: restartPending.map((item) => item.label).join(locale === 'en-US' ? ', ' : '、'),
+              })
+            }}
+          </span>
         </div>
         <Section
           v-for="(group, index) in runtimeGroups"
@@ -601,13 +646,22 @@ onBeforeUnmount(() => {
                 <div class="st-row__label">
                   <span>{{ field.label }}</span>
                   <code class="st-attr">{{ field.attr }}</code>
-                  <Badge v-if="field.restart" tone="warn">重启后生效</Badge>
-                  <Badge v-if="field.overridden" tone="brand">已覆盖</Badge>
+                  <Badge v-if="field.restart" tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
+                  <Badge v-if="field.overridden" tone="brand">{{ t('page.settings.runtime.overridden') }}</Badge>
                 </div>
                 <p v-if="field.desc" class="st-row__desc">{{ field.desc }}</p>
                 <p class="st-row__default">
-                  默认 {{ field.default === null || field.default === '' ? '（空）' : field.default }}
-                  <template v-if="field.min !== null || field.max !== null"> · 范围 {{ field.min ?? '−∞' }} ~ {{ field.max ?? '∞' }}</template>
+                  {{
+                    t('page.settings.runtime.default', {
+                      value:
+                        field.default === null || field.default === ''
+                          ? t('page.settings.runtime.emptyValue')
+                          : String(field.default),
+                    })
+                  }}
+                  <template v-if="field.min !== null || field.max !== null">
+                    · {{ t('page.settings.runtime.range', { min: field.min ?? '−∞', max: field.max ?? '∞' }) }}
+                  </template>
                 </p>
               </div>
               <div class="st-row__control">
@@ -644,14 +698,18 @@ onBeforeUnmount(() => {
     <!-- 2. 出口代理节点 -->
     <SettingsCard
       id="settings-proxies"
-      title="出口代理节点"
-      description="一个出口 IP 上跑几十个号会被上游拉黑。配好出口后，在「定时任务」里选组名。"
+      :title="t('page.settings.proxies.title')"
+      :description="t('page.settings.proxies.description')"
       hide-save
       hide-reset
     >
       <template #actions>
-        <Btn size="sm" variant="default" @click="router.push('/schedules')">去定时任务</Btn>
-        <Btn size="sm" variant="default" :disabled="proxyLoading" @click="openProxyDrawer">添加节点</Btn>
+        <Btn size="sm" variant="default" @click="router.push('/schedules')">
+          {{ t('page.settings.proxies.goSchedules') }}
+        </Btn>
+        <Btn size="sm" variant="default" :disabled="proxyLoading" @click="openProxyDrawer">
+          {{ t('page.settings.proxies.add') }}
+        </Btn>
       </template>
 
       <div v-if="proxyLoading && !proxyData" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
@@ -662,12 +720,23 @@ onBeforeUnmount(() => {
         <div class="st-filters">
           <n-select
             :value="proxyPool"
-            :options="[{ label: '全部分组', value: '' }, ...(proxyData?.pools || []).map((pool) => ({ label: pool || '默认组', value: pool }))]"
-            aria-label="按分组筛选"
+            :options="[
+              { label: t('page.settings.proxies.allPools'), value: '' },
+              ...(proxyData?.pools || []).map((pool) => ({
+                label: pool || t('page.settings.proxies.defaultPool'),
+                value: pool,
+              })),
+            ]"
+            :aria-label="t('page.settings.proxies.filterAria')"
             style="width: 180px"
             @update:value="(value: string | null) => (proxyPool = value || '')"
           />
-          <n-input v-model:value="proxyQuery" placeholder="搜索名称 / 地址" clearable style="width: 220px" />
+          <n-input
+            v-model:value="proxyQuery"
+            :placeholder="t('page.settings.proxies.search')"
+            clearable
+            style="width: 220px"
+          />
         </div>
         <DataTable
           table-id="settings-proxies"
@@ -680,31 +749,56 @@ onBeforeUnmount(() => {
       <Empty
         v-if="!proxyLoading && !proxyError && !proxyNodes.length"
         compact
-        description="还没有配置出口节点，任务会从本机 IP 直连。批量任务建议至少配一个。"
+        :description="t('page.settings.proxies.empty')"
       >
-        <Btn variant="default" size="sm" @click="openProxyDrawer">添加节点</Btn>
+        <Btn variant="default" size="sm" @click="openProxyDrawer">
+          {{ t('page.settings.proxies.add') }}
+        </Btn>
       </Empty>
     </SettingsCard>
 
     <!-- 3. 邀请绑定 -->
     <SettingsCard
       id="settings-invitation"
-      title="WorkBuddy 邀请绑定"
-      description="填邀请码或 WorkBuddy 官方邀请链接；保存后新注册账号自动绑定。停用不会解绑已绑定的账号。"
+      :title="t('page.settings.invitation.title')"
+      :description="t('page.settings.invitation.description')"
       hide-save
       hide-reset
     >
       <template #actions>
-        <Badge :tone="invitation?.enabled ? 'ok' : 'neutral'">{{ invitation?.enabled ? '已启用' : '未启用' }}</Badge>
+        <Badge :tone="invitation?.enabled ? 'ok' : 'neutral'">
+          {{ invitation?.enabled ? t('page.settings.invitation.enabled') : t('page.settings.invitation.disabled') }}
+        </Badge>
       </template>
       <div v-if="invitationLoading && !invitation" class="st-skeleton"><n-skeleton text :repeat="2" /></div>
       <ErrorBlock v-else-if="invitationError" :title="invitationError" retry @retry="loadInvitation" />
       <template v-else>
-        <FormField label="邀请码 / 邀请链接" hint="支持纯邀请码或官方邀请链接；保存后返回解析出的邀请码与链接。">
+        <FormField
+          :label="t('page.settings.invitation.field')"
+          :hint="t('page.settings.invitation.hint')"
+        >
           <div class="st-inline">
-            <n-input v-model:value="invitationInput" placeholder="邀请码或 WorkBuddy 官方邀请链接" autocomplete="off" />
-            <Btn variant="primary" size="sm" :disabled="!invitationDirty" @click="saveInvitationValue(invitationInput.trim())">保存</Btn>
-            <Btn variant="default" size="sm" :disabled="!invitation?.enabled" @click="disableInvitation">停用</Btn>
+            <n-input
+              v-model:value="invitationInput"
+              :placeholder="t('page.settings.invitation.placeholder')"
+              autocomplete="off"
+            />
+            <Btn
+              variant="primary"
+              size="sm"
+              :disabled="!invitationDirty"
+              @click="saveInvitationValue(invitationInput.trim())"
+            >
+              {{ t('page.settings.invitation.save') }}
+            </Btn>
+            <Btn
+              variant="default"
+              size="sm"
+              :disabled="!invitation?.enabled"
+              @click="disableInvitation"
+            >
+              {{ t('page.settings.invitation.disable') }}
+            </Btn>
           </div>
         </FormField>
         <p v-if="invitation?.invite_url" class="st-note mono">{{ invitation.invite_url }}</p>
@@ -714,25 +808,25 @@ onBeforeUnmount(() => {
     <!-- 4. 修改登录密码 -->
     <SettingsCard
       id="settings-password"
-      title="修改登录密码"
-      description="修改后其它设备需要重新登录（后端会吊销其它会话，只保留当前这一条）。"
+      :title="t('page.settings.password.title')"
+      :description="t('page.settings.password.description')"
       hide-save
       hide-reset
     >
       <div class="st-grid">
-        <FormField label="当前密码">
+        <FormField :label="t('page.settings.password.old')">
           <n-input v-model:value="passwordDraft.old" type="password" autocomplete="current-password" />
         </FormField>
-        <FormField label="新密码" hint="至少 6 位（以后端规则为准）。">
+        <FormField :label="t('page.settings.password.next')" :hint="t('page.settings.password.hint')">
           <n-input v-model:value="passwordDraft.next" type="password" autocomplete="new-password" />
         </FormField>
-        <FormField label="确认新密码">
+        <FormField :label="t('page.settings.password.confirm')">
           <n-input v-model:value="passwordDraft.confirm" type="password" autocomplete="new-password" />
         </FormField>
       </div>
       <div class="st-inline">
         <Btn variant="primary" size="sm" :loading="passwordSaving" :disabled="!passwordDirty" @click="submitPassword">
-          保存新密码
+          {{ t('page.settings.password.save') }}
         </Btn>
       </div>
     </SettingsCard>
@@ -740,58 +834,114 @@ onBeforeUnmount(() => {
     <!-- 5. 逆向产物 -->
     <SettingsCard
       id="settings-appsource"
-      title="逆向产物（客户端源码）"
-      description="从本机安装的客户端 app.asar 里解出源码，便于检索/排障。纯标准库解包，不需要 Node/npm；生产环境可用 ADMIN_DEV_TOOLS=0 关闭。"
+      :title="t('page.settings.appsource.title')"
+      :description="t('page.settings.appsource.description')"
       hide-save
       hide-reset
     >
       <template #actions>
-        <Badge v-if="sourceStatus?.dev_tools === false || sourceMissing" tone="neutral">本部署未开放</Badge>
+        <Badge v-if="sourceStatus?.dev_tools === false || sourceMissing" tone="neutral">
+          {{ t('page.settings.appsource.unavailable') }}
+        </Badge>
       </template>
 
       <div v-if="sourceLoading && !sourceStatus" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
       <div v-else-if="sourceMissing" class="st-note">
-        本部署未开放逆向产物（ADMIN_DEV_TOOLS=0 或非本机运行时）。功能关闭时该区块不可用，不影响其它设置。
+        {{ t('page.settings.appsource.unavailableBody') }}
       </div>
       <template v-else>
         <KV :items="sourceLines.map((line) => ({ label: line.label, value: line.value, mono: line.mono }))" />
 
-        <Section title="路径">
-          <FormField label="客户端安装目录" hint="可填 D:\WorkBuddy、...\resources 或 ...\resources\app.asar，会自动补齐到安装根目录。">
+        <Section :title="t('page.settings.appsource.paths')">
+          <FormField
+            :label="t('page.settings.appsource.install')"
+            :hint="t('page.settings.appsource.installHint')"
+          >
             <div class="st-inline">
-              <n-input v-model:value="installDraft" placeholder="例如 D:\WorkBuddy" />
-              <Btn variant="primary" size="sm" :loading="sourceBusy === 'locate'" @click="saveInstallDir">校验并保存</Btn>
+              <n-input v-model:value="installDraft" :placeholder="t('page.settings.appsource.installPlaceholder')" />
+              <Btn
+                variant="primary"
+                size="sm"
+                :loading="sourceBusy === 'locate'"
+                @click="saveInstallDir"
+              >
+                {{ t('page.settings.appsource.validate') }}
+              </Btn>
             </div>
           </FormField>
-          <FormField label="逆向产物输出目录" hint="留空 = 用户缓存目录（不写进 git 仓库）。">
+          <FormField
+            :label="t('page.settings.appsource.output')"
+            :hint="t('page.settings.appsource.outputHint')"
+          >
             <div class="st-inline">
-              <n-input v-model:value="outputDraft" placeholder="留空 = 用户缓存目录" />
-              <Btn variant="default" size="sm" :loading="sourceBusy === 'locate-source'" @click="saveOutputDir">设为输出目录</Btn>
+              <n-input v-model:value="outputDraft" :placeholder="t('page.settings.appsource.outputPlaceholder')" />
+              <Btn
+                variant="default"
+                size="sm"
+                :loading="sourceBusy === 'locate-source'"
+                @click="saveOutputDir"
+              >
+                {{ t('page.settings.appsource.setOutput') }}
+              </Btn>
             </div>
           </FormField>
           <div class="st-inline">
-            <Btn variant="default" size="sm" :icon="ScanSearch" :loading="sourceBusy === 'detect'" @click="runSourceAction('detect')">重新扫描</Btn>
-            <Btn variant="default" size="sm" :icon="FileSearch" :loading="sourceBusy === 'plan'" @click="runSourceAction('plan')">预检</Btn>
-            <Btn variant="primary" size="sm" :icon="PackageOpen" :loading="sourceBusy === 'unpack' || unpacking" :disabled="sourceStatus?.can_unpack === false" @click="runSourceAction('unpack')">
-              一键拆包
+            <Btn
+              variant="default"
+              size="sm"
+              :icon="ScanSearch"
+              :loading="sourceBusy === 'detect'"
+              @click="runSourceAction('detect')"
+            >
+              {{ t('page.settings.appsource.rescan') }}
             </Btn>
-            <Btn variant="danger" size="sm" :icon="Trash2" :loading="sourceBusy === 'remove'" @click="runSourceAction('remove')">删除产物</Btn>
+            <Btn
+              variant="default"
+              size="sm"
+              :icon="FileSearch"
+              :loading="sourceBusy === 'plan'"
+              @click="runSourceAction('plan')"
+            >
+              {{ t('page.settings.appsource.precheck') }}
+            </Btn>
+            <Btn variant="primary" size="sm" :icon="PackageOpen" :loading="sourceBusy === 'unpack' || unpacking" :disabled="sourceStatus?.can_unpack === false" @click="runSourceAction('unpack')">
+              {{ t('page.settings.appsource.unpack') }}
+            </Btn>
+            <Btn
+              variant="danger"
+              size="sm"
+              :icon="Trash2"
+              :loading="sourceBusy === 'remove'"
+              @click="runSourceAction('remove')"
+            >
+              {{ t('page.settings.appsource.remove') }}
+            </Btn>
           </div>
 
           <div v-if="unpacking || unpackProgress" class="st-progress">
             <div class="st-progress__head">
-              <span>{{ unpackProgress?.phase || '准备中' }}</span>
+              <span>{{ unpackProgress?.phase || t('page.settings.appsource.preparing') }}</span>
               <span class="tnum">{{ unpackPercent(unpackProgress) }}%</span>
             </div>
-            <Meter :value="unpackPercent(unpackProgress)" tone="brand" :aria-label="'拆包进度'" />
+            <Meter
+              :value="unpackPercent(unpackProgress)"
+              tone="brand"
+              :aria-label="t('page.settings.appsource.progressAria')"
+            />
             <p class="st-note mono">{{ unpackProgress?.current || '' }}</p>
           </div>
         </Section>
 
-        <Section title="在产物里检索关键字">
+        <Section :title="t('page.settings.appsource.searchSection')">
           <div class="st-inline">
-            <n-input v-model:value="searchQuery" placeholder="例如 create_canvas / turingSdk" @keyup.enter="runSearch" />
-            <Btn variant="default" size="sm" :icon="RefreshCw" :loading="searching" @click="runSearch">检索</Btn>
+            <n-input
+              v-model:value="searchQuery"
+              :placeholder="t('page.settings.appsource.searchPlaceholder')"
+              @keyup.enter="runSearch"
+            />
+            <Btn variant="default" size="sm" :icon="RefreshCw" :loading="searching" @click="runSearch">
+              {{ t('page.settings.appsource.search') }}
+            </Btn>
           </div>
           <p v-if="searchNote" class="st-note">{{ searchNote }}</p>
           <ul v-if="searchHits.length" class="st-hits">
@@ -806,20 +956,24 @@ onBeforeUnmount(() => {
 
     <FormDrawer
       v-model:show="proxyDrawer"
-      title="添加出口节点"
-      submit-text="添加节点"
+      :title="t('page.settings.proxies.drawerTitle')"
+      :submit-text="t('page.settings.proxies.drawerSubmit')"
       :submit-loading="proxySubmitting"
       :submit-disabled="!proxyDraft.url.trim()"
       @submit="submitProxy"
     >
-      <FormField label="名称（可选）">
+      <FormField :label="t('page.settings.proxies.nameField')">
         <n-input
           :value="proxyDraft.label"
-          placeholder="机房A-01 / 住宅-上海"
+          :placeholder="t('page.settings.proxies.namePlaceholder')"
           @update:value="(value: string) => (proxyDraft.label = value)"
         />
       </FormField>
-      <FormField label="代理地址" required hint="http://user:pass@host:port、socks5://host:port，或 env:变量名 从环境变量读取。">
+      <FormField
+        :label="t('page.settings.proxies.urlField')"
+        required
+        :hint="t('page.settings.proxies.urlHint')"
+      >
         <n-input
           :value="proxyDraft.url"
           placeholder="http://user:pass@host:port"
@@ -827,7 +981,10 @@ onBeforeUnmount(() => {
           @update:value="(value: string) => (proxyDraft.url = value)"
         />
       </FormField>
-      <FormField label="单节点并发" hint="住宅代理建议 1~2，机房可以 5~10。">
+      <FormField
+        :label="t('page.settings.proxies.concurrencyField')"
+        :hint="t('page.settings.proxies.concurrencyHint')"
+      >
         <n-input-number
           :value="proxyDraft.max_concurrency"
           :min="1"
@@ -836,10 +993,13 @@ onBeforeUnmount(() => {
           @update:value="(value: number | null) => (proxyDraft.max_concurrency = value ?? 1)"
         />
       </FormField>
-      <FormField label="分组（可选）" hint="留空 = 默认组；定时任务里按组名选出口。">
+      <FormField
+        :label="t('page.settings.proxies.poolField')"
+        :hint="t('page.settings.proxies.poolHint')"
+      >
         <n-input
           :value="proxyDraft.pool"
-          placeholder="留空 = 默认组"
+          :placeholder="t('page.settings.proxies.poolPlaceholder')"
           @update:value="(value: string) => (proxyDraft.pool = value)"
         />
       </FormField>

@@ -3,6 +3,7 @@
 import { Copy } from 'lucide-vue-next'
 import { NButton } from 'naive-ui'
 import { copyText, useComponentToast } from '../_internal/feedback'
+import { t } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -18,8 +19,8 @@ const toast = useComponentToast()
 
 async function onCopy(): Promise<void> {
   const ok = await copyText(props.code)
-  if (ok) toast.success('已复制')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('common.copied'))
+  else toast.error(t('common.copyFailed'))
 }
 </script>
 
@@ -32,12 +33,12 @@ async function onCopy(): Promise<void> {
         quaternary
         size="tiny"
         class="mh-code__copy"
-        aria-label="复制"
-        title="复制"
+        :aria-label="t('common.copy')"
+        :title="t('common.copy')"
         @click="onCopy"
       >
         <template #icon><Copy :size="14" /></template>
-        复制
+        {{ t('common.copy') }}
       </n-button>
     </div>
     <pre class="mh-code__pre mono" :style="{ maxHeight }"><code>{{ code }}</code></pre>

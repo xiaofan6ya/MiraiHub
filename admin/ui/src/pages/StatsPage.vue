@@ -65,7 +65,9 @@ import {
 const HELP_TEXT =
   '模型调用分析：窗口内的请求、积分、Token、成功率、延迟与吞吐。' +
   '数据来自本地 usage_logs，聚合在 SQL 侧完成；成功率 = 成功请求 / 全部请求，' +
-  '积分与 Token 只统计成功请求，平均耗时也只取成功样本。'
+  '积分与 Token 只统计成功请求，平均耗时也只取成功样本。' +
+  '时间范围是滚动窗口（近 24 小时 / 近 7 天 / 近 30 天），不是自然日；' +
+  '「今日（自然日）」口径在使用记录页，两处数字不同属正常。'
 
 const toast = useToast()
 const platformStore = usePlatformStore()
@@ -78,8 +80,14 @@ const table = useTableQuery('stats', {
 const days = computed(() => normalizeDays(table.state.filters.days))
 const granularity = computed(() => normalizeGranularity(table.state.filters.grain, days.value))
 
+/**
+ * days=1 是**滚动 24 小时**（后端 window.start = 当前 - 24h），不是自然日；
+ * 页面上的按钮按真实口径写「近 24 小时」，与使用记录页的「今日（自然日）」区分。
+ */
+const DAY_LABEL_OVERRIDES: Record<number, string> = { 1: '近 24 小时' }
+
 const dayOptions: Array<SegmentedOption<string>> = STATS_DAYS.map((value) => ({
-  label: STATS_DAYS_LABEL[value],
+  label: DAY_LABEL_OVERRIDES[value] ?? STATS_DAYS_LABEL[value],
   value: String(value),
 }))
 
@@ -294,6 +302,7 @@ watch([days, granularity], () => {
 
       <p class="stats-meta">
         <span>{{ windowText }}</span>
+        <span v-if="days === 1" class="stats-scope">滚动窗口：最近 24 小时，不是自然日</span>
         <span v-if="updatedText">更新于 {{ updatedText }}</span>
         <span v-if="dashboard?.source === 'raw'">数据源：原表（汇总表降级）</span>
       </p>
@@ -410,6 +419,10 @@ watch([days, granularity], () => {
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
+}
+
+.stats-scope {
+  color: var(--fg-2);
 }
 
 .stats-note {
