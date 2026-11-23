@@ -484,6 +484,16 @@ try:
     app.include_router(krowork_accounts_router.router)
 except Exception:  # noqa: BLE001 - krowork 目录被裁剪时降级为不挂载
     logger.exception("KroWork 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.astudio.routers import accounts as astudio_accounts_router
+    app.include_router(astudio_accounts_router.router)
+except Exception:  # noqa: BLE001 - astudio 目录被裁剪时降级为不挂载
+    logger.exception("AStudio 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.codar.routers import accounts as codar_accounts_router
+    app.include_router(codar_accounts_router.router)
+except Exception:  # noqa: BLE001 - codar 目录被裁剪时降级为不挂载
+    logger.exception("科搭 Codar 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1" and not env_guard.IS_PROD:
     # 逆向产物管理（任意目录创建 + 递归读取）：**生产不挂载**。
     # 中间件还有一道 404，双保险 —— 见 env_guard.PROD_BLOCKED_PREFIXES。
