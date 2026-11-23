@@ -32,6 +32,7 @@ import { usePlatformStore } from '@/stores/platform'
 import { ApiError } from '@/api/http'
 import { errorMessage, failureText } from '@/utils/error'
 import { fmtInt } from '@/utils/format'
+import { useI18n } from '@/i18n'
 import {
   formatBalance,
   getGatewayConfig,
@@ -54,21 +55,17 @@ import {
   type SpeedRowView,
 } from '@/api/gateway'
 
-const HELP_TEXT =
-  '配置跨平台调度策略：一个 Key 请求同一个模型时，先交给哪个平台。' +
-  '禁用的平台不参与调度，但其账号仍可查看与管理。' +
-  '顺序、可用性、原因都由后端按当前策略实时计算；前端只负责展示与保存。'
+const { t } = useI18n()
+const helpText = computed(() => t('page.gateway.help'))
+const activityNote = computed(() => t('page.gateway.activityNote'))
+const spreadText = computed(() => t('page.gateway.spreadText'))
+const speedNote = computed(() => t('page.gateway.speedNote'))
 
-const ACTIVITY_NOTE =
-  '所有策略都会叠加「活跃度回温」：24 小时内用过的账号满权重；久未调用的按小时线性降权，' +
-  '超过 72 小时再回来时单号在途先限 1，把「沉默后突然激活」摊成涓流。'
 
-const SPREAD_TEXT =
-  '一个请求如果没带 X-Platform 头、也没绑定到某个 Key，就需要决定它走哪个平台。这个开关就是那个决定。' +
-  '关闭（默认）：一律走默认平台（WorkBuddy），老客户端的模型 ID 不变，行为完全不变。' +
-  '打开：按上面的「调度策略」分到各平台之一 —— 只有当你确认客户端能接受任意平台的模型 ID 时才开。'
 
-const SPEED_NOTE = '表中均为平均值（悬停看中位数）。TTFT 越低越好、TPS 越高越好。'
+
+
+
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -128,7 +125,7 @@ async function loadConfig(): Promise<void> {
     syncDrafts()
   } catch (error) {
     configError.value = toErrorState(error)
-    if (config.value !== null) toast.error(failureText('刷新网关配置', error))
+    if (config.value !== null) toast.error(failureText(t('page.gateway.action.refreshConfig'), error))
   } finally {
     loading.value.config = false
   }
@@ -143,7 +140,7 @@ async function loadOrder(): Promise<void> {
     syncDrafts()
   } catch (error) {
     orderError.value = toErrorState(error)
-    if (config.value !== null) toast.error(failureText('刷新调度顺序', error))
+    if (config.value !== null) toast.error(failureText(t('page.gateway.action.refreshOrder'), error))
   } finally {
     loading.value.order = false
   }
@@ -156,7 +153,7 @@ async function loadSpeed(): Promise<void> {
     speed.value = await getPlatformSpeed(24)
   } catch (error) {
     speedError.value = toErrorState(error)
-    if (speed.value !== null) toast.error(failureText('刷新平台速度', error))
+    if (speed.value !== null) toast.error(failureText(t('page.gateway.action.refreshSpeed'), error))
   } finally {
     loading.value.speed = false
   }
@@ -189,11 +186,15 @@ async function changeStrategy(value: string): Promise<void> {
     const result = await saveGatewayConfig({ strategy: value })
     config.value = result.config
     syncDrafts()
-    toast.success('策略已切换：' + (strategyOf(result.config, value)?.label || value))
+    toast.success(
+      t('page.gateway.toast.strategyChanged', {
+        name: strategyOf(result.config, value)?.label || value,
+      }),
+    )
     await loadOrder()
   } catch (error) {
     if (config.value) config.value = { ...config.value, strategy: previous }
-    toast.error(failureText('切换策略', error))
+    toast.error(failureText(t('page.gateway.action.strategy'), error))
   } finally {
     saving.value.strategy = false
   }
@@ -212,7 +213,7 @@ async function savePriority(next: Record<string, number>, message: string): Prom
     toast.success(message)
     await loadOrder()
   } catch (error) {
-    toast.error(failureText('保存优先级', error))
+    toast.error(failureText(t('page.gateway.action.savePriority'), error))
     await Promise.all([loadConfig(), loadOrder()])
   } finally {
     saving.value.priority = false
@@ -228,7 +229,7 @@ function commitPriority(platformId: string): void {
   const value = Math.max(0, Math.min(9999, Math.round(raw)))
   if (priorityOf(config.value, platformId) === value) return
   const next = { ...(config.value?.priority || {}), [platformId]: value }
-  void savePriority(next, '已保存优先级')
+  void savePriority(next, t('page.gateway.toast.prioritySaved'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -269,7 +270,7 @@ async function onDragEnd(): Promise<void> {
   if (dragIndex.value === null) return
   dragIndex.value = null
   const next = priorityPayload(order.value)
-  await savePriority(next, '已保存调度顺序')
+  await savePriority(next, t('page.gateway.toast.orderSaved'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -280,19 +281,26 @@ async function togglePlatform(row: GatewayOrderItem): Promise<void> {
   const enabling = Boolean(row.disabled)
   if (!enabling) {
     const ok = await confirm({
-      title: '禁用平台网关？',
-      message: '禁用后 ' + row.label + ' 不再参与调度，它的模型权益将不可用；账号数据保留，随时可以恢复。',
-      okText: '禁用',
+      title: t('page.gateway.confirmDisable.title'),
+      message: t('page.gateway.confirmDisable.body', { name: row.label }),
+      okText: t('page.gateway.confirmDisable.ok'),
       danger: true,
     })
     if (!ok) return
   }
   try {
-    await setGatewayEnabled(row.platform, enabling, '控制台手动操作')
-    toast.success(enabling ? '已启用' : '已禁用')
+    await setGatewayEnabled(row.platform, enabling, t('page.gateway.toggleReason'))
+    toast.success(
+      enabling ? t('page.gateway.toast.enabled') : t('page.gateway.toast.disabled'),
+    )
     await Promise.all([loadConfig(), loadOrder()])
   } catch (error) {
-    toast.error(failureText(enabling ? '启用平台' : '禁用平台', error))
+    toast.error(
+      failureText(
+        enabling ? t('page.gateway.action.enable') : t('page.gateway.action.disable'),
+        error,
+      ),
+    )
   }
 }
 
@@ -308,10 +316,10 @@ async function toggleSpread(value: boolean): Promise<void> {
   try {
     const result = await saveGatewayConfig({ spread_unbound: value })
     config.value = result.config
-    toast.success(value ? '已开启：无头请求会按策略分摊到各平台' : '已关闭：无头请求走默认平台')
+    toast.success(value ? t('page.gateway.toast.spreadOn') : t('page.gateway.toast.spreadOff'))
   } catch (error) {
     if (config.value) config.value = { ...config.value, spread_unbound: previous }
-    toast.error(failureText('保存无头请求设置', error))
+    toast.error(failureText(t('page.gateway.action.saveSpread'), error))
   } finally {
     saving.value.spread = false
   }
@@ -344,12 +352,12 @@ const ribbonLanes = computed<RibbonLane[]>(() =>
   })),
 )
 
-const simSource = { label: '模拟请求', total: 100 }
-const simText = computed(() => simulationText(simLanes.value, 100))
+const simSource = computed(() => ({ label: t('page.gateway.simSource'), total: 100 }))
+const simText = computed(() => simulationText(simLanes.value, 100, t))
 
 function runSimulation(): void {
   simulated.value = simulateRouting(order.value, config.value?.strategy || 'priority', 100)
-  toast.success('已模拟 100 个请求')
+  toast.success(t('page.gateway.toast.simulated'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -359,7 +367,7 @@ function runSimulation(): void {
 const speedRows = computed<SpeedRowView[]>(() => toSpeedRows(speed.value?.items))
 const speedTableRows = computed<TableRow[]>(() => speedRows.value as unknown as TableRow[])
 const speedHint = computed(() =>
-  speed.value ? speedPayloadText(speed.value) : '近 24 小时真实请求聚合',
+  speed.value ? speedPayloadText(speed.value, t) : t('page.gateway.speedHintFallback'),
 )
 
 function speedPlatform(row: TableRow): VNodeChild {
@@ -368,8 +376,10 @@ function speedPlatform(row: TableRow): VNodeChild {
   return h('span', { class: 'gw-speed-name' }, [
     h(PlatformLogo, { id: item.platform, size: 18 }),
     h('span', null, item.label || item.platform),
-    fastest ? h(Badge, { tone: 'ok' }, { default: () => '最快' }) : null,
-    item.low_sample ? h(Badge, { tone: 'neutral' }, { default: () => '样本少' }) : null,
+    fastest ? h(Badge, { tone: 'ok' }, { default: () => t('page.gateway.speed.fastest') }) : null,
+    item.low_sample
+      ? h(Badge, { tone: 'neutral' }, { default: () => t('page.gateway.speed.lowSample') })
+      : null,
   ])
 }
 
@@ -381,15 +391,22 @@ function speedRate(row: TableRow): VNodeChild {
 const speedColumns = computed<TableColumn[]>(() => [
   {
     key: 'platform',
-    title: '平台',
+    title: t('page.gateway.speed.platform'),
     mobile: 'title',
     minWidth: 200,
     render: speedPlatform,
   },
-  { key: 'success', title: '成功率', mobile: 'meta', width: 96, numeric: true, render: speedRate },
+  {
+    key: 'success',
+    title: t('page.gateway.speed.successRate'),
+    mobile: 'meta',
+    width: 96,
+    numeric: true,
+    render: speedRate,
+  },
   {
     key: 'ttfb',
-    title: 'TTFT 均值',
+    title: t('page.gateway.speed.ttfb'),
     mobile: 'meta',
     width: 108,
     numeric: true,
@@ -397,7 +414,7 @@ const speedColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'tps',
-    title: 'TPS 均值',
+    title: t('page.gateway.speed.tps'),
     mobile: 'meta',
     width: 116,
     numeric: true,
@@ -405,7 +422,7 @@ const speedColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'latency',
-    title: '总耗时均值',
+    title: t('page.gateway.speed.latency'),
     mobile: 'meta',
     width: 116,
     numeric: true,
@@ -413,7 +430,7 @@ const speedColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'samples',
-    title: '样本',
+    title: t('page.gateway.speed.samples'),
     mobile: 'meta',
     width: 84,
     numeric: true,
@@ -445,15 +462,17 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="gateway-page">
-    <PageHeader title="平台网关" :help="HELP_TEXT">
+    <PageHeader :title="t('page.gateway.title')" :help="helpText">
       <template #actions>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="refreshing" @click="loadAll">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="refreshing" @click="loadAll">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
     <ErrorBlock
       v-if="pageError"
-      title="加载平台网关配置失败"
+      :title="t('page.gateway.loadFailed')"
       :detail="pageError.detail"
       @retry="loadAll"
     />
@@ -465,10 +484,17 @@ onBeforeUnmount(() => {
     <template v-else>
       <!-- 调度策略 -->
       <Card class="gw-strategy-card" :loading="loading.config || saving.strategy">
-        <template #title>调度策略</template>
-        <template #extra><span class="gw-sub">切换后立即生效，无需重启</span></template>
+        <template #title>{{ t('page.gateway.strategy.title') }}</template>
+        <template #extra>
+          <span class="gw-sub">{{ t('page.gateway.strategy.hint') }}</span>
+        </template>
 
-        <div v-if="config" class="gw-strategy-grid" role="radiogroup" aria-label="调度策略">
+        <div
+          v-if="config"
+          class="gw-strategy-grid"
+          role="radiogroup"
+          :aria-label="t('page.gateway.strategy.title')"
+        >
           <button
             v-for="item in config.strategies"
             :key="item.value"
@@ -486,33 +512,37 @@ onBeforeUnmount(() => {
         <p v-if="config" class="gw-strategy__detail">
           {{ strategyDescription(config) }}
         </p>
-        <p class="gw-note">{{ ACTIVITY_NOTE }}</p>
+        <p class="gw-note">{{ activityNote }}</p>
       </Card>
 
       <div class="gw-split">
         <!-- 当前调度顺序 -->
         <Card class="gw-order-card" :loading="loading.order || saving.priority">
-          <template #title>当前调度顺序</template>
+          <template #title>{{ t('page.gateway.order.title') }}</template>
           <template #extra>
             <span class="gw-sub">
-              {{ isPriorityStrategy ? '拖拽或改优先级数字，松手即保存' : '按当前策略实际排出的顺序' }}
+              {{
+                isPriorityStrategy
+                  ? t('page.gateway.order.hintEditable')
+                  : t('page.gateway.order.hintReadonly')
+              }}
             </span>
             <HelpTip
-              content="顺序由后端按当前策略实时计算。优先级策略下可以拖拽（松手重排为 10/20/30… 并保存）；其它策略只读。"
-              label="调度顺序说明"
+              :content="t('page.gateway.order.helpContent')"
+              :label="t('page.gateway.order.helpLabel')"
             />
           </template>
 
           <ErrorBlock
             v-if="orderError"
             compact
-            :title="'加载调度顺序失败：' + orderError.message"
+            :title="t('page.gateway.order.loadFailed', { reason: orderError.message })"
             :detail="orderError.detail"
             @retry="loadOrder"
           />
           <Empty
             v-else-if="!order.length"
-            description="当前没有可用平台（全部被禁用或没有可用账号）。"
+            :description="t('page.gateway.order.empty')"
           />
           <div v-else class="gw-order">
             <div
@@ -541,22 +571,35 @@ onBeforeUnmount(() => {
                     :show-button="false"
                     :value="drafts[row.platform]"
                     :disabled="saving.priority"
-                    :aria-label="'优先级：' + (row.label || row.platform)"
+                    :aria-label="
+                      t('page.gateway.order.priorityAria', { name: row.label || row.platform })
+                    "
                     @update:value="(value: number | null) => (drafts[row.platform] = typeof value === 'number' ? value : 0)"
                     @blur="commitPriority(row.platform)"
                     @keyup.enter="commitPriority(row.platform)"
                   />
-                  <span class="gw-sub">优先级</span>
+                  <span class="gw-sub">{{ t('page.gateway.order.priority') }}</span>
                 </template>
-                <span v-else class="gw-sub">优先级 {{ priorityOf(config, row.platform) }}</span>
+                <span v-else class="gw-sub">
+                  {{ t('page.gateway.order.priorityValue', { value: priorityOf(config, row.platform) }) }}
+                </span>
               </span>
 
               <span class="gw-order__meta">
-                {{ row.usable }} 可用 · 额度 {{ formatBalance(row.balance_remain) }}
+                {{
+                  t('page.gateway.order.meta', {
+                    usable: row.usable,
+                    balance: formatBalance(row.balance_remain),
+                  })
+                }}
               </span>
               <span class="gw-order__reason">
-                <Badge v-if="row.disabled" tone="danger" dot>已禁用</Badge>
-                <Badge v-else-if="!row.available" tone="neutral">无可用账号</Badge>
+                <Badge v-if="row.disabled" tone="danger" dot>
+                  {{ t('page.gateway.order.disabled') }}
+                </Badge>
+                <Badge v-else-if="!row.available" tone="neutral">
+                  {{ t('page.gateway.order.noAccounts') }}
+                </Badge>
                 <span class="gw-sub">{{ row.reason || '—' }}</span>
               </span>
               <Btn
@@ -565,7 +608,7 @@ onBeforeUnmount(() => {
                 :disabled="saving.priority"
                 @click="togglePlatform(row)"
               >
-                {{ row.disabled ? '启用' : '禁用' }}
+                {{ row.disabled ? t('page.gateway.action.enable') : t('page.gateway.action.disable') }}
               </Btn>
             </div>
           </div>
@@ -573,62 +616,66 @@ onBeforeUnmount(() => {
 
         <!-- 调度预演 -->
         <Card class="gw-sim-card" :loading="loading.order || loading.speed">
-          <template #title>调度预演</template>
-          <template #extra><span class="gw-sub">按当前策略的预期分流比例</span></template>
+          <template #title>{{ t('page.gateway.sim.title') }}</template>
+          <template #extra>
+            <span class="gw-sub">{{ t('page.gateway.sim.hint') }}</span>
+          </template>
 
           <RouteRibbon
             v-if="ribbonLanes.length"
             :source="simSource"
             :lanes="ribbonLanes"
-            unit="次"
+            :unit="t('page.gateway.sim.unit')"
           />
-          <Empty v-else description="没有可调度的平台，无法预演。" />
+          <Empty v-else :description="t('page.gateway.sim.empty')" />
 
           <p class="gw-sim__text">{{ simText }}</p>
           <div class="gw-sim__actions">
             <Btn variant="primary" :disabled="!order.length" @click="runSimulation">
-              模拟 100 个请求
+              {{ t('page.gateway.sim.run') }}
             </Btn>
-            <span class="gw-sub">纯前端模拟，用于解释当前顺序；不代表真实流量。</span>
+            <span class="gw-sub">{{ t('page.gateway.sim.note') }}</span>
           </div>
         </Card>
       </div>
 
       <!-- 无头请求 -->
       <Card class="gw-spread-card" :loading="saving.spread">
-        <template #title>无头请求走哪个平台</template>
-        <template #extra><span class="gw-sub">不带 X-Platform 且未绑定 Key 的请求</span></template>
+        <template #title>{{ t('page.gateway.spread.title') }}</template>
+        <template #extra>
+          <span class="gw-sub">{{ t('page.gateway.spread.hint') }}</span>
+        </template>
         <div class="gw-spread">
           <NSwitch
             :value="config?.spread_unbound === true"
             :loading="saving.spread"
             :disabled="!config || saving.spread"
-            aria-label="无头请求参与负载分摊"
+            :aria-label="t('page.gateway.spread.aria')"
             @update:value="toggleSpread"
           />
           <div class="gw-spread__text">
-            <strong>参与负载分摊</strong>
-            <p class="gw-sub">{{ SPREAD_TEXT }}</p>
+            <strong>{{ t('page.gateway.spread.switch') }}</strong>
+            <p class="gw-sub">{{ spreadText }}</p>
           </div>
         </div>
       </Card>
 
       <!-- 平台速度 -->
       <Card class="gw-speed-card" :loading="loading.speed">
-        <template #title>平台速度 · TTFT / TPS（近 24 小时）</template>
+        <template #title>{{ t('page.gateway.speed.title') }}</template>
         <template #extra><span class="gw-sub">{{ speedHint }}</span></template>
 
         <ErrorBlock
           v-if="speedError"
           compact
-          :title="'加载平台速度失败：' + speedError.message"
+          :title="t('page.gateway.speed.loadFailed', { reason: speedError.message })"
           :detail="speedError.detail"
           @retry="loadSpeed"
         />
         <div v-else-if="loading.speed && !speed" class="gw-skeleton" aria-busy="true">
           <NSkeleton v-for="index in 4" :key="index" height="40px" />
         </div>
-        <Empty v-else-if="!speedRows.length" description="近 24 小时还没有样本。" />
+        <Empty v-else-if="!speedRows.length" :description="t('page.gateway.speed.empty')" />
         <template v-else>
           <DataTable
             table-id="gateway-speed"
@@ -637,9 +684,9 @@ onBeforeUnmount(() => {
             row-key="platform"
             :pagination="false"
             :virtual-scroll="false"
-            empty-description="近 24 小时还没有样本。"
+            :empty-description="t('page.gateway.speed.empty')"
           />
-          <p class="gw-note">{{ SPEED_NOTE }}</p>
+          <p class="gw-note">{{ speedNote }}</p>
         </template>
       </Card>
     </template>

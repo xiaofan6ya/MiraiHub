@@ -34,6 +34,7 @@ import { useConfirm, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError } from '@/api/http'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import {
   FINGERPRINT_FIELDS,
   VERSION_FIELDS,
@@ -47,37 +48,28 @@ import {
   runtimeView,
   saveClientProfile,
   scanView,
+  headerSourceTone,
   sourceLabel,
-  sourceRows,
   sourceTone,
+  sourceRows,
   type ClientDetectPayload,
   type ClientProfilePayload,
 } from '@/api/client'
 
-const HELP_TEXT =
-  'UA、版本号与风控头按平台分别保存，改完保存即生效，不需要重启服务。' +
-  '档案由「内置兜底 ← 现场探测 / 已保存 ← 环境变量」合成；UA 始终由桌面端版本与 CLI 版本现拼。' +
-  '线上实例探测不到客户端时，请把取值策略切换为「钉住已保存值」，否则会退回内置兜底版本号。'
-
-const SCAN_HELP = '这些目录里没有凭据文件不代表未登录，仅表示未在本机落盘。目录名固定，系统会自动在所有盘符与父文件夹中定位。'
-
-const UA_HELP =
-  'UA 由「桌面端版本」与「CLI 版本」自动拼成三段式，两者一致才能避免「UA 报旧版本、X-IDE-Version 报新版本」的错位。' +
-  '要整体自定义请用环境变量 WORKBUDDY_USER_AGENT。'
-
-const HEADERS_HELP =
-  '客户端源码中观察到的兼容请求头。实际发送范围由端点决定；多个默认头会与保存值合并，不会互相覆盖。' +
-  '「运行时生成」的头由账号凭据 / 调用方上下文动态产生，不在本页保存。'
-
-const SECTIONS = [
-  { id: 'client-scan', title: '扫描位置' },
-  { id: 'client-runtime', title: '运行时诊断' },
-  { id: 'client-ua', title: '生效中的 User-Agent' },
-  { id: 'client-version', title: '版本与归属' },
-  { id: 'client-fingerprint', title: '桌面事件指纹' },
-  { id: 'client-headers', title: '风控 / 审计请求头' },
-  { id: 'client-sources', title: '取值来源' },
-]
+const { t } = useI18n()
+const helpText = computed(() => t('page.client.help'))
+const scanHelp = computed(() => t('page.client.scanHelp'))
+const uaHelp = computed(() => t('page.client.uaHelp'))
+const headersHelp = computed(() => t('page.client.headersHelp'))
+const sections = computed(() => [
+  { id: 'client-scan', title: t('page.client.section.scan') },
+  { id: 'client-runtime', title: t('page.client.section.runtime') },
+  { id: 'client-ua', title: t('page.client.section.ua') },
+  { id: 'client-version', title: t('page.client.section.version') },
+  { id: 'client-fingerprint', title: t('page.client.section.fingerprint') },
+  { id: 'client-headers', title: t('page.client.section.headers') },
+  { id: 'client-sources', title: t('page.client.section.sources') },
+])
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -154,7 +146,7 @@ async function loadProfile(): Promise<void> {
     fillForms()
   } catch (err) {
     error.value = toErrorState(err)
-    if (profile.value !== null) toast.error(failureText('刷新客户端参数', err))
+    if (profile.value !== null) toast.error(failureText(t('page.client.action.refresh'), err))
   } finally {
     loading.value = false
   }
@@ -173,7 +165,7 @@ async function saveCard(kind: 'version' | 'fingerprint'): Promise<void> {
     return
   }
   if (!Object.keys(result.profile).length) {
-    toast.warning('没有要保存的改动（留空的字段不会提交）')
+    toast.warning(t('page.client.toast.noChanges'))
     return
   }
   saving[kind] = true
@@ -181,10 +173,15 @@ async function saveCard(kind: 'version' | 'fingerprint'): Promise<void> {
     const payload = await saveClientProfile({ profile: result.profile, merge: true })
     profile.value = payload
     fillForms()
-    toast.success('已保存，新值立即生效')
-    if (payload.errors?.length) toast.warning(payload.errors.join('；'))
+    toast.success(t('page.client.toast.saved'))
+    if (payload.errors?.length) toast.warning(payload.errors.join(t('page.client.listSeparator')))
   } catch (err) {
-    toast.error(failureText(kind === 'version' ? '保存版本与归属' : '保存桌面事件指纹', err))
+    toast.error(
+      failureText(
+        kind === 'version' ? t('page.client.action.saveVersion') : t('page.client.action.saveFingerprint'),
+        err,
+      ),
+    )
   } finally {
     saving[kind] = false
   }
@@ -194,7 +191,7 @@ function resetCard(kind: 'version' | 'fingerprint'): void {
   const baseline = kind === 'version' ? versionBaseline : fingerprintBaseline
   const form = kind === 'version' ? versionForm : fingerprintForm
   fillForm(form, baseline)
-  toast.info('已恢复为当前生效值')
+  toast.info(t('page.client.toast.restored'))
 }
 
 async function toggleSource(): Promise<void> {
@@ -206,10 +203,10 @@ async function toggleSource(): Promise<void> {
     profile.value = payload
     fillForms()
     toast.success(
-      next === 'saved' ? '已切换为「钉住已保存值」' : '已切换为「优先现场探测」',
+      next === 'saved' ? t('page.client.toast.sourceSaved') : t('page.client.toast.sourceDetect'),
     )
   } catch (err) {
-    toast.error(failureText('切换取值策略', err))
+    toast.error(failureText(t('page.client.action.toggleSource'), err))
   } finally {
     saving.source = false
   }
@@ -217,9 +214,9 @@ async function toggleSource(): Promise<void> {
 
 async function resetAll(): Promise<void> {
   const ok = await confirm({
-    title: '重置客户端参数？',
-    message: '清空后台保存的值，回到「优先现场探测 + 内置兜底」。已保存的版本号与指纹会丢失。',
-    okText: '重置',
+    title: t('page.client.confirmReset.title'),
+    message: t('page.client.confirmReset.body'),
+    okText: t('page.client.confirmReset.ok'),
     danger: true,
   })
   if (!ok) return
@@ -228,9 +225,9 @@ async function resetAll(): Promise<void> {
     profile.value = await resetClientProfile()
     detected.value = null
     fillForms()
-    toast.success('已重置')
+    toast.success(t('page.client.toast.reset'))
   } catch (err) {
-    toast.error(failureText('重置客户端参数', err))
+    toast.error(failureText(t('page.client.action.reset'), err))
   } finally {
     saving.reset = false
   }
@@ -242,11 +239,11 @@ async function runDetect(): Promise<void> {
   try {
     const payload = await detectClient()
     detected.value = payload
-    if (payload.has_client) toast.success(payload.message || '已探测到本机客户端')
-    else toast.warning(payload.message || '未探测到本机客户端')
+    if (payload.has_client) toast.success(payload.message || t('page.client.toast.detected'))
+    else toast.warning(payload.message || t('page.client.toast.notDetected'))
     await loadProfile()
   } catch (err) {
-    toast.error(failureText('探测本机客户端', err))
+    toast.error(failureText(t('page.client.action.detect'), err))
   } finally {
     saving.detect = false
   }
@@ -258,49 +255,64 @@ async function runDetect(): Promise<void> {
 
 const scan = computed(() => scanView(profile.value, detected.value))
 const runtime = computed(() => runtimeView(detected.value?.runtime_diagnostics || profile.value?.runtime_diagnostics))
-const uaText = computed(() => detected.value?.ua || profile.value?.ua || '（未知）')
+const uaText = computed(() => detected.value?.ua || profile.value?.ua || t('page.client.uaUnknown'))
 const headerTableRows = computed<TableRow[]>(() => headerRows(profile.value) as unknown as TableRow[])
 const sources = computed(() => sourceRows(profile.value?.sources))
 const sourcesOpen = ref(false)
 const visibleSources = computed(() => (sources.value.length > 10 && !sourcesOpen.value ? sources.value.slice(0, 10) : sources.value))
 
-const sourceMode = computed(() => (profile.value?.source === 'saved' ? '钉住已保存值' : '优先现场探测'))
+const sourceMode = computed(() =>
+  profile.value?.source === 'saved'
+    ? t('page.client.sourceMode.saved')
+    : t('page.client.sourceMode.detect'),
+)
 const platformLabel = computed(() => platform.currentSpec?.label || platform.storagePlatform || 'WorkBuddy')
 
 const scanKv = computed<KvItem[]>(() => {
   if (!profile.value) return []
   return [
-    { label: '状态', value: scan.value.stateText },
-    { label: '本机客户端', value: profile.value.has_client ? '已探测到（' + Object.keys(profile.value.detected || {}).length + ' 项）' : '未探测到' },
-    { label: '取值策略', value: sourceMode.value },
-    { label: '已保存字段', value: String(Object.keys(profile.value.saved || {}).length) },
-    { label: '扫描目录', value: String(scan.value.dirs.length) + ' 个' },
+    { label: t('page.client.kv.state'), value: scan.value.stateText },
+    {
+      label: t('page.client.kv.detected'),
+      value: profile.value.has_client
+        ? t('page.client.kv.detectedYes', { count: Object.keys(profile.value.detected || {}).length })
+        : t('page.client.kv.detectedNo'),
+    },
+    { label: t('page.client.kv.sourceMode'), value: sourceMode.value },
+    {
+      label: t('page.client.kv.savedFields'),
+      value: String(Object.keys(profile.value.saved || {}).length),
+    },
+    {
+      label: t('page.client.kv.scanDirs'),
+      value: t('page.client.kv.scanDirsValue', { count: scan.value.dirs.length }),
+    },
   ]
 })
 
 const headerColumns = computed<TableColumn[]>(() => [
   {
     key: 'name',
-    title: '请求头',
+    title: t('page.client.col.header'),
     mobile: 'title',
     minWidth: 220,
     render: (row: TableRow) => (row as unknown as { name: string }).name,
   },
   {
     key: 'value',
-    title: '值',
+    title: t('page.client.col.value'),
     mobile: 'subtitle',
     minWidth: 260,
     render: (row: TableRow) => (row as unknown as { value: string }).value,
   },
   {
     key: 'source',
-    title: '来源',
+    title: t('page.client.col.source'),
     mobile: 'meta',
     minWidth: 200,
     render: (row: TableRow) => {
       const item = row as unknown as { source: string }
-      const tone = item.source.startsWith('档案值') ? 'brand' : item.source.startsWith('SDK') ? 'ok' : 'neutral'
+      const tone = headerSourceTone(item.source)
       return h(Badge, { tone }, { default: () => item.source })
     },
   },
@@ -329,27 +341,39 @@ onBeforeUnmount(() => {
 
 <template>
   <SettingsLayout
-    title="客户端参数"
-    :help="HELP_TEXT"
-    :sections="SECTIONS"
+    :title="t('page.client.title')"
+    :help="helpText"
+    :sections="sections"
     :dirty="dirty"
   >
     <template #actions>
-      <Btn variant="default" :icon="Search" :loading="saving.detect" @click="runDetect">探测本机客户端</Btn>
-      <Btn variant="quiet" :loading="saving.source" :disabled="!profile" @click="toggleSource">
-        取值策略：{{ sourceMode }}
+      <Btn variant="default" :icon="Search" :loading="saving.detect" @click="runDetect">
+        {{ t('page.client.action.detect') }}
       </Btn>
-      <Btn variant="quiet" :loading="saving.reset" :disabled="!profile" @click="resetAll">重置</Btn>
-      <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadProfile">刷新</Btn>
+      <Btn variant="quiet" :loading="saving.source" :disabled="!profile" @click="toggleSource">
+        {{ t('page.client.sourceModeLabel', { mode: sourceMode }) }}
+      </Btn>
+      <Btn variant="quiet" :loading="saving.reset" :disabled="!profile" @click="resetAll">
+        {{ t('page.client.action.reset') }}
+      </Btn>
+      <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadProfile">
+        {{ t('common.refresh') }}
+      </Btn>
     </template>
 
     <ErrorBlock
       v-if="pageError"
-      title="加载客户端参数失败"
+      :title="t('page.client.loadFailed')"
       :detail="pageError.detail"
       @retry="loadProfile"
     />
-    <SettingsCard v-else-if="firstLoading" id="client-loading" title="读取客户端参数…" hide-save hide-reset>
+    <SettingsCard
+      v-else-if="firstLoading"
+      id="client-loading"
+      :title="t('page.client.loadingCard')"
+      hide-save
+      hide-reset
+    >
       <div class="cl-skeleton" aria-busy="true">
         <NSkeleton v-for="index in 6" :key="index" height="32px" />
       </div>
@@ -357,14 +381,22 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <!-- 1. 扫描位置 -->
-      <SettingsCard id="client-scan" title="扫描位置" :loading="saving.detect" hide-save hide-reset>
+      <SettingsCard
+        id="client-scan"
+        :title="t('page.client.section.scan')"
+        :loading="saving.detect"
+        hide-save
+        hide-reset
+      >
         <template #actions>
-          <Btn variant="quiet" size="sm" :loading="saving.detect" @click="runDetect">重新探测</Btn>
-          <HelpTip :content="SCAN_HELP" label="扫描位置说明" />
+          <Btn variant="quiet" size="sm" :loading="saving.detect" @click="runDetect">
+            {{ t('page.client.action.detectAgain') }}
+          </Btn>
+          <HelpTip :content="scanHelp" :label="t('page.client.scanHelpLabel')" />
         </template>
 
-        <p class="cl-sub">当前平台：{{ platformLabel }} · 本机路径与凭据位置（只读，客户端档案是 WorkBuddy 的全局设置）。</p>
-        <Section title="状态" first>
+        <p class="cl-sub">{{ t('page.client.scanIntro', { platform: platformLabel }) }}</p>
+        <Section :title="t('page.client.section.state')" first>
           <div class="cl-rows">
             <div v-for="item in scanKv" :key="item.label" class="cl-row">
               <span class="cl-row__label">{{ item.label }}</span>
@@ -373,36 +405,45 @@ onBeforeUnmount(() => {
           </div>
         </Section>
 
-        <Section title="扫描目录">
+        <Section :title="t('page.client.section.dirs')">
           <ul v-if="scan.dirs.length" class="cl-list">
             <li v-for="dir in scan.dirs" :key="dir"><code class="mono">{{ dir }}</code></li>
           </ul>
           <p v-else class="cl-sub">—</p>
         </Section>
 
-        <Section v-if="scan.items.length" title="凭据位置（不含令牌）">
+        <Section v-if="scan.items.length" :title="t('page.client.section.credentialPaths')">
           <ul class="cl-list">
             <li v-for="(item, index) in scan.items" :key="index">
-              <span class="cl-tag">{{ item.plain ? '明文' : '加密' }}</span>
+              <span class="cl-tag">
+                {{ item.plain ? t('page.client.credential.plain') : t('page.client.credential.encrypted') }}
+              </span>
               <code class="mono">{{ item.where }}</code>
               <span v-if="item.who" class="cl-sub">{{ item.who }}</span>
             </li>
           </ul>
         </Section>
 
-        <p v-if="scan.baseUrl" class="cl-sub">上游地址：<code class="mono">{{ scan.baseUrl }}</code></p>
+        <p v-if="scan.baseUrl" class="cl-sub">
+          {{ t('page.client.scanBaseUrl') }}<code class="mono">{{ scan.baseUrl }}</code>
+        </p>
         <p v-if="scan.hint" class="cl-sub">{{ scan.hint }}</p>
         <p v-for="err in scan.errors" :key="err" class="cl-error">{{ err }}</p>
       </SettingsCard>
 
       <!-- 2. 运行时诊断 -->
-      <SettingsCard id="client-runtime" title="运行时诊断" hide-save hide-reset>
+      <SettingsCard
+        id="client-runtime"
+        :title="t('page.client.section.runtime')"
+        hide-save
+        hide-reset
+      >
         <template #actions>
-          <Badge v-if="runtime.warning" tone="warn" dot>有异常项</Badge>
-          <HelpTip content="能力状态与请求头名称（不含令牌）。原生 SDK 不可用时不要手工填写或伪造设备令牌。" label="运行时诊断说明" />
+          <Badge v-if="runtime.warning" tone="warn" dot>{{ t('page.client.runtime.warning') }}</Badge>
+          <HelpTip :content="t('page.client.runtime.help')" :label="t('page.client.runtime.helpLabel')" />
         </template>
 
-        <Section title="能力状态" first>
+        <Section :title="t('page.client.section.capabilities')" first>
           <div class="cl-rows">
             <div v-for="row in runtime.rows" :key="row.label" class="cl-row">
               <span class="cl-row__label">{{ row.label }}</span>
@@ -414,33 +455,35 @@ onBeforeUnmount(() => {
           </div>
         </Section>
 
-        <Section title="请求头字段组">
+        <Section :title="t('page.client.section.headerGroups')">
           <div v-if="runtime.groups.length" class="cl-rows">
             <div v-for="group in runtime.groups" :key="group.name" class="cl-row">
               <span class="cl-row__label mono">{{ group.name }}</span>
               <span class="cl-row__value mono cl-wrap">{{ group.headers.join(', ') || '—' }}</span>
             </div>
           </div>
-          <Empty v-else description="没有运行时诊断信息（后端未提供 header_groups）。" />
+          <Empty v-else :description="t('page.client.runtime.empty')" />
         </Section>
         <p class="cl-note">{{ runtime.note }}</p>
       </SettingsCard>
 
       <!-- 3. 生效中的 UA -->
-      <SettingsCard id="client-ua" title="生效中的 User-Agent" hide-save hide-reset>
-        <template #actions><HelpTip :content="UA_HELP" label="User-Agent 说明" /></template>
+      <SettingsCard id="client-ua" :title="t('page.client.section.ua')" hide-save hide-reset>
+        <template #actions>
+          <HelpTip :content="uaHelp" :label="t('page.client.uaHelpLabel')" />
+        </template>
         <CodeBlock :code="uaText" language="http" />
-        <p class="cl-note">UA 始终由版本号现拼；想整体自定义请用环境变量 WORKBUDDY_USER_AGENT。</p>
+        <p class="cl-note">{{ t('page.client.uaNote') }}</p>
       </SettingsCard>
 
       <!-- 4. 版本与归属 -->
       <SettingsCard
         id="client-version"
-        title="版本与归属"
-        description="改完保存即生效，不需要重启服务。留空提交的字段不会覆盖已保存值。"
+        :title="t('page.client.section.version')"
+        :description="t('page.client.version.description')"
         :dirty="versionDirty"
         :loading="saving.version"
-        save-label="保存版本与归属"
+        :save-label="t('page.client.action.saveVersion')"
         :save-disabled="!versionDirty || saving.version"
         @save="saveCard('version')"
         @reset="resetCard('version')"
@@ -475,11 +518,11 @@ onBeforeUnmount(() => {
       <!-- 5. 桌面事件指纹 -->
       <SettingsCard
         id="client-fingerprint"
-        title="桌面事件指纹"
-        description="遥测事件里的设备与产品形态；OS / 硬件 / 时区按本机系统实测（装了客户端才准确）。"
+        :title="t('page.client.section.fingerprint')"
+        :description="t('page.client.fingerprint.description')"
         :dirty="fingerprintDirty"
         :loading="saving.fingerprint"
-        save-label="保存桌面事件指纹"
+        :save-label="t('page.client.action.saveFingerprint')"
         :save-disabled="!fingerprintDirty || saving.fingerprint"
         @save="saveCard('fingerprint')"
         @reset="resetCard('fingerprint')"
@@ -512,8 +555,10 @@ onBeforeUnmount(() => {
       </SettingsCard>
 
       <!-- 6. 风控 / 审计请求头 -->
-      <SettingsCard id="client-headers" title="风控 / 审计请求头" hide-save hide-reset>
-        <template #actions><HelpTip :content="HEADERS_HELP" label="请求头说明" /></template>
+      <SettingsCard id="client-headers" :title="t('page.client.section.headers')" hide-save hide-reset>
+        <template #actions>
+          <HelpTip :content="headersHelp" :label="t('page.client.headersHelpLabel')" />
+        </template>
         <DataTable
           table-id="client-headers"
           :columns="headerColumns"
@@ -521,18 +566,18 @@ onBeforeUnmount(() => {
           row-key="name"
           :pagination="false"
           :virtual-scroll="false"
-          empty-description="没有可展示的请求头（后端未提供 header_groups）。"
+          :empty-description="t('page.client.headers.empty')"
         >
           <template #empty>
-            <Empty description="没有可展示的请求头（后端未提供 header_groups）。" />
+            <Empty :description="t('page.client.headers.empty')" />
           </template>
         </DataTable>
       </SettingsCard>
 
       <!-- 7. 取值来源 -->
-      <SettingsCard id="client-sources" title="取值来源" hide-save hide-reset>
+      <SettingsCard id="client-sources" :title="t('page.client.section.sources')" hide-save hide-reset>
         <template #actions>
-          <span class="cl-sub">每个参数来自现场探测还是存档（排障用）</span>
+          <span class="cl-sub">{{ t('page.client.sources.intro') }}</span>
         </template>
         <div v-if="sources.length" class="cl-rows">
           <div v-for="row in visibleSources" :key="row.key" class="cl-row">
@@ -542,10 +587,14 @@ onBeforeUnmount(() => {
             </span>
           </div>
         </div>
-        <Empty v-else description="没有来源信息。" />
+        <Empty v-else :description="t('page.client.sources.empty')" />
         <div v-if="sources.length > 10" class="cl-more">
           <Btn variant="quiet" size="sm" @click="sourcesOpen = !sourcesOpen">
-            {{ sourcesOpen ? '收起' : '展开全部（' + sources.length + ' 项）' }}
+            {{
+              sourcesOpen
+                ? t('common.collapseDetails')
+                : t('page.client.sources.expand', { count: sources.length })
+            }}
           </Btn>
         </div>
       </SettingsCard>

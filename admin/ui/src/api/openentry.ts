@@ -16,6 +16,7 @@
  *   3. 文案上限与后端 _sanitize_copy 完全一致，前端先拦并指行号。
  */
 import { http } from './http'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* -------------------------------------------------------------------------- */
 /* 后端形状                                                                    */
@@ -121,12 +122,26 @@ export function getAdminTickets(signal?: AbortSignal): Promise<AdminTicketsPaylo
 /* -------------------------------------------------------------------------- */
 
 /** 秒 → 人话（0 = 永久；≥1 天按天、≥1 小时按小时、其余按分钟）。 */
-export function ttlLabel(seconds: unknown): string {
+export function ttlLabel(seconds: unknown, translate?: Translate): string {
+  const tr = translate ?? defaultTranslate
   const n = Number(seconds)
-  if (!Number.isFinite(n) || n <= 0) return '永久'
-  if (n >= 86400) return Math.round(n / 86400) + ' 天'
-  if (n >= 3600) return Math.round(n / 3600) + ' 小时'
-  return Math.max(1, Math.round(n / 60)) + ' 分钟'
+  if (!Number.isFinite(n) || n <= 0) return tr('page.openentry.ttl.permanent')
+  if (n >= 86400) return tr('page.openentry.ttl.days', { n: Math.round(n / 86400) })
+  if (n >= 3600) return tr('page.openentry.ttl.hours', { n: Math.round(n / 3600) })
+  return tr('page.openentry.ttl.minutes', { n: Math.max(1, Math.round(n / 60)) })
+}
+
+/** 链接时效下拉（默认中文；英文走 ttlOptions()）。 */
+export function ttlOptions(translate?: Translate): Array<{ label: string; value: string }> {
+  const tr = translate ?? defaultTranslate
+  return [
+    { label: tr('page.openentry.ttl.permanent'), value: '0' },
+    { label: tr('page.openentry.ttl.hours', { n: 1 }), value: '3600' },
+    { label: tr('page.openentry.ttl.hours', { n: 6 }), value: '21600' },
+    { label: tr('page.openentry.ttl.hours', { n: 24 }), value: '86400' },
+    { label: tr('page.openentry.ttl.days', { n: 3 }), value: '259200' },
+    { label: tr('page.openentry.ttl.days', { n: 7 }), value: '604800' },
+  ]
 }
 
 /** 链接时效下拉（与旧版一致的五档 + 永久）。 */
@@ -146,35 +161,50 @@ export function buildTicketUrl(code: string, origin: string): string {
 }
 
 /** 链接状态文案：永久有效 / 剩余 X。 */
-export function ticketExpiryText(ticket: OpenTicket | null | undefined): string {
+export function ticketExpiryText(ticket: OpenTicket | null | undefined, translate?: Translate): string {
   if (!ticket) return '—'
-  if (ticket.permanent) return '永久有效'
-  return '剩余 ' + ttlLabel(ticket.expires_in)
+  const tr = translate ?? defaultTranslate
+  if (ticket.permanent) return tr('page.openentry.ticket.permanent')
+  return tr('page.openentry.ticket.remaining', { ttl: ttlLabel(ticket.expires_in, translate) })
 }
 
 /** 入口状态：Badge 文案与语气。 */
-export function gateStateOf(status: GateStatus | null | undefined): {
+export function gateStateOf(
+  status: GateStatus | null | undefined,
+  translate?: Translate,
+): {
   label: string
   tone: 'ok' | 'neutral'
 } {
-  return status?.open ? { label: '已开放', tone: 'ok' } : { label: '已关闭', tone: 'neutral' }
+  const tr = translate ?? defaultTranslate
+  return status?.open
+    ? { label: tr('page.openentry.state.open'), tone: 'ok' }
+    : { label: tr('page.openentry.state.closed'), tone: 'neutral' }
 }
 
 /** 「代次 7 · 可用票据 3 · 有效邀请码 1」。 */
-export function gateMetaText(status: GateStatus | null | undefined): string {
+export function gateMetaText(
+  status: GateStatus | null | undefined,
+  translate?: Translate,
+): string {
   if (!status) return ''
-  return (
-    '代次 ' + Number(status.epoch || 0) +
-    ' · 可用票据 ' + Number(status.active_tickets || 0) +
-    ' · 有效邀请码 ' + Number(status.active_invites || 0)
-  )
+  const tr = translate ?? defaultTranslate
+  return tr('page.openentry.gateMeta', {
+    epoch: Number(status.epoch || 0),
+    tickets: Number(status.active_tickets || 0),
+    invites: Number(status.active_invites || 0),
+  })
 }
 
 /** 「已开放 3 / 5 · 点击切换，立即生效」。 */
-export function platformFlagSummary(platforms: OpenPlatform[] | null | undefined): string {
+export function platformFlagSummary(
+  platforms: OpenPlatform[] | null | undefined,
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
   const list = platforms || []
   const on = list.filter((item) => item.enabled).length
-  return '已开放 ' + on + ' / ' + list.length + ' · 切换立即生效'
+  return tr('page.openentry.platformSummary', { on, total: list.length })
 }
 
 /** 文案草稿 → 提交形状（去首尾空白、丢空行，说明最多 6 行）。 */
@@ -199,28 +229,45 @@ export interface CopyLimits {
 export const COPY_LIMITS: CopyLimits = { title: 40, sub: 120, introLines: 6, introLine: 200, foot: 160 }
 
 /** 文案校验：返回错误文案（含行号），空串 = 通过。 */
-export function copyValidation(copy: Partial<PageCopy> | null | undefined): string {
+export function copyValidation(
+  copy: Partial<PageCopy> | null | undefined,
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
   const value = normalizeCopy(copy)
-  if (value.title.length > COPY_LIMITS.title) return '标题不能超过 ' + COPY_LIMITS.title + ' 字'
-  if (value.sub.length > COPY_LIMITS.sub) return '副标题不能超过 ' + COPY_LIMITS.sub + ' 字'
-  if (value.foot.length > COPY_LIMITS.foot) return '页脚不能超过 ' + COPY_LIMITS.foot + ' 字'
+  if (value.title.length > COPY_LIMITS.title) {
+    return tr('page.openentry.copyError.title', { limit: COPY_LIMITS.title })
+  }
+  if (value.sub.length > COPY_LIMITS.sub) {
+    return tr('page.openentry.copyError.sub', { limit: COPY_LIMITS.sub })
+  }
+  if (value.foot.length > COPY_LIMITS.foot) {
+    return tr('page.openentry.copyError.foot', { limit: COPY_LIMITS.foot })
+  }
   const rawLines = (copy?.intro || []).map((line) => String(line || '').trim()).filter(Boolean)
   if (rawLines.length > COPY_LIMITS.introLines) {
-    return '说明最多 ' + COPY_LIMITS.introLines + ' 行，请合并后再保存'
+    return tr('page.openentry.copyError.lines', { limit: COPY_LIMITS.introLines })
   }
   for (let index = 0; index < rawLines.length; index += 1) {
     if (rawLines[index].length > COPY_LIMITS.introLine) {
-      return '说明第 ' + (index + 1) + ' 行超过 ' + COPY_LIMITS.introLine + ' 字'
+      return tr('page.openentry.copyError.lineLength', {
+        line: index + 1,
+        limit: COPY_LIMITS.introLine,
+      })
     }
   }
   return ''
 }
 
 /** 预览用的行（标题/副标题/说明/页脚），空值给占位提示。 */
-export function copyPreviewLines(copy: Partial<PageCopy> | null | undefined): string[] {
+export function copyPreviewLines(
+  copy: Partial<PageCopy> | null | undefined,
+  translate?: Translate,
+): string[] {
+  const tr = translate ?? defaultTranslate
   const value = normalizeCopy(copy)
   const lines: string[] = []
-  lines.push(value.title || '（未填标题，使用默认）')
+  lines.push(value.title || tr('page.openentry.preview.emptyTitle'))
   if (value.sub) lines.push(value.sub)
   for (const line of value.intro) lines.push(line)
   if (value.foot) lines.push(value.foot)

@@ -470,6 +470,30 @@ describe('OpenEntryPage · 公开页文案', () => {
     expect(bodyText()).toContain('标题不能超过 40 字')
   })
 
+  it('预览标题跟着标题输入实时变化（标题/副标题/说明同一份草稿）', async () => {
+    const { wrapper } = await mountPage()
+    const card = wrapper.find('#openentry-copy')
+    // 预览标题是卡片里唯一的 h4（SettingsCard 标题是 h2）
+    expect(card.find('h4').text()).toBe('MiraiHub 注册')
+
+    const inputs = card.findAll('input')
+    await inputs[0].setValue('内测入口')
+    await flush()
+    expect(card.find('h4').text()).toBe('内测入口')
+
+    // 改副标题不动标题，但副标题自己要出现在预览里（与实时草稿同源）
+    await inputs[1].setValue('仅限内部同事')
+    await flush()
+    expect(card.find('h4').text()).toBe('内测入口')
+    expect(card.text()).toContain('仅限内部同事')
+
+    // 清空标题回落到默认标题，不留上一次的旧值
+    await inputs[0].setValue('   ')
+    await flush()
+    expect(card.find('h4').text()).toBe('MiraiHub 注册')
+    expect(wrapper.find('#openentry-copy').text()).not.toContain('内测入口')
+  })
+
   it('改说明即时反映到预览，保存时提交归一后的 page_copy', async () => {
     const { wrapper } = await mountPage()
     const card = wrapper.find('#openentry-copy')

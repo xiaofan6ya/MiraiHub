@@ -10,6 +10,7 @@
  * 策略文案、顺序、原因全部**以后端返回为准**，前端不复刻排序逻辑（见 gateway_router.order）。
  */
 import { http } from './http'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 import { FMT_EMPTY, fmtDuration, fmtInt } from '@/utils/format'
 
 export interface GatewayStrategyOption {
@@ -286,10 +287,13 @@ export function simulateRouting(
 export function simulationText(
   lanes: SimulatedLane[] | null | undefined,
   total = 100,
+  translate?: Translate,
 ): string {
+  const tr = translate ?? defaultTranslate
   const items = (lanes || []).filter((lane) => lane.count > 0)
-  if (!items.length) return '没有可调度的平台'
-  return total + ' 个请求中：' + items.map((lane) => lane.label + ' ' + lane.count).join(' · ')
+  if (!items.length) return tr('page.gateway.sim.noLanes')
+  const detail = items.map((lane) => lane.label + ' ' + lane.count).join(' · ')
+  return tr('page.gateway.sim.summary', { total, detail })
 }
 
 /* ------------------------------------------------------------------ *
@@ -332,10 +336,14 @@ export function toSpeedRows(items: PlatformSpeedItem[] | null | undefined): Spee
 }
 
 /** 「近 24 小时 · 2 个平台有样本」 */
-export function speedPayloadText(payload: PlatformSpeedPayload | null | undefined): string {
+export function speedPayloadText(
+  payload: PlatformSpeedPayload | null | undefined,
+  translate?: Translate,
+): string {
   if (!payload) return ''
+  const tr = translate ?? defaultTranslate
   const count = (payload.items || []).length
-  return '近 ' + fmtInt(payload.hours) + ' 小时 · ' + count + ' 个平台有样本'
+  return tr('page.gateway.speed.payload', { hours: fmtInt(payload.hours), count })
 }
 
 /** 平台额度：千分位；没有数据时 —（不显示 0 冒充无数据）。 */

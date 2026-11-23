@@ -39,6 +39,7 @@ import {
 import { useConfirm, useTableQuery, useToast } from '@/composables'
 import { FMT_EMPTY, fmtInt } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import { ApiError, isAbortError } from '@/api/http'
 import {
   GROUP_MODEL_PREVIEW,
@@ -59,10 +60,9 @@ import {
   type ModelConfigItem,
 } from '@/api/groups'
 
-/** 旧版页面底部那段说明（原样保留，收进 ⓘ）。 */
-const HELP_TEXT =
-  '分组用于限定 API Key 可用的模型范围。创建 Key 时选择分组即可；不选分组表示可用全部启用模型。' +
-  '绑定分组后该 Key 只能调用组内模型，调用组外模型返回 403（model_not_in_group）。'
+const { t } = useI18n()
+/** 旧版页面底部那段说明（文案在字典里，逐字一致；收进 ⓘ）。 */
+const helpText = computed(() => t('page.groups.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -100,17 +100,21 @@ const hasFilters = computed(
 const summary = computed(() => {
   const current = filteredStats.value
   if (!hasFilters.value) {
-    return '共 ' + current.total + ' 个分组 · 覆盖 ' + current.models + ' 个模型 · 绑定 ' +
-      current.boundKeys + ' 个 Key'
+    return t('page.groups.summary.all', {
+      total: current.total,
+      models: current.models,
+      keys: current.boundKeys,
+    })
   }
-  return '筛选出 ' + current.total + ' / 共 ' + stats.value.total + ' 个分组 · 绑定 ' +
-    current.boundKeys + ' 个 Key'
+  return t('page.groups.summary.filtered', {
+    total: current.total,
+    all: stats.value.total,
+    keys: current.boundKeys,
+  })
 })
 
 const emptyDescription = computed(() =>
-  hasFilters.value
-    ? '没有符合条件的分组。清空筛选后可看到全部分组。'
-    : '还没有分组。新建分组，从已启用模型里挑几个。',
+  hasFilters.value ? t('page.groups.empty.filtered') : t('page.groups.empty.all'),
 )
 
 /** 搜索框是受控的本地副本：输入即时回显，300ms 后由 FilterBar 写进路由 query。 */
@@ -122,25 +126,35 @@ watch(
   },
 )
 
-const modelFilterOptions = [
-  { label: '模型：全部', value: '' },
-  { label: '含已停用模型', value: 'stale' },
-  { label: '全部可用', value: 'ready' },
-]
-const keyFilterOptions = [
-  { label: 'Key：全部', value: '' },
-  { label: '已绑定 Key', value: 'bound' },
-  { label: '未绑定 Key', value: 'unbound' },
-]
+const modelFilterOptions = computed(() => [
+  { label: t('page.groups.filter.modelAll'), value: '' },
+  { label: t('page.groups.filter.modelStale'), value: 'stale' },
+  { label: t('page.groups.filter.modelReady'), value: 'ready' },
+])
+const keyFilterOptions = computed(() => [
+  { label: t('page.groups.filter.keyAll'), value: '' },
+  { label: t('page.groups.filter.keyBound'), value: 'bound' },
+  { label: t('page.groups.filter.keyUnbound'), value: 'unbound' },
+])
 
 const chips = computed<FilterChip[]>(() => {
   const filters = table.state.filters
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
-  if (filters.models === 'stale') list.push({ key: 'models', label: '模型', value: '含已停用' })
-  if (filters.models === 'ready') list.push({ key: 'models', label: '模型', value: '全部可用' })
-  if (filters.keys === 'bound') list.push({ key: 'keys', label: 'Key', value: '已绑定' })
-  if (filters.keys === 'unbound') list.push({ key: 'keys', label: 'Key', value: '未绑定' })
+  const modelLabel = t('page.groups.chip.model')
+  const keyLabel = t('page.groups.chip.key')
+  if (filters.q) list.push({ key: 'q', label: t('page.groups.chip.search'), value: filters.q })
+  if (filters.models === 'stale') {
+    list.push({ key: 'models', label: modelLabel, value: t('page.groups.chip.staleValue') })
+  }
+  if (filters.models === 'ready') {
+    list.push({ key: 'models', label: modelLabel, value: t('page.groups.chip.readyValue') })
+  }
+  if (filters.keys === 'bound') {
+    list.push({ key: 'keys', label: keyLabel, value: t('page.groups.chip.boundValue') })
+  }
+  if (filters.keys === 'unbound') {
+    list.push({ key: 'keys', label: keyLabel, value: t('page.groups.chip.unboundValue') })
+  }
   return list
 })
 
@@ -190,7 +204,10 @@ function renderModels(row: TableRow): VNodeChild {
         Chip,
         {
           key: 'overflow',
-          title: '还有 ' + group.modelOverflow + ' 个：' + rest.join('、'),
+          title: t('page.groups.cell.overflow', {
+            count: group.modelOverflow,
+            list: rest.join(t('page.groups.listSeparator')),
+          }),
         },
         { default: () => '+' + group.modelOverflow },
       ),
@@ -203,9 +220,9 @@ function renderModels(row: TableRow): VNodeChild {
         {
           key: 'stale',
           tone: 'warn',
-          title: '部分模型已被停用，实际可用 ' + group.effectiveCount + ' 个',
+          title: t('page.groups.cell.staleTitle', { count: group.effectiveCount }),
         },
-        { default: () => group.staleCount + ' 个已停用' },
+        { default: () => t('page.groups.cell.staleBadge', { count: group.staleCount }) },
       ),
     )
   }
@@ -231,8 +248,8 @@ function renderActions(row: TableRow): VNodeChild {
   const group = row as GroupRow
   return h(RowActions, {
     actions: [
-      { key: 'edit', label: '编辑' },
-      { key: 'delete', label: '删除', danger: true },
+      { key: 'edit', label: t('common.edit') },
+      { key: 'delete', label: t('common.delete'), danger: true },
     ],
     max: 1,
     onSelect: (key: string) => {
@@ -244,7 +261,7 @@ function renderActions(row: TableRow): VNodeChild {
 const columns = computed<TableColumn[]>(() => [
   {
     key: 'name',
-    title: '分组名',
+    title: t('page.groups.col.name'),
     mobile: 'title',
     width: 200,
     sortable: true,
@@ -253,7 +270,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'models',
-    title: '包含模型',
+    title: t('page.groups.col.models'),
     mobile: 'meta',
     minWidth: 320,
     sortable: true,
@@ -262,7 +279,7 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'key_count',
-    title: 'Key 数',
+    title: t('page.groups.col.keys'),
     mobile: 'meta',
     width: 96,
     numeric: true,
@@ -272,14 +289,14 @@ const columns = computed<TableColumn[]>(() => [
   },
   {
     key: 'note',
-    title: '备注',
+    title: t('page.groups.col.note'),
     mobile: 'subtitle',
     minWidth: 160,
     render: renderNote,
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.groups.col.actions'),
     mobile: 'actions',
     width: 116,
     hideable: false,
@@ -319,7 +336,12 @@ async function loadGroups(): Promise<void> {
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     loadError.value = { message: errorMessage(error), detail }
     // 已有数据时刷新失败：只提示，不清空表格（05-patterns §3）。
-    toast.error(failureText(groups.value === null ? '加载分组' : '刷新分组', error))
+    toast.error(
+      failureText(
+        groups.value === null ? t('page.groups.action.load') : t('page.groups.action.refresh'),
+        error,
+      ),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -383,13 +405,17 @@ const catalog = ref<ModelConfigItem[] | null>(null)
 const catalogLoading = ref(false)
 const catalogError = ref('')
 
-const drawerTitle = computed(() => (editing.value ? '编辑分组' : '新建分组'))
-const submitText = computed(() => (editing.value ? '保存' : '创建分组'))
+const drawerTitle = computed(() =>
+  editing.value ? t('page.groups.drawer.edit') : t('page.groups.drawer.create'),
+)
+const submitText = computed(() =>
+  editing.value ? t('page.groups.submit.save') : t('page.groups.submit.create'),
+)
 
 /** 选项 = 全部启用模型 + 已选中的「停用 / 未在目录」项（保留旧值，避免保存时丢授权）。 */
 const editorOptions = computed<GroupModelOption[]>(() => {
   if (!catalog.value) return []
-  return buildGroupEditorOptions(catalog.value, selection.value).options
+  return buildGroupEditorOptions(catalog.value, selection.value, t).options
 })
 
 const optionIndex = computed(() => {
@@ -400,13 +426,17 @@ const optionIndex = computed(() => {
 
 const outOfCatalog = computed(() => {
   if (!catalog.value) return [] as GroupModelOption[]
-  const plan = buildGroupEditorOptions(catalog.value, selection.value)
+  const plan = buildGroupEditorOptions(catalog.value, selection.value, t)
   return plan.options.filter((option) => !option.known || !option.enabled)
 })
 
 const outOfCatalogHint = computed(() =>
   outOfCatalog.value
-    .map((option) => (option.known ? option.modelId + '（已停用）' : option.value + '（目录中找不到）'))
+    .map((option) =>
+      option.known
+        ? t('page.groups.option.disabled', { id: option.modelId })
+        : t('page.groups.option.missing', { id: option.value }),
+    )
     .join('\n'),
 )
 
@@ -440,10 +470,10 @@ async function ensureCatalog(force = false): Promise<void> {
     const payload = await listModelConfigs()
     catalog.value = Array.isArray(payload?.items) ? payload.items : []
     if (!selectionEdited.value) {
-      selection.value = buildGroupEditorOptions(catalog.value, storedModels.value).selected
+      selection.value = buildGroupEditorOptions(catalog.value, storedModels.value, t).selected
     }
   } catch (error) {
-    catalogError.value = failureText('加载模型目录', error)
+    catalogError.value = failureText(t('page.groups.action.catalog'), error)
   } finally {
     catalogLoading.value = false
   }
@@ -469,12 +499,12 @@ async function openCreate(): Promise<void> {
 async function openEdit(row: GroupRow): Promise<void> {
   const item = groups.value?.find((group) => group.id === row.id)
   if (!item) {
-    toast.warning('该分组已不存在，请刷新列表')
+    toast.warning(t('page.groups.toast.missing'))
     return
   }
   editing.value = row
   storedModels.value = Array.isArray(item.models) ? item.models.slice() : []
-  selection.value = buildGroupEditorOptions(catalog.value, storedModels.value).selected
+  selection.value = buildGroupEditorOptions(catalog.value, storedModels.value, t).selected
   selectionEdited.value = false
   formName.value = item.name
   formNote.value = item.note || ''
@@ -493,17 +523,17 @@ function validate(): boolean {
   resetFormErrors()
   const name = formName.value.trim()
   if (!name) {
-    formErrorName.value = '请填写分组名称'
+    formErrorName.value = t('page.groups.form.requiredName')
     return false
   }
   const editingId = editing.value ? editing.value.id : -1
   const duplicated = (groups.value || []).some((group) => group.name === name && group.id !== editingId)
   if (duplicated) {
-    formErrorName.value = '分组「' + name + '」已存在'
+    formErrorName.value = t('page.groups.form.duplicate', { name })
     return false
   }
   if (!selection.value.length) {
-    formErrorModels.value = '请至少选择一个模型'
+    formErrorModels.value = t('page.groups.form.requiredModels')
     return false
   }
   return true
@@ -519,16 +549,18 @@ async function submit(): Promise<void> {
   try {
     if (isEdit && editing.value) {
       await updateGroup(editing.value.id, payload)
-      toast.success('已保存分组「' + name + '」')
+      toast.success(t('page.groups.toast.saved', { name }))
     } else {
       await createGroup(payload)
-      toast.success('已创建分组「' + name + '」')
+      toast.success(t('page.groups.toast.created', { name }))
     }
     drawerOpen.value = false
     if (!isEdit) table.setPage(1)
     await loadGroups()
   } catch (error) {
-    toast.error(failureText(isEdit ? '保存分组' : '创建分组', error))
+    toast.error(
+      failureText(isEdit ? t('page.groups.action.save') : t('page.groups.action.create'), error),
+    )
   } finally {
     submitting.value = false
   }
@@ -545,12 +577,12 @@ async function onRowAction(row: GroupRow, key: string): Promise<void> {
 
 async function removeOne(row: GroupRow): Promise<void> {
   const ok = await confirm({
-    title: '删除分组「' + row.name + '」？',
+    title: t('page.groups.confirm.deleteTitle', { name: row.name }),
     message:
       row.keyCount > 0
-        ? '删除后无法恢复；绑定该分组的 ' + row.keyCount + ' 个 Key 会自动变为「不限制模型」。'
-        : '删除后无法恢复。该分组当前没有绑定 Key。',
-    okText: '删除',
+        ? t('page.groups.confirm.deleteBound', { count: row.keyCount })
+        : t('page.groups.confirm.deleteFree'),
+    okText: t('common.delete'),
     danger: true,
   })
   if (!ok) return
@@ -559,14 +591,14 @@ async function removeOne(row: GroupRow): Promise<void> {
     const unbound = Number(result?.unbound_keys) || 0
     toast.success(
       unbound > 0
-        ? '已删除分组「' + row.name + '」，' + unbound + ' 个 Key 已改为不限制模型'
-        : '已删除分组「' + row.name + '」',
+        ? t('page.groups.toast.deletedUnbound', { name: row.name, count: unbound })
+        : t('page.groups.toast.deleted', { name: row.name }),
     )
     tableRef.value?.clearSelection()
     checkedKeys.value = []
     await loadGroups()
   } catch (error) {
-    toast.error(failureText('删除分组', error))
+    toast.error(failureText(t('page.groups.action.delete'), error))
   }
 }
 
@@ -575,14 +607,14 @@ async function bulkDelete(clear?: () => void): Promise<void> {
   if (!rows.length || bulkRunning.value) return
   const unbound = rows.reduce((total, row) => total + row.keyCount, 0)
   const ok = await confirm({
-    title: '删除 ' + rows.length + ' 个分组？',
+    title: t('page.groups.confirm.bulkTitle', { count: rows.length }),
     message:
       unbound > 0
-        ? '删除后无法恢复；这些分组绑定的 ' + unbound + ' 个 Key 会自动变为「不限制模型」。'
-        : '删除后无法恢复。这些分组当前没有绑定 Key。',
-    okText: '删除',
+        ? t('page.groups.confirm.bulkBound', { count: unbound })
+        : t('page.groups.confirm.bulkFree'),
+    okText: t('common.delete'),
     danger: true,
-    requireText: '删除',
+    requireText: t('page.groups.confirm.bulkRequire'),
   })
   if (!ok) return
   bulkRunning.value = true
@@ -598,8 +630,12 @@ async function bulkDelete(clear?: () => void): Promise<void> {
   }
   bulkRunning.value = false
   const removed = rows.length - failed
-  if (failed === 0) toast.success('已删除 ' + removed + ' 个分组')
-  else toast.error('已删除 ' + removed + ' 个分组，' + failed + ' 个删除失败：' + firstError)
+  if (failed === 0) toast.success(t('page.groups.toast.bulkDone', { count: removed }))
+  else {
+    toast.error(
+      t('page.groups.toast.bulkPartial', { removed, failed, reason: firstError }),
+    )
+  }
   clear?.()
   tableRef.value?.clearSelection()
   checkedKeys.value = []
@@ -622,10 +658,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="groups-page">
-    <PageHeader title="分组管理" :help="HELP_TEXT">
+    <PageHeader :title="t('page.groups.title')" :help="helpText">
       <template #actions>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadGroups()">刷新</Btn>
-        <Btn variant="primary" :icon="Plus" @click="openCreate">新建分组</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadGroups()">
+          {{ t('common.refresh') }}
+        </Btn>
+        <Btn variant="primary" :icon="Plus" @click="openCreate">{{ t('page.groups.create') }}</Btn>
       </template>
     </PageHeader>
 
@@ -643,7 +681,7 @@ onBeforeUnmount(() => {
             <n-input
               class="groups-filter__search"
               :value="search"
-              placeholder="搜索分组名 / 备注 / 模型"
+              :placeholder="t('page.groups.search.placeholder')"
               clearable
               @update:value="
                 (value: string) => {
@@ -671,12 +709,17 @@ onBeforeUnmount(() => {
       <div class="groups-body">
         <ErrorBlock
           v-if="loadError && groups === null"
-          :title="'加载分组失败：' + loadError.message"
+          :title="t('page.groups.loadFailed', { reason: loadError.message })"
           :detail="loadError.detail"
           @retry="loadGroups()"
         />
 
-        <div v-else-if="firstLoading" class="groups-skeleton" aria-busy="true" aria-label="分组加载中">
+        <div
+          v-else-if="firstLoading"
+          class="groups-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.groups.loadingAria')"
+        >
           <n-skeleton v-for="index in 6" :key="index" height="44px" />
         </div>
 
@@ -708,17 +751,17 @@ onBeforeUnmount(() => {
               :loading="bulkRunning"
               @click="bulkDelete(clear)"
             >
-              批量删除
+              {{ t('page.groups.bulkDelete') }}
             </Btn>
           </template>
 
           <template #empty>
             <Empty :description="emptyDescription">
               <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
-                清除筛选
+                {{ t('page.groups.clearFilters') }}
               </Btn>
               <Btn v-else variant="primary" size="sm" :icon="Plus" @click="openCreate">
-                新建分组
+                {{ t('page.groups.create') }}
               </Btn>
             </Empty>
           </template>
@@ -735,14 +778,14 @@ onBeforeUnmount(() => {
       @submit="submit"
     >
       <FormField
-        label="分组名"
+        :label="t('page.groups.form.name')"
         required
         :error="formErrorName"
-        hint="创建 Key 时按分组选择可用模型。"
+        :hint="t('page.groups.form.nameHint')"
       >
         <n-input
           v-model:value="formName"
-          placeholder="例如：便宜模型组"
+          :placeholder="t('page.groups.form.namePlaceholder')"
           maxlength="64"
           show-count
           clearable
@@ -751,16 +794,16 @@ onBeforeUnmount(() => {
       </FormField>
 
       <FormField
-        label="模型"
+        :label="t('page.groups.form.models')"
         required
         :error="formErrorModels"
-        hint="只列出已启用的模型。分组保存的是上游模型 id，停用模型会从可用范围自动排除。"
+        :hint="t('page.groups.form.modelsHint')"
       >
         <div class="groups-transfer">
           <ErrorBlock
             v-if="catalogError && !catalog"
             :title="catalogError"
-            retry-label="重试"
+            :retry-label="t('common.retry')"
             compact
             @retry="ensureCatalog(true)"
           />
@@ -770,27 +813,31 @@ onBeforeUnmount(() => {
             :value="selection"
             :options="editorOptions"
             source-filterable
-            source-title="全部启用模型"
-            target-title="已选模型"
-            source-filter-placeholder="搜索平台 / 模型"
+            :source-title="t('page.groups.transfer.source')"
+            :target-title="t('page.groups.transfer.target')"
+            :source-filter-placeholder="t('page.groups.transfer.searchPlaceholder')"
             :filter="transferFilter"
             size="small"
             @update:value="onTransferUpdate"
           />
-          <p v-if="catalogLoading && catalog" class="groups-hint">正在刷新模型目录…</p>
-          <p v-if="transferEmpty" class="groups-hint">
-            模型目录为空。请先在「模型配置」同步模型目录后再建分组。
-          </p>
+          <p v-if="catalogLoading && catalog" class="groups-hint">{{ t('page.groups.catalogRefreshing') }}</p>
+          <p v-if="transferEmpty" class="groups-hint">{{ t('page.groups.catalogEmpty') }}</p>
           <p v-if="outOfCatalog.length" class="groups-hint is-warn">
-            <Badge tone="warn">{{ outOfCatalog.length }} 个模型不在启用目录</Badge>
-            <HelpTip :content="outOfCatalogHint" label="查看这些模型" />
-            保存时原样保留，不会静默删除。
+            <Badge tone="warn">
+              {{ t('page.groups.outOfCatalog', { count: outOfCatalog.length }) }}
+            </Badge>
+            <HelpTip :content="outOfCatalogHint" :label="t('page.groups.outOfCatalogTip')" />
+            {{ t('page.groups.outOfCatalogKeep') }}
           </p>
         </div>
       </FormField>
 
-      <FormField label="备注" hint="可选。">
-        <n-input v-model:value="formNote" placeholder="可选" maxlength="200" />
+      <FormField :label="t('page.groups.form.note')" :hint="t('page.groups.form.noteHint')">
+        <n-input
+          v-model:value="formNote"
+          :placeholder="t('page.groups.form.notePlaceholder')"
+          maxlength="200"
+        />
       </FormField>
     </FormDrawer>
   </div>

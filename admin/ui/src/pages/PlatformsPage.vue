@@ -48,6 +48,7 @@ import { ApiError, isAbortError } from '@/api/http'
 import { failureText } from '@/utils/error'
 import { fmtCredit, fmtCompact, fmtDuration, fmtInt } from '@/utils/format'
 import { listPlatforms, type PlatformSpec } from '@/api/platforms'
+import { useI18n } from '@/i18n'
 import {
   aggregateAccounts,
   countByState,
@@ -73,9 +74,8 @@ import {
   type PlatformStateFilter,
 } from '@/api/platforms-admin'
 
-const HELP_TEXT =
-  '在这里切换平台与区域。切到某个平台后，账号池 / 积分到期 / 积分流水 / 成长计划都只统计该平台；' +
-  '使用记录 / 用量日志 / 风控哨兵是全网关口径。禁用平台只影响调度，账号仍然可管理。'
+const { t } = useI18n()
+const helpText = computed(() => t('page.platforms.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -136,8 +136,8 @@ async function load(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载平台列表', error), detail }
-    toast.error(failureText('加载平台列表', error))
+    loadError.value = { message: failureText(t('page.platforms.action.load'), error), detail }
+    toast.error(failureText(t('page.platforms.action.load'), error))
   } finally {
     if (controller === current) {
       controller = null
@@ -175,24 +175,33 @@ const maxCredits = computed(() =>
 )
 
 const stateOptions = computed<Array<SegmentedOption<string>>>(() => [
-  { label: '全部 ' + counts.value.all, value: 'all' },
-  { label: '已启用 ' + counts.value.enabled, value: 'enabled' },
-  { label: '已禁用 ' + counts.value.disabled, value: 'disabled' },
+  { label: t('page.platforms.state.all', { count: counts.value.all }), value: 'all' },
+  { label: t('page.platforms.state.enabled', { count: counts.value.enabled }), value: 'enabled' },
+  { label: t('page.platforms.state.disabled', { count: counts.value.disabled }), value: 'disabled' },
 ])
 
 const chips = computed<FilterChip[]>(() => {
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.platforms.chip.search'), value: filters.q })
   if (stateFilter.value !== 'all') {
-    list.push({ key: 'state', label: '状态', value: stateFilter.value === 'enabled' ? '已启用' : '已禁用' })
+    list.push({
+      key: 'state',
+      label: t('page.platforms.chip.state'),
+      value:
+        stateFilter.value === 'enabled'
+          ? t('page.platforms.badge.enabled')
+          : t('page.platforms.badge.disabled'),
+    })
   }
   return list
 })
 
-const summary = computed(
-  () =>
-    '共 ' + counts.value.all + ' 个平台 · 已启用 ' + counts.value.enabled +
-    ' · 已禁用 ' + counts.value.disabled,
+const summary = computed(() =>
+  t('page.platforms.summary', {
+    all: counts.value.all,
+    enabled: counts.value.enabled,
+    disabled: counts.value.disabled,
+  }),
 )
 
 const search = ref(filters.q)
@@ -229,10 +238,10 @@ function setHours(value: string | number): void {
   table.setFilter('hours', String(value) === '168' ? '168' : '')
 }
 
-const hoursOptions: Array<SegmentedOption<string>> = [
-  { label: '近 24 小时', value: '24' },
-  { label: '近 7 天', value: '168' },
-]
+const hoursOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.platforms.hours.24'), value: '24' },
+  { label: t('page.platforms.hours.168'), value: '168' },
+])
 
 const tierTone = (key: string): 'ok' | 'brand' | 'warn' | 'danger' =>
   key === 'hang' ? 'ok' : key === 'elite' ? 'brand' : key === 'npc' ? 'warn' : 'danger'
@@ -271,7 +280,7 @@ function openAccounts(card: PlatformCard): void {
 function makeCurrent(card: PlatformCard): void {
   if (isCurrent(card)) return
   platformStore.setCurrent(card.id, card.realm || '')
-  toast.success('已切换到 ' + card.label)
+  toast.success(t('page.platforms.toast.switched', { name: card.label }))
 }
 
 async function toggleEnabled(card: PlatformCard): Promise<void> {
@@ -281,20 +290,29 @@ async function toggleEnabled(card: PlatformCard): Promise<void> {
     if (!ok) return
   }
   try {
-    await setPlatformEnabled(card.storage, enabling, enabling ? '' : '界面禁用')
-    toast.success(enabling ? '已启用 ' + card.label : '已禁用 ' + card.label + '（不参与调度，账号仍可管理）')
+    await setPlatformEnabled(card.storage, enabling, enabling ? '' : t('page.platforms.disabledReason'))
+    toast.success(
+      enabling
+        ? t('page.platforms.toast.enabled', { name: card.label })
+        : t('page.platforms.toast.disabled', { name: card.label }),
+    )
     await load()
     void platformStore.reload()
   } catch (error) {
-    toast.error(failureText(enabling ? '启用平台' : '禁用平台', error))
+    toast.error(
+      failureText(
+        enabling ? t('page.platforms.action.enable') : t('page.platforms.action.disable'),
+        error,
+      ),
+    )
   }
 }
 
 function confirmDisable(card: PlatformCard): Promise<boolean> {
   return confirm({
-    title: '禁用「' + card.label + '」？',
-    message: '禁用后该平台不再参与调度，但账号数据保留，可随时重新启用。',
-    okText: '禁用',
+    title: t('page.platforms.confirmDisable.title', { name: card.label }),
+    message: t('page.platforms.confirmDisable.body'),
+    okText: t('page.platforms.confirmDisable.ok'),
     danger: true,
   })
 }
@@ -303,13 +321,22 @@ async function scanOne(card: PlatformCard): Promise<void> {
   const spec = platforms.value.find((item) => item.id === card.id)
   const plan = scanPlanFor(spec)
   if (!spec || !plan) {
-    toast.error('扫描失败：找不到该平台的声明信息')
+    toast.error(t('page.platforms.scan.noSpec'))
     return
   }
-  toast.info('开始扫描 ' + card.label + '…')
+  toast.info(t('page.platforms.scan.starting', { name: card.label }))
   const result = await runPlatformScan(spec, plan)
-  if (result.note && !result.imported && !result.scanned) toast.error(card.label + '：' + result.note)
-  else toast.success(card.label + '：扫描 ' + result.scanned + ' · 入库 ' + result.imported)
+  if (result.note && !result.imported && !result.scanned) {
+    toast.error(card.label + '：' + result.note)
+  } else {
+    toast.success(
+      t('page.platforms.scan.done', {
+        name: card.label,
+        scanned: result.scanned,
+        imported: result.imported,
+      }),
+    )
+  }
   await load()
   void platformStore.refreshCounts()
 }
@@ -325,15 +352,17 @@ async function runExport(mode: 'backup' | 'plain', platform = ''): Promise<void>
     const platformsMap = (data?.platforms || {}) as Record<string, { count?: number }>
     const count = Object.values(platformsMap).reduce((sum, item) => sum + Number(item?.count || 0), 0)
     if (!count) {
-      toast.error('该平台没有账号可导出')
+      toast.error(t('page.platforms.export.empty'))
       return
     }
     const scope = String(data?.platform_scope || (platform || 'all-platforms'))
     saveJson(data, exportFilename(mode, scope))
-    toast.success('已导出 ' + count + ' 个账号（' + Object.keys(platformsMap).length + ' 个平台）')
+    toast.success(
+      t('page.platforms.export.done', { count, platforms: Object.keys(platformsMap).length }),
+    )
     exportOpen.value = false
   } catch (error) {
-    toast.error(failureText('导出平台账号', error))
+    toast.error(failureText(t('page.platforms.action.export'), error))
   } finally {
     exporting.value = false
   }
@@ -345,23 +374,33 @@ async function runExport(mode: 'backup' | 'plain', platform = ''): Promise<void>
 
 function menuOptions(card: PlatformCard): DropdownOption[] {
   const options: DropdownOption[] = [
-    { label: card.enabled ? '禁用平台' : '启用平台', key: 'toggle' },
-    { label: '扫描本机', key: 'scan', disabled: !card.actions.some((item) => item.name === 'scan') },
-    { label: '导出本平台', key: 'export' },
+    {
+      label: card.enabled ? t('page.platforms.action.disable') : t('page.platforms.action.enable'),
+      key: 'toggle',
+    },
+    {
+      label: t('page.platforms.menu.scan'),
+      key: 'scan',
+      disabled: !card.actions.some((item) => item.name === 'scan'),
+    },
+    { label: t('page.platforms.menu.export'), key: 'export' },
   ]
   const extra = card.actions.filter((item) => !['scan', 'export'].includes(item.name))
   if (extra.length) {
     options.push({ type: 'divider', key: 'divider-1' })
     for (const action of extra) {
       options.push({
-        label: action.name === 'import' || action.name === 'import-file' ? action.label : action.label + '（账号池）',
+        label:
+          action.name === 'import' || action.name === 'import-file'
+            ? action.label
+            : t('page.platforms.menu.accountsSuffix', { label: action.label }),
         key: 'action:' + action.name,
       })
     }
   }
   if (card.tier) {
     options.push({ type: 'divider', key: 'divider-2' })
-    options.push({ label: '平均级：' + card.tier.label, key: 'tier', disabled: true })
+    options.push({ label: t('page.platforms.menu.tier', { tier: card.tier.label }), key: 'tier', disabled: true })
   }
   return options
 }
@@ -389,7 +428,7 @@ function onMenuSelect(card: PlatformCard, key: string | number): void {
     }
     // 其余平台动作（签到 / 刷新额度 / 授权登录…）在账号池按账号执行（S25/S26）
     platformStore.setCurrent(card.id, card.realm || '')
-    toast.info('已切到 ' + card.label + '：该动作在账号池执行')
+    toast.info(t('page.platforms.toast.actionsInAccounts', { name: card.label }))
     void router.push('/accounts')
   }
 }
@@ -404,7 +443,7 @@ const scanResults = ref<PlatformScanResult[]>([])
 async function scanAll(): Promise<void> {
   if (scanningAll.value) return
   if (!platforms.value.length) {
-    toast.error('平台清单还没加载好，请稍后再试')
+    toast.error(t('page.platforms.scan.notReady'))
     return
   }
   scanningAll.value = true
@@ -419,7 +458,7 @@ async function scanAll(): Promise<void> {
       scanResults.value.push(result)
       imported += result.imported
     }
-    toast.success('扫描完成：共入库 ' + imported + ' 个账号')
+    toast.success(t('page.platforms.scan.allDone', { count: imported }))
     await load()
     void platformStore.refreshCounts()
   } finally {
@@ -442,7 +481,7 @@ function openImport(preset?: string): void {
   importNotes.value = []
   importPreview.value = []
   importOpen.value = true
-  if (preset) importNotes.value.push('已选平台 ' + preset + '：把该平台的导出文件拖进来即可')
+  if (preset) importNotes.value.push(t('page.platforms.import.preset', { name: preset }))
 }
 
 async function onImportFiles(event: Event): Promise<void> {
@@ -454,7 +493,12 @@ async function onImportFiles(event: Event): Promise<void> {
     try {
       loaded.push({ name: file.name, text: await file.text() })
     } catch (error) {
-      importNotes.value.push(file.name + '：读取失败（' + ((error as Error)?.message || String(error)) + '）')
+      importNotes.value.push(
+        t('page.platforms.import.readFailed', {
+          name: file.name,
+          reason: (error as Error)?.message || String(error),
+        }),
+      )
     }
   }
   importFiles.value = loaded
@@ -482,8 +526,18 @@ function trackJob(id: string, name: string): void {
       pollUrl: '/api/accounts/job/',
       onFinish: (snapshot: JobSnapshot) => {
         const result = (snapshot.result || {}) as { added?: number }
-        if (snapshot.status === 'failed') toast.error(name + ' 导入失败：' + (snapshot.error || '未知错误'))
-        else toast.success(name + ' 导入完成：新增 ' + Number(result.added || 0) + ' 个')
+        if (snapshot.status === 'failed') {
+          toast.error(
+            t('page.platforms.import.failed', {
+              name,
+              reason: snapshot.error || t('page.platforms.import.unknownError'),
+            }),
+          )
+        } else {
+          toast.success(
+            t('page.platforms.import.done', { name, count: Number(result.added || 0) }),
+          )
+        }
         void load()
         void platformStore.refreshCounts()
       },
@@ -522,7 +576,7 @@ async function submitImport(): Promise<void> {
   const parsed = parsePlatformBackup(importFiles.value)
   const entries = Object.entries(parsed.byPlatform).filter(([, list]) => list.length)
   if (!entries.length) {
-    toast.error('没有解析出任何平台账号')
+    toast.error(t('page.platforms.import.noAccounts'))
     return
   }
   submitting.value = true
@@ -531,14 +585,19 @@ async function submitImport(): Promise<void> {
     for (const [storage, list] of entries) {
       try {
         const jobId = await submitPlatformImport(storage, list)
-        trackJob(jobId, storage + ' 导入')
+        trackJob(jobId, t('page.platforms.import.jobName', { storage }))
         submitted += 1
       } catch (error) {
-        toast.error(storage + ' 提交失败：' + ((error as Error)?.message || String(error)))
+        toast.error(
+          t('page.platforms.import.submitFailed', {
+            storage,
+            reason: (error as Error)?.message || String(error),
+          }),
+        )
       }
     }
     if (submitted) {
-      toast.success('已提交 ' + submitted + ' 个平台的后台导入，完成后自动刷新')
+      toast.success(t('page.platforms.import.submitted', { count: submitted }))
       importOpen.value = false
     }
   } finally {
@@ -555,18 +614,24 @@ const exporting = ref(false)
 const exportMode = ref<'backup' | 'plain'>('backup')
 const exportScope = ref('')
 
-const exportModeOptions: Array<SegmentedOption<string>> = [
-  { label: '备份（含凭证）', value: 'backup' },
-  { label: '清单（脱敏）', value: 'plain' },
-]
+const exportModeOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.platforms.export.backup'), value: 'backup' },
+  { label: t('page.platforms.export.plain'), value: 'plain' },
+])
 
 const exportScopeOptions = computed(() => {
   const seen = new Set<string>()
-  const options = [{ label: '全部平台（整机备份）', value: '' }]
+  const options = [{ label: t('page.platforms.export.allPlatforms'), value: '' }]
   for (const card of cards.value) {
     if (!card.accountCount || seen.has(card.storage)) continue
     seen.add(card.storage)
-    options.push({ label: card.label + '（' + card.accountCount + ' 个账号）', value: card.storage })
+    options.push({
+      label: t('page.platforms.export.platformLabel', {
+        label: card.label,
+        count: card.accountCount,
+      }),
+      value: card.storage,
+    })
   }
   return options
 })
@@ -588,12 +653,12 @@ function benchCell(row: TableRow, key: keyof PlatformSpeedRow): string {
   return String(item[key] ?? '—')
 }
 
-const benchColumns: TableColumn[] = [
+const benchColumns = computed<TableColumn[]>(() => [
   { key: 'rank', title: '#', width: 48, mobile: 'meta' },
-  { key: 'label', title: '平台', minWidth: 140, mobile: 'title' },
+  { key: 'label', title: t('page.platforms.bench.platform'), minWidth: 140, mobile: 'title' },
   {
     key: 'success_rate',
-    title: '成功率',
+    title: t('page.platforms.bench.successRate'),
     width: 96,
     mobile: 'subtitle',
     render: (row: TableRow) => {
@@ -601,21 +666,25 @@ const benchColumns: TableColumn[] = [
       return h(Badge, { tone: badgeToneOf(successTone(item.success_rate)) }, { default: () => benchCell(row, 'success_rate') })
     },
   },
-  { key: 'ttfb_avg', title: 'TTFT 均值', width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'ttfb_avg') },
-  { key: 'tps_avg', title: 'TPS 均值', width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'tps_avg') },
-  { key: 'latency_avg', title: '总耗时均值', width: 120, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'latency_avg') },
-  { key: 'jitter', title: '抖动', width: 90, mobile: 'hidden', render: (row: TableRow) => benchCell(row, 'jitter') },
+  { key: 'ttfb_avg', title: t('page.platforms.bench.ttfb'), width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'ttfb_avg') },
+  { key: 'tps_avg', title: t('page.platforms.bench.tps'), width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'tps_avg') },
+  { key: 'latency_avg', title: t('page.platforms.bench.latency'), width: 120, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'latency_avg') },
+  { key: 'jitter', title: t('page.platforms.bench.jitter'), width: 90, mobile: 'hidden', render: (row: TableRow) => benchCell(row, 'jitter') },
   {
     key: 'samples',
-    title: '样本',
+    title: t('page.platforms.bench.samples'),
     width: 96,
     mobile: 'hidden',
     render: (row: TableRow) => {
       const item = row as unknown as PlatformSpeedRow
-      return h('span', { class: item.low_sample ? 'pf-low' : '' }, fmtInt(item.samples) + (item.low_sample ? '（样本少）' : ''))
+      return h(
+        'span',
+        { class: item.low_sample ? 'pf-low' : '' },
+        fmtInt(item.samples) + (item.low_sample ? t('page.platforms.bench.lowSample') : ''),
+      )
     },
   },
-]
+])
 
 /* ------------------------------------------------------------------ *
  * 生命周期
@@ -653,14 +722,20 @@ watch(
 
 <template>
   <div class="pf-page">
-    <PageHeader title="平台管理" :help="HELP_TEXT">
+    <PageHeader :title="t('page.platforms.title')" :help="helpText">
       <template #actions>
         <Btn variant="default" :icon="ScanSearch" :loading="scanningAll" :disabled="loading" @click="scanAll">
-          扫描全部平台
+          {{ t('page.platforms.action.scanAll') }}
         </Btn>
-        <Btn variant="default" :icon="Upload" :disabled="loading" @click="openImport()">导入</Btn>
-        <Btn variant="default" :icon="Download" :disabled="loading" @click="exportOpen = true">导出</Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="refresh">刷新</Btn>
+        <Btn variant="default" :icon="Upload" :disabled="loading" @click="openImport()">
+          {{ t('page.platforms.action.import') }}
+        </Btn>
+        <Btn variant="default" :icon="Download" :disabled="loading" @click="exportOpen = true">
+          {{ t('page.platforms.action.export') }}
+        </Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="refresh">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -671,7 +746,12 @@ watch(
       @retry="refresh"
     />
 
-    <div v-else-if="firstLoading" class="pf-skeleton" aria-busy="true" aria-label="平台列表加载中">
+    <div
+      v-else-if="firstLoading"
+      class="pf-skeleton"
+      aria-busy="true"
+      :aria-label="t('page.platforms.loadingAria')"
+    >
       <div v-for="index in 6" :key="index" class="pf-skeleton__card"><n-skeleton text :repeat="4" /></div>
     </div>
 
@@ -686,11 +766,16 @@ watch(
           @remove="removeChip"
         >
           <template #default>
-            <Segmented :options="stateOptions" :model-value="stateFilter" aria-label="平台状态" @update:model-value="setState" />
+            <Segmented
+              :options="stateOptions"
+              :model-value="stateFilter"
+              :aria-label="t('page.platforms.stateAria')"
+              @update:model-value="setState"
+            />
             <n-input
               v-model:value="search"
               class="pf-search"
-              placeholder="搜索平台"
+              :placeholder="t('page.platforms.searchPlaceholder')"
               clearable
               @update:value="(value: string) => onFilterChange({ q: value })"
             />
@@ -709,21 +794,33 @@ watch(
               <PlatformLogo :id="card.id" :size="28" :label="card.label" />
               <div class="pf-card__title">
                 <h3 :title="card.notes || card.label">{{ card.label }}</h3>
-                <p>{{ card.realmLabel || '单区平台' }} · 优先级 {{ card.priority === null ? '—' : card.priority }}</p>
+                <p>
+                  {{ card.realmLabel || t('page.platforms.card.singleRealm') }} ·
+                  {{ t('page.platforms.card.priority', { value: card.priority === null ? '—' : card.priority }) }}
+                </p>
               </div>
               <div class="pf-card__badges">
-                <Badge :tone="card.enabled ? 'ok' : 'neutral'">{{ card.enabled ? '已启用' : '已禁用' }}</Badge>
+                <Badge :tone="card.enabled ? 'ok' : 'neutral'">
+                  {{ card.enabled ? t('page.platforms.badge.enabled') : t('page.platforms.badge.disabled') }}
+                </Badge>
                 <Badge v-if="card.tier" :tone="tierTone(card.tier.key)" :title="card.tier.reason">{{ card.tier.label }}</Badge>
               </div>
             </header>
 
             <div class="pf-card__metrics">
               <span class="tnum">
-                账号
-                {{ card.activeAccounts === null ? card.accountCount + ' 个' : card.activeAccounts + '/' + card.accountCount + ' 可用' }}
+                {{ t('page.platforms.card.accounts') }}
+                {{
+                  card.activeAccounts === null
+                    ? t('page.platforms.card.accountCount', { count: card.accountCount })
+                    : t('page.platforms.card.accountsAvailable', {
+                        active: card.activeAccounts,
+                        total: card.accountCount,
+                      })
+                }}
               </span>
               <span class="tnum">
-                今日 {{ fmtInt(card.requests) }} 次
+                {{ t('page.platforms.card.today', { count: fmtInt(card.requests) }) }}
                 <template v-if="card.successRate !== null"> · <b :class="'pf-tone-' + successTone(card.successRate)">{{ rateText(card) }}</b></template>
               </span>
               <span class="tnum">
@@ -732,23 +829,27 @@ watch(
             </div>
 
             <div class="pf-card__quota">
-              <span>剩余额度 {{ quotaText(card) }}</span>
+              <span>{{ t('page.platforms.card.quota', { value: quotaText(card) }) }}</span>
               <Meter
                 :value="card.credits ?? 0"
                 :max="maxCredits || 1"
                 tone="brand"
-                :aria-label="card.label + ' 剩余额度占比'"
+                :aria-label="t('page.platforms.card.quotaAria', { name: card.label })"
               />
             </div>
 
             <p v-if="!card.enabled" class="pf-card__note">
-              不参与调度，账号仍可管理{{ card.disabledReason ? '（' + card.disabledReason + '）' : '' }}
+              {{ t('page.platforms.card.disabledNote') }}{{
+                card.disabledReason ? t('page.platforms.card.disabledReason', { reason: card.disabledReason }) : ''
+              }}
             </p>
 
             <footer class="pf-card__actions">
-              <Btn size="sm" variant="default" @click="openAccounts(card)">账号池</Btn>
+              <Btn size="sm" variant="default" @click="openAccounts(card)">
+                {{ t('page.platforms.card.accountsBtn') }}
+              </Btn>
               <Btn size="sm" variant="quiet" :disabled="isCurrent(card)" @click="makeCurrent(card)">
-                {{ isCurrent(card) ? '当前平台' : '设为当前' }}
+                {{ isCurrent(card) ? t('page.platforms.card.current') : t('page.platforms.card.setCurrent') }}
               </Btn>
               <n-dropdown
                 trigger="click"
@@ -756,21 +857,44 @@ watch(
                 :options="menuOptions(card)"
                 @select="(key: string | number) => onMenuSelect(card, key)"
               >
-                <Btn size="sm" variant="quiet" :icon="MoreHorizontal" aria-label="更多平台操作">更多</Btn>
+                <Btn
+                  size="sm"
+                  variant="quiet"
+                  :icon="MoreHorizontal"
+                  :aria-label="t('page.platforms.card.moreAria')"
+                >
+                  {{ t('page.platforms.card.more') }}
+                </Btn>
               </n-dropdown>
             </footer>
           </article>
         </div>
 
-        <Empty v-else :description="filters.q || stateFilter !== 'all' ? '没有符合条件的平台，试试清空搜索或切回「全部」。' : '还没有登记任何平台。'">
-          <Btn v-if="filters.q || stateFilter !== 'all'" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
-          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">刷新</Btn>
+        <Empty
+          v-else
+          :description="
+            filters.q || stateFilter !== 'all'
+              ? t('page.platforms.empty.filtered')
+              : t('page.platforms.empty.all')
+          "
+        >
+          <Btn v-if="filters.q || stateFilter !== 'all'" variant="default" size="sm" @click="resetFilters">
+            {{ t('page.platforms.clearFilters') }}
+          </Btn>
+          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">
+            {{ t('common.refresh') }}
+          </Btn>
         </Empty>
       </Card>
 
-      <Card title="平台速度与稳定性" :loading="loading && !!speed">
+      <Card :title="t('page.platforms.speed.title')" :loading="loading && !!speed">
         <template #extra>
-          <Segmented :options="hoursOptions" :model-value="String(hours)" aria-label="统计窗口" @update:model-value="setHours" />
+          <Segmented
+            :options="hoursOptions"
+            :model-value="String(hours)"
+            :aria-label="t('page.platforms.speed.windowAria')"
+            @update:model-value="setHours"
+          />
         </template>
         <DataTable
           table-id="platform-bench"
@@ -778,21 +902,21 @@ watch(
           :data="benchRows"
           row-key="platform"
           :loading="loading"
-          empty-description="近窗口内还没有真实请求样本。"
+          :empty-description="t('page.platforms.speed.empty')"
         >
           <template #empty>
-            <Empty compact description="近窗口内还没有真实请求样本。" />
+            <Empty compact :description="t('page.platforms.speed.empty')" />
           </template>
         </DataTable>
       </Card>
 
-      <Card v-if="scanResults.length" title="扫描全部平台 · 结果">
+      <Card v-if="scanResults.length" :title="t('page.platforms.scan.resultTitle')">
         <ul class="pf-scan">
           <li v-for="item in scanResults" :key="item.storage" class="pf-scan__row">
             <span class="pf-scan__name">{{ item.label }}</span>
-            <span class="tnum">扫描 {{ item.scanned }}</span>
-            <span class="tnum">入库 {{ item.imported }}</span>
-            <span class="tnum">跳过 {{ item.skipped }}</span>
+            <span class="tnum">{{ t('page.platforms.scan.scanned', { count: item.scanned }) }}</span>
+            <span class="tnum">{{ t('page.platforms.scan.imported', { count: item.imported }) }}</span>
+            <span class="tnum">{{ t('page.platforms.scan.skipped', { count: item.skipped }) }}</span>
             <span class="pf-scan__note">{{ item.note }}</span>
           </li>
         </ul>
@@ -801,20 +925,24 @@ watch(
 
     <FormDrawer
       v-model:show="importOpen"
-      title="导入全部平台"
-      submit-text="开始导入"
+      :title="t('page.platforms.import.title')"
+      :submit-text="t('page.platforms.import.submit')"
       :submit-disabled="!importPreview.length || submitting"
       :submit-loading="submitting"
       @submit="submitImport"
     >
-      <p class="pf-hint">
-        选择「导出全部平台」生成的 JSON（format=miraihub-all-platforms）。每个平台的账号都会走各自的后台导入任务，
-        可以切到其它页面等结果。
-      </p>
-      <input class="pf-file" type="file" accept=".json,application/json" multiple aria-label="选择全平台备份文件" @change="onImportFiles" />
+      <p class="pf-hint">{{ t('page.platforms.import.hint') }}</p>
+      <input
+        class="pf-file"
+        type="file"
+        accept=".json,application/json"
+        multiple
+        :aria-label="t('page.platforms.import.fileAria')"
+        @change="onImportFiles"
+      />
       <ul v-if="importPreview.length" class="pf-preview">
         <li v-for="item in importPreview" :key="item.storage">
-          {{ item.storage }} · {{ item.count }} 个账号
+          {{ item.storage }} · {{ t('page.platforms.import.previewCount', { count: item.count }) }}
         </li>
       </ul>
       <p v-for="(note, index) in importNotes" :key="index" class="pf-hint">{{ note }}</p>
@@ -822,22 +950,27 @@ watch(
 
     <FormDrawer
       v-model:show="exportOpen"
-      title="导出平台账号"
-      submit-text="开始导出"
+      :title="t('page.platforms.export.title')"
+      :submit-text="t('page.platforms.export.start')"
       :submit-loading="exporting"
       @submit="runExport(exportMode, exportScope)"
     >
-      <p class="pf-hint">「备份」含明文凭证，可用「导入全部平台」原样回灌；「清单」已脱敏，只能用于核对。</p>
-      <Segmented :options="exportModeOptions" :model-value="exportMode" aria-label="导出模式" @update:model-value="(value: string | number) => (exportMode = String(value) === 'plain' ? 'plain' : 'backup')" />
+      <p class="pf-hint">{{ t('page.platforms.export.hint') }}</p>
+      <Segmented
+        :options="exportModeOptions"
+        :model-value="exportMode"
+        :aria-label="t('page.platforms.export.modeAria')"
+        @update:model-value="(value: string | number) => (exportMode = String(value) === 'plain' ? 'plain' : 'backup')"
+      />
       <n-select
         v-model:value="exportScope"
         :options="exportScopeOptions"
-        aria-label="导出范围"
-        placeholder="导出范围"
+        :aria-label="t('page.platforms.export.scopeAria')"
+        :placeholder="t('page.platforms.export.scopeAria')"
       />
     </FormDrawer>
 
-    <JobProgress :jobs="jobItems" title="平台导入任务" @hide="hideJob" />
+    <JobProgress :jobs="jobItems" :title="t('page.platforms.job.title')" @hide="hideJob" />
   </div>
 </template>
 

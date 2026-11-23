@@ -15,6 +15,7 @@ import {
 } from 'naive-ui'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import DataTable from '@/components/data/DataTable.vue'
+import { ApiError } from '@/api/http'
 import * as settingsApi from '@/api/settings'
 import type {
   AppSourceStatus,
@@ -749,13 +750,68 @@ describe('SettingsPage · 修改登录密码', () => {
 
 describe('SettingsPage · 逆向产物', () => {
   it('后端整路由 404（DEV_TOOLS=0）时降级说明，不影响其它区块', async () => {
-    getAppSourceStatus.mockRejectedValue(new Error('404 Not Found'))
+    // 真实路径：ADMIN_DEV_TOOLS=0 → http 层抛 ApiError(404)
+    getAppSourceStatus.mockRejectedValue(new ApiError(404, 'Not Found'))
     const { wrapper } = await mountPage()
 
     const source = wrapper.find('#settings-appsource')
     expect(source.text()).toContain('本部署未开放')
     expect(source.text()).toContain('本部署未开放逆向产物（ADMIN_DEV_TOOLS=0 或非本机运行时）')
+    // 404 是「未开放」，不是错误态：不该出现错误块
+    expect(source.text()).not.toContain('加载逆向产物状态失败')
     expect(wrapper.find('#settings-invitation').text()).toContain('已启用')
+  })
+
+  it('非 ApiError 的 404 文案（代理层改写）同样按「未开放」降级', async () => {
+    getAppSourceStatus.mockRejectedValue(new Error('404 Not Found'))
+    const { wrapper } = await mountPage()
+
+    const source = wrapper.find('#settings-appsource')
+    expect(source.text()).toContain('本部署未开放逆向产物')
+    expect(source.text()).not.toContain('加载逆向产物状态失败')
+  })
+
+  it('状态接口 500 不降级：显示错误 + 重试，重试成功后回到正常渲染', async () => {
+    getAppSourceStatus.mockRejectedValue(new ApiError(500, 'runtime settings 读取失败'))
+    const { wrapper } = await mountPage()
+
+    const source = wrapper.find('#settings-appsource')
+    expect(source.text()).toContain('加载逆向产物状态失败：runtime settings 读取失败')
+    // 关键：500 不能被吞成「本部署未开放」
+    expect(source.text()).not.toContain('本部署未开放逆向产物')
+    expect(buttonByText(source.element, '重试')).toBeTruthy()
+
+    const before = getAppSourceStatus.mock.calls.length
+    getAppSourceStatus.mockResolvedValue(sourceStatus())
+    await click(source.element, '重试')
+
+    expect(getAppSourceStatus.mock.calls.length).toBeGreaterThan(before)
+    const after = wrapper.find('#settings-appsource')
+    expect(after.text()).not.toContain('加载逆向产物状态失败')
+    expect(after.text()).toContain('D:\\WorkBuddy\\resources\\app.asar')
+  })
+
+  it('断网（fetch TypeError）同样走错误态 + 重试，不降级、不炸其它区块', async () => {
+    getAppSourceStatus.mockRejectedValue(new TypeError('Failed to fetch'))
+    const { wrapper } = await mountPage()
+
+    const source = wrapper.find('#settings-appsource')
+    expect(source.text()).toContain('加载逆向产物状态失败：Failed to fetch')
+    expect(source.text()).not.toContain('本部署未开放逆向产物')
+    expect(buttonByText(source.element, '重试')).toBeTruthy()
+    expect(wrapper.find('#settings-runtime').text()).toContain('网关与超时')
+    expect(wrapper.find('#settings-proxies').text()).toContain('共 2 个节点')
+  })
+
+  it('状态接口回报 dev_tools=false 时同样降级（防御性口径）', async () => {
+    getAppSourceStatus.mockResolvedValue(sourceStatus({ dev_tools: false }))
+    const { wrapper } = await mountPage()
+
+    const source = wrapper.find('#settings-appsource')
+    expect(source.text()).toContain('本部署未开放逆向产物')
+    // 降级时不再渲染状态行（卡片说明里本来就有 app.asar 字样，只断言真实路径）
+    expect(source.text()).not.toContain('D:\\WorkBuddy\\resources\\app.asar')
+    expect(source.text()).not.toContain('加载逆向产物状态失败')
   })
 
   it('路径校验保存 / 输出目录校验 / 检索命中与产物未产出', async () => {
