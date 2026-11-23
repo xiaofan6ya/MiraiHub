@@ -376,6 +376,17 @@ function derivedHeaderValue(effective: Record<string, unknown>, name: string): s
   return map[name] || '—'
 }
 
+/**
+ * 请求头来源前缀 → Badge 语气（档案值 brand / SDK ok / 其它 neutral）。
+ * 前缀判断留在 api 层，页面模板里不再出现中文前缀字面量。
+ */
+export function headerSourceTone(source: string | null | undefined): 'brand' | 'ok' | 'neutral' {
+  const text = String(source || '')
+  if (text.startsWith('档案值')) return 'brand'
+  if (text.startsWith('SDK')) return 'ok'
+  return 'neutral'
+}
+
 export function headerRows(payload: ClientProfilePayload | null | undefined): HeaderRow[] {
   if (!payload) return []
   const eff = payload.effective || {}

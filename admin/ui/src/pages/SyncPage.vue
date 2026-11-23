@@ -19,6 +19,7 @@ import type { KvItem } from '@/components'
 import { useConfirm, useCopy, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import {
   describeSyncConfig,
   generateSyncSecret,
@@ -38,18 +39,11 @@ import {
   type SyncPushRecord,
 } from '@/api/sync'
 
-const HELP_TEXT =
-  '本地数据视为最新。配置线上实例的 URL 与密钥（HMAC 签名）后，点「同步到线上」把本地账号、模型配置与客户端兼容参数（UA / 版本号 / 请求头）推送过去。' +
-  '线上实例需配置相同密钥，并通过 /api/sync/receive 接收。版本与产品字段从本机安装包读取，OS 与硬件字段按本机系统实测（只在装了客户端的机器上有效）；' +
-  '线上服务器探测不到客户端，一律以同步过来的档案为准。'
-
-const CARD_DESCRIPTION =
-  '推送会用本机账号、模型配置与客户端兼容参数覆盖线上实例的同名数据；保存只改本机的 URL 与密钥。'
-
-const SECRET_HINT =
-  '与线上实例一致。留空提交表示保持现有密钥；保存后会重新显示库里的密钥。'
-
-const SECTIONS = [{ id: 'sync-online', title: '线上同步' }]
+const { t } = useI18n()
+const helpText = computed(() => t('page.sync.help'))
+const cardDescription = computed(() => t('page.sync.cardDescription'))
+const secretHint = computed(() => t('page.sync.secretHint'))
+const sections = computed(() => [{ id: 'sync-online', title: t('page.sync.section.online') }])
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -68,7 +62,7 @@ const pushing = ref(false)
 const loadError = ref<unknown>(null)
 
 const status = computed(() =>
-  config.value ? describeSyncConfig(config.value, record.value) : null,
+  config.value ? describeSyncConfig(config.value, record.value, Date.now(), t) : null,
 )
 const lastPush = computed(() => status.value?.lastPush ?? null)
 const statusEmpty = computed(() => status.value?.empty === true)
@@ -87,17 +81,17 @@ const dirty = computed(() =>
 
 const urlHint = computed(() =>
   normalizeRemoteUrl(form.remoteUrl)
-    ? '线上实例地址，末尾的 / 会自动去掉。'
-    : '留空不会写入后端：已配置的地址无法通过保存清除。',
+    ? t('page.sync.url.hintConfigured')
+    : t('page.sync.url.hintEmpty'),
 )
 const urlError = computed(() => {
   const value = normalizeRemoteUrl(form.remoteUrl)
-  return value && !isHttpUrl(value) ? '不是 http(s) 地址；后端不校验格式，但推送一定失败。' : ''
+  return value && !isHttpUrl(value) ? t('page.sync.url.invalid') : ''
 })
 
 const kvItems = computed<KvItem[]>(() => [
-  { label: '远程 URL', slot: 'url', block: true },
-  { label: '密钥', slot: 'secret' },
+  { label: t('page.sync.kv.url'), slot: 'url', block: true },
+  { label: t('page.sync.kv.secret'), slot: 'secret' },
 ])
 
 function applyForm(payload: SyncConfigPayload): void {
@@ -130,7 +124,7 @@ async function load(options: LoadOptions = {}): Promise<void> {
   } catch (error) {
     loadError.value = error
     // 契约 sync.md §六：刷新失败要「保留旧数据 + 卡片内 compact ErrorBlock + Toast」两条都给。
-    if (!isFirst && !options.quiet) toast.error(failureText('刷新同步配置', error))
+    if (!isFirst && !options.quiet) toast.error(failureText(t('page.sync.action.refresh'), error))
   } finally {
     refreshing.value = false
     firstLoad.value = false
@@ -151,11 +145,11 @@ async function save(): Promise<void> {
   saving.value = true
   try {
     await saveSyncConfig(normalizeSyncInput({ remoteUrl: form.remoteUrl, secret: form.secret }))
-    toast.success('已保存同步配置')
+    toast.success(t('page.sync.toast.saved'))
     // 以库里的实际值为准：空 URL 不写库、空密钥沿用旧值，都只有重取才准确。
     await load({ forceForm: true })
   } catch (error) {
-    toast.error(failureText('保存配置', error))
+    toast.error(failureText(t('page.sync.action.save'), error))
   } finally {
     saving.value = false
   }
@@ -165,54 +159,54 @@ function reset(): void {
   if (!config.value) return
   const hadChanges = dirty.value
   applyForm(config.value)
-  if (hadChanges) toast.info('已恢复为上次保存的配置')
+  if (hadChanges) toast.info(t('page.sync.toast.reset'))
 }
 
 async function regenerate(): Promise<void> {
   const confirmed = await confirm({
-    title: '重新生成同步密钥？',
-    message: '生成后需要把新密钥同步到线上实例，否则线上会以「签名校验失败」拒绝接收。',
-    okText: '重新生成',
+    title: t('page.sync.confirm.regenerate.title'),
+    message: t('page.sync.confirm.regenerate.body'),
+    okText: t('page.sync.confirm.regenerate.ok'),
   })
   if (!confirmed) return
   form.secret = generateSyncSecret()
   secretVisible.value = true
-  toast.success('已生成新密钥，记得点「保存配置」')
+  toast.success(t('page.sync.toast.regenerated'))
 }
 
 async function copySecret(): Promise<void> {
   const value = form.secret || config.value?.secret || ''
   if (!value) {
-    toast.warning('还没有可复制的密钥')
+    toast.warning(t('page.sync.toast.noSecret'))
     return
   }
   const ok = await copy(value)
-  if (ok) toast.success('已复制')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('common.copied'))
+  else toast.error(t('common.copyFailed'))
 }
 
 async function push(): Promise<void> {
   if (busy.value) return
   const url = normalizeRemoteUrl(form.remoteUrl)
   if (!url) {
-    toast.warning('请先填写远程 URL')
+    toast.warning(t('page.sync.toast.needUrl'))
     return
   }
   const confirmed = await confirm({
-    title: '同步到线上？',
-    message: '会用本地账号、模型配置与客户端参数覆盖线上实例的同名数据。推送前会把输入框里的 URL 与密钥先写入本机库。',
-    okText: '同步到线上',
+    title: t('page.sync.confirm.push.title'),
+    message: t('page.sync.confirm.push.body'),
+    okText: t('page.sync.confirm.push.ok'),
   })
   if (!confirmed) return
   pushing.value = true
   try {
     const payload = await pushToOnline(normalizeSyncInput({ remoteUrl: url, secret: form.secret }))
     rememberRecord(pushRecordFromResult(summarizePushResult(payload)))
-    toast.success('已同步到线上')
+    toast.success(t('page.sync.toast.pushed'))
     await load({ forceForm: true })
   } catch (error) {
     rememberRecord(pushRecordFromError(url, errorMessage(error)))
-    toast.error(failureText('同步到线上', error))
+    toast.error(failureText(t('page.sync.action.push'), error))
   } finally {
     pushing.value = false
   }
@@ -235,18 +229,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <SettingsLayout title="同步设置" :help="HELP_TEXT" :sections="SECTIONS" :dirty="dirty">
+  <SettingsLayout :title="t('page.sync.title')" :help="helpText" :sections="sections" :dirty="dirty">
     <template #actions>
-      <Btn variant="default" :icon="RefreshCw" :loading="refreshing" @click="refresh">刷新</Btn>
+      <Btn variant="default" :icon="RefreshCw" :loading="refreshing" @click="refresh">
+        {{ t('common.refresh') }}
+      </Btn>
     </template>
 
     <SettingsCard
       id="sync-online"
-      title="线上同步"
-      :description="CARD_DESCRIPTION"
+      :title="t('page.sync.section.online')"
+      :description="cardDescription"
       :dirty="dirty"
       :loading="saving || refreshing"
-      save-label="保存配置"
+      :save-label="t('page.sync.saveLabel')"
       :save-disabled="saveDisabled"
       @save="save"
       @reset="reset"
@@ -259,7 +255,7 @@ onBeforeUnmount(() => {
           :disabled="firstLoad || refreshing || saving"
           @click="push"
         >
-          同步到线上
+          {{ t('page.sync.action.push') }}
         </Btn>
       </template>
 
@@ -273,7 +269,7 @@ onBeforeUnmount(() => {
       <!-- 首次加载失败：整块错误 + 重试 -->
       <ErrorBlock
         v-else-if="loadError && !config"
-        title="同步配置加载失败"
+        :title="t('page.sync.loadFailed')"
         :detail="errorText"
         @retry="load()"
       />
@@ -282,80 +278,80 @@ onBeforeUnmount(() => {
         <ErrorBlock
           v-if="loadError"
           compact
-          title="刷新同步配置失败，当前显示上次加载的值"
+          :title="t('page.sync.refreshFailed')"
           :detail="errorText"
           @retry="load()"
         />
 
-        <Section title="连接" first>
+        <Section :title="t('page.sync.section.connect')" first>
           <div class="form-grid">
-            <FormField label="远程 URL" :hint="urlHint" :error="urlError">
+            <FormField :label="t('page.sync.field.url')" :hint="urlHint" :error="urlError">
               <NInput
                 v-model:value="form.remoteUrl"
-                placeholder="https://online.example.com"
+                :placeholder="t('page.sync.placeholder.url')"
                 :disabled="busy"
                 @blur="onUrlBlur"
               />
             </FormField>
 
-            <FormField label="同步密钥（HMAC 签名用）" :hint="SECRET_HINT">
+            <FormField :label="t('page.sync.field.secret')" :hint="secretHint">
               <div class="secret-row">
                 <NInput
                   v-model:value="form.secret"
                   class="secret-input"
                   :type="secretVisible ? 'text' : 'password'"
-                  placeholder="与线上实例一致的密钥"
+                  :placeholder="t('page.sync.placeholder.secret')"
                   autocomplete="off"
                   :disabled="busy"
                 >
                   <template #suffix>
                     <IconBtn
-                      :label="secretVisible ? '隐藏密钥' : '显示密钥'"
+                      :label="secretVisible ? t('page.sync.secret.hide') : t('page.sync.secret.show')"
                       :icon="secretVisible ? EyeOff : Eye"
                       @click="secretVisible = !secretVisible"
                     />
-                    <IconBtn label="复制密钥" :icon="Copy" @click="copySecret" />
+                    <IconBtn :label="t('page.sync.secret.copy')" :icon="Copy" @click="copySecret" />
                   </template>
                 </NInput>
-                <Btn variant="quiet" :disabled="busy" @click="regenerate">重新生成</Btn>
+                <Btn variant="quiet" :disabled="busy" @click="regenerate">
+                  {{ t('page.sync.regenerate') }}
+                </Btn>
               </div>
             </FormField>
           </div>
         </Section>
 
-        <Section title="同步内容">
+        <Section :title="t('page.sync.section.content')">
+          <p class="hint">{{ t('page.sync.content.accounts') }}</p>
           <p class="hint">
-            账号（平台、UID、名称、企业、域名、状态、登录态、额度）· 模型配置（平台、模型 ID、倍率、备注）·
-            客户端兼容参数（UA、版本号、风控头与指纹）。
-          </p>
-          <p class="hint">
-            线上实例需配置相同密钥，通过 <code class="mono">/api/sync/receive</code> 校验签名后接收。
+            {{ t('page.sync.content.receivePrefix') }}
+            <code class="mono">/api/sync/receive</code>
+            {{ t('page.sync.content.receiveSuffix') }}
           </p>
         </Section>
 
-        <Section title="当前状态">
-          <Empty
-            v-if="statusEmpty"
-            description="还没有配置线上实例。填写远程 URL 并保存后即可同步。"
-          />
+        <Section :title="t('page.sync.section.status')">
+          <Empty v-if="statusEmpty" :description="t('page.sync.empty')" />
 
           <template v-else>
             <KV :items="kvItems">
               <template #url>
                 <Copyable v-if="configuredUrl" :value="configuredUrl" />
-                <span v-else class="muted">未配置</span>
+                <span v-else class="muted">{{ t('page.sync.unconfigured') }}</span>
               </template>
               <template #secret>
                 <span class="secret-line">
-                  <span class="mono">{{ secretMasked || '未设置' }}</span>
-                  <Badge v-if="secretAutoGenerated" tone="brand">本次访问自动生成</Badge>
+                  <span class="mono">{{ secretMasked || t('page.sync.unset') }}</span>
+                  <Badge v-if="secretAutoGenerated" tone="brand">
+                    {{ t('page.sync.autoGenerated') }}
+                  </Badge>
                 </span>
               </template>
             </KV>
 
             <div class="last-push">
               <div class="last-push__head">
-                <span class="last-push__label">最近同步</span>
+                <span class="last-push__label">{{ t('page.sync.lastPush') }}</span>
                 <template v-if="lastPush">
                   <Badge :tone="lastPush.ok ? 'ok' : 'danger'">{{ lastPush.resultText }}</Badge>
                   <span class="last-push__time" :title="lastPush.timeFull">{{ lastPush.timeText }}</span>
@@ -363,13 +359,15 @@ onBeforeUnmount(() => {
                     {{ lastPush.remoteText }}
                   </span>
                 </template>
-                <span v-else class="last-push__none">尚未同步</span>
+                <span v-else class="last-push__none">{{ t('page.sync.neverPushed') }}</span>
               </div>
 
               <p v-if="lastPush" class="last-push__detail">
-                账号 <span class="tnum">{{ lastPush.accountsText }}</span> ·
-                模型 <span class="tnum">{{ lastPush.modelsText }}</span> ·
-                客户端参数 {{ lastPush.profileText }}
+                {{ t('page.sync.detail.accounts') }}
+                <span class="tnum">{{ lastPush.accountsText }}</span> ·
+                {{ t('page.sync.detail.models') }}
+                <span class="tnum">{{ lastPush.modelsText }}</span> ·
+                {{ t('page.sync.detail.profile') }} {{ lastPush.profileText }}
               </p>
               <p v-if="lastPush?.error" class="last-push__error">{{ lastPush.error }}</p>
             </div>

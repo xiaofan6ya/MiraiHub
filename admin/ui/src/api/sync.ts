@@ -11,6 +11,7 @@
  * 页面禁止直接 fetch：请求统一走 ./http。
  */
 import { http } from './http'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 import { fmtFullTime, fmtInt, fmtRelative, maskSecret, toDate } from '@/utils/format'
 
 /** `POST /api/sync/push` 里线上接收端返回的结构（admin/routers/sync.py:receive）。 */
@@ -319,7 +320,11 @@ export function summarizePushResult(payload: SyncPushResult | null | undefined):
 }
 
 /** 展示文案：账号/模型用 "+新增 / ~更新"，客户端参数按线上应用结果。 */
-export function formatPushSummary(summary: SyncPushSummary): SyncPushSummaryText {
+export function formatPushSummary(
+  summary: SyncPushSummary,
+  translate?: Translate,
+): SyncPushSummaryText {
+  const tr = translate ?? defaultTranslate
   const accounts = summary.accounts
     ? '+' + fmtInt(summary.accounts.added) + ' / ~' + fmtInt(summary.accounts.updated)
     : '—'
@@ -328,10 +333,14 @@ export function formatPushSummary(summary: SyncPushSummary): SyncPushSummaryText
     : '—'
   let profile = '—'
   if (summary.profile) {
-    if (summary.profile.applied === true) profile = '已同步 ' + fmtInt(summary.profile.fields) + ' 项'
-    else if (summary.profile.applied === false) {
-      profile = '未同步：' + (summary.profile.errors.join('；') || '线上未接受')
-    } else profile = '为空，未同步'
+    if (summary.profile.applied === true) {
+      profile = tr('page.sync.summary.profileApplied', { count: fmtInt(summary.profile.fields) })
+    } else if (summary.profile.applied === false) {
+      const reason =
+        summary.profile.errors.join(tr('page.sync.listSeparator')) ||
+        tr('page.sync.summary.profileNotAccepted')
+      profile = tr('page.sync.summary.profileRejected', { reason })
+    } else profile = tr('page.sync.summary.profileEmpty')
   }
   return { accounts, models, profile }
 }
@@ -471,7 +480,9 @@ export function describeSyncConfig(
   config: SyncConfigPayload | null | undefined,
   record: SyncPushRecord | null = null,
   now: number = Date.now(),
+  translate?: Translate,
 ): SyncStatusView {
+  const tr = translate ?? defaultTranslate
   const url = normalizeRemoteUrl(config?.remote_url)
   const secret = asString(config?.secret)
   const masked = asString(config?.secret_masked) || (secret ? maskSecret(secret) : '')
@@ -480,19 +491,22 @@ export function describeSyncConfig(
 
   let lastPush: SyncLastPushView | null = null
   if (latest) {
-    const text = formatPushSummary({
-      remote: latest.remote,
-      accounts: latest.accounts,
-      models: latest.models,
-      profile: latest.profile,
-    })
+    const text = formatPushSummary(
+      {
+        remote: latest.remote,
+        accounts: latest.accounts,
+        models: latest.models,
+        profile: latest.profile,
+      },
+      translate,
+    )
     lastPush = {
       at: latest.at,
       ok: latest.ok,
-      resultText: latest.ok ? '成功' : '失败',
+      resultText: latest.ok ? tr('page.sync.result.ok') : tr('page.sync.result.failed'),
       timeText: fmtRelative(latest.at, now),
       timeFull: fmtFullTime(latest.at),
-      remoteText: latest.remote ? '推送至 ' + latest.remote : '',
+      remoteText: latest.remote ? tr('page.sync.result.remote', { remote: latest.remote }) : '',
       accountsText: text.accounts,
       modelsText: text.models,
       profileText: text.profile,

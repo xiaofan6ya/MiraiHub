@@ -27,8 +27,8 @@ import FormField from '@/components/overlay/FormField.vue'
 import PlatformLogo from '@/components/identity/PlatformLogo.vue'
 import { useConfirm, useToast } from '@/composables'
 import { failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import {
-  TTL_OPTIONS,
   buildTicketUrl,
   copyPreviewLines,
   copyValidation,
@@ -44,6 +44,7 @@ import {
   ticketExpiryText,
   toggleGate,
   ttlLabel,
+  ttlOptions,
   type AdminTicketsPayload,
   type GateStatus,
   type OpenConfigPayload,
@@ -52,19 +53,19 @@ import {
   type PageCopy,
 } from '@/api/openentry'
 
-const HELP_TEXT =
-  '多平台聚合入口：总闸关闭时 /join 与 /api/open/* 一律 404；每次开关推进代次，旧链接与邀请码同时作废。' +
-  '链接按时间有效、公共共享、不限人数；通过可信渠道发送。'
+const { t } = useI18n()
+const helpText = computed(() => t('page.openentry.help'))
+const ttlSelectOptions = computed(() => ttlOptions(t))
 
 const toast = useToast()
 const confirm = useConfirm()
 
-const sections = [
-  { id: 'openentry-gate', title: '入口状态' },
-  { id: 'openentry-links', title: '访问链接' },
-  { id: 'openentry-platforms', title: '公开页平台' },
-  { id: 'openentry-copy', title: '公开页文案' },
-]
+const sections = computed(() => [
+  { id: 'openentry-gate', title: t('page.openentry.section.gate') },
+  { id: 'openentry-links', title: t('page.openentry.section.links') },
+  { id: 'openentry-platforms', title: t('page.openentry.section.platforms') },
+  { id: 'openentry-copy', title: t('page.openentry.section.copy') },
+])
 
 /* ------------------------------------------------------------------ *
  * 取数
@@ -81,9 +82,9 @@ const ticketsError = ref('')
 const tickets = ref<AdminTicketsPayload | null>(null)
 
 /** 页头与入口卡片的 Badge 都读它：必须随 gate 变化求值（setup 时算一次会永远停在「已关闭」）。 */
-const state = computed(() => gateStateOf(gate.value))
-const meta = computed(() => gateMetaText(gate.value))
-const platformSummary = computed(() => platformFlagSummary(config.value?.platforms))
+const state = computed(() => gateStateOf(gate.value, t))
+const meta = computed(() => gateMetaText(gate.value, t))
+const platformSummary = computed(() => platformFlagSummary(config.value?.platforms, t))
 
 async function loadGate(): Promise<void> {
   gateLoading.value = true
@@ -91,7 +92,7 @@ async function loadGate(): Promise<void> {
   try {
     gate.value = await getGateStatus()
   } catch (error) {
-    gateError.value = failureText('读取入口状态', error)
+    gateError.value = failureText(t('page.openentry.action.loadGate'), error)
   } finally {
     gateLoading.value = false
   }
@@ -105,7 +106,7 @@ async function loadConfig(): Promise<void> {
     syncCopyDraft(config.value?.copy)
     ttlDraft.value = String(config.value?.ticket_ttl ?? 86400)
   } catch (error) {
-    configError.value = failureText('读取公开入口配置', error)
+    configError.value = failureText(t('page.openentry.action.loadConfig'), error)
   } finally {
     configLoading.value = false
   }
@@ -117,7 +118,7 @@ async function loadTickets(): Promise<void> {
   try {
     tickets.value = await getAdminTickets()
   } catch (error) {
-    ticketsError.value = failureText('读取访问链接', error)
+    ticketsError.value = failureText(t('page.openentry.action.loadTickets'), error)
   } finally {
     ticketsLoading.value = false
   }
@@ -145,22 +146,25 @@ async function switchGate(): Promise<void> {
   if (gateToggling.value) return
   const open = Boolean(gate.value?.open)
   const ok = await confirm({
-    title: open ? '关闭自助注册入口？' : '开启自助注册入口？',
-    message: open
-      ? '关闭后 /join 立即 404；已签发的全部访问链接与邀请码同时失效，且无法恢复。'
-      : '开启后即可签发访问链接。每次开关都会推进代次，旧链接一律作废。',
-    okText: open ? '关闭入口' : '开启入口',
+    title: open ? t('page.openentry.confirmGate.closeTitle') : t('page.openentry.confirmGate.openTitle'),
+    message: open ? t('page.openentry.confirmGate.closeBody') : t('page.openentry.confirmGate.openBody'),
+    okText: open ? t('page.openentry.action.closeGate') : t('page.openentry.action.openGate'),
     danger: open,
   })
   if (!ok) return
   gateToggling.value = true
   try {
     await toggleGate(!open)
-    toast.success(open ? '入口已关闭，旧链接全部失效' : '入口已开启，可生成链接')
+    toast.success(open ? t('page.openentry.toast.gateClosed') : t('page.openentry.toast.gateOpened'))
     await loadGate()
     await loadTickets()
   } catch (error) {
-    toast.error(failureText(open ? '关闭入口' : '开启入口', error))
+    toast.error(
+      failureText(
+        open ? t('page.openentry.action.closeGate') : t('page.openentry.action.openGate'),
+        error,
+      ),
+    )
   } finally {
     gateToggling.value = false
   }
@@ -179,11 +183,11 @@ async function saveTtl(): Promise<void> {
   ttlSaving.value = true
   try {
     await saveOpenConfig({ ticket_ttl: Number(ttlDraft.value) })
-    toast.success('链接时效已保存：新签发的链接按新时效生效')
+    toast.success(t('page.openentry.toast.ttlSaved'))
     await loadConfig()
     await loadGate()
   } catch (error) {
-    toast.error(failureText('保存链接时效', error))
+    toast.error(failureText(t('page.openentry.action.saveTtl'), error))
   } finally {
     ttlSaving.value = false
   }
@@ -208,7 +212,7 @@ function openDrawer(): void {
 
 async function submitIssue(): Promise<void> {
   if (!canIssue.value) {
-    toast.error('入口未开启：开启后才能签发访问链接')
+    toast.error(t('page.openentry.toast.gateClosedWarn'))
     return
   }
   issuing.value = true
@@ -217,11 +221,11 @@ async function submitIssue(): Promise<void> {
     ticketCount.value = String(count)
     const payload = await issueTickets(count)
     issuedUrls.value = payload?.urls || []
-    toast.success('已生成 ' + issuedUrls.value.length + ' 条链接，数量之外的有效期见列表')
+    toast.success(t('page.openentry.toast.issued', { count: issuedUrls.value.length }))
     await loadGate()
     await loadTickets()
   } catch (error) {
-    toast.error(failureText('签发访问链接', error))
+    toast.error(failureText(t('page.openentry.action.issue'), error))
   } finally {
     issuing.value = false
   }
@@ -244,10 +248,14 @@ async function togglePlatform(platform: OpenPlatform): Promise<void> {
   platformSaving.value = platform.id
   try {
     await saveOpenConfig({ platforms: { [platform.id]: !platform.enabled } })
-    toast.success(platform.label + (platform.enabled ? ' 已从公开页隐藏' : ' 已在公开页开放'))
+    toast.success(
+      platform.enabled
+        ? t('page.openentry.toast.platformHidden', { name: platform.label })
+        : t('page.openentry.toast.platformShown', { name: platform.label }),
+    )
     await loadConfig()
   } catch (error) {
-    toast.error(failureText('切换平台开关', error))
+    toast.error(failureText(t('page.openentry.action.togglePlatform'), error))
   } finally {
     platformSaving.value = ''
   }
@@ -257,29 +265,29 @@ async function togglePlatform(platform: OpenPlatform): Promise<void> {
  * 公开页文案
  * ------------------------------------------------------------------ */
 
-const copyDraft = reactive<PageCopy>({ title: '', sub: '', intro: [], foot: '' })
-const copyText = reactive({ title: '', sub: '', intro: '', foot: '' })
+/**
+ * 文案草稿只有一份：输入框与右侧预览共用同一个对象（说明用换行串）。
+ * 之前输入框绑一份状态、预览标题绑另一份（只在取数时同步），
+ * 结果改了标题预览不动，和副标题/说明的实时表现不一致。
+ */
+const copyDraft = reactive({ title: '', sub: '', intro: '', foot: '' })
 const copySaving = ref(false)
 
 function syncCopyDraft(copy: PageCopy | null | undefined): void {
   const value = normalizeCopy(copy)
   copyDraft.title = value.title
   copyDraft.sub = value.sub
-  copyDraft.intro = value.intro
+  copyDraft.intro = value.intro.join('\n')
   copyDraft.foot = value.foot
-  copyText.title = value.title
-  copyText.sub = value.sub
-  copyText.intro = value.intro.join('\n')
-  copyText.foot = value.foot
 }
 
 const copyFromForm = computed<PageCopy>(() => ({
-  title: copyText.title,
-  sub: copyText.sub,
-  intro: copyText.intro.split('\n'),
-  foot: copyText.foot,
+  title: copyDraft.title,
+  sub: copyDraft.sub,
+  intro: copyDraft.intro.split('\n'),
+  foot: copyDraft.foot,
 }))
-const previewLines = computed(() => copyPreviewLines(copyFromForm.value))
+const previewLines = computed(() => copyPreviewLines(copyFromForm.value, t))
 const copyDirty = computed(() => {
   const saved = normalizeCopy(config.value?.copy)
   const next = normalizeCopy(copyFromForm.value)
@@ -292,7 +300,7 @@ const copyDirty = computed(() => {
 })
 
 async function saveCopy(): Promise<void> {
-  const error = copyValidation(copyFromForm.value)
+  const error = copyValidation(copyFromForm.value, t)
   if (error) {
     toast.error(error)
     return
@@ -300,10 +308,10 @@ async function saveCopy(): Promise<void> {
   copySaving.value = true
   try {
     await saveOpenConfig({ page_copy: normalizeCopy(copyFromForm.value) })
-    toast.success('公开页文案已保存')
+    toast.success(t('page.openentry.toast.copySaved'))
     await loadConfig()
   } catch (err) {
-    toast.error(failureText('保存公开页文案', err))
+    toast.error(failureText(t('page.openentry.action.saveCopy'), err))
   } finally {
     copySaving.value = false
   }
@@ -311,18 +319,18 @@ async function saveCopy(): Promise<void> {
 
 async function resetCopy(): Promise<void> {
   const ok = await confirm({
-    title: '恢复默认文案？',
-    message: '公开页会回到默认标题与空说明；已填的标题 / 副标题 / 说明 / 页脚全部清空。',
-    okText: '恢复默认',
+    title: t('page.openentry.confirmReset.title'),
+    message: t('page.openentry.confirmReset.body'),
+    okText: t('page.openentry.confirmReset.ok'),
   })
   if (!ok) return
   copySaving.value = true
   try {
     await saveOpenConfig({ page_copy: { title: '', sub: '', intro: [], foot: '' } })
-    toast.success('已恢复默认文案')
+    toast.success(t('page.openentry.toast.copyReset'))
     await loadConfig()
   } catch (err) {
-    toast.error(failureText('恢复默认文案', err))
+    toast.error(failureText(t('page.openentry.action.resetCopy'), err))
   } finally {
     copySaving.value = false
   }
@@ -332,22 +340,22 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
 </script>
 
 <template>
-  <SettingsLayout title="公开注册入口" :help="HELP_TEXT" :sections="sections" :dirty="dirty">
+  <SettingsLayout :title="t('page.openentry.title')" :help="helpText" :sections="sections" :dirty="dirty">
     <template #actions>
       <Badge :tone="state.tone">{{ state.label }}</Badge>
       <Btn variant="quiet" :icon="RefreshCw" :loading="gateLoading || configLoading || ticketsLoading" @click="reload">
-        刷新
+        {{ t('common.refresh') }}
       </Btn>
     </template>
 
     <!-- 1. 入口状态 + 限制参数 -->
     <SettingsCard
       id="openentry-gate"
-      title="入口状态"
-      description="关闭时 /join 与 /api/open/* 一律 404；每次开关推进代次，旧链接与邀请码同时失效。"
+      :title="t('page.openentry.section.gate')"
+      :description="t('page.openentry.gateDescription')"
       :dirty="ttlDirty"
       :loading="ttlSaving"
-      save-label="保存时效"
+      :save-label="t('page.openentry.saveTtl')"
       :save-disabled="!ttlDirty"
       @save="saveTtl"
       @reset="loadConfig"
@@ -358,12 +366,12 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
         <div class="oe-gate">
           <div class="oe-gate__text">
             <div class="oe-gate__label">
-              自助注册入口
+              {{ t('page.openentry.gateSwitch') }}
               <Badge :tone="state.tone">{{ state.label }}</Badge>
             </div>
             <p class="oe-note">{{ meta }}</p>
             <p class="oe-note">
-              链接有效 {{ ttlLabel(gate?.ticket_ttl) }}，可重复打开（关闸即全部失效）。
+              {{ t('page.openentry.gateNote', { ttl: ttlLabel(gate?.ticket_ttl, t) }) }}
             </p>
           </div>
           <div class="oe-gate__switch">
@@ -372,17 +380,25 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
               size="large"
               :loading="gateToggling"
               :disabled="gateLoading"
-              aria-label="自助注册入口总开关"
+              :aria-label="t('page.openentry.gateAria')"
               @update:value="switchGate"
             />
             <Btn variant="danger" size="sm" :icon="Power" :disabled="!gate?.open" @click="switchGate">
-              关闭入口使全部失效
+              {{ t('page.openentry.closeGate') }}
             </Btn>
           </div>
         </div>
 
-        <FormField label="链接时效（限制参数）" :hint="'新签发的链接按新时效生效；当前 ' + ttlLabel(gate?.ticket_ttl) + '。'">
-          <n-select v-model:value="ttlDraft" :options="TTL_OPTIONS" aria-label="链接时效" style="width: 200px" />
+        <FormField
+          :label="t('page.openentry.field.ttl')"
+          :hint="t('page.openentry.field.ttlHint', { ttl: ttlLabel(gate?.ticket_ttl, t) })"
+        >
+          <n-select
+            v-model:value="ttlDraft"
+            :options="ttlSelectOptions"
+            :aria-label="t('page.openentry.field.ttlAria')"
+            style="width: 200px"
+          />
         </FormField>
       </template>
     </SettingsCard>
@@ -390,14 +406,14 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
     <!-- 2. 访问链接 -->
     <SettingsCard
       id="openentry-links"
-      title="访问链接"
-      description="按时间有效、公共共享、不限人数；后端只保存 jti，明文链接只在生成时返回一次。"
+      :title="t('page.openentry.section.links')"
+      :description="t('page.openentry.linksDescription')"
       hide-save
       hide-reset
     >
       <template #actions>
         <Btn variant="default" size="sm" :icon="Link2" :disabled="!canIssue" @click="openDrawer">
-          生成访问链接
+          {{ t('page.openentry.generate') }}
         </Btn>
       </template>
 
@@ -405,26 +421,36 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       <ErrorBlock v-else-if="ticketsError" :title="ticketsError" retry @retry="loadTickets" />
       <template v-else>
         <p class="oe-note">
-          {{ tickets?.open ? '入口已开启' : '入口未开启（开启后才能签发）' }} · 当前有效 {{ tickets?.count || 0 }} 条 · 代次 {{ tickets?.epoch || 0 }}
+          {{
+            t('page.openentry.ticketsSummary', {
+              state: tickets?.open
+                ? t('page.openentry.ticketsOpen')
+                : t('page.openentry.ticketsClosed'),
+              count: tickets?.count || 0,
+              epoch: tickets?.epoch || 0,
+            })
+          }}
         </p>
         <ul v-if="ticketRows.length" class="oe-tickets">
           <li v-for="ticket in ticketRows" :key="ticket.code" class="oe-ticket">
             <Copyable :value="ticketUrl(ticket)" class="oe-ticket__url" />
-            <Badge :tone="ticket.permanent ? 'brand' : 'neutral'">{{ ticketExpiryText(ticket) }}</Badge>
+            <Badge :tone="ticket.permanent ? 'brand' : 'neutral'">{{ ticketExpiryText(ticket, t) }}</Badge>
           </li>
         </ul>
-        <Empty v-else compact description="还没有链接，点「生成访问链接」签发。">
-          <Btn variant="default" size="sm" :disabled="!canIssue" @click="openDrawer">生成访问链接</Btn>
+        <Empty v-else compact :description="t('page.openentry.linksEmpty')">
+          <Btn variant="default" size="sm" :disabled="!canIssue" @click="openDrawer">
+            {{ t('page.openentry.generate') }}
+          </Btn>
         </Empty>
-        <p class="oe-note">撤销粒度是「代次」：关闭入口会让全部链接同时失效（后端没有单条撤销接口）。</p>
+        <p class="oe-note">{{ t('page.openentry.epochNote') }}</p>
       </template>
     </SettingsCard>
 
     <!-- 3. 公开页平台 -->
     <SettingsCard
       id="openentry-platforms"
-      title="公开页可见的平台"
-      description="只有这里打开的平台会出现在公开注册页；清单来自各平台的公开登录适配器。"
+      :title="t('page.openentry.section.platforms')"
+      :description="t('page.openentry.platformsDescription')"
       hide-save
       hide-reset
     >
@@ -445,65 +471,72 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
             <n-switch
               :value="platform.enabled"
               :loading="platformSaving === platform.id"
-              :aria-label="platform.label + ' 是否在公开页可见'"
+              :aria-label="t('page.openentry.platformAria', { name: platform.label })"
               @update:value="togglePlatform(platform)"
             />
           </li>
         </ul>
-        <Empty v-else compact description="该部署没有可公开注册的平台适配器。" />
+        <Empty v-else compact :description="t('page.openentry.platformsEmpty')" />
       </template>
     </SettingsCard>
 
     <!-- 4. 公开页文案 + 预览 -->
     <SettingsCard
       id="openentry-copy"
-      title="公开页文案"
-      description="纯文本，最多 6 行说明；保存后立即对公开页生效。"
+      :title="t('page.openentry.section.copy')"
+      :description="t('page.openentry.copyDescription')"
       :dirty="copyDirty"
       :loading="copySaving"
-      save-label="保存文案"
+      :save-label="t('page.openentry.saveCopy')"
       :save-disabled="!copyDirty"
       @save="saveCopy"
       @reset="loadConfig"
     >
       <template #actions>
-        <Btn variant="quiet" size="sm" :disabled="copySaving" @click="resetCopy">恢复默认</Btn>
+        <Btn variant="quiet" size="sm" :disabled="copySaving" @click="resetCopy">
+          {{ t('page.openentry.resetCopy') }}
+        </Btn>
       </template>
 
       <div v-if="configLoading && !config" class="oe-skeleton"><n-skeleton text :repeat="4" /></div>
       <ErrorBlock v-else-if="configError" :title="configError" retry @retry="loadConfig" />
       <div v-else class="oe-copy">
         <div class="oe-copy__form">
-          <FormField label="标题" hint="不超过 40 字。">
-            <n-input v-model:value="copyText.title" placeholder="MiraiHub 注册" />
+          <FormField :label="t('page.openentry.field.title')" :hint="t('page.openentry.field.titleHint')">
+            <n-input v-model:value="copyDraft.title" :placeholder="t('page.openentry.field.titlePlaceholder')" />
           </FormField>
-          <FormField label="副标题" hint="不超过 120 字，可留空。">
-            <n-input v-model:value="copyText.sub" placeholder="可留空" />
+          <FormField :label="t('page.openentry.field.sub')" :hint="t('page.openentry.field.subHint')">
+            <n-input v-model:value="copyDraft.sub" :placeholder="t('page.openentry.field.optional')" />
           </FormField>
-          <FormField label="说明" hint="一行一条，最多 6 行、每行不超过 200 字。">
-            <n-input v-model:value="copyText.intro" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="欢迎使用 MiraiHub；填写邀请码即可注册" />
+          <FormField :label="t('page.openentry.field.intro')" :hint="t('page.openentry.field.introHint')">
+            <n-input
+              v-model:value="copyDraft.intro"
+              type="textarea"
+              :autosize="{ minRows: 3, maxRows: 6 }"
+              :placeholder="t('page.openentry.field.introPlaceholder')"
+            />
           </FormField>
-          <FormField label="页脚" hint="不超过 160 字，可留空。">
-            <n-input v-model:value="copyText.foot" placeholder="可留空" />
+          <FormField :label="t('page.openentry.field.foot')" :hint="t('page.openentry.field.footHint')">
+            <n-input v-model:value="copyDraft.foot" :placeholder="t('page.openentry.field.optional')" />
           </FormField>
         </div>
-        <aside class="oe-copy__preview" aria-label="公开页文案预览">
-          <h4>{{ copyDraft.title || 'MiraiHub 注册' }}</h4>
+        <aside class="oe-copy__preview" :aria-label="t('page.openentry.previewAria')">
+          <h4>{{ copyDraft.title.trim() || t('page.openentry.field.titlePlaceholder') }}</h4>
           <p v-for="(line, index) in previewLines.slice(1)" :key="index" class="oe-copy__line">{{ line }}</p>
-          <p class="oe-copy__foot">预览仅示意排版，公开页样式以 join.html 为准。</p>
+          <p class="oe-copy__foot">{{ t('page.openentry.previewNote') }}</p>
         </aside>
       </div>
     </SettingsCard>
 
     <FormDrawer
       v-model:show="drawerOpen"
-      title="生成访问链接"
-      submit-text="生成链接"
+      :title="t('page.openentry.generate')"
+      :submit-text="t('page.openentry.generateSubmit')"
       :submit-loading="issuing"
       :submit-disabled="!canIssue"
       @submit="submitIssue"
     >
-      <FormField label="生成数量" hint="1–50 条；同一条链接在有效期内可重复打开、不限人数。">
+      <FormField :label="t('page.openentry.field.count')" :hint="t('page.openentry.field.countHint')">
         <n-input v-model:value="ticketCount" placeholder="1" />
       </FormField>
       <ul v-if="issuedUrls.length" class="oe-issued">
@@ -511,7 +544,7 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
           <Copyable :value="url" />
         </li>
       </ul>
-      <p class="oe-note">明文链接只在生成时返回一次；关闸后全部失效。</p>
+      <p class="oe-note">{{ t('page.openentry.plainNote') }}</p>
     </FormDrawer>
   </SettingsLayout>
 </template>

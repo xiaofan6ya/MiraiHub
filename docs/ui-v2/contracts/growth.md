@@ -132,8 +132,12 @@
 1. **首次加载**：卡片骨架（每账号一张灰块）+ 统计条骨架；「全部领奖」禁用。
 2. **刷新中**：保留旧数据，刷新按钮转圈；任务清单按账号粒度单独 loading。
 3. **空**：无成长账号 → `Empty`「当前平台还没有可管理的成长账号」；平台不支持 → `Empty`「当前平台没有成长计划」；筛选无结果 → 「没有符合条件的账号」。
-4. **错误**：账号列表失败 → `ErrorBlock` + 重试；单账号任务清单失败 → 该卡内错误提示 + 「重试」，不影响其它卡。
-5. **任务清单拉取慢**：`/api/growth/accounts/{id}/tasks` 单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，未到的卡显示骨架。
+4. **错误**：账号列表失败 → `ErrorBlock` + 「重试」（`loadError`，无数据时占整页）；单账号任务清单失败 → 该卡内错误提示 + 「重试」（`reloadAccountTasks`），孤立的个别失败不影响其它卡；**连续 8 个失败则熔断整条队列，只在顶部留一条提示**：
+   - **熔断阈值**：批量预取按 `TASK_FAILURE_LIMIT = 8` 计「连续失败」，任一账号成功即清零；`abort` / `AbortError` 直接返回、不计入。第 8 个连续失败落定时置 `tripped`，两个 worker 都不再领新 id；并发 2 下最多发出 **9 个请求**（8 个已失败 + 1 个先于熔断发出的在途请求），194 个账号整站 502 不会跑到底。
+   - **顶部单条提示**：熔断后清空逐卡 `tasksError`（失败卡片回落「这个账号还没有拉到任务清单。」空态，不逐卡刷 502），改在统计条上方渲染唯一一条 `.gw-bulk-error`（`role="alert"`、`TriangleAlert` 图标、`Btn`「重试」）：正文「任务清单连续 8 个账号加载失败，已暂停批量预取」（N > 0 时补「（剩余 N 个账号未请求）」），副行是最后一条失败的 `failureText('加载任务清单', …)`；N = 本轮队列长度 − 已发出请求数（`ids.length - attempted`）。
+   - **重试只补缺口**：`retryBulkTasks()` 清掉全局提示后跑 `loadAllTasks(false)`，按 `force || !tasksByAccount[id]` 过滤，只请求首轮失败与从未请求的账号（已拿到 payload 的不重跑）；若这轮再连续失败，会重新熔断并再次出提示。
+   - **卸载 / 切平台 abort 旧队列**：队列挂在 `tasksAbort` 上，`abortTaskQueue()` 依次 `abort()` 在途请求、置空 `tasksAbort`、`tasksToken += 1`（旧 token 失效）、清 `tasksLoading`；调用点为 `onBeforeUnmount`、`platformStore.onChange`（`selector` 变化时先 abort 再判 `supports('growth')`）、`watch(supported)` 转 false、以及每轮 `loadAllTasks` 开头（新一轮取代旧一轮）。worker 在写入 `tasksByAccount` / `tasksError` 前用 `stale()`（`abort.signal.aborted || token !== tasksToken`）拦掉迟到响应与错误，因此 abort 只静默退出、不产生全局提示；切平台时同时清空 `bulkTasksError`，平台不支持则清空账号列表并显示 `Empty`。
+5. **任务清单拉取慢**：`/api/growth/accounts/{id}/tasks` 单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，未到的卡显示骨架；失败收敛与队列取消见第 4 条。
 6. **企业版账号**：后端已排除，页脚显示排除数量。
 7. **禁用账号**：`status !== 'active'` 时「做任务/领奖/成长动作」禁用，提示「请先启用账号或重新登录」（后端同口径 400）。
 8. **并发限制**：成长中心刷新后端只允许 2 个并发，第 3 个返回 429 → Toast 原文。
@@ -165,6 +169,20 @@
 | 成长中心动作（打卡/盲盒/礼物/抽奖/连登兑换 7·14·28） | `postGrowthAction` + ⋯ 菜单 | 已实现 |
 | 刷新成长状态（成长中心 refresh） | `refreshGrowthCenter` + 轮询 `GET /accounts/{aid}` | 已实现 |
 | 平台能力判定（不硬编码平台） | `platformStore.supports('growth')` → `Empty` | 已实现 |
+| 批量预取并发 2 + 连续 8 失败熔断 | `GrowthPage.vue: loadAllTasks`（`TASK_CONCURRENCY = 2`、`TASK_FAILURE_LIMIT = 8`、`tripped`） | 已实现：最多 9 个请求即停，不再把整平台账号跑完 |
+| 熔断后顶部单条提示 + 「重试」只补缺口 | `bulkTasksError` + `.gw-bulk-error`（`role="alert"`）+ `retryBulkTasks()` | 已实现：逐卡 `tasksError` 清空，只留一条全局提示与一个重试入口 |
+| 卸载 / 切平台 / 新一轮预取 abort 旧队列 | `abortTaskQueue()`（`tasksAbort` + `tasksToken`）；`onBeforeUnmount` / `platformStore.onChange` / `watch(supported)` / `loadAllTasks` 开头 | 已实现：迟到响应用 `stale()` 丢弃，`AbortError` 不计失败 |
+| 熔断与取消的回归测试 | `admin/ui/tests/coverage-growth.spec.ts`「批量预取：熔断与取消」（4 例） | 已实现：8–9 次请求、顶部单条、重试补 30 个、卸载/切平台不再发第 3 个请求 |
 | 四态 + 筛选/分页同步 query + 375px | `GrowthPage.vue` + `useTableQuery('growth')` | 已实现 |
 | 成长中心快照分区可视化（heatmap/宠物/旅行/抽奖记录…） | 未实现（§七.1） | 有差异（任务范围外，动作已保留） |
 | 官方领取记录 / 积分流水明细 | 未实现（属账号页/积分流水页） | 有差异 |
+
+### 已知不一致（代码待跟进，本次仅改文档）
+
+- 页头 ⓘ 文案（`GrowthPage.vue` 的 `HELP_TEXT`）仍写「失败只影响那一张卡」；连续 8 个失败会熔断整条队列、收成顶部一条提示。建议 S26 把 ⓘ 补成「连续失败会暂停批量预取」，本次未改代码。
+
+### 无法验证
+
+- 真实后端整站 502（194 个账号）只在单测 stub 下复现：8–9 个请求即熔断、重试补发数量都来自 `coverage-growth.spec.ts` 的模拟响应，未做真网关联调（与 `accounts.md` 同：本环境无 8790 服务）。
+- 顶部提示的视觉呈现（`--danger-soft` 底色、图标对齐、窄屏换行、`role="alert"` 的实际读屏行为）只做过 DOM 断言，没有浏览器/读屏实测。
+- 卸载/切平台后的在途请求取消在 jsdom 里用 signal 监听代替真实 fetch 取消，未在真实浏览器 Network 面板核对。

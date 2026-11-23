@@ -16,6 +16,7 @@
  * 筛选、排序、分页都在客户端完成（见 toGroupRows / filterGroupRows / sortGroupRows / paginateGroupRows）。
  */
 import { http } from './http'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* ------------------------------------------------------------------ *
  * 接口类型（字段名与后端一致，snake_case 原样保留）
@@ -325,18 +326,19 @@ interface CatalogEntry {
   enabled: boolean
 }
 
-function makeLabel(entry: CatalogEntry): string {
-  const platforms = entry.platformLabels.join(' / ') || '未知平台'
+function makeLabel(entry: CatalogEntry, translate?: Translate): string {
+  const tr = translate ?? defaultTranslate
+  const platforms = entry.platformLabels.join(' / ') || tr('page.groups.option.unknownPlatform')
   const parts = [platforms, entry.modelId]
-  if (entry.free) parts.push('免费')
-  if (!entry.enabled) parts.push('已停用')
+  if (entry.free) parts.push(tr('page.groups.option.free'))
+  if (!entry.enabled) parts.push(tr('page.groups.option.disabledTag'))
   return parts.join(' · ')
 }
 
-function toOption(entry: CatalogEntry): GroupModelOption {
+function toOption(entry: CatalogEntry, translate?: Translate): GroupModelOption {
   return {
     value: entry.upstreamId,
-    label: makeLabel(entry),
+    label: makeLabel(entry, translate),
     platform: entry.platforms[0] || '',
     platformLabel: entry.platformLabels[0] || '',
     platforms: entry.platformLabels.slice(),
@@ -359,7 +361,9 @@ function toOption(entry: CatalogEntry): GroupModelOption {
 export function buildGroupEditorOptions(
   catalog: ModelConfigItem[] | null | undefined,
   storedSelection: string[] | null | undefined,
+  translate?: Translate,
 ): GroupEditorPlan {
+  const tr = translate ?? defaultTranslate
   const entries: CatalogEntry[] = []
   const byUpstream = new Map<string, CatalogEntry>()
   const byUpstreamLower = new Map<string, CatalogEntry>()
@@ -433,14 +437,16 @@ export function buildGroupEditorOptions(
       return left.join('\u0000').localeCompare(right.join('\u0000'), 'zh-CN')
     })
 
-  const options: GroupModelOption[] = enabledEntries.map(toOption)
+  const options: GroupModelOption[] = enabledEntries.map((entry) => toOption(entry, translate))
   for (const entry of extra) {
-    if (!options.some((option) => option.value === entry.upstreamId)) options.push(toOption(entry))
+    if (!options.some((option) => option.value === entry.upstreamId)) {
+      options.push(toOption(entry, translate))
+    }
   }
   for (const raw of unknown) {
     options.push({
       value: raw,
-      label: raw + ' · 未在目录',
+      label: raw + tr('page.groups.option.notInCatalog'),
       platform: '',
       platformLabel: '',
       platforms: [],

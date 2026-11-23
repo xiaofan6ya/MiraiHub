@@ -35,6 +35,7 @@ import {
 import { useConfirm, usePolling, useTableQuery, useToast } from '@/composables'
 import { errorMessage, failureText } from '@/utils/error'
 import { FMT_EMPTY, fmtInt } from '@/utils/format'
+import { useI18n } from '@/i18n'
 import {
   getSentinelStatus,
   getTraffic,
@@ -57,10 +58,8 @@ import {
   type TrafficPayload,
 } from '@/api/sentinel'
 
-const HELP_TEXT =
-  '实时监测上游封控信号（403 / 11140 / 4015 等）与每个平台的请求结果。' +
-  '同一窗口内多个账号被风控时判定为批次级封控，可立即暂停该平台止损：' +
-  '暂停期间请求直接返回 503，不消耗账号额度、也不打到上游。'
+const { t } = useI18n()
+const helpText = computed(() => t('page.sentinel.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -120,31 +119,32 @@ const banner = computed(() => toBanner(status.value, traffic.value))
  * 滚动 1 小时，不是自然日 —— 统计格不能沿用「今日」，否则与使用记录的
  * 「今日（自然日）」对不上。覆盖放在页面这层：toStats 仍是接口字段的直译。
  */
-const STAT_LABEL_OVERRIDES: Record<string, Partial<SentinelStat>> = {
-  今日请求: {
-    label: '近 1 小时请求',
-    help: '窗口 1 小时（/api/sentinel/traffic?window=3600），滚动统计；不是使用记录页的「今日（自然日）」。',
+const STAT_LABEL_OVERRIDES: Record<number, Partial<SentinelStat>> = {
+  // 第 0 格原本叫「今日请求」；按序号覆盖，不依赖 api 回传的中文 label（英文态下 label 会变）。
+  0: {
+    label: t('page.sentinel.stat.requests1h'),
+    help: t('page.sentinel.stat.requests1hHelp'),
   },
 }
 
 const stats = computed(() =>
-  toStats(status.value, traffic.value).map((item) => {
-    const patch = STAT_LABEL_OVERRIDES[item.label]
+  toStats(status.value, traffic.value, t).map((item, index) => {
+    const patch = STAT_LABEL_OVERRIDES[index]
     return patch ? { ...item, ...patch } : item
   }),
 )
-const ribbon = computed(() => toRibbon(traffic.value))
-const health = computed(() => toPlatformHealth(traffic.value))
-const liveRows = computed(() => toLiveRows(traffic.value, 50))
-const signalRows = computed(() => toSignalRows(status.value, traffic.value))
-const accountRows = computed(() => toAccountRows(status.value, traffic.value))
+const ribbon = computed(() => toRibbon(traffic.value, t))
+const health = computed(() => toPlatformHealth(traffic.value, t))
+const liveRows = computed(() => toLiveRows(traffic.value, 50, t))
+const signalRows = computed(() => toSignalRows(status.value, traffic.value, t))
+const accountRows = computed(() => toAccountRows(status.value, traffic.value, t))
 const paused = computed(() => pausedKeys(status.value))
-const storage = computed(() => storageText(status.value, traffic.value))
+const storage = computed(() => storageText(status.value, traffic.value, t))
 
 const platformLabelOf = computed(() => {
   const map = new Map<string, string>()
   for (const row of traffic.value?.platforms || []) map.set(row.platform, row.label || row.platform)
-  for (const key of paused.value) map.set(key, pausedLabel(key, traffic.value))
+  for (const key of paused.value) map.set(key, pausedLabel(key, traffic.value, t))
   return map
 })
 
@@ -152,30 +152,36 @@ const tab = computed(() => (table.state.filters.tab === 'accounts' ? 'accounts' 
 const platformFilter = computed(() => table.state.filters.platform)
 
 const platformOptions = computed(() => {
-  const options = [{ label: '全部平台', value: '' }]
+  const options = [{ label: t('page.sentinel.allPlatforms'), value: '' }]
   for (const row of traffic.value?.platforms || []) {
     options.push({ label: row.label || row.platform, value: row.platform })
   }
   for (const key of paused.value) {
-    if (!options.some((option) => option.value === key)) options.push({ label: pausedLabel(key, traffic.value), value: key })
+    if (!options.some((option) => option.value === key)) {
+      options.push({ label: pausedLabel(key, traffic.value, t), value: key })
+    }
   }
   return options
 })
 
-const windowOptions = [
-  { label: '5 分钟', value: '300' },
-  { label: '10 分钟', value: '600' },
-  { label: '30 分钟', value: '1800' },
-]
+const windowOptions = computed(() => [
+  { label: t('page.sentinel.window.5'), value: '300' },
+  { label: t('page.sentinel.window.10'), value: '600' },
+  { label: t('page.sentinel.window.30'), value: '1800' },
+])
 
 const chips = computed<FilterChip[]>(() => {
   const list: FilterChip[] = []
   if (platformFilter.value) {
-    list.push({ key: 'platform', label: '平台', value: platformLabelOf.value.get(platformFilter.value) || platformFilter.value })
+    list.push({
+      key: 'platform',
+      label: t('page.sentinel.chip.platform'),
+      value: platformLabelOf.value.get(platformFilter.value) || platformFilter.value,
+    })
   }
   if (table.state.filters.window && table.state.filters.window !== '300') {
-    const option = windowOptions.find((item) => item.value === table.state.filters.window)
-    list.push({ key: 'window', label: '窗口', value: option?.label || table.state.filters.window })
+    const option = windowOptions.value.find((item) => item.value === table.state.filters.window)
+    list.push({ key: 'window', label: t('page.sentinel.chip.window'), value: option?.label || table.state.filters.window })
   }
   return list
 })
@@ -290,11 +296,9 @@ function cellCode(row: TableRow): VNodeChild {
     'span',
     {
       class: 'mono',
-      title: unmapped
-        ? '未收录的码：该平台这个码还没进 sentinel.PLATFORM_SIGNALS，补一行映射即可'
-        : '',
+      title: unmapped ? t('page.sentinel.unmappedTip') : '',
     },
-    String(row.code || '-') + (unmapped ? ' · 未归类' : ''),
+    String(row.code || '-') + (unmapped ? t('page.sentinel.unmappedTag') : ''),
   )
 }
 
@@ -311,8 +315,8 @@ function cellActions(row: TableRow): VNodeChild {
   return h(RowActions, {
     actions: [
       isPaused
-        ? { key: 'resume', label: '恢复该平台' }
-        : { key: 'pause', label: '暂停该平台', danger: true, disabled: !platform || platform === 'unknown' },
+        ? { key: 'resume', label: t('page.sentinel.row.resume') }
+        : { key: 'pause', label: t('page.sentinel.row.pause'), danger: true, disabled: !platform || platform === 'unknown' },
     ],
     max: 1,
     onSelect: (key: string) => void onRowAction(row, key),
@@ -323,61 +327,70 @@ function cellActions(row: TableRow): VNodeChild {
 const pauseOpen = ref(false)
 const pauseTarget = ref('')
 const pauseSeconds = ref('600')
-const pauseReason = ref('手动止损')
+const pauseReason = ref('')
 const pausing = ref(false)
 
-const pauseSecondOptions = [
-  { label: '10 分钟', value: '600' },
-  { label: '30 分钟', value: '1800' },
-  { label: '直到手动恢复', value: '0' },
-]
+const pauseSecondOptions = computed(() => [
+  { label: t('page.sentinel.pauseSeconds.10'), value: '600' },
+  { label: t('page.sentinel.pauseSeconds.30'), value: '1800' },
+  { label: t('page.sentinel.pauseSeconds.untilManual'), value: '0' },
+])
 
 function openPause(platform = '', seconds = 600): void {
   pauseTarget.value = platform
   pauseSeconds.value = String(seconds)
-  pauseReason.value = '手动止损'
+  pauseReason.value = t('page.sentinel.reasonDefault')
   pauseOpen.value = true
 }
 
 async function submitPause(): Promise<void> {
-  const name = pauseTarget.value ? platformLabelOf.value.get(pauseTarget.value) || pauseTarget.value : '全部平台'
+  const name = pauseTarget.value
+    ? platformLabelOf.value.get(pauseTarget.value) || pauseTarget.value
+    : t('page.sentinel.allPlatforms')
   const seconds = Number(pauseSeconds.value) || 0
+  const duration = seconds > 0
+    ? t('page.sentinel.pauseDuration.minutes', { minutes: Math.round(seconds / 60) })
+    : t('page.sentinel.pauseSeconds.untilManual')
   const ok = await confirm({
-    title: '暂停 ' + name + ' 的上游请求？',
-    message:
-      (seconds > 0 ? '暂停 ' + Math.round(seconds / 60) + ' 分钟' : '直到手动恢复') +
-      '。暂停期间请求会直接返回 503，不消耗账号额度、也不会打到上游。',
+    title: t('page.sentinel.confirmPause.title', { name }),
+    message: t('page.sentinel.confirmPause.body', { duration }),
     danger: true,
-    okText: '暂停',
+    okText: t('page.sentinel.confirmPause.ok'),
   })
   if (!ok) return
   pausing.value = true
   try {
-    await pausePlatform({ platform: pauseTarget.value, seconds, reason: pauseReason.value || '手动止损' })
+    await pausePlatform({
+      platform: pauseTarget.value,
+      seconds,
+      reason: pauseReason.value || t('page.sentinel.reasonDefault'),
+    })
     pauseOpen.value = false
-    toast.success('已暂停：' + name)
+    toast.success(t('page.sentinel.toast.paused', { name }))
     refresh()
   } catch (error) {
-    toast.error(failureText('暂停平台', error))
+    toast.error(failureText(t('page.sentinel.action.pause'), error))
   } finally {
     pausing.value = false
   }
 }
 
 async function onResume(platform = ''): Promise<void> {
-  const name = platform ? platformLabelOf.value.get(platform) || platform : '全部平台'
+  const name = platform
+    ? platformLabelOf.value.get(platform) || platform
+    : t('page.sentinel.allPlatforms')
   const ok = await confirm({
-    title: '恢复 ' + name + ' 的上游请求？',
-    message: '恢复后该平台立即重新接收请求，仍处于风控窗口的账号可能继续被上游拦截。',
-    okText: '恢复',
+    title: t('page.sentinel.confirmResume.title', { name }),
+    message: t('page.sentinel.confirmResume.body'),
+    okText: t('page.sentinel.confirmResume.ok'),
   })
   if (!ok) return
   try {
     await resumePlatform(platform)
-    toast.success('已恢复：' + name)
+    toast.success(t('page.sentinel.toast.resumed', { name }))
     refresh()
   } catch (error) {
-    toast.error(failureText('恢复平台', error))
+    toast.error(failureText(t('page.sentinel.action.resume'), error))
   }
 }
 
@@ -394,10 +407,10 @@ async function onRowAction(row: TableRow, key: string): Promise<void> {
 const columns = computed<TableColumn[]>(() =>
   tab.value === 'accounts'
     ? [
-        { key: 'platformLabel', title: '平台', mobile: 'title', width: 140 },
+        { key: 'platformLabel', title: t('page.sentinel.col.platform'), mobile: 'title', width: 140 },
         {
           key: 'accountId',
-          title: '账号',
+          title: t('page.sentinel.col.account'),
           mobile: 'subtitle',
           width: 100,
           numeric: true,
@@ -405,11 +418,11 @@ const columns = computed<TableColumn[]>(() =>
           sortOrder: sortOrderOf('account'),
           render: cellAccount,
         },
-        { key: 'label', title: '最近信号', mobile: 'meta', minWidth: 220, render: cellReason },
-        { key: 'severityLabel', title: '类型', mobile: 'meta', width: 110, render: cellSeverity },
+        { key: 'label', title: t('page.sentinel.col.lastSignal'), mobile: 'meta', minWidth: 220, render: cellReason },
+        { key: 'severityLabel', title: t('page.sentinel.col.severity'), mobile: 'meta', width: 110, render: cellSeverity },
         {
           key: 'count',
-          title: '次数',
+          title: t('page.sentinel.col.count'),
           mobile: 'meta',
           width: 90,
           numeric: true,
@@ -417,10 +430,10 @@ const columns = computed<TableColumn[]>(() =>
           sortOrder: sortOrderOf('count'),
           render: (row: TableRow) => fmtInt(row.count),
         },
-        { key: 'firstTime', title: '首次', mobile: 'meta', width: 120 },
+        { key: 'firstTime', title: t('page.sentinel.col.first'), mobile: 'meta', width: 120 },
         {
           key: 'lastTime',
-          title: '最近',
+          title: t('page.sentinel.col.last'),
           mobile: 'meta',
           width: 130,
           sortable: true,
@@ -430,16 +443,16 @@ const columns = computed<TableColumn[]>(() =>
     : [
         {
           key: 'time',
-          title: '时间',
+          title: t('page.sentinel.col.time'),
           mobile: 'title',
           width: 120,
           sortable: true,
           sortOrder: sortOrderOf('time'),
         },
-        { key: 'platformLabel', title: '平台', mobile: 'subtitle', width: 140 },
+        { key: 'platformLabel', title: t('page.sentinel.col.platform'), mobile: 'subtitle', width: 140 },
         {
           key: 'accountId',
-          title: '账号',
+          title: t('page.sentinel.col.account'),
           mobile: 'meta',
           width: 100,
           numeric: true,
@@ -447,12 +460,12 @@ const columns = computed<TableColumn[]>(() =>
           sortOrder: sortOrderOf('account'),
           render: cellAccount,
         },
-        { key: 'code', title: '信号码', mobile: 'meta', width: 130, render: cellCode },
-        { key: 'reason', title: '原因', mobile: 'meta', minWidth: 220, render: cellReason },
-        { key: 'model', title: '模型', mobile: 'meta', width: 170 },
+        { key: 'code', title: t('page.sentinel.col.code'), mobile: 'meta', width: 130, render: cellCode },
+        { key: 'reason', title: t('page.sentinel.col.reason'), mobile: 'meta', minWidth: 220, render: cellReason },
+        { key: 'model', title: t('page.sentinel.col.model'), mobile: 'meta', width: 170 },
         {
           key: 'actions',
-          title: '操作',
+          title: t('page.sentinel.col.actions'),
           mobile: 'actions',
           width: 130,
           hideable: false,
@@ -464,18 +477,22 @@ const columns = computed<TableColumn[]>(() =>
 
 <template>
   <div class="sentinel-page">
-    <PageHeader title="风控哨兵" :help="HELP_TEXT">
+    <PageHeader :title="t('page.sentinel.title')" :help="helpText">
       <template #actions>
-        <span class="sentinel-storage">存储：{{ storage }}</span>
-        <Btn variant="quiet" :icon="Pause" @click="openPause('', banner.suggestedSeconds)">暂停平台…</Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="statusPoll.running.value && loading" @click="refresh()">刷新</Btn>
+        <span class="sentinel-storage">{{ t('page.sentinel.storage', { backend: storage }) }}</span>
+        <Btn variant="quiet" :icon="Pause" @click="openPause('', banner.suggestedSeconds)">
+          {{ t('page.sentinel.pauseOpen') }}
+        </Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="statusPoll.running.value && loading" @click="refresh()">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
     <ErrorBlock
       v-if="statusError && !status"
-      :title="'哨兵加载失败：' + statusError"
-      retry-label="重试"
+      :title="t('page.sentinel.loadFailed', { reason: statusError })"
+      :retry-label="t('common.retry')"
       @retry="refresh()"
     />
     <div v-else-if="loading && !status" class="sentinel-skeleton" aria-busy="true">
@@ -500,7 +517,11 @@ const columns = computed<TableColumn[]>(() =>
             size="sm"
             @click="openPause(banner.platform, banner.suggestedSeconds)"
           >
-            暂停{{ banner.platformLabel ? ' ' + banner.platformLabel : '该平台' }}止损
+            {{
+              banner.platformLabel
+                ? t('page.sentinel.pauseTrippedLabel', { platform: banner.platformLabel })
+                : t('page.sentinel.pauseTrippedThis')
+            }}
           </Btn>
           <Btn
             v-for="key in paused"
@@ -510,7 +531,7 @@ const columns = computed<TableColumn[]>(() =>
             :icon="Play"
             @click="onResume(key === 'all' ? '' : key)"
           >
-            恢复 {{ pausedLabel(key, traffic) }}
+            {{ t('page.sentinel.resumeBtn', { name: pausedLabel(key, traffic, t) }) }}
           </Btn>
         </div>
       </section>
@@ -519,56 +540,60 @@ const columns = computed<TableColumn[]>(() =>
 
       <div class="sentinel-split">
         <div class="sentinel-main">
-          <Card title="实时流量">
+          <Card :title="t('page.sentinel.realtime.title')">
             <template #extra>
-              <span class="sentinel-hint">最近请求走向与结果 · 含超时 / 503 / 报错</span>
+              <span class="sentinel-hint">{{ t('page.sentinel.realtime.hint') }}</span>
             </template>
             <RouteRibbon :source="ribbon.source" :lanes="ribbon.lanes" @select="selectPlatform" />
             <p class="sentinel-legend">
-              <span><i class="dot is-ok" />成功</span>
-              <span><i class="dot is-warn" />限流</span>
-              <span><i class="dot is-danger" />失败 / 超时</span>
-              <span class="sentinel-muted">{{ trafficPoll.paused.value ? trafficPoll.pausedMessage.value : '每 2 秒刷新' }}</span>
+              <span><i class="dot is-ok" />{{ t('page.sentinel.legend.ok') }}</span>
+              <span><i class="dot is-warn" />{{ t('page.sentinel.legend.warn') }}</span>
+              <span><i class="dot is-danger" />{{ t('page.sentinel.legend.danger') }}</span>
+              <span class="sentinel-muted">
+                {{ trafficPoll.paused.value ? trafficPoll.pausedMessage.value : t('page.sentinel.refreshEvery') }}
+              </span>
             </p>
           </Card>
 
-          <Card title="平台健康">
+          <Card :title="t('page.sentinel.health.title')">
             <template #extra>
-              <span class="sentinel-hint">成功率 · 失败 / 超时 · 近 1 小时请求</span>
+              <span class="sentinel-hint">{{ t('page.sentinel.health.hint') }}</span>
             </template>
-            <Empty v-if="!health.length" compact description="近 1 小时还没有请求。" />
+            <Empty v-if="!health.length" compact :description="t('page.sentinel.health.empty')" />
             <div v-for="row in health" :key="row.platform" class="sentinel-health">
               <div class="sentinel-health__head">
                 <span class="sentinel-health__name">{{ row.label }}</span>
                 <span class="sentinel-health__rate" :class="'is-' + row.tone">{{ row.rateText }}</span>
                 <span class="sentinel-health__count">
-                  {{ fmtInt(row.requests) }} 次<template v-if="row.failed"> · {{ fmtInt(row.failed) }} 失败</template>
+                  {{ t('page.sentinel.health.count', { requests: fmtInt(row.requests) }) }}<template v-if="row.failed"> · {{ t('page.sentinel.health.failed', { failed: fmtInt(row.failed) }) }}</template>
                 </span>
                 <RowActions
                   :actions="[
                     paused.includes(row.platform) || paused.includes('all')
-                      ? { key: 'resume', label: '恢复该平台' }
-                      : { key: 'pause', label: '暂停该平台', danger: true },
+                      ? { key: 'resume', label: t('page.sentinel.row.resume') }
+                      : { key: 'pause', label: t('page.sentinel.row.pause'), danger: true },
                   ]"
                   :max="1"
                   @select="(key: string) => onRowAction({ platform: row.platform }, key)"
                 />
               </div>
-              <StackMeter :items="row.items" :total="row.requests" :height="8" unit=" 次" />
+              <StackMeter :items="row.items" :total="row.requests" :height="8" :unit="t('page.sentinel.health.unit')" />
             </div>
             <p v-if="statusPoll.paused.value" class="sentinel-warn">
               {{ statusPoll.pausedMessage.value }}
-              <Btn variant="quiet" size="sm" @click="statusPoll.resume()">恢复</Btn>
+              <Btn variant="quiet" size="sm" @click="statusPoll.resume()">{{ t('page.sentinel.resume') }}</Btn>
             </p>
           </Card>
         </div>
 
         <div class="sentinel-side">
-          <Card title="实时请求">
+          <Card :title="t('page.sentinel.live.title')">
             <template #extra>
-              <span class="sentinel-hint">{{ trafficPoll.paused.value ? '已暂停' : '每 2 秒刷新' }}</span>
+              <span class="sentinel-hint">
+                {{ trafficPoll.paused.value ? t('page.sentinel.live.paused') : t('page.sentinel.refreshEvery') }}
+              </span>
             </template>
-            <Empty v-if="!liveRows.length" compact description="最近没有请求。" />
+            <Empty v-if="!liveRows.length" compact :description="t('page.sentinel.live.empty')" />
             <ol v-else class="sentinel-live" aria-live="polite">
               <li v-for="row in liveRows" :key="row.rid" class="sentinel-live__row" :class="'is-' + row.tone">
                 <span class="sentinel-live__time tnum">{{ row.time }}</span>
@@ -579,7 +604,7 @@ const columns = computed<TableColumn[]>(() =>
             </ol>
             <p v-if="trafficPoll.paused.value" class="sentinel-warn">
               {{ trafficPoll.pausedMessage.value }}
-              <Btn variant="quiet" size="sm" @click="trafficPoll.resume()">恢复</Btn>
+              <Btn variant="quiet" size="sm" @click="trafficPoll.resume()">{{ t('page.sentinel.resume') }}</Btn>
             </p>
           </Card>
         </div>
@@ -589,11 +614,11 @@ const columns = computed<TableColumn[]>(() =>
         <div class="sentinel-table-head">
           <Segmented
             :options="[
-              { label: '封控信号', value: 'signals' },
-              { label: '受影响账号', value: 'accounts' },
+              { label: t('page.sentinel.tab.signals'), value: 'signals' },
+              { label: t('page.sentinel.tab.accounts'), value: 'accounts' },
             ]"
             :model-value="tab"
-            aria-label="信号视图"
+            :aria-label="t('page.sentinel.tabsAria')"
             @update:model-value="onTab"
           />
           <div class="sentinel-table-filters">
@@ -615,7 +640,7 @@ const columns = computed<TableColumn[]>(() =>
               size="sm"
               @click="resetFilters"
             >
-              重置
+              {{ t('common.reset') }}
             </Btn>
           </div>
         </div>
@@ -630,7 +655,11 @@ const columns = computed<TableColumn[]>(() =>
             {{ chip.label }}：{{ chip.value }} ✕
           </button>
           <span class="sentinel-muted">
-            {{ tab === 'accounts' ? '按最近一次信号排序 · ' + filteredAccounts().length + ' 个账号有信号' : '最近 ' + filteredSignals().length + ' 条（Redis 保留 15 分钟，自动过期）' }}
+            {{
+              tab === 'accounts'
+                ? t('page.sentinel.table.accountsNote', { count: filteredAccounts().length })
+                : t('page.sentinel.table.signalsNote', { count: filteredSignals().length })
+            }}
           </span>
         </div>
 
@@ -645,41 +674,53 @@ const columns = computed<TableColumn[]>(() =>
           :page-size="table.state.pageSize"
           :item-count="tableRows.length"
           :page-sizes="[20, 50, 100]"
-          empty-description="最近没有账号被上游拦。"
+          :empty-description="t('page.sentinel.empty.accounts')"
           @update:page="table.setPage"
           @update:page-size="table.setPageSize"
           @update:sorter="onSorter"
         >
           <template #empty>
-            <Empty :description="tab === 'accounts' ? '最近没有账号被上游拦。' : '暂无明细。'" compact />
+            <Empty
+              :description="tab === 'accounts' ? t('page.sentinel.empty.accounts') : t('page.sentinel.empty.signals')"
+              compact
+            />
           </template>
         </DataTable>
       </Card>
     </template>
 
     <!-- 暂停平台 -->
-    <n-modal v-model:show="pauseOpen" preset="card" title="暂停平台（止损）" :style="{ width: '480px' }">
+    <n-modal
+      v-model:show="pauseOpen"
+      preset="card"
+      :title="t('page.sentinel.pauseModalTitle')"
+      :style="{ width: '480px' }"
+    >
       <div class="sentinel-form">
         <label class="sentinel-field">
-          <span>目标平台</span>
+          <span>{{ t('page.sentinel.field.target') }}</span>
           <n-select v-model:value="pauseTarget" :options="platformOptions" />
         </label>
         <label class="sentinel-field">
-          <span>暂停时长</span>
+          <span>{{ t('page.sentinel.field.duration') }}</span>
           <n-select v-model:value="pauseSeconds" :options="pauseSecondOptions" />
         </label>
         <label class="sentinel-field">
-          <span>原因</span>
-          <n-input v-model:value="pauseReason" placeholder="手动止损" maxlength="200" />
+          <span>{{ t('page.sentinel.field.reason') }}</span>
+          <n-input
+            v-model:value="pauseReason"
+            :placeholder="t('page.sentinel.reasonPlaceholder')"
+            maxlength="200"
+          />
         </label>
-        <p class="sentinel-hint">
-          暂停生效点在网关鉴权之后、选号之前：直接返回 503 + Retry-After，不消耗账号额度、不打上游。
-        </p>
+        <p class="sentinel-hint">{{ t('page.sentinel.pauseTip') }}</p>
       </div>
       <template #footer>
         <div class="sentinel-form__actions">
-          <Btn variant="default" @click="pauseOpen = false">取消</Btn>
-          <Btn variant="danger" solid :loading="pausing" @click="submitPause">暂停</Btn>
+          <Btn variant="default" @click="pauseOpen = false">{{ t('common.cancel') }}</Btn>
+          <Btn variant="danger" solid :loading="pausing" @click="submitPause">
+            {{ t('page.sentinel.confirmPause.ok') }}
+          </Btn>
         </div>
       </template>
     </n-modal>

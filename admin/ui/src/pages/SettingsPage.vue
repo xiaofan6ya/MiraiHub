@@ -31,6 +31,7 @@ import Empty from '@/components/base/Empty.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
 import type { TableColumn, TableRow } from '@/components'
 import { useConfirm, usePolling, useToast } from '@/composables'
+import { ApiError } from '@/api/http'
 import { failureText } from '@/utils/error'
 import { fmtTime } from '@/utils/format'
 import {
@@ -475,18 +476,36 @@ const sourceDirty = computed(
     outputDraft.value.trim() !== String(sourceStatus.value?.source_dir || ''),
 )
 
+/**
+ * 「本部署未开放」只有两个来源：后端整路由 404（ADMIN_DEV_TOOLS=0 或非本机运行时），
+ * 或状态接口显式回报 dev_tools=false。500 / 超时 / 断网都是真错误——显示错误 + 重试，
+ * 不能吞成「未开放」，否则运维看到的是部署没开，而不是后端崩了。
+ */
+function isSourceUnavailable(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status === 404
+  const status = (error as { status?: unknown } | null)?.status
+  if (typeof status === 'number' && Number.isFinite(status)) return status === 404
+  // 非 ApiError（反向代理改写的错误、测试桩）只能看文案里是否明确是 404
+  return /\b404\b/.test(String((error as { message?: unknown } | null)?.message || ''))
+}
+
 async function loadSource(): Promise<void> {
   sourceLoading.value = true
   sourceError.value = ''
-  sourceMissing.value = false
   try {
-    sourceStatus.value = await getAppSourceStatus()
-    installDraft.value = sourceStatus.value?.install_dir || ''
-    outputDraft.value = sourceStatus.value?.source_dir || ''
+    const status = await getAppSourceStatus()
+    sourceStatus.value = status
+    installDraft.value = status?.install_dir || ''
+    outputDraft.value = status?.source_dir || ''
+    // 路由被整段摘掉时后端只给 404，走不到这里；dev_tools=false 是防御性口径
+    sourceMissing.value = status?.dev_tools === false
   } catch (error) {
-    // DEV_TOOLS=0 / 生产环境：后端整路由 404 → 卡片降级说明
-    sourceMissing.value = true
-    sourceError.value = failureText(t('page.settings.appsource.loadFailed'), error)
+    if (isSourceUnavailable(error)) {
+      sourceMissing.value = true
+    } else {
+      // 保留上一次成功的数据，同时把错误摆出来（可重试）
+      sourceError.value = failureText(t('page.settings.appsource.loadFailed'), error)
+    }
   } finally {
     sourceLoading.value = false
   }
@@ -885,107 +904,110 @@ onBeforeUnmount(() => {
         {{ t('page.settings.appsource.unavailableBody') }}
       </div>
       <template v-else>
-        <KV :items="sourceLines.map((line) => ({ label: line.label, value: line.value, mono: line.mono }))" />
+        <ErrorBlock v-if="sourceError" :title="sourceError" retry @retry="loadSource" />
+        <template v-if="sourceStatus">
+          <KV :items="sourceLines.map((line) => ({ label: line.label, value: line.value, mono: line.mono }))" />
 
-        <Section :title="t('page.settings.appsource.paths')">
-          <FormField
-            :label="t('page.settings.appsource.install')"
-            :hint="t('page.settings.appsource.installHint')"
-          >
+          <Section :title="t('page.settings.appsource.paths')">
+            <FormField
+              :label="t('page.settings.appsource.install')"
+              :hint="t('page.settings.appsource.installHint')"
+            >
+              <div class="st-inline">
+                <n-input v-model:value="installDraft" :placeholder="t('page.settings.appsource.installPlaceholder')" />
+                <Btn
+                  variant="primary"
+                  size="sm"
+                  :loading="sourceBusy === 'locate'"
+                  @click="saveInstallDir"
+                >
+                  {{ t('page.settings.appsource.validate') }}
+                </Btn>
+              </div>
+            </FormField>
+            <FormField
+              :label="t('page.settings.appsource.output')"
+              :hint="t('page.settings.appsource.outputHint')"
+            >
+              <div class="st-inline">
+                <n-input v-model:value="outputDraft" :placeholder="t('page.settings.appsource.outputPlaceholder')" />
+                <Btn
+                  variant="default"
+                  size="sm"
+                  :loading="sourceBusy === 'locate-source'"
+                  @click="saveOutputDir"
+                >
+                  {{ t('page.settings.appsource.setOutput') }}
+                </Btn>
+              </div>
+            </FormField>
             <div class="st-inline">
-              <n-input v-model:value="installDraft" :placeholder="t('page.settings.appsource.installPlaceholder')" />
-              <Btn
-                variant="primary"
-                size="sm"
-                :loading="sourceBusy === 'locate'"
-                @click="saveInstallDir"
-              >
-                {{ t('page.settings.appsource.validate') }}
-              </Btn>
-            </div>
-          </FormField>
-          <FormField
-            :label="t('page.settings.appsource.output')"
-            :hint="t('page.settings.appsource.outputHint')"
-          >
-            <div class="st-inline">
-              <n-input v-model:value="outputDraft" :placeholder="t('page.settings.appsource.outputPlaceholder')" />
               <Btn
                 variant="default"
                 size="sm"
-                :loading="sourceBusy === 'locate-source'"
-                @click="saveOutputDir"
+                :icon="ScanSearch"
+                :loading="sourceBusy === 'detect'"
+                @click="runSourceAction('detect')"
               >
-                {{ t('page.settings.appsource.setOutput') }}
+                {{ t('page.settings.appsource.rescan') }}
+              </Btn>
+              <Btn
+                variant="default"
+                size="sm"
+                :icon="FileSearch"
+                :loading="sourceBusy === 'plan'"
+                @click="runSourceAction('plan')"
+              >
+                {{ t('page.settings.appsource.precheck') }}
+              </Btn>
+              <Btn variant="primary" size="sm" :icon="PackageOpen" :loading="sourceBusy === 'unpack' || unpacking" :disabled="sourceStatus?.can_unpack === false" @click="runSourceAction('unpack')">
+                {{ t('page.settings.appsource.unpack') }}
+              </Btn>
+              <Btn
+                variant="danger"
+                size="sm"
+                :icon="Trash2"
+                :loading="sourceBusy === 'remove'"
+                @click="runSourceAction('remove')"
+              >
+                {{ t('page.settings.appsource.remove') }}
               </Btn>
             </div>
-          </FormField>
-          <div class="st-inline">
-            <Btn
-              variant="default"
-              size="sm"
-              :icon="ScanSearch"
-              :loading="sourceBusy === 'detect'"
-              @click="runSourceAction('detect')"
-            >
-              {{ t('page.settings.appsource.rescan') }}
-            </Btn>
-            <Btn
-              variant="default"
-              size="sm"
-              :icon="FileSearch"
-              :loading="sourceBusy === 'plan'"
-              @click="runSourceAction('plan')"
-            >
-              {{ t('page.settings.appsource.precheck') }}
-            </Btn>
-            <Btn variant="primary" size="sm" :icon="PackageOpen" :loading="sourceBusy === 'unpack' || unpacking" :disabled="sourceStatus?.can_unpack === false" @click="runSourceAction('unpack')">
-              {{ t('page.settings.appsource.unpack') }}
-            </Btn>
-            <Btn
-              variant="danger"
-              size="sm"
-              :icon="Trash2"
-              :loading="sourceBusy === 'remove'"
-              @click="runSourceAction('remove')"
-            >
-              {{ t('page.settings.appsource.remove') }}
-            </Btn>
-          </div>
 
-          <div v-if="unpacking || unpackProgress" class="st-progress">
-            <div class="st-progress__head">
-              <span>{{ unpackProgress?.phase || t('page.settings.appsource.preparing') }}</span>
-              <span class="tnum">{{ unpackPercent(unpackProgress) }}%</span>
+            <div v-if="unpacking || unpackProgress" class="st-progress">
+              <div class="st-progress__head">
+                <span>{{ unpackProgress?.phase || t('page.settings.appsource.preparing') }}</span>
+                <span class="tnum">{{ unpackPercent(unpackProgress) }}%</span>
+              </div>
+              <Meter
+                :value="unpackPercent(unpackProgress)"
+                tone="brand"
+                :aria-label="t('page.settings.appsource.progressAria')"
+              />
+              <p class="st-note mono">{{ unpackProgress?.current || '' }}</p>
             </div>
-            <Meter
-              :value="unpackPercent(unpackProgress)"
-              tone="brand"
-              :aria-label="t('page.settings.appsource.progressAria')"
-            />
-            <p class="st-note mono">{{ unpackProgress?.current || '' }}</p>
-          </div>
-        </Section>
+          </Section>
 
-        <Section :title="t('page.settings.appsource.searchSection')">
-          <div class="st-inline">
-            <n-input
-              v-model:value="searchQuery"
-              :placeholder="t('page.settings.appsource.searchPlaceholder')"
-              @keyup.enter="runSearch"
-            />
-            <Btn variant="default" size="sm" :icon="RefreshCw" :loading="searching" @click="runSearch">
-              {{ t('page.settings.appsource.search') }}
-            </Btn>
-          </div>
-          <p v-if="searchNote" class="st-note">{{ searchNote }}</p>
-          <ul v-if="searchHits.length" class="st-hits">
-            <li v-for="(hit, index) in searchHits" :key="index" class="st-hit">
-              <span class="st-hit__file mono">{{ hit.file }}:{{ hit.line }}</span>
-              <code class="st-hit__text">{{ hit.text }}</code>
-            </li>
-          </ul>
-        </Section>
+          <Section :title="t('page.settings.appsource.searchSection')">
+            <div class="st-inline">
+              <n-input
+                v-model:value="searchQuery"
+                :placeholder="t('page.settings.appsource.searchPlaceholder')"
+                @keyup.enter="runSearch"
+              />
+              <Btn variant="default" size="sm" :icon="RefreshCw" :loading="searching" @click="runSearch">
+                {{ t('page.settings.appsource.search') }}
+              </Btn>
+            </div>
+            <p v-if="searchNote" class="st-note">{{ searchNote }}</p>
+            <ul v-if="searchHits.length" class="st-hits">
+              <li v-for="(hit, index) in searchHits" :key="index" class="st-hit">
+                <span class="st-hit__file mono">{{ hit.file }}:{{ hit.line }}</span>
+                <code class="st-hit__text">{{ hit.text }}</code>
+              </li>
+            </ul>
+          </Section>
+        </template>
       </template>
     </SettingsCard>
 

@@ -12,6 +12,7 @@
  */
 import { http } from './http'
 import { FMT_EMPTY, fmtInt, fmtRelative } from '@/utils/format'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* ------------------------------------------------------------------ *
  * 类型（字段名与后端一致）
@@ -190,15 +191,37 @@ export interface SeverityMeta {
   hint: string
 }
 
-export const SEVERITY_META: Record<string, SeverityMeta> = {
-  risk: { label: '风控', tone: 'danger', hint: '上游在拦（WAF / 渠道 / 账号级风控 / 签名），会计入批次熔断判定。' },
-  throttle: { label: '限流', tone: 'warn', hint: '限速 / 限流 / 排队 / 额度耗尽，属于运营态：只记录，不熔断。' },
-  auth: { label: '登录', tone: 'neutral', hint: '登录态失效 / 退出登录：不算风控，需要重新登录，只记录。' },
-  info: { label: '记录', tone: 'neutral', hint: '留痕用，没有止损动作。' },
+/** 四档的语气固定；label / hint 走字典（默认中文与旧文案逐字一致）。 */
+const SEVERITY_TONE: Record<string, SeverityMeta['tone']> = {
+  risk: 'danger',
+  throttle: 'warn',
+  auth: 'neutral',
+  info: 'neutral',
 }
 
-export function severityMeta(severity: string | null | undefined): SeverityMeta {
-  return SEVERITY_META[String(severity || 'info')] || SEVERITY_META.info
+const SEVERITY_KEYS: Record<string, { label: Parameters<Translate>[0]; hint: Parameters<Translate>[0] }> = {
+  risk: { label: 'page.sentinel.severity.risk', hint: 'page.sentinel.severity.riskHint' },
+  throttle: { label: 'page.sentinel.severity.throttle', hint: 'page.sentinel.severity.throttleHint' },
+  auth: { label: 'page.sentinel.severity.auth', hint: 'page.sentinel.severity.authHint' },
+  info: { label: 'page.sentinel.severity.info', hint: 'page.sentinel.severity.infoHint' },
+}
+
+export function severityMeta(severity: string | null | undefined, translate?: Translate): SeverityMeta {
+  const tr = translate ?? defaultTranslate
+  const key = SEVERITY_KEYS[String(severity || 'info')] ? String(severity || 'info') : 'info'
+  return {
+    label: tr(SEVERITY_KEYS[key].label),
+    tone: SEVERITY_TONE[key] || 'neutral',
+    hint: tr(SEVERITY_KEYS[key].hint),
+  }
+}
+
+/** 保留旧导出：默认中文的四档表（页面/单测直接读时行为不变）。 */
+export const SEVERITY_META: Record<string, SeverityMeta> = {
+  risk: severityMeta('risk'),
+  throttle: severityMeta('throttle'),
+  auth: severityMeta('auth'),
+  info: severityMeta('info'),
 }
 
 /** 成功率（0–100）着色：≥98 ok / ≥90 warn / 其余 danger（与旧版 KPI 一致）。 */
@@ -240,7 +263,12 @@ export interface SentinelBanner {
 }
 
 /** 结论横幅：批次封控判定 + 阈值说明 + 建议止损平台。 */
-export function toBanner(status: SentinelStatus | null, traffic: TrafficPayload | null): SentinelBanner {
+export function toBanner(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): SentinelBanner {
+  const tr = translate ?? defaultTranslate
   const tripped = Boolean(status?.tripped)
   const windowMinutes = Math.max(1, Math.round(Number(status?.window_seconds || 300) / 60))
   const affected = Number(status?.accounts_affected || 0)
@@ -253,11 +281,13 @@ export function toBanner(status: SentinelStatus | null, traffic: TrafficPayload 
     tripped,
     tone: tripped ? 'danger' : 'ok',
     title: tripped
-      ? '检测到批次级封控：最近 ' + windowMinutes + ' 分钟内有 ' + affected + ' 个账号被风控'
-      : '未检测到批次级封控',
+      ? tr('page.sentinel.banner.tripped', { minutes: windowMinutes, accounts: affected })
+      : tr('page.sentinel.banner.ok'),
     detail:
-      '阈值 ' + threshold + ' 个账号 / ' + windowMinutes + ' 分钟' +
-      (tripped ? ' · 建议暂停 ' + Number(status?.suggested_pause_seconds || 0) + ' 秒止损' : ''),
+      tr('page.sentinel.banner.detail', { threshold, minutes: windowMinutes }) +
+      (tripped
+        ? tr('page.sentinel.banner.detailPause', { seconds: Number(status?.suggested_pause_seconds || 0) })
+        : ''),
     platform,
     platformLabel: platform ? labelMap.get(platform) || platform : '',
     suggestedSeconds: Number(status?.suggested_pause_seconds || 600),
@@ -274,8 +304,8 @@ export function pausedKeys(status: SentinelStatus | null): string[] {
   })
 }
 
-export function pausedLabel(key: string, traffic: TrafficPayload | null): string {
-  if (key === 'all') return '全部平台'
+export function pausedLabel(key: string, traffic: TrafficPayload | null, translate?: Translate): string {
+  if (key === 'all') return (translate ?? defaultTranslate)('page.sentinel.allPlatforms')
   const row = (traffic?.platforms || []).find((item) => item.platform === key)
   return row?.label || key
 }
@@ -292,7 +322,9 @@ export interface SentinelStat {
 export function toStats(
   status: SentinelStatus | null,
   traffic: TrafficPayload | null,
+  translate?: Translate,
 ): SentinelStat[] {
+  const tr = translate ?? defaultTranslate
   const totals = traffic?.totals || { requests: 0, ok: 0, error: 0, timeout: 0, interrupted: 0 }
   const requests = Number(totals.requests) || 0
   const ok = Number(totals.ok) || 0
@@ -307,39 +339,44 @@ export function toStats(
   const paused = pausedKeys(status)
   return [
     {
-      label: '今日请求',
+      label: tr('page.sentinel.stat.today'),
       value: fmtInt(requests),
-      foot: activePlatforms + ' / ' + platforms.length + ' 个平台有流量',
+      foot: tr('page.sentinel.stat.requestsFoot', { active: activePlatforms, total: platforms.length }),
     },
     {
-      label: '成功率',
+      label: tr('page.sentinel.stat.rate'),
       value: requests ? rate.toFixed(1) + '%' : FMT_EMPTY,
-      foot: '成功 ' + fmtInt(ok) + ' 次',
+      foot: tr('page.sentinel.stat.rateFoot', { count: fmtInt(ok) }),
       tone: rateTone(requests ? rate : 100),
     },
     {
-      label: '失败 / 超时',
+      label: tr('page.sentinel.stat.failed'),
       value: fmtInt(failed),
-      foot: worst ? '最多：' + worst.label + ' ' + fmtInt(worst.bad) + ' 次' : '暂无失败',
+      foot: worst
+        ? tr('page.sentinel.stat.failedFootWorst', { label: worst.label, count: fmtInt(worst.bad) })
+        : tr('page.sentinel.stat.failedFootNone'),
       tone: failed ? 'danger' : 'ok',
     },
     {
-      label: '信号',
+      label: tr('page.sentinel.stat.signals'),
       value: fmtInt(status?.total_events || 0),
-      foot: '最近 ' + lastSignalText(status?.accounts || []),
-      help: '窗口内的风控信号条数；明细存 Redis，保留 15 分钟。',
+      foot: tr('page.sentinel.stat.signalsFoot', { text: lastSignalText(status?.accounts || []) }),
+      help: tr('page.sentinel.stat.signalsHelp'),
     },
     {
-      label: '涉及账号',
+      label: tr('page.sentinel.stat.accounts'),
       value: fmtInt(status?.accounts_affected || 0),
-      foot:
-        '原因 ' + Object.keys(status?.by_code || {}).length + ' 种 · 仅真风控参与熔断',
+      foot: tr('page.sentinel.stat.accountsFoot', {
+        count: Object.keys(status?.by_code || {}).length,
+      }),
       tone: Number(status?.accounts_affected || 0) ? 'warn' : 'default',
     },
     {
-      label: '暂停中的平台',
+      label: tr('page.sentinel.stat.paused'),
       value: fmtInt(paused.length),
-      foot: paused.length ? paused.map((key) => pausedLabel(key, traffic)).join('、') : '全部平台在跑',
+      foot: paused.length
+        ? paused.map((key) => pausedLabel(key, traffic, translate)).join(tr('page.sentinel.listSeparator'))
+        : tr('page.sentinel.stat.pausedFoot'),
       tone: paused.length ? 'warn' : 'default',
     },
   ]
@@ -358,12 +395,13 @@ export interface RibbonView {
 }
 
 /** RouteRibbon 数据：线宽=请求占比、颜色=成功率（设计稿要求按成功率着色）。 */
-export function toRibbon(traffic: TrafficPayload | null): RibbonView {
+export function toRibbon(traffic: TrafficPayload | null, translate?: Translate): RibbonView {
+  const tr = translate ?? defaultTranslate
   const platforms = [...(traffic?.platforms || [])]
     .filter((row) => Number(row.requests) > 0)
     .sort((a, b) => Number(b.requests) - Number(a.requests))
   return {
-    source: { label: '客户端请求', total: Number(traffic?.totals?.requests || 0) },
+    source: { label: tr('page.sentinel.ribbonSource'), total: Number(traffic?.totals?.requests || 0) },
     lanes: platforms.map((row) => ({
       id: row.platform,
       name: row.label || row.platform,
@@ -388,7 +426,11 @@ export interface PlatformHealthRow {
 }
 
 /** 平台健康：StackMeter 两段（成功 / 失败·超时）+ 成功率着色。 */
-export function toPlatformHealth(traffic: TrafficPayload | null): PlatformHealthRow[] {
+export function toPlatformHealth(
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): PlatformHealthRow[] {
+  const tr = translate ?? defaultTranslate
   return [...(traffic?.platforms || [])]
     .filter((row) => Number(row.requests) > 0)
     .map((row) => {
@@ -406,8 +448,8 @@ export function toPlatformHealth(traffic: TrafficPayload | null): PlatformHealth
         rateText: rate == null ? FMT_EMPTY : rate.toFixed(1) + '%',
         tone: rateTone(rate),
         items: [
-          { label: '成功', value: ok, tone: 'ok' as const },
-          { label: '失败 / 超时', value: failed, tone: 'danger' as const },
+          { label: tr('page.sentinel.health.segOk'), value: ok, tone: 'ok' as const },
+          { label: tr('page.sentinel.stat.failed'), value: failed, tone: 'danger' as const },
         ],
       }
     })
@@ -447,15 +489,20 @@ export function requestTone(item: TrafficRequest): LiveTone {
 }
 
 /** 实时请求列表：最多 50 行（新的在上），状态码着色。 */
-export function toLiveRows(traffic: TrafficPayload | null, limit = 50): LiveRow[] {
+export function toLiveRows(
+  traffic: TrafficPayload | null,
+  limit = 50,
+  translate?: Translate,
+): LiveRow[] {
+  const tr = translate ?? defaultTranslate
   const labelMap = new Map((traffic?.platforms || []).map((row) => [row.platform, row.label]))
   return (traffic?.recent || []).slice(0, Math.max(1, limit)).map((item, index) => {
     const status = Number(item.status || 0)
     const running = item.outcome === 'running'
     const statusText = running
-      ? '进行中'
+      ? tr('page.sentinel.live.running')
       : item.outcome === 'timeout'
-        ? '超时'
+        ? tr('page.sentinel.live.timeout')
         : status
           ? String(status)
           : item.outcome || FMT_EMPTY
@@ -516,10 +563,16 @@ function timeText(ts: number): string {
 }
 
 /** 封控信号明细行（设计稿「封控信号」表格：时间 · 平台 · 账号 · 信号码 · 原因 · 操作）。 */
-export function toSignalRows(status: SentinelStatus | null, traffic: TrafficPayload | null): SignalRow[] {
+export function toSignalRows(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): SignalRow[] {
+  const tr = translate ?? defaultTranslate
+  const unknown = tr('page.sentinel.unknownPlatform')
   const labelMap = new Map((traffic?.platforms || []).map((row) => [row.platform, row.label]))
   return (status?.recent || []).map((event, index) => {
-    const meta = severityMeta(event.severity)
+    const meta = severityMeta(event.severity, translate)
     const signalLabel =
       event.signal_label || (status?.signal_labels || {})[event.signal] || event.signal || FMT_EMPTY
     return {
@@ -527,7 +580,7 @@ export function toSignalRows(status: SentinelStatus | null, traffic: TrafficPayl
       ts: Number(event.ts) || 0,
       time: timeText(event.ts),
       platform: event.platform || 'unknown',
-      platformLabel: labelMap.get(event.platform) || event.platform || '未知平台',
+      platformLabel: labelMap.get(event.platform) || event.platform || unknown,
       accountId: Number(event.account_id) || 0,
       code: event.code || '-',
       label: event.label || event.kind || '',
@@ -544,14 +597,20 @@ export function toSignalRows(status: SentinelStatus | null, traffic: TrafficPayl
 }
 
 /** 受影响账号行（旧版「受影响账号」表，按最近信号排序）。 */
-export function toAccountRows(status: SentinelStatus | null, traffic: TrafficPayload | null): AccountSignalRow[] {
+export function toAccountRows(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): AccountSignalRow[] {
+  const tr = translate ?? defaultTranslate
+  const unknown = tr('page.sentinel.unknownPlatform')
   const labelMap = new Map((traffic?.platforms || []).map((row) => [row.platform, row.label]))
   return (status?.accounts || []).map((item, index) => {
-    const meta = severityMeta(item.severity)
+    const meta = severityMeta(item.severity, translate)
     return {
       id: 'acc-' + item.account_id + '-' + index,
       platform: item.platform || 'unknown',
-      platformLabel: labelMap.get(item.platform) || item.platform || '未知平台',
+      platformLabel: labelMap.get(item.platform) || item.platform || unknown,
       accountId: Number(item.account_id) || 0,
       label: item.label || item.kind || '',
       code: item.code || '-',
@@ -568,7 +627,12 @@ export function toAccountRows(status: SentinelStatus | null, traffic: TrafficPay
 }
 
 /** 页头「存储：Redis / 内存」文案。 */
-export function storageText(status: SentinelStatus | null, traffic: TrafficPayload | null): string {
-  if (traffic?.storage) return traffic.storage === 'redis' ? 'Redis' : '内存'
-  return status?.redis ? 'Redis' : '内存'
+export function storageText(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): string {
+  const memory = (translate ?? defaultTranslate)('page.sentinel.storage.memory')
+  if (traffic?.storage) return traffic.storage === 'redis' ? 'Redis' : memory
+  return status?.redis ? 'Redis' : memory
 }
