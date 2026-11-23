@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 
 from admin.config import settings
 from admin.db import SessionLocal, get_db, init_db, wait_database_ready
@@ -304,6 +305,27 @@ app.add_middleware(IPBlockMiddleware)
 # 完全不同，等于完全没有风控。本中间件不区分路径，全站生效。
 from admin.abuse_guard import AbuseGuardMiddleware
 app.add_middleware(AbuseGuardMiddleware)
+
+
+class UIStaticGZipMiddleware:
+    """只给 /admin/v2 的静态资源开 gzip。
+
+    为什么不全局：`/v1`、`/gw` 的 SSE 长连接一旦被 gzip 缓冲，token 会被攒住，
+    流式体验直接坏掉。这里按路径分流，API/SSE 原样直通。
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=6)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path", "").startswith("/admin/v2/"):
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(UIStaticGZipMiddleware)
 
 
 @app.on_event("shutdown")

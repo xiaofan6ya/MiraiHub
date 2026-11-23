@@ -208,3 +208,20 @@ def test_console_invalid_mode_falls_back_to_v1(client, dist, monkeypatch):
     r = client.get("/admin", follow_redirects=False)
     assert r.status_code == 200
     assert "v2-login" not in r.text
+
+def test_ui_assets_are_gzipped(client, dist, logged_in):
+    """v2 静态资源要 gzip：预览/直连 uvicorn 没有 nginx 压缩时，LCP 才不会砸在 1.2MB 明文上。"""
+    big = dist / "assets" / "big-0123456789.js"
+    big.write_text("console.log('x');\n" * 400, encoding="utf-8")
+    r = client.get("/admin/v2/assets/big-0123456789.js",
+                   headers={"Accept-Encoding": "gzip"}, follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers.get("content-encoding") == "gzip"
+    assert "accept-encoding" in r.headers.get("vary", "").lower()
+
+
+def test_api_stream_paths_are_not_gzipped(client):
+    """API/SSE 不能被 UI 的 gzip 中间件碰到。"""
+    r = client.get("/api/app/version", headers={"Accept-Encoding": "gzip"}, follow_redirects=False)
+    assert r.status_code == 200
+    assert "content-encoding" not in r.headers
