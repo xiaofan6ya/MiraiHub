@@ -27,6 +27,10 @@ const PAGE_COMPONENTS: Partial<Record<PageKey, () => Promise<Component>>> = {
   logs: () => import('@/pages/LogsPage.vue').then((mod) => mod.default),
   usage: () => import('@/pages/UsagePage.vue').then((mod) => mod.default),
   stats: () => import('@/pages/StatsPage.vue').then((mod) => mod.default),
+  sentinel: () => import('@/pages/SentinelPage.vue').then((mod) => mod.default),
+  gateway: () => import('@/pages/GatewayPage.vue').then((mod) => mod.default),
+  platforms: () => import('@/pages/PlatformsPage.vue').then((mod) => mod.default),
+  overview: () => import('@/pages/OverviewPage.vue').then((mod) => mod.default),
 }
 
 const pageRoutes: RouteRecordRaw[] = PAGES.map((page) => ({

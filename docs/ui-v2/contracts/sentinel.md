@@ -485,3 +485,49 @@ await sentinelPollLogs();                 // 执行轮询
 - 粒子流颜色：已在代码中硬编码（绿 `#3E6A99` / 黄 `#f59e0b` / 红 `#ef4444`），**后期可改为 CSS 变量**
 - 表格行悬停：`hover:bg-slate-100 dark:hover:bg-slate-800`
 - 着色 chip：用 CSS class `.tone-ok` / `.tone-warn` / `.tone-danger`，值在 tokens.css 中定义
+
+
+---
+
+## 实现对照（S18 /sentinel 新版实现，2026-11-23）
+
+新版实现：`admin/ui/src/pages/SentinelPage.vue` + `admin/ui/src/api/sentinel.ts` + `admin/ui/tests/page-sentinel.spec.ts`。
+结构按 P2（模板 A）：PageHeader（存储 / 暂停平台… / 刷新）+ 结论横幅 + 6 格 StatStrip + 左右分栏（实时流量 + 平台健康 ｜ 实时请求）+ 封控信号表格 + 暂停平台弹窗。
+视图状态（tab/window/platform/page/size/sort/order）通过 `useTableQuery('sentinel')` 同步到路由 query。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 结论横幅（是否触发 + 阈值） | 页面首屏横幅（ok-soft / danger-soft） | 已实现：文案沿用旧版「检测到批次级封控：最近 N 分钟内有 X 个账号被风控 / 未检测到批次级封控」，副行给阈值与建议暂停秒数 |
+| 检测到时「暂停该平台」主按钮 | 横幅右侧 danger 按钮 | 已实现：取 `by_platform` 里 risk 最多的平台 + `suggested_pause_seconds`，点击进暂停确认 |
+| 暂停中的平台「恢复 X」按钮 | 横幅右侧（每个暂停键一个） | 已实现：`pause` 里的键逐个渲染（`all` → 全部平台），过期项不显示 |
+| 6 格 StatStrip | `StatStrip` | 已实现（按 P2 ASCII）：今日请求 / 成功率（着色 ≥98 ok、≥90 warn、其余 danger）/ 失败·超时 / 信号（脚注最近信号相对时间）/ 涉及账号（脚注原因种类）/ 暂停中的平台（脚注平台名） |
+| 「存储后端 Redis」不再占统计位 | 页头「存储：Redis / 内存」小字 | 已实现（旧版第 4 格的位置让给「信号」，符合 P2） |
+| 实时流量 RouteRibbon（按成功率着色） | 「实时流量」卡 | 已实现：`traffic.platforms` → lanes，线宽=请求占比、颜色用组件内 healthOf（≥90/60/其余，与设计稿一致），带成功率数字与 `HTTP last_status`；空数据走组件自带「暂无流量」 |
+| 点击线路带平台 → 过滤信号表 | RouteRibbon `@select` → `?platform=` | 已实现（新版补充）：再点一次取消，筛选 chip 可移除 |
+| 实时请求列表（2 秒轮询） | 右栏「实时请求」卡 | 已实现：`/api/sentinel/traffic?window=3600` 每 2 秒（任务书要求；旧版 4 秒），最多 50 行，新的在上 |
+| 状态码着色（2xx ok / 429 warn / ≥400 danger） | 列表行 | 已实现：`requestTone` 按旧版 sentinelToneOf 口径（状态码优先；200+流式 interrupted 也算成功；running 用 brand 显示「进行中」；无状态码才看 timeout/error） |
+| 新行插入时顶部淡入 150ms | CSS `sentinel-row-in` | 已实现（keyed 列表只在新增行触发；`prefers-reduced-motion` 由 tokens.css 全局关掉动画） |
+| 页面不可见暂停轮询 | `usePolling`（status 10s / traffic 2s） | 已实现：05-patterns §3 的 visibility 暂停 |
+| 连续失败 3 次暂停 + 「恢复」 | 各卡底部 warn 文案 + 恢复按钮 | 已实现：`usePolling` 的 pausedMessage + resume；横幅/表格仍显示旧数据 |
+| 平台健康 StackMeter 两段 | 「平台健康」卡 | 已实现：每平台一行 = 名称 + 成功率（着色）+ 次数·失败 + 两段 StackMeter（成功 ok / 失败·超时 danger，total=今日请求） |
+| 平台健康行「⋯」止损 | 行内 `RowActions` | 已实现：暂停该平台（danger）/ 恢复该平台（已暂停时），暂停走确认弹窗 |
+| 封控信号 DataTable（时间 · 平台 · 账号 · 信号码 · 原因 · 操作） | 表格卡 | 已实现：时间（相对时间）、平台展示名、#账号、信号码（未收录显示「· 未归类」并 tooltip 说明）、原因（归一信号名 · 原始标签，tooltip 显示 detail）、模型列、操作（暂停/恢复该平台） |
+| 受影响账号表（旧版） | 同一卡片的页签「受影响账号」 | 已实现：平台 / #账号 / 最近信号 / 类型（四档 Badge）/ 次数 / 首次 / 最近，按最近信号排序 |
+| 四档严重程度展示 | 类型 Badge | 已实现：risk 风控（danger）/ throttle 限流（warn）/ auth 登录（neutral）/ info 记录（neutral），tooltip 给该档处置说明（仅 risk 参与熔断） |
+| 信号窗口 | 表格卡「5 / 10 / 30 分钟」 | 已实现（新版补充）：写 `?window=`，重新请求 `/api/sentinel/status?window=`（后端默认 300s，范围 30–3600） |
+| 暂停平台（止损）确认 | 「暂停平台…」弹窗 + 确认框 | 已实现：目标平台（全部/各平台）、时长（10 分钟 / 30 分钟 / 直到手动恢复）、原因；确认文案沿用旧版「暂停期间请求会直接返回 503，不消耗账号额度、也不会打到上游」；成功 Toast「已暂停：X」 |
+| 恢复平台 | 横幅按钮 / 行操作 | 已实现；有差异：旧版恢复**无**确认框，新版按任务书要求补了确认「恢复 X 的上游请求？」 |
+| 旧版拓扑粒子动画（traffic.js） | 由 RouteRibbon 取代 | 有差异（设计稿指定）：P2 明确「实时流量（RouteRibbon，按成功率着色）」，不再保留 cabling 粒子动画 |
+| 旧版「今日概况」4 格 KPI | 合并进 StatStrip | 有差异（设计稿指定）：P2 要求把旧版 6 格信号指标与 KPI 一起收进一个 StatStrip |
+| 旧版「受影响账号 / 信号明细」两块表 | 合并为一个表格卡两个页签 | 有差异：页面高度更可控，数据与列完全保留 |
+| `/api/sentinel/reset`（清空信号） | — | 未提供入口：后端有该接口（排障用），但旧版面板没有按钮，P2 也未要求；如需可从命令面板或排障脚本调用 |
+| `/api/sentinel/pressure`（并发压力） | — | 不在 P2 范围（概览/哨兵以外的排障数据），未展示 |
+| `alert` 字段（熔断时后端推的预警） | — | 未单独展示：后端在 status 里返回最近一次通知结果，页面只用 `tripped` 判定；通知去重与投递在服务端完成 |
+| 平台上下文 | — | 不适用：`/api/sentinel/*` 不读 `X-Platform`（`platform` 是显式的查询参数）；页面的「平台筛选」只筛本页表格，不切全局上下文，因此不订阅 `usePlatformStore().onChange` |
+
+### 无法验证
+
+- 真实后端联调（本环境无 8790 服务）：status/traffic/pause/resume 的行为只用单测 + 类型检查验证。
+- 需要真实流量的部分：RouteRibbon 线宽/脉冲、平台健康条比例、实时请求 2 秒刷新与淡入、暂停后网关 503（`Retry-After`）。
+- Redis 不可用时的降级（`storage=memory`、信号只存进程内存）与多 worker 下 running 记录的合并。
+- 批次熔断的真实触发（需要 3 个账号在窗口内被上游真风控）与后端预警投递（邮件/机器人）。

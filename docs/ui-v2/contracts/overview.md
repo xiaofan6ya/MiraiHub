@@ -305,3 +305,49 @@ GET /api/accounts/badges
    - 着色规则不单独依靠颜色，要有文字/图标补充
 4. **国际化**：所有文案（「余额」「请求」等）需提取到 i18n 配置
 5. **主题适应**：所有颜色变量用 CSS Custom Properties（`--c-ok` 等），支持亮/暗主题切换
+
+---
+
+## 实现对照
+
+> 本节由 S21 实现时追加（原 1–307 行未改动）。上文是旧版概览的完整描述；
+> 新版按设计稿 `06-pages-a.md` P1 实现，与上文不一致处逐行标注了原因。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 页面骨架：状态行 + 英雄卡 + 用量条 + 流量带 / 账号状态 + 缓存卡 | `src/pages/OverviewPage.vue` | 已实现 |
+| 时间范围 今日 / 7 天 / 30 天 + 刷新 + 更新时间 | `Segmented` + `?days=` + 状态行「更新于」 | 已实现 |
+| 状态行：运行状态、Base URL（可复制）、平台数 / 模型数、当前平台、更新时间 | `StatusDot` + `IconBtn(Copy)` + `buildUsageItems` 之外的状态字段 | 已实现（运行状态 = 页面能取到数据，与旧版静态徽标同口径；没有独立健康检查接口） |
+| 剩余额度英雄卡：`--fs-display` 大数字 + 今日 / N 天 / 户均 + Meter（<20% warn、<5% danger）+ 总额度与账号数 + 已禁用余额说明 | `buildBalanceHero` + `Meter` | 已实现 |
+| 右侧用量条：请求 / 成功率 / 输入 Token / 输出 Token / Token 合计 | `buildUsageItems` + `StatStrip`（设计稿 P3 的五格口径） | 已实现 |
+| 今日流量 RouteRibbon（点击线路 → `/platforms` 并选中该平台） | `buildLanes` + `RouteRibbon @select` + `platformStore.setCurrent` | 已实现（「选中」= 切换全局平台上下文；平台管理页尚未做行级选中，见下方接线说明） |
+| 账号状态：5 行 Meter（活跃/冷却/熔断/额度耗尽/已禁用），0 值灰字，结论跳 `/accounts?status=cooldown` | `buildMonitorRows` / `monitorConclusion` | 已实现（目标页需读取 `status` query；账号页由 S25 实现，见接线说明） |
+| 告警横幅：danger / warn soft + 「查看」 | `buildAlerts`（封控 → 平台暂停 → 账号冷却 → 额度不足 20%） | 已实现 |
+| 缓存命中：Ring + 3 个 KV（输入命中/输入总量/样本请求）+ 说明 | `buildCache` + `Ring` + `KV` | 已实现 |
+| 首次加载骨架 | `NSkeleton`（状态行 / 英雄 / 两列卡 / 缓存） | 已实现 |
+| 刷新保留旧数据 | `Card loading` 转圈 + 页头按钮 loading；失败只 Toast 不清表 | 已实现 |
+| 空状态 | 账号卡 `Empty`（无账号）+ 流量带自带「暂无流量」+ 各数值 0 / — | 已实现 |
+| 错误状态 + 重试 | `ErrorBlock`（首屏失败替换内容区） | 已实现 |
+| 平台上下文订阅 + 卸载取消 | `usePlatformStore().onChange`（selector 变化才重取） | 已实现（`/api/overview` 读 `X-Platform`，切平台数据确实变化） |
+| 时间范围同步路由 query | `useTableQuery('overview')` 的 `days` filter | 已实现（刷新 / 前进后退 / 分享链接可还原） |
+| 手机 375px 可用 | 英雄与两列卡 ≤1023px 单列；状态行换行；缓存卡纵向 | 已实现（设计稿要求「手机 2 列」，实现为 1023 以下单列 + StatStrip 自带 2 列网格，避免 375px 挤压） |
+| 失败分类 / 模型 Top 排行 | — | 未做（旧版概览没有；P1 把它们放在数据看板 `/stats`，见 S17） |
+| 旧版底部平台状态网格 | 改为今日流量 RouteRibbon | 已实现（有差异：P1 明确用线路带替代网格） |
+| 旧版账号异常明细列表（最多 6 条 + 剩余冷却分钟） | — | 未做（P1 只要求 5 行 Meter + 一句结论；明细在账号池 `/accounts`） |
+| 缓存卡「命中 / 未命中」构成条与分平台命中率 | — | 未做（P1 只要求 Ring + 3 KV + 说明；`cache.by_platform` / `miss_tokens` 接口已返回，后续可加） |
+| 缓存卡折叠 / 展开（契约 §4.2） | — | 未做（P1 无折叠交互，卡片常显） |
+| 数字滚动动效（旧版 countTo） | — | 未做（01-direction §6 明确禁止数字滚动动画） |
+| 侧栏风控角标 | 外壳 `platform/shellBadges` | 不在本页（外壳统一维护） |
+| 成功率着色阈值（上文 §3.2：98% / 90%） | `rateTone`（`src/api/stats.ts`） | 有差异：复用全站统一阈值 ≥99.5% ok / ≥97% warn（与 dashboard.js 一致），避免概览与数据看板两套颜色 |
+| 命中率着色（≥10% ok / ≥5% warn） | `buildCache` | 已实现 |
+| 单元测试（英雄卡 / 用量条 / 监测 / 告警 / 缓存 / 流量带） | `tests/page-overview.spec.ts`（19 个用例，用后端真实响应形状） | 已实现 |
+
+### 口径核对（以 overview_router.py / sentinel.py 实际字段为准）
+
+- `accounts` 段只统计 `status='active'` 的账号；`balance_remain` / `balance_total` 是整数，`used_ratio = 1 - 剩余/总额`（总额为 0 时 `null`）。
+- `today` / `window` / `month` 的 `requests` 含失败，`ok_requests` 是成功数，`prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens` / `credits` 只累加成功请求。
+- `window.days` 只有 `window` 段带（后端 `dict(window, days=days)`）；`month` 是最近 30 天（30 天口径下与 `window` 相同）。
+- `cache.rate` 的分母只算「最早一条带缓存命中之后」的输入 token；无样本时 `rate = null`（页面显示 —，不显示 0%）。
+- `monitor` 分桶优先级：`disabled` > `breaker` > `cooling` > `no_balance` > `active`，`total` 是账号总数。
+- `/api/sentinel/status` 的 `accounts_affected` 只算真风控信号，`pause` 是 router 追加的「平台 -> 暂停信息」。
+- 流量带平台维度来自 `/api/stats/dashboard.platforms`（按落库平台聚合，`trae` 覆盖 `trae-cn` / `trae-intl`），`success_rate` 无样本时为 `null`；`/api/platforms` 只用来取图标与禁用状态。

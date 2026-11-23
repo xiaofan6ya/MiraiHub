@@ -670,3 +670,42 @@ Content-Type: application/json
    - 账号名非空且不超过 128 字符
    - 编辑时检测未改动时禁用「保存」按钮
 8. **确认流程**：删除、导入等破坏性操作前必须显示确认对话框
+
+---
+
+## 实现对照
+
+> 本节是 S20 的交付说明（原 1–672 行未改动）。实现落在
+> `admin/ui/src/pages/PlatformsPage.vue` + `admin/ui/src/api/platforms-admin.ts`（+ `tests/page-platforms.spec.ts`）。
+> 设计稿以 `06-pages-a.md` P4（卡片墙 + 跑分表）为准；本契约前半部分是早先按「列表 + 右侧详情」写的设想，
+> 与 P4 不一致处按 P4 实现，并在下表如实标注差异与真实接口。
+
+| 契约功能 | 新版位置 / 真实接口 | 状态 |
+|---|---|---|
+| 平台卡片墙（logo 28 / 名称 / 状态 Badge / 区域 / 优先级） | `PlatformsPage.vue` 卡片网格；数据 `GET /api/platforms`（`router.py:list_platforms`）+ `GET /api/gateway/config`（priority） | 已实现 |
+| 账号可用数（3/3 可用） | `GET /api/accounts?all_platforms=1` → `aggregateAccounts`（只算 `status=active`，按落库平台聚合） | 已实现（多一次账号快照请求，失败降级为只显示账号数） |
+| 剩余额度 Meter | 同上：active 账号 `balance_remain` 求和；`quota_unit=token` 用 `fmtCompact`，积分用 `fmtCredit`；Meter 以全平台最大值为刻度 | 已实现 |
+| 今日请求 / 成功率 / TTFT / TPS | `GET /api/platform/speed?hours=24\|168`（`bench_router.py:platform_speed`，成功率是 0–100） | 已实现 |
+| 状态页签 全部/已启用/已禁用 + 搜索 | FilterBar + Segmented（计数来自卡片）；状态与搜索同步路由 query（`state`/`q`） | 已实现 |
+| 卡片操作「账号池」 | `platformStore.setCurrent` + 跳 `/accounts` | 已实现 |
+| 卡片操作「设为当前」 | `platformStore.setCurrent`（写 localStorage + `PUT /api/platforms/current`） | 已实现 |
+| `⋯` 启用 / 禁用 | `POST /api/gateway/disable\|enable`（`gateway_api.py`），禁用需确认；禁用后卡片 60% 透明 + 提示「不参与调度，账号仍可管理」 | 已实现 |
+| `⋯` 扫描本机 | `runPlatformScan`：workbuddy 系列 `POST /api/accounts/import-local {all:true}`；qoder 只 `GET /api/qoder/scan-local`；其它平台 `GET+POST /api/<storage>/scan-local|import-local`（与旧版 platformScanAll 分支一致） | 已实现 |
+| `⋯` 导出本平台 | `GET /api/platforms/export-all?platform=<落库名>&mode=backup` → JSON 下载 | 已实现 |
+| `⋯` 平台特有动作（actions 声明原样移植） | `platformActionsOf` 移植 platform-actions.js（含 import-only / 不支持扫描的修正、同组只留一个主按钮）；`import` 打开导入抽屉，其余动作切到账号池执行（签到/刷新额度/授权登录等按账号执行，属 S25/S26） | 有差异（动作入口在，执行落在账号池） |
+| `⋯` tier / 平均级 | `tierOf`：平台自报 `rating` 优先，其次 platform-tiers.js 兜底表；菜单里显示「平均级：夯/人上人/npc/拉完了」+ 原因 | 已实现 |
+| 扫描全部平台 | 页头按钮，逐平台串行执行（旧版同样串行、无后端 job），结果表展示 扫描/入库/跳过/说明 | 已实现（客户端串行进度，未用 JobProgress） |
+| 导入全部平台（FormDrawer：文件选择 + 预览 + 确认） | `parsePlatformBackup` 解析 `format=miraihub-all-platforms`；逐平台 `POST /api/accounts/import-async` → `GET /api/accounts/job/{id}`；`useJob`+`JobProgress` 右下角进度 | 已实现 |
+| 导出全部平台 | FormDrawer：备份（含凭证）/ 清单（脱敏）+ 平台范围；`GET /api/platforms/export-all` → `miraihub-<scope>-<mode>-<时间戳>.json` | 已实现 |
+| 平台速度与稳定性表（成功率 / TTFT / TPS / 总耗时 / 抖动 / 样本） | DataTable（`table-id=platform-bench`），窗口 24h/7d 同步 query `hours`；样本 <3 标「样本少」warn 色 | 已实现 |
+| 四态（首次骨架 / 刷新保留 / 空 / 错误） | 卡片网格骨架、`Card :loading`、`Empty`、`ErrorBlock`+重试 | 已实现 |
+| 手机 375px | 卡片网格 1 列、搜索框满宽、DataTable 走组件卡片模式 | 已实现 |
+| 平台上下文订阅 | `platformStore.onChange`（选择真变了才重载），卸载取消 | 已实现 |
+| 契约 §一「左侧列表 + 右侧详情面板 + 账号表格 + 分页」 | 未实现：P4 设计稿是卡片墙，账号明细在 `/accounts`（S25/S26） | 有差异（设计稿未要求） |
+| 契约 §2.2.4 `PUT /api/platforms/{name}` 改平台元信息 | 后端不存在该接口（平台元信息由代码声明），未实现 | 有差异（后端无此接口） |
+| 契约 §2.2.5 `DELETE /api/platforms/{name}` 删平台 | 后端不存在该接口，未实现 | 有差异（后端无此接口） |
+| 契约 §2.3 `GET /api/platforms/{name}/accounts` 分页账号表 | 后端不存在该接口；账号数据走 `GET /api/accounts`（S25） | 有差异（后端无此接口） |
+| 契约 §二「点击列头排序」 | 跑分表固定按后端 rank 排序；卡片无排序需求 | 有差异（P4 未要求） |
+| 契约 §八.8「删除/导入前确认」 | 禁用平台、删除渠道类操作走 `useConfirm`；导入在抽屉内二次确认（开始导入） | 已实现 |
+| 单元测试（真实响应形状 → 卡片/动作/扫描计划） | `admin/ui/tests/page-platforms.spec.ts`（14 例） | 已实现 |
+
