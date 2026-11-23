@@ -915,3 +915,33 @@ sequenceDiagram
 | 模型速率限制微调 | 旧版隐藏在高级设置 | 本页高级设置已涵盖 | ✓ |
 | 自定义告警规则 | 旧版「维护」页 | 移到「告警规则」页（新增 P27） | ⏳ |
 
+---
+
+## 实现对照（S28）
+
+> 本节是 S28 的交付说明（原 1–917 行未改动）。实现落在 `admin/ui/src/pages/SettingsPage.vue` +
+> `admin/ui/src/api/settings.ts`（+ `tests/page-settings.spec.ts`），按 P23 的 5 个区块与 SettingsLayout（模板 C）实现；
+> 每个卡片独立保存。
+
+| 契约功能 | 新版位置 / 真实接口 | 状态 |
+|---|---|---|
+| 运行配置：每项名称 + 说明 + 控件 | SettingsPage `#settings-runtime`；`GET /api/runtime-config` → `fields[{attr,label,group,kind,desc,min,max,step,restart,value,default,overridden}]`（admin/runtime_settings.py:snapshot） | 已实现 |
+| 重启后生效标记 | `field.restart` → Badge warn「重启后生效」 | 已实现（当前 CATALOG 没有 restart=True 的项，标记逻辑就绪） |
+| 保存后「有 N 项修改需要重启服务后生效」横幅 | `restartPendingOf()`：保存返回的 `changed` ∩ restart 字段 | 已实现 |
+| 运行配置保存（只发改动项；空值 = 回落 .env） | `PUT /api/runtime-config {updates}`（runtime_settings.py:save）→ `changed/reverted/errors` | 已实现（分组按后端 `group`，不硬编码） |
+| 出口代理节点 DataTable | `GET /api/proxies` → `items[]` + `summary{total,ready,blocked,disabled,slots}` + `pools[]`（admin/routers/proxies.py:list_proxies） | 已实现 |
+| 添加节点 FormDrawer | `POST /api/proxies {label,url,max_concurrency,pool}`；地址在列表恒为 `***`（后端 _mask） | 已实现 |
+| 行操作：启停 / 解除静默 / 删除 | `PATCH /api/proxies/{id}`、`POST /{id}/unblock`、`DELETE /{id}`（删除需确认） | 已实现 |
+| 代理说明（单 IP 多号会被拉黑、分组去定时任务选） | 卡片说明 + 「定时任务」链到 `/schedules` | 已实现 |
+| WorkBuddy 邀请绑定：状态 + 表单 + 停用 | `GET/PUT /api/settings/invitation`（admin/server.py:130/136 → admin/invitation.py）；返回 `invite_code/invite_url/enabled`；停用 = 提交空值（确认） | 已实现 |
+| 修改登录密码：前端一致 + 最小长度 | `PATCH /api/admin/password {old_password,new_password}`（server.py:936；后端 ≥6 位并吊销其它会话）；前端先拦「两次不一致」「少于 6 位」 | 已实现 |
+| 密码修改成功提示（其它设备需要重新登录） | 用 `revoked_sessions` 显示「已修改，其他设备需要重新登录（吊销 N 个会话）」 | 已实现 |
+| 逆向产物：路径 + 校验并保存 + 设为输出目录 | `GET /api/app-source/status`、`POST /locate {install_dir, source_dir}`（admin/routers/app_source.py） | 已实现 |
+| 逆向产物：预检 / 一键拆包 / 删除产物 | `POST /unpack/plan`、`POST /unpack`、`POST /remove`；进度 `GET /unpack/progress`（usePolling 1.5s） | 已实现 |
+| 逆向产物：检索 + 结果列表 | `GET /api/app-source/search?q=&limit=` → `files[{file,line,text}]`（产物不存在时 reason 原样提示） | 已实现 |
+| 开发工具关闭时的降级 | `DEV_TOOLS=0` 时后端整路由 404 → 卡片说明「本部署未开放逆向产物」，不报错 | 已实现 |
+| 每卡独立保存 + 未保存标记 + 离开确认 | SettingsCard 的 save/reset + SettingsLayout `:dirty` | 已实现 |
+| 四态 + 375px | 各卡骨架 / 保留旧数据 / Empty（无节点、无检索结果）/ ErrorBlock 或卡内错误；单列 | 已实现 |
+| 单元测试（真实响应形状 → 分组/重启横幅/密码校验/代理摘要） | admin/ui/tests/page-settings.spec.ts | 已实现 |
+
+

@@ -585,3 +585,32 @@ POST /api/accounts/export
 - `refresh-batch` / `health-check-batch` 返回 `jobrunner` 快照；轮询 `GET /api/accounts/job/{job_id}`，`status !== running` 即结束。
 - 导出任务完成时 `result.file_token` 用于 `GET /api/accounts/export-download?token=…`，文件 30 分钟内可重复下载。
 - `GET /api/logs/summary?days=1` 的 `items[].account_id/requests/credits` 是「今日消耗」列的数据源（请求数含失败、积分只算成功）。
+
+
+---
+
+## 实现对照（S26 添加账号能力，2026-11-23）
+
+新版实现：`admin/ui/src/pages/AccountsPage.vue`（在 S25 表格/筛选/批量之上补齐添加账号）+ `admin/ui/src/api/account-add.ts` + `admin/ui/tests/page-accounts-add.spec.ts`。
+S25 的表格、状态页签、筛选、批量工具条、后台任务进度**未改动**；页头「导入 / 扫描本机 / 添加账号 ▾」与空状态「导入账号」从占位改为真实流程。
+
+| 功能 | 新版位置 | 状态 |
+|---|---|---|
+| 添加账号下拉（按平台能力显示） | 页头 `添加账号 ▾` → `addMethodsFor()` | 已实现：方式来自 `GET /api/platforms` 的 `auth_mode` / `supports_local_scan` / `actions` + `account-add.ts` 的 `PLATFORM_AUTH_FLOWS`；不支持的方式不出现，平台特有分支集中在声明表里 |
+| 手机号登录 FormDrawer | 抽屉「手机号登录」 | 已实现（仅声明了短信接口的平台）：区号下拉（`COUNTRY_CODES`）+ 手机号 + 获取验证码（60 秒倒计时）+ 验证码；loomy 新号返回 `need_password` 时补密码再提交；krowork 先 `/auth/begin` 拿 `auth_id` 再发码/提交 |
+| 浏览器授权步骤条 | 抽屉「浏览器授权登录」 | 已实现（marvis / raccoon / wps-lingxi）：三步步骤条（打开授权地址 → 等待确认/回调 → 账号入池）；发起后新窗口打开授权 URL，每 2 秒轮询 `/auth/poll`（最多 150 次），成功后 Toast + 刷新列表 |
+| 手动添加 FormDrawer | 抽屉「手动添加」 | 已实现：名称 + 凭证 JSON（等宽 textarea）+ 平台相关提示（`manualHint`）；提交 `POST /api/accounts`，后端做结构校验 + 真实上游验证；重复账号按旧版行为覆盖并提示 |
+| 导入 FormDrawer（粘贴 → 预览 → 勾选导入） | 抽屉「导入账号」 | 已实现：支持 JSONL / JSON 数组 / 单个对象；`parseImportText` 解析成预览行（有效/无法解析分别标注，默认勾选有效行）；`importModeOf` 决定提交 `items`（WorkBuddy）还是原文 `text`（其他平台）；`POST /api/accounts/import-async` 返回 job 后交给现有 `JobProgress` 轮询 |
+| 扫描本机（预览可导入） | 页头「扫描本机」+ 抽屉 | 已实现：`GET /api/accounts/scan-local` 列客户端登录目录；`scanPreviewRows` 标出「已在池子里 / 当前登录 / 凭据错误」并默认只勾选可导入项；`POST /api/accounts/import-local` 由服务端读文件入库（token 不下发浏览器）；结果 Toast「新增 x · 更新 y · 跳过 z」 |
+| 拖放导入 | — | 有差异：导入抽屉目前是粘贴 + 解析预览（旧版导入也是粘贴/文件读取后解析）；拖放需要额外文件组件，本步未加，粘贴原文等价可用 |
+| 导出当前筛选 | 页头「导出」 | 已实现（S25 已有）：`exportFiltered` → `exportAccountsAsync({ ids, format }) ` + `/api/accounts/export-download` |
+| 注册命令面板「添加账号」「导入账号」 | `registerCommand`（`accounts.add` / `accounts.import`） | 已实现：`onMounted` 注册、`onBeforeUnmount` 取消（含轮询/倒计时清理），页面重挂载不堆积 |
+| 平台能力驱动、不散落 `if (id === ...)` | `api/account-add.ts` | 已实现：平台授权接口集中在一张声明表；页面只调用 `addMethodsFor` / `methodEnabled` / 统一的 send/verify/begin/poll |
+| 失败与危险操作提示 | 抽屉与 Toast | 已实现：错误统一 `<动作>失败：<原因>`；验证码/手机号前端校验（`validatePhoneForm`）；手机号打码（`maskPhone`）；导入无有效行、扫描未勾选都直接提示 |
+
+### 无法验证
+
+- 真实后端联调（本环境无 8790 服务）：`POST /api/accounts` 的真实上游验证、`import-async` 的进度、`scan-local` 的目录内容、各平台 `/auth/*` 的请求体字段都只用类型与单测验证。
+- 各平台授权流程的真实字段：loomy `msgid`、krowork `auth_id` 的返回键按后端代码推断，`verify` 时做了 `msgid || id` / `auth_id || id` 兜底；若上游改字段，需按实际响应补。
+- 拖放导入与文件选择（见上「有差异」）。
+- 短信到达与倒计时在真实网络下的表现（倒计时为纯前端 60 秒）。
