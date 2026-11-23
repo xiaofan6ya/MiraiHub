@@ -31,6 +31,10 @@ const PAGE_COMPONENTS: Partial<Record<PageKey, () => Promise<Component>>> = {
   gateway: () => import('@/pages/GatewayPage.vue').then((mod) => mod.default),
   platforms: () => import('@/pages/PlatformsPage.vue').then((mod) => mod.default),
   overview: () => import('@/pages/OverviewPage.vue').then((mod) => mod.default),
+  journal: () => import('@/pages/JournalPage.vue').then((mod) => mod.default),
+  credits: () => import('@/pages/CreditsPage.vue').then((mod) => mod.default),
+  growth: () => import('@/pages/GrowthPage.vue').then((mod) => mod.default),
+  accounts: () => import('@/pages/AccountsPage.vue').then((mod) => mod.default),
 }
 
 const pageRoutes: RouteRecordRaw[] = PAGES.map((page) => ({
