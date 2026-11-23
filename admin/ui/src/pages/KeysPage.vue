@@ -42,6 +42,7 @@ import { useConfirm, useTableQuery, useToast } from '@/composables'
 import { copyText } from '@/composables/useCopy'
 import { ApiError, isAbortError } from '@/api/http'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import { FMT_EMPTY, fmtCredit, fmtInt, fmtTime } from '@/utils/format'
 import {
   buildCurlExamples,
@@ -88,18 +89,11 @@ import {
   type SelectionPolicyPayload,
 } from '@/api/keys'
 
-/** 旧版 #panel-keys 的副标题与鉴权说明原文。 */
-const HELP_TEXT =
-  '对外共享的调用凭证：每个 Key 单独计量、限额与封禁，共享出去不影响后台登录。' +
-  'OpenAI 与 Anthropic 两套协议共用同一批 Key、同一套配额与用量记账，只是 base_url 约定不同：' +
-  'OpenAI SDK 填含 /v1 的那个，Claude Code / Anthropic SDK 填不含 /v1 的那个' +
-  '（SDK 会自己拼 /v1/messages，填错会变成 /v1/v1/messages）。'
+const { t } = useI18n()
 
-const AUTH_TEXT =
-  'OpenAI 与 Anthropic 两套协议共用同一批 Key、同一套配额与用量记账，只是 base_url 约定不同：' +
-  'OpenAI SDK 填 OpenAI 地址（含 /v1），Claude Code / Anthropic SDK 填 Claude 地址（不含 /v1，' +
-  'SDK 会自己拼 /v1/messages，填错会变成 /v1/v1/messages）。' +
-  'Claude 端的 claude-sonnet-4-5 这类模型名由服务端自动按档次映射到白名单里的模型，无需手动改。'
+/** 旧版 #panel-keys 的副标题与鉴权说明原文。 */
+const helpText = computed(() => t('page.keys.help'))
+const authText = computed(() => t('page.keys.authText'))
 
 const router = useRouter()
 const toast = useToast()
@@ -123,16 +117,22 @@ const hasFilters = computed(() => Boolean(table.state.filters.q || table.state.f
 const summary = computed(() => {
   const current = keyStats(filteredRows.value)
   if (!hasFilters.value) {
-    return '共 ' + current.total + ' 个 Key · 正常 ' + current.active + ' · 已停用 ' + current.revoked +
-      ' · 不限额 ' + current.unlimited
+    return t('page.keys.summary.all', {
+      total: current.total,
+      active: current.active,
+      revoked: current.revoked,
+      unlimited: current.unlimited,
+    })
   }
-  return '筛选出 ' + current.total + ' / 共 ' + stats.value.total + ' 个 Key · 正常 ' + current.active
+  return t('page.keys.summary.filtered', {
+    total: current.total,
+    all: stats.value.total,
+    active: current.active,
+  })
 })
 
 const emptyDescription = computed(() =>
-  hasFilters.value
-    ? '没有符合条件的 Key。清空筛选后可看到全部 Key。'
-    : '还没有 Key。创建 Key 后即可对外调用网关。',
+  hasFilters.value ? t('page.keys.empty.filtered') : t('page.keys.empty.none'),
 )
 
 /* ------------------------------ 对接信息 ------------------------------ */
@@ -158,11 +158,11 @@ const firstModel = computed(() => chips.value.chips[0]?.copyValue || '')
 const examples = computed(() => buildCurlExamples(origin.value, firstModel.value))
 const policyLabel = computed(() => {
   const item = (policy.value?.modes || []).find((mode) => mode.value === policy.value?.mode)
-  return item?.label || '账号调度策略'
+  return item?.label || t('page.keys.policyFallback')
 })
 const policyHelp = computed(() => {
   const item = (policy.value?.modes || []).find((mode) => mode.value === policy.value?.mode)
-  return (item?.description || '决定网关挑哪一个账号承接请求。') + '（在「积分到期」页修改）'
+  return (item?.description || t('page.keys.policyFallbackHelp')) + t('page.keys.policySuffix')
 })
 
 /* ------------------------------ 表单 ------------------------------ */
@@ -205,27 +205,37 @@ const auxFailed = computed(
 let auxLoaded = false
 
 const groupOptions = computed(() => [
-  { label: '不限制（全部可用模型）', value: 0 },
+  { label: t('page.keys.groupOption.none'), value: 0 },
   ...groups.value.map((group) => ({
-    label: group.name + (group.effective_count != null ? '（' + group.effective_count + ' 个模型）' : ''),
+    label:
+      group.name +
+      (group.effective_count != null
+        ? t('page.keys.groupOption.count', { count: group.effective_count })
+        : ''),
     value: group.id,
   })),
 ])
 const platformOptionsForForm = computed(() => [
-  { label: '不限制（全部平台）', value: '' },
+  { label: t('page.keys.platformOption.none'), value: '' },
   ...platforms.value.map((item) => ({ label: item.label, value: item.storage })),
 ])
 const accountSelectOptions = computed(() =>
   accountOptions.value.map((account) => ({
     label:
-      (account.name || account.uid || '账号') + ' #' + account.id +
-      (account.status && account.status !== 'active' ? ' · 已禁用' : '') +
-      (account.balance_remain != null ? ' · ' + fmtCredit(account.balance_remain) + ' 积分' : ''),
+      (account.name || account.uid || t('page.keys.account.fallback')) +
+      ' #' +
+      account.id +
+      (account.status && account.status !== 'active' ? t('page.keys.account.disabled') : '') +
+      (account.balance_remain != null
+        ? t('page.keys.account.credits', { amount: fmtCredit(account.balance_remain) })
+        : ''),
     value: account.id,
   })),
 )
-const drawerTitle = computed(() => (editing.value ? '编辑 API Key' : '创建 API Key'))
-const submitText = computed(() => (editing.value ? '保存' : '创建'))
+const drawerTitle = computed(() =>
+  editing.value ? t('page.keys.drawer.edit') : t('page.keys.drawer.create'),
+)
+const submitText = computed(() => (editing.value ? t('common.save') : t('page.keys.submit.create')))
 
 /* ------------------------------ 抽屉：查看 / 用量 / IP / 模型 / 指南 ------------------------------ */
 const viewOpen = ref(false)
@@ -249,21 +259,23 @@ const guideOpen = ref(false)
 const guideTab = ref('openai')
 
 const ipColumns = computed<TableColumn[]>(() => [
-  { key: 'ip', title: 'IP 地址', mobile: 'title', width: 150 },
-  { key: 'requests', title: '调用次数', mobile: 'meta', width: 100, numeric: true, render: (row: TableRow) => fmtInt(row.requests) },
-  { key: 'failed', title: '失败', mobile: 'meta', width: 80, numeric: true, render: (row: TableRow) => fmtInt(row.failed) },
-  { key: 'credits', title: '积分', mobile: 'meta', width: 90, numeric: true, render: (row: TableRow) => fmtCredit(row.credits) },
+  { key: 'ip', title: t('page.keys.ipc.ip'), mobile: 'title', width: 150 },
+  { key: 'requests', title: t('page.keys.ipc.requests'), mobile: 'meta', width: 100, numeric: true, render: (row: TableRow) => fmtInt(row.requests) },
+  { key: 'failed', title: t('page.keys.ipc.failed'), mobile: 'meta', width: 80, numeric: true, render: (row: TableRow) => fmtInt(row.failed) },
+  { key: 'credits', title: t('page.keys.ipc.credits'), mobile: 'meta', width: 90, numeric: true, render: (row: TableRow) => fmtCredit(row.credits) },
   { key: 'tokens', title: 'Token', mobile: 'meta', width: 100, numeric: true, render: (row: TableRow) => fmtInt(row.tokens) },
-  { key: 'lastSeen', title: '最近调用', mobile: 'meta', width: 150 },
-  { key: 'models', title: '使用模型', mobile: 'subtitle', minWidth: 180 },
-  { key: 'active', title: '并发', mobile: 'meta', width: 80, numeric: true, render: (row: TableRow) => fmtInt(row.active) },
+  { key: 'lastSeen', title: t('page.keys.ipc.lastSeen'), mobile: 'meta', width: 150 },
+  { key: 'models', title: t('page.keys.ipc.models'), mobile: 'subtitle', minWidth: 180 },
+  { key: 'active', title: t('page.keys.ipc.active'), mobile: 'meta', width: 80, numeric: true, render: (row: TableRow) => fmtInt(row.active) },
   {
     key: 'blocked',
-    title: '状态',
+    title: t('page.keys.ipc.status'),
     mobile: 'meta',
     width: 90,
     render: (row: TableRow) =>
-      h(Badge, { tone: row.blocked ? 'danger' : 'ok' }, { default: () => (row.blocked ? '已封禁' : '正常') }),
+      h(Badge, { tone: row.blocked ? 'danger' : 'ok' }, {
+        default: () => (row.blocked ? t('page.keys.ipc.blocked') : t('page.keys.ipc.ok')),
+      }),
   },
 ])
 
@@ -302,7 +314,9 @@ async function loadKeys(): Promise<void> {
       message: errorMessage(error),
       detail: error instanceof ApiError && error.detail ? prettyDetail(error.detail) : '',
     }
-    toast.error(failureText(keys.value === null ? '加载 Key' : '刷新 Key', error))
+    toast.error(
+      failureText(keys.value === null ? t('page.keys.action.load') : t('page.keys.action.refreshKeys'), error),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -407,29 +421,35 @@ watch(
   (value) => { search.value = value },
 )
 
-const statusOptions = [
-  { label: '状态：全部', value: '' },
-  { label: '正常', value: 'active' },
-  { label: '已停用', value: 'revoked' },
-]
+const statusOptions = computed(() => [
+  { label: t('page.keys.filter.statusAll'), value: '' },
+  { label: t('page.keys.filter.active'), value: 'active' },
+  { label: t('page.keys.filter.revoked'), value: 'revoked' },
+])
 
 const groupFilterOptions = computed(() => [
-  { label: '分组：全部', value: '' },
-  { label: '未绑定分组', value: 'none' },
+  { label: t('page.keys.filter.groupAll'), value: '' },
+  { label: t('page.keys.filter.groupNone'), value: 'none' },
   ...groups.value.map((group) => ({ label: group.name, value: String(group.id) })),
 ])
 
 const chipsList = computed<FilterChip[]>(() => {
   const filters = table.state.filters
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.keys.filter.chipSearch'), value: filters.q })
   if (filters.group) {
-    const label = filters.group === 'none'
-      ? '未绑定分组'
-      : groups.value.find((group) => String(group.id) === filters.group)?.name || filters.group
-    list.push({ key: 'group', label: '分组', value: label })
+    const label =
+      filters.group === 'none'
+        ? t('page.keys.filter.groupNone')
+        : groups.value.find((group) => String(group.id) === filters.group)?.name || filters.group
+    list.push({ key: 'group', label: t('page.keys.filter.chipGroup'), value: label })
   }
-  if (filters.status) list.push({ key: 'status', label: '状态', value: filters.status === 'active' ? '正常' : '已停用' })
+  if (filters.status)
+    list.push({
+      key: 'status',
+      label: t('page.keys.filter.chipStatus'),
+      value: filters.status === 'active' ? t('page.keys.filter.active') : t('page.keys.filter.revoked'),
+    })
   return list
 })
 
@@ -488,7 +508,11 @@ function renderKey(row: TableRow): VNodeChild {
   const item = row as KeyRow
   return h('div', { class: 'keys-key' }, [
     h('code', { class: 'mono keys-key__text', title: item.masked }, item.masked),
-    h(IconBtn, { icon: Copy, label: '复制完整 Key', onClick: () => void copyFullKey(item) }),
+    h(IconBtn, {
+      icon: Copy,
+      label: t('page.keys.cell.copyKey'),
+      onClick: () => void copyFullKey(item),
+    }),
   ])
 }
 
@@ -501,8 +525,13 @@ function renderQuota(row: TableRow): VNodeChild {
       h('span', {}, item.limitText),
     ]),
     item.unlimited
-      ? h('span', { class: 'keys-quota__hint' }, '不限额')
-      : h(Meter, { value: item.usageRatio * 100, tone: item.usageTone, height: 4, ariaLabel: '额度使用率' }),
+      ? h('span', { class: 'keys-quota__hint' }, t('page.keys.cell.unlimited'))
+      : h(Meter, {
+          value: item.usageRatio * 100,
+          tone: item.usageTone,
+          height: 4,
+          ariaLabel: t('page.keys.cell.meterAria'),
+        }),
   ])
 }
 
@@ -522,7 +551,7 @@ function renderIps(row: TableRow): VNodeChild {
       {
         type: 'button',
         class: 'keys-ips__count',
-        title: '查看该 Key 的来源 IP 与请求次数，用于识别共享范围与异常来源',
+        title: t('page.keys.cell.ipsTitle'),
         onClick: () => void openIps(item),
       },
       item.ipText,
@@ -542,13 +571,17 @@ function renderIps(row: TableRow): VNodeChild {
 function renderGroup(row: TableRow): VNodeChild {
   const item = row as KeyRow
   return item.groupId
-    ? h(Badge, { tone: 'brand', title: '该 Key 仅可使用所绑定分组内的模型' }, { default: () => item.groupLabel })
+    ? h(Badge, { tone: 'brand', title: t('page.keys.cell.groupTitle') }, { default: () => item.groupLabel })
     : h('span', { class: 'keys-muted' }, item.groupLabel)
 }
 
 function renderExpire(row: TableRow): VNodeChild {
   const item = row as KeyRow
-  return h('span', { class: 'keys-muted', title: '后端 Key 模型没有到期字段，到期时间未提供' }, item.expireText)
+  return h(
+    'span',
+    { class: 'keys-muted', title: t('page.keys.cell.expireTitle') },
+    item.expireText,
+  )
 }
 
 function renderStatus(row: TableRow): VNodeChild {
@@ -560,12 +593,15 @@ function renderActions(row: TableRow): VNodeChild {
   const item = row as KeyRow
   return h(RowActions, {
     actions: [
-      { key: 'edit', label: '编辑' },
-      { key: 'copy', label: '复制 Key' },
-      { key: 'reset', label: '重置用量' },
-      { key: 'toggle', label: item.status === 'active' ? '停用' : '启用' },
-      { key: 'usage', label: '查看用量' },
-      { key: 'delete', label: '删除', danger: true },
+      { key: 'edit', label: t('common.edit') },
+      { key: 'copy', label: t('page.keys.action.copy') },
+      { key: 'reset', label: t('page.keys.action.reset') },
+      {
+        key: 'toggle',
+        label: item.status === 'active' ? t('page.keys.action.disable') : t('page.keys.action.enable'),
+      },
+      { key: 'usage', label: t('page.keys.action.usage') },
+      { key: 'delete', label: t('common.delete'), danger: true },
     ],
     max: 2,
     onSelect: (key: string) => void onRowAction(item, key),
@@ -573,15 +609,15 @@ function renderActions(row: TableRow): VNodeChild {
 }
 
 const columns = computed<TableColumn[]>(() => [
-  { key: 'name', title: '名称', mobile: 'title', minWidth: 180, sortable: true, sortOrder: sortOrderOf('name'), render: renderName },
+  { key: 'name', title: t('page.keys.col.name'), mobile: 'title', minWidth: 180, sortable: true, sortOrder: sortOrderOf('name'), render: renderName },
   { key: 'key', title: 'Key', mobile: 'subtitle', minWidth: 220, render: renderKey },
-  { key: 'quota', title: '限额 / 已用', mobile: 'meta', minWidth: 170, sortable: true, sortOrder: sortOrderOf('used'), render: renderQuota },
-  { key: 'concurrency', title: '并发', mobile: 'meta', width: 120, sortable: true, sortOrder: sortOrderOf('concurrency'), render: renderConcurrency },
-  { key: 'ips', title: '来源 IP', mobile: 'meta', minWidth: 170, render: renderIps },
-  { key: 'group', title: '分组', mobile: 'meta', width: 130, render: renderGroup },
-  { key: 'expire', title: '到期', mobile: 'meta', width: 90, render: renderExpire },
-  { key: 'status', title: '状态', mobile: 'meta', width: 96, render: renderStatus },
-  { key: 'actions', title: '操作', mobile: 'actions', width: 150, hideable: false, fixed: 'right', render: renderActions },
+  { key: 'quota', title: t('page.keys.col.quota'), mobile: 'meta', minWidth: 170, sortable: true, sortOrder: sortOrderOf('used'), render: renderQuota },
+  { key: 'concurrency', title: t('page.keys.col.concurrency'), mobile: 'meta', width: 120, sortable: true, sortOrder: sortOrderOf('concurrency'), render: renderConcurrency },
+  { key: 'ips', title: t('page.keys.col.ips'), mobile: 'meta', minWidth: 170, render: renderIps },
+  { key: 'group', title: t('page.keys.col.group'), mobile: 'meta', width: 130, render: renderGroup },
+  { key: 'expire', title: t('page.keys.col.expire'), mobile: 'meta', width: 90, render: renderExpire },
+  { key: 'status', title: t('page.keys.col.status'), mobile: 'meta', width: 96, render: renderStatus },
+  { key: 'actions', title: t('page.keys.col.actions'), mobile: 'actions', width: 150, hideable: false, fixed: 'right', render: renderActions },
 ])
 
 /* ------------------------------ 行为 ------------------------------ */
@@ -594,10 +630,10 @@ async function copyFullKey(row: KeyRow): Promise<void> {
   try {
     const data = await viewKey(row.id)
     const ok = await copyText(data.key)
-    if (ok) toast.success('已复制完整 Key')
-    else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+    if (ok) toast.success(t('page.keys.toast.copied'))
+    else toast.error(t('common.copyFailed'))
   } catch (error) {
-    toast.error(failureText('读取 Key', error))
+    toast.error(failureText(t('page.keys.action.read'), error))
   }
 }
 
@@ -637,7 +673,7 @@ async function submit(): Promise<void> {
     const input = draftToInput(draft.value)
     if (editing.value) {
       await patchKey(editing.value.id, { ...input, reset_used: draft.value.resetUsed })
-      toast.success('已保存')
+      toast.success(t('page.keys.toast.saved'))
       drawerOpen.value = false
       await loadKeys()
     } else {
@@ -648,7 +684,9 @@ async function submit(): Promise<void> {
       await loadKeys()
     }
   } catch (error) {
-    toast.error(failureText(editing.value ? '保存 Key' : '创建 Key', error))
+    toast.error(
+      failureText(editing.value ? t('page.keys.action.saveKey') : t('page.keys.action.create'), error),
+    )
   } finally {
     submitting.value = false
   }
@@ -660,44 +698,49 @@ async function onRowAction(row: KeyRow, action: string): Promise<void> {
   if (action === 'usage') return openUsage(row)
   if (action === 'reset') {
     const ok = await confirm({
-      title: '重置已用额度？',
-      message: '已用积分归零，历史日志保留。该 Key 立即恢复全部额度。',
-      okText: '重置用量',
+      title: t('page.keys.confirmReset.title'),
+      message: t('page.keys.confirmReset.body'),
+      okText: t('page.keys.action.reset'),
     })
     if (!ok) return
     try {
       await patchKey(row.id, { reset_used: true })
-      toast.success('已重置已用额度')
+      toast.success(t('page.keys.toast.resetDone'))
       await loadKeys()
     } catch (error) {
-      toast.error(failureText('重置用量', error))
+      toast.error(failureText(t('page.keys.action.resetUsed'), error))
     }
     return
   }
   if (action === 'toggle') {
     try {
       await patchKey(row.id, statusPatch(row.status))
-      toast.success(row.status === 'active' ? '已停用' : '已启用')
+      toast.success(row.status === 'active' ? t('page.keys.toast.disabled') : t('page.keys.toast.enabled'))
       await loadKeys()
     } catch (error) {
-      toast.error(failureText(row.status === 'active' ? '停用 Key' : '启用 Key', error))
+      toast.error(
+        failureText(
+          row.status === 'active' ? t('page.keys.action.disableKey') : t('page.keys.action.enableKey'),
+          error,
+        ),
+      )
     }
     return
   }
   if (action === 'delete') {
     const ok = await confirm({
-      title: '删除该 Key？',
-      message: '删除后该 Key 立即无法调用网关，用量记录保留。如需临时停止调用，请使用停用。',
+      title: t('page.keys.confirmDelete.title'),
+      message: t('page.keys.confirmDelete.body'),
       danger: true,
-      okText: '删除',
+      okText: t('common.delete'),
     })
     if (!ok) return
     try {
       await deleteKey(row.id)
-      toast.success('已删除')
+      toast.success(t('page.keys.toast.deleted'))
       await loadKeys()
     } catch (error) {
-      toast.error(failureText('删除 Key', error))
+      toast.error(failureText(t('page.keys.action.deleteKey'), error))
     }
   }
 }
@@ -742,18 +785,24 @@ async function openIps(row: KeyRow): Promise<void> {
   await loadIps()
 }
 
+const ipRangeOptions = computed(() => [
+  { label: t('page.keys.ips.range24'), value: '1' },
+  { label: t('page.keys.ips.range7'), value: '7' },
+  { label: t('page.keys.ips.range30'), value: '30' },
+])
+
 const ipSummaryItems = computed<KvItem[]>(() => [
-  { label: '来源 IP', value: fmtInt(ipOverview.value.totalIps) },
-  { label: '调用次数', value: fmtInt(ipOverview.value.requests) },
-  { label: '当前活跃 IP', value: fmtInt(ipOverview.value.activeIps) },
-  { label: '当前并发', value: fmtInt(ipOverview.value.activeRequests) },
+  { label: t('page.keys.ipSummary.ips'), value: fmtInt(ipOverview.value.totalIps) },
+  { label: t('page.keys.ipc.requests'), value: fmtInt(ipOverview.value.requests) },
+  { label: t('page.keys.ipSummary.activeIps'), value: fmtInt(ipOverview.value.activeIps) },
+  { label: t('page.keys.ipSummary.activeRequests'), value: fmtInt(ipOverview.value.activeRequests) },
 ])
 
 const usageView = computed(() => (usageData.value ? toUsageView(usageData.value) : null))
 const viewItems = computed<KvItem[]>(() => [
-  { label: '名称', value: viewData.value?.name || FMT_EMPTY },
-  { label: '前缀', value: viewData.value?.key_prefix || FMT_EMPTY, mono: true },
-  { label: '创建于', value: viewData.value?.created_at ? fmtTime(viewData.value.created_at) : FMT_EMPTY },
+  { label: t('page.keys.view.name'), value: viewData.value?.name || FMT_EMPTY },
+  { label: t('page.keys.view.prefix'), value: viewData.value?.key_prefix || FMT_EMPTY, mono: true },
+  { label: t('page.keys.view.createdAt'), value: viewData.value?.created_at ? fmtTime(viewData.value.created_at) : FMT_EMPTY },
 ])
 
 onMounted(() => {
@@ -768,26 +817,30 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="keys-page">
-    <PageHeader title="API Keys" :help="HELP_TEXT">
+    <PageHeader title="API Keys" :help="helpText">
       <template #actions>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadKeys()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadKeys()">
+          {{ t('common.refresh') }}
+        </Btn>
         <span class="keys-policy">
           <Btn variant="quiet" @click="router.push('/credits')">{{ policyLabel }}</Btn>
-          <HelpTip :content="policyHelp" label="账号调度策略说明" />
+          <HelpTip :content="policyHelp" :label="t('page.keys.policyHelpLabel')" />
         </span>
-        <Btn variant="default" @click="guideOpen = true">接入指南</Btn>
-        <Btn variant="primary" :icon="Plus" @click="openCreate">创建 Key</Btn>
+        <Btn variant="default" @click="guideOpen = true">{{ t('page.keys.action.guide') }}</Btn>
+        <Btn variant="primary" :icon="Plus" @click="openCreate">{{ t('page.keys.action.create') }}</Btn>
       </template>
     </PageHeader>
 
-    <Card class="keys-share" title="对接信息">
+    <Card class="keys-share" :title="t('page.keys.share.title')">
       <template #extra>
-        <Btn variant="quiet" size="sm" :loading="modelsLoading" @click="loadAccessories()">刷新</Btn>
+        <Btn variant="quiet" size="sm" :loading="modelsLoading" @click="loadAccessories()">
+          {{ t('common.refresh') }}
+        </Btn>
       </template>
 
       <div class="keys-share__grid">
         <div class="keys-share__row">
-          <span class="keys-share__label">连接地址</span>
+          <span class="keys-share__label">{{ t('page.keys.share.address') }}</span>
           <n-select
             class="keys-share__select"
             :value="origin"
@@ -796,22 +849,22 @@ onBeforeUnmount(() => {
           />
         </div>
         <div class="keys-share__row">
-          <span class="keys-share__label">OpenAI<em>含 /v1</em></span>
+          <span class="keys-share__label">OpenAI<em>{{ t('page.keys.share.openaiHint') }}</em></span>
           <Copyable :value="openaiBase" />
         </div>
         <div class="keys-share__row">
-          <span class="keys-share__label">Claude<em>不含 /v1</em></span>
+          <span class="keys-share__label">Claude<em>{{ t('page.keys.share.claudeHint') }}</em></span>
           <Copyable :value="claudeBase" />
         </div>
         <div class="keys-share__row">
-          <span class="keys-share__label">鉴权</span>
-          <Copyable value="Authorization: Bearer <你的 Key>　或　x-api-key: <你的 Key>" />
-          <HelpTip :content="AUTH_TEXT" label="鉴权说明" />
+          <span class="keys-share__label">{{ t('page.keys.share.auth') }}</span>
+          <Copyable :value="t('page.keys.share.authValue')" />
+          <HelpTip :content="authText" :label="t('page.keys.share.authHelpLabel')" />
         </div>
         <div class="keys-share__row keys-share__row--models">
-          <span class="keys-share__label">可用模型</span>
+          <span class="keys-share__label">{{ t('page.keys.share.models') }}</span>
           <div class="keys-share__models">
-            <span class="keys-muted">{{ chips.total }} 组</span>
+            <span class="keys-muted">{{ t('page.keys.share.groups', { count: chips.total }) }}</span>
             <Chip
               v-for="chip in chips.chips"
               :key="chip.key"
@@ -823,9 +876,11 @@ onBeforeUnmount(() => {
               {{ chip.name }}<span v-if="chip.platformCount > 1" class="keys-chip-count">{{ chip.platformCount }}</span>
             </Chip>
             <Btn v-if="chips.total" variant="quiet" size="sm" @click="modelsOpen = true">
-              全部 {{ chips.total }} ▸
+              {{ t('page.keys.share.allModels', { count: chips.total }) }}
             </Btn>
-            <span v-if="!chips.total && !modelsLoading" class="keys-muted">未配置模型白名单（放行全部模型）</span>
+            <span v-if="!chips.total && !modelsLoading" class="keys-muted">
+              {{ t('page.keys.share.noWhitelist') }}
+            </span>
           </div>
         </div>
       </div>
@@ -845,7 +900,7 @@ onBeforeUnmount(() => {
             <n-input
               class="keys-filter__search"
               :value="search"
-              placeholder="搜索名称 / 备注 / 账号"
+              :placeholder="t('page.keys.filter.searchPlaceholder')"
               clearable
               @update:value="
                 (value: string) => {
@@ -873,12 +928,17 @@ onBeforeUnmount(() => {
       <div class="keys-body">
         <ErrorBlock
           v-if="loadError && keys === null"
-          :title="'加载 Key 失败：' + loadError.message"
+          :title="t('page.keys.error.load', { error: loadError.message })"
           :detail="loadError.detail"
           @retry="loadKeys()"
         />
 
-        <div v-else-if="firstLoading" class="keys-skeleton" aria-busy="true" aria-label="Key 加载中">
+        <div
+          v-else-if="firstLoading"
+          class="keys-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.keys.loadingAria')"
+        >
           <n-skeleton v-for="index in 6" :key="index" height="44px" />
         </div>
 
@@ -901,8 +961,12 @@ onBeforeUnmount(() => {
         >
           <template #empty>
             <Empty :description="emptyDescription">
-              <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
-              <Btn v-else variant="primary" size="sm" :icon="Plus" @click="openCreate">创建 Key</Btn>
+              <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
+                {{ t('page.keys.clearFilters') }}
+              </Btn>
+              <Btn v-else variant="primary" size="sm" :icon="Plus" @click="openCreate">
+                {{ t('page.keys.action.create') }}
+              </Btn>
             </Empty>
           </template>
         </DataTable>
@@ -921,73 +985,108 @@ onBeforeUnmount(() => {
       <ErrorBlock
         v-if="auxFailed"
         compact
-        title="分组 / 平台 / 账号候选加载失败，对应下拉可能为空。"
-        retry-label="重新加载"
+        :title="t('page.keys.form.auxFailed')"
+        :retry-label="t('page.keys.form.reload')"
         @retry="reloadAux"
       />
-      <Section title="基本" first>
+      <Section :title="t('page.keys.section.basic')" first>
         <div class="keys-form">
-          <FormField label="名称" :required="Boolean(editing)" :error="errors.name" hint="创建时可留空，后端会填「未命名」。">
-            <n-input v-model:value="draft.name" placeholder="例如：给设计组的 Key" maxlength="120" clearable />
+          <FormField
+            :label="t('page.keys.form.name')"
+            :required="Boolean(editing)"
+            :error="errors.name"
+            :hint="t('page.keys.form.nameHint')"
+          >
+            <n-input
+              v-model:value="draft.name"
+              :placeholder="t('page.keys.form.namePlaceholder')"
+              maxlength="120"
+              clearable
+            />
           </FormField>
-          <FormField label="模型分组" hint="选择后该 Key 只能调用组内模型，调用组外模型返回 403。">
+          <FormField
+            :label="t('page.keys.form.group')"
+            :hint="t('page.keys.form.groupHint')"
+          >
             <n-select v-model:value="draft.groupId" :options="groupOptions" />
           </FormField>
-          <FormField label="备注">
-            <n-input v-model:value="draft.note" type="textarea" :rows="2" maxlength="255" placeholder="可选" />
+          <FormField :label="t('page.keys.form.note')">
+            <n-input
+              v-model:value="draft.note"
+              type="textarea"
+              :rows="2"
+              maxlength="255"
+              :placeholder="t('page.keys.form.notePlaceholder')"
+            />
           </FormField>
         </div>
       </Section>
 
-      <Section title="额度与流量">
+      <Section :title="t('page.keys.section.quota')">
         <div class="keys-form">
           <FormField
-            label="总额度（积分）"
+            :label="t('page.keys.form.limit')"
             :error="errors.creditLimit"
-            hint="勾选「不限额」时忽略；填 0 表示零额度。"
+            :hint="t('page.keys.form.limitHint')"
           >
             <div class="keys-form__inline">
-              <n-checkbox v-model:checked="draft.unlimited">不限额（∞）</n-checkbox>
+              <n-checkbox v-model:checked="draft.unlimited">
+                {{ t('page.keys.form.unlimited') }}
+              </n-checkbox>
               <n-input
                 v-model:value="draft.creditLimit"
-                placeholder="留空不限额；0 表示零额度"
+                :placeholder="t('page.keys.form.limitPlaceholder')"
                 :disabled="draft.unlimited"
               />
             </div>
           </FormField>
           <FormField
-            label="并发上限"
+            :label="t('page.keys.form.concurrency')"
             :error="errors.maxConcurrent"
-            hint="空 = 跟随全局；0 = 不限；N = 该 Key 所有对话合计最多 N 个在途请求。"
+            :hint="t('page.keys.form.concurrencyHint')"
           >
-            <n-input v-model:value="draft.maxConcurrent" placeholder="空 = 全局，0 = 不限" />
+            <n-input
+              v-model:value="draft.maxConcurrent"
+              :placeholder="t('page.keys.form.concurrencyPlaceholder')"
+            />
           </FormField>
           <FormField
-            label="每分钟请求数"
+            :label="t('page.keys.form.rate')"
             :error="errors.ratePerMinute"
-            hint="频率与并发独立；积分不限额也不会解除流量限制。"
+            :hint="t('page.keys.form.rateHint')"
           >
-            <n-input v-model:value="draft.ratePerMinute" placeholder="空 = 全局，0 = 不限" />
+            <n-input
+              v-model:value="draft.ratePerMinute"
+              :placeholder="t('page.keys.form.concurrencyPlaceholder')"
+            />
           </FormField>
-          <FormField v-if="editing" label="重置已用额度">
+          <FormField v-if="editing" :label="t('page.keys.form.resetUsed')">
             <n-checkbox v-model:checked="draft.resetUsed">
-              勾选后把已用积分归零（当前 {{ editing?.usedText }}，不影响历史日志）
+              {{ t('page.keys.form.resetUsedLabel', { used: editing?.usedText || '' }) }}
             </n-checkbox>
           </FormField>
         </div>
       </Section>
 
-      <Section title="模型与账号">
+      <Section :title="t('page.keys.section.scope')">
         <div class="keys-form">
-          <FormField label="聚合模型路由" hint="开启后 /v1/models 返回跨平台聚合列表，可由网关挑平台转发。">
-            <n-checkbox v-model:checked="draft.aggregate">使用聚合模型（跨平台负载分摊）</n-checkbox>
+          <FormField
+            :label="t('page.keys.form.aggregate')"
+            :hint="t('page.keys.form.aggregateHint')"
+          >
+            <n-checkbox v-model:checked="draft.aggregate">
+              {{ t('page.keys.form.aggregateLabel') }}
+            </n-checkbox>
           </FormField>
-          <FormField label="独占平台" hint="绑定后只在该平台的账号池里选号；不限制则按请求自报平台。">
+          <FormField
+            :label="t('page.keys.form.platform')"
+            :hint="t('page.keys.form.platformHint')"
+          >
             <n-select v-model:value="draft.platform" :options="platformOptionsForForm" />
           </FormField>
           <FormField
-            label="独占绑定账号（多选）"
-            hint="不选 = 使用公共账号池；选中后只用这些账号，账号不可用时不换号。搜索走服务端。"
+            :label="t('page.keys.form.accounts')"
+            :hint="t('page.keys.form.accountsHint')"
           >
             <n-select
               :value="draft.accountIds"
@@ -997,7 +1096,7 @@ onBeforeUnmount(() => {
               clearable
               :loading="accountsLoading"
               :options="accountSelectOptions"
-              placeholder="不限制（使用公共账号池）"
+              :placeholder="t('page.keys.form.accountsPlaceholder')"
               @update:value="onAccountsChange"
               @search="(value: string) => loadAccountOptions(value)"
             />
@@ -1005,61 +1104,88 @@ onBeforeUnmount(() => {
         </div>
       </Section>
 
-      <Section title="访问与有效期">
-        <p class="keys-hint">
-          来源 IP 只用于统计（表格「来源 IP」列可查看），后端没有「绑定来源 IP」字段，因此这里不提供绑定位。
-        </p>
-        <p class="keys-hint">后端 Key 模型没有到期字段，因此不提供有效期设置，表格「到期」列显示 —。</p>
+      <Section :title="t('page.keys.section.access')">
+        <p class="keys-hint">{{ t('page.keys.access.ipNote') }}</p>
+        <p class="keys-hint">{{ t('page.keys.access.expireNote') }}</p>
       </Section>
     </FormDrawer>
 
     <!-- 创建成功：完整 Key（旧版同样可随时在列表里再次查看） -->
-    <n-modal v-model:show="createdOpen" preset="card" class="keys-modal" title="Key 已创建" :style="{ width: '520px' }">
-      <p class="keys-hint">可随时在列表里点「复制 Key」再次查看完整值。</p>
+    <n-modal
+      v-model:show="createdOpen"
+      preset="card"
+      class="keys-modal"
+      :title="t('page.keys.created.title')"
+      :style="{ width: '520px' }"
+    >
+      <p class="keys-hint">{{ t('page.keys.created.note') }}</p>
       <Copyable :value="createdKey" />
       <template #footer>
         <div class="keys-modal__footer">
-          <Btn variant="primary" @click="createdOpen = false">完成</Btn>
+          <Btn variant="primary" @click="createdOpen = false">
+            {{ t('page.keys.created.done') }}
+          </Btn>
         </div>
       </template>
     </n-modal>
 
     <!-- 查看用量 -->
-    <DetailDrawer v-model:show="usageOpen" title="Key 用量" subtitle="按额度统计">
-      <ErrorBlock v-if="usageError" :title="'读取用量失败：' + usageError" :retry="false" compact />
+    <DetailDrawer
+      v-model:show="usageOpen"
+      :title="t('page.keys.usage.title')"
+      :subtitle="t('page.keys.usage.subtitle')"
+    >
+      <ErrorBlock
+        v-if="usageError"
+        :title="t('page.keys.usage.error', { error: usageError })"
+        :retry="false"
+        compact
+      />
       <div v-else-if="usageLoading" class="keys-skeleton"><n-skeleton :repeat="3" text /></div>
       <template v-else-if="usageView">
         <div class="keys-usage-grid">
-          <div class="keys-usage-cell"><span>限额</span><strong class="tnum">{{ usageView.limitText }}</strong></div>
-          <div class="keys-usage-cell"><span>已用</span><strong class="tnum">{{ usageView.usedText }}</strong></div>
-          <div class="keys-usage-cell"><span>剩余</span><strong class="tnum">{{ usageView.remainingText }}</strong></div>
-          <div class="keys-usage-cell"><span>使用率</span><strong class="tnum">{{ usageView.percentText }}</strong></div>
+          <div class="keys-usage-cell">
+            <span>{{ t('page.keys.usage.limit') }}</span>
+            <strong class="tnum">{{ usageView.limitText }}</strong>
+          </div>
+          <div class="keys-usage-cell">
+            <span>{{ t('page.keys.usage.used') }}</span>
+            <strong class="tnum">{{ usageView.usedText }}</strong>
+          </div>
+          <div class="keys-usage-cell">
+            <span>{{ t('page.keys.usage.remaining') }}</span>
+            <strong class="tnum">{{ usageView.remainingText }}</strong>
+          </div>
+          <div class="keys-usage-cell">
+            <span>{{ t('page.keys.usage.rate') }}</span>
+            <strong class="tnum">{{ usageView.percentText }}</strong>
+          </div>
         </div>
         <Meter
           v-if="!usageView.unlimited"
           :value="usageView.ratio * 100"
           :tone="usageView.tone"
           :height="8"
-          aria-label="额度使用率"
+          :aria-label="t('page.keys.usage.meterAria')"
         />
-        <p class="keys-hint">创建于 {{ usageView.createdText }}</p>
+        <p class="keys-hint">{{ t('page.keys.usage.createdAt', { time: usageView.createdText }) }}</p>
       </template>
       <template #footer>
-        <Btn variant="default" @click="usageOpen = false">关闭</Btn>
+        <Btn variant="default" @click="usageOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
 
     <!-- 来源 IP -->
-    <DetailDrawer v-model:show="ipOpen" :title="'来源 IP · ' + ipKeyName" subtitle="并发为当前服务进程的在途请求">
+    <DetailDrawer
+      v-model:show="ipOpen"
+      :title="t('page.keys.ips.title', { name: ipKeyName })"
+      :subtitle="t('page.keys.ips.subtitle')"
+    >
       <div class="keys-ipbar">
         <Segmented
-          :options="[
-            { label: '24 小时', value: '1' },
-            { label: '7 天', value: '7' },
-            { label: '30 天', value: '30' },
-          ]"
+          :options="ipRangeOptions"
           :model-value="ipDays"
-          aria-label="时间范围"
+          :aria-label="t('page.keys.ips.rangeAria')"
           @update:model-value="
             (value: string | number) => {
               ipDays = String(value)
@@ -1067,10 +1193,17 @@ onBeforeUnmount(() => {
             }
           "
         />
-        <Btn variant="quiet" size="sm" :loading="ipLoading" @click="loadIps()">刷新</Btn>
+        <Btn variant="quiet" size="sm" :loading="ipLoading" @click="loadIps()">
+          {{ t('common.refresh') }}
+        </Btn>
       </div>
       <KV :items="ipSummaryItems" />
-      <ErrorBlock v-if="ipError" :title="'读取来源 IP 失败：' + ipError" :retry="false" compact />
+      <ErrorBlock
+        v-if="ipError"
+        :title="t('page.keys.ips.error', { error: ipError })"
+        :retry="false"
+        compact
+      />
       <DataTable
         v-else
         table-id="keys-ips"
@@ -1080,72 +1213,81 @@ onBeforeUnmount(() => {
         :pagination="false"
         :virtual-scroll="false"
         max-height="360px"
-        empty-description="所选时间内暂无调用记录"
+        :empty-description="t('page.keys.ips.empty')"
       />
-      <p class="keys-hint">封禁 / 解封在「IP 管理」页操作；这里只读展示统计。</p>
+      <p class="keys-hint">{{ t('page.keys.ips.note') }}</p>
       <template #footer>
-        <Btn variant="default" @click="ipOpen = false">关闭</Btn>
+        <Btn variant="default" @click="ipOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
 
     <!-- 全部模型 -->
-    <DetailDrawer v-model:show="modelsOpen" :title="'可用模型 · ' + chips.total + ' 组'" subtitle="点击模型名复制调用名（带平台后缀）">
-      <n-input v-model:value="modelTerm" placeholder="搜索模型名 / 调用名 / 上游 id" clearable />
-      <div v-if="!modelHits.length" class="keys-muted">没有匹配的模型。</div>
+    <DetailDrawer
+      v-model:show="modelsOpen"
+      :title="t('page.keys.models.title', { count: chips.total })"
+      :subtitle="t('page.keys.models.subtitle')"
+    >
+      <n-input
+        v-model:value="modelTerm"
+        :placeholder="t('page.keys.models.searchPlaceholder')"
+        clearable
+      />
+      <div v-if="!modelHits.length" class="keys-muted">{{ t('page.keys.models.noHits') }}</div>
       <div v-for="hit in modelHits" :key="hit.key" class="keys-model">
         <div class="keys-model__head">
           <strong>{{ hit.name }}</strong>
-          <span class="keys-muted">{{ hit.platformCount }} 平台</span>
+          <span class="keys-muted">{{ t('page.keys.models.platformCount', { count: hit.platformCount }) }}</span>
         </div>
         <div class="keys-model__rows">
           <div v-for="row in hit.rows" :key="row.callId" class="keys-model__row">
             <span class="keys-muted">{{ row.platformLabel }}</span>
-            <Chip mono copy :value="row.callId" :title="'上游 id：' + row.upstreamId">{{ row.callId }}</Chip>
+            <Chip
+              mono
+              copy
+              :value="row.callId"
+              :title="t('page.keys.models.upstreamId', { id: row.upstreamId })"
+            >
+              {{ row.callId }}
+            </Chip>
             <span class="keys-muted tnum">{{ row.multiplierText }}</span>
           </div>
         </div>
       </div>
       <template #footer>
-        <Btn variant="default" @click="modelsOpen = false">关闭</Btn>
+        <Btn variant="default" @click="modelsOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
 
     <!-- 接入指南 -->
-    <DetailDrawer v-model:show="guideOpen" title="接入指南" subtitle="地址与模型已按当前连接地址填好">
+    <DetailDrawer
+      v-model:show="guideOpen"
+      :title="t('page.keys.guide.title')"
+      :subtitle="t('page.keys.guide.subtitle')"
+    >
       <n-tabs v-model:value="guideTab" type="line" animated>
-        <n-tab-pane name="openai" tab="OpenAI 协议">
+        <n-tab-pane name="openai" :tab="t('page.keys.guide.openai')">
           <CodeBlock :code="examples.openai" language="bash" />
         </n-tab-pane>
         <n-tab-pane name="claude" tab="Claude Code / Anthropic">
           <CodeBlock :code="examples.claude" language="bash" />
         </n-tab-pane>
-        <n-tab-pane name="audio" tab="语音转文字">
-          <p class="keys-hint">
-            POST /v1/audio/transcriptions，使用同一 API Key：multipart/form-data 上传 file，
-            model=workbuddy-asr；response_format 可选 json（默认）或 text。网关文件上限 25 MiB，
-            不支持 language / prompt / 时间戳 / 流式转写；不保存音频与转写内容。
-          </p>
+        <n-tab-pane name="audio" :tab="t('page.keys.guide.audio')">
+          <p class="keys-hint">{{ t('page.keys.guide.audioNote') }}</p>
           <CodeBlock :code="examples.audioCurl" language="bash" />
           <CodeBlock :code="examples.audioPython" language="python" />
         </n-tab-pane>
-        <n-tab-pane name="images" tab="AI 生图">
-          <p class="keys-hint">
-            文生图 POST /v1/images/generations，图生图 POST /v1/images/edits（单张 image，最大 20 MiB；
-            也支持 image_url / base64 image_data）。返回 url（默认）或 b64_json；暂不支持 mask、流式、多图。
-          </p>
+        <n-tab-pane name="images" :tab="t('page.keys.guide.images')">
+          <p class="keys-hint">{{ t('page.keys.guide.imagesNote') }}</p>
           <CodeBlock :code="examples.imagesPython" language="python" />
         </n-tab-pane>
-        <n-tab-pane name="videos" tab="AI 生视频（异步任务）">
-          <p class="keys-hint">
-            创建 POST /v1/videos 只到「上游已入队」就返回 queued；轮询 GET /v1/videos/{id}，
-            下载 GET /v1/videos/{id}/content。生成通常需要 1~5 分钟，按上游 usage.credit 实际积分记账。
-          </p>
+        <n-tab-pane name="videos" :tab="t('page.keys.guide.videos')">
+          <p class="keys-hint">{{ t('page.keys.guide.videosNote') }}</p>
           <CodeBlock :code="examples.videoCurl" language="bash" />
           <CodeBlock :code="examples.videoPython" language="python" />
         </n-tab-pane>
       </n-tabs>
       <template #footer>
-        <Btn variant="default" @click="guideOpen = false">关闭</Btn>
+        <Btn variant="default" @click="guideOpen = false">{{ t('common.close') }}</Btn>
       </template>
     </DetailDrawer>
   </div>

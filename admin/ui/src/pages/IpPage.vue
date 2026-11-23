@@ -45,6 +45,7 @@ import {
 import { useConfirm, useTableQuery, useToast } from '@/composables'
 import { FMT_EMPTY, fmtCompact, fmtCredit, fmtExpiry, fmtFullTime, fmtInt, fmtRelative, fmtTime, expiryTone } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
+import { useI18n } from '@/i18n'
 import { ApiError, isAbortError } from '@/api/http'
 import {
   BLOCK_DURATION_OPTIONS,
@@ -76,52 +77,45 @@ import {
   type IpDeviceRow,
 } from '@/api/ip'
 
+const { t } = useI18n()
+
 /** 旧版 #panel-ip 的子标题 + 四条 ip-notes 原文（收进 ⓘ，不占主视线）。 */
-const HELP_TEXT =
-  '封禁后，该 IP 的全部 /v1 与 /gw 请求直接返回 403「该 IP 已被封禁」，在鉴权和转发上游之前拦截。\n' +
-  '入口次数包含鉴权失败、限流和封禁请求；历史数据从用量日志补充。\n' +
-  '按小时汇总，时间范围包含起始小时；失败数按 HTTP 状态统计，积分与 Token 来自用量日志。\n' +
-  '点击表头切换排序；点击 IP 查看该地址的用量明细。\n' +
-  '低消耗筛选按成功用量记录计算均值，未返回 Token 的请求不作为低消耗。'
+const helpText = computed(() => t('page.ip.help'))
 
 /** 页签 2 的说明（设计稿 P13 原文）。 */
-const BLOCKED_HELP = '封禁后该 IP 的全部 /v1 与 /gw 请求直接 403'
-const BLOCKED_EXPIRY_HELP =
-  '到期时间由 blocked_ips.expires_at 决定，为空表示永久；已过期的记录后端视为未封禁。'
+const blockedHelp = computed(() => t('page.ip.blocked.help'))
+const blockedExpiryHelp = computed(() => t('page.ip.blocked.expiryHelp'))
 
 /** 页签 3 的说明（旧版 panel-note 原文）。 */
-const DEVICES_HELP = '按标识独立封禁'
-const DEVICES_NOTE =
-  '设备 ID、指纹和 MAC 均由客户端上报，未经硬件验证。相同标识换 IP 后仍会拦截；' +
-  '未上报或重置标识的设备无法可靠关联。普通 UA 不作为封禁依据。最多展示最近 2000 条关联。'
-const DEVICE_KEY_HELP =
-  '/api/ip/devices 不返回关联 Key；按 Key 追查请在用量日志按客户端 IP 过滤。'
+const devicesHelp = computed(() => t('page.ip.devices.help'))
+const devicesNote = computed(() => t('page.ip.devices.note'))
+const deviceKeyHelp = computed(() => t('page.ip.devices.keyHelp'))
 
 type IpView = 'active' | 'blocked' | 'devices'
 
-const VIEW_OPTIONS: SegmentedOption<string>[] = [
-  { label: '活跃 IP', value: 'active' },
-  { label: '封禁名单', value: 'blocked' },
-  { label: '设备关联', value: 'devices' },
-]
+const VIEW_OPTIONS = computed<SegmentedOption<string>[]>(() => [
+  { label: t('page.ip.view.active'), value: 'active' },
+  { label: t('page.ip.view.blocked'), value: 'blocked' },
+  { label: t('page.ip.view.devices'), value: 'devices' },
+])
 
 const daysOptions = IP_DAYS_OPTIONS.map((option) => ({ label: option.label, value: option.value }))
 const usageOptions = IP_USAGE_OPTIONS.map((option) => ({ label: option.label, value: option.value }))
-const statusOptions = [
-  { label: '状态：全部', value: '' },
-  { label: '已封禁', value: 'blocked' },
-  { label: '允许', value: 'allowed' },
-]
-const blockedStatusOptions = [
-  { label: '状态：全部', value: '' },
-  { label: '已封禁', value: 'enabled' },
-  { label: '已解除', value: 'disabled' },
-]
-const deviceStatusOptions = [
-  { label: '状态：全部', value: '' },
-  { label: '已封禁', value: 'blocked' },
-  { label: '允许', value: 'allowed' },
-]
+const statusOptions = computed(() => [
+  { label: t('page.ip.filter.statusAll'), value: '' },
+  { label: t('page.ip.status.blocked'), value: 'blocked' },
+  { label: t('page.ip.status.allowed'), value: 'allowed' },
+])
+const blockedStatusOptions = computed(() => [
+  { label: t('page.ip.filter.statusAll'), value: '' },
+  { label: t('page.ip.status.blocked'), value: 'enabled' },
+  { label: t('page.ip.status.revoked'), value: 'disabled' },
+])
+const deviceStatusOptions = computed(() => [
+  { label: t('page.ip.filter.statusAll'), value: '' },
+  { label: t('page.ip.status.blocked'), value: 'blocked' },
+  { label: t('page.ip.status.allowed'), value: 'allowed' },
+])
 const durationOptions = BLOCK_DURATION_OPTIONS.map((option) => ({ label: option.label, value: option.value }))
 
 const route = useRoute()
@@ -211,7 +205,12 @@ async function loadActivity(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     activityError.value = toErrorState(error)
-    toast.error(failureText(activity.value === null ? '加载 IP 活动' : '刷新 IP 活动', error))
+    toast.error(
+      failureText(
+        activity.value === null ? t('page.ip.action.loadActivity') : t('page.ip.action.refreshActivity'),
+        error,
+      ),
+    )
   } finally {
     if (activityController === current) {
       activityController = null
@@ -232,7 +231,12 @@ async function loadBlocked(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     blockedError.value = toErrorState(error)
-    toast.error(failureText(blocked.value === null ? '加载封禁名单' : '刷新封禁名单', error))
+    toast.error(
+      failureText(
+        blocked.value === null ? t('page.ip.action.loadBlocked') : t('page.ip.action.refreshBlocked'),
+        error,
+      ),
+    )
   } finally {
     if (blockedController === current) {
       blockedController = null
@@ -253,7 +257,12 @@ async function loadDevices(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     deviceError.value = toErrorState(error)
-    toast.error(failureText(devices.value === null ? '加载设备关联' : '刷新设备关联', error))
+    toast.error(
+      failureText(
+        devices.value === null ? t('page.ip.action.loadDevices') : t('page.ip.action.refreshDevices'),
+        error,
+      ),
+    )
   } finally {
     if (deviceController === current) {
       deviceController = null
@@ -302,25 +311,25 @@ const statItems = computed<StatItem[]>(() => {
       : null
   return [
     {
-      label: '活跃 IP',
+      label: t('page.ip.stat.activeIps'),
       value: payload ? fmtInt(payload.total_ips) : FMT_EMPTY,
-      foot: '所选时间内有入口请求的 IP 数',
+      foot: t('page.ip.stat.activeIpsFoot'),
     },
     {
-      label: '入口请求',
+      label: t('page.ip.stat.requests'),
       value: payload ? fmtCompact(payload.total_requests) : FMT_EMPTY,
-      foot: '含鉴权失败、限流与封禁拦截',
+      foot: t('page.ip.stat.requestsFoot'),
     },
     {
-      label: '封禁 IP',
+      label: t('page.ip.stat.blocked'),
       value: blockedCount === null ? FMT_EMPTY : fmtInt(blockedCount),
       tone: blockedCount ? 'danger' : 'default',
-      foot: '启用中的封禁记录',
+      foot: t('page.ip.stat.blockedFoot'),
     },
     {
-      label: '设备标识',
+      label: t('page.ip.stat.devices'),
       value: devices.value ? fmtInt(devices.value.length) : FMT_EMPTY,
-      foot: '客户端上报 · 未验证',
+      foot: t('page.ip.stat.devicesFoot'),
     },
   ]
 })
@@ -352,30 +361,35 @@ const activitySummary = computed(() => {
   if (!payload) return ''
   const total = fmtInt(payload.total_ips)
   if (activeTable.state.filters.status) {
-    return '本页 ' + visibleActivityRows.value.length + ' / 共 ' + total + ' 个 IP（状态筛选仅作用于当前页）'
+    return t('page.ip.activity.summaryFiltered', {
+      shown: visibleActivityRows.value.length,
+      total,
+    })
   }
-  return '共 ' + total + ' 个 IP · ' + fmtInt(payload.total_requests) + ' 次请求'
+  return t('page.ip.activity.summary', { total, requests: fmtInt(payload.total_requests) })
 })
 
 const activityEmptyText = computed(() =>
-  activityHasFilters.value ? '所选时间内没有符合筛选的 IP。' : '所选时间内暂无请求。',
+  activityHasFilters.value ? t('page.ip.activity.emptyFiltered') : t('page.ip.activity.empty'),
 )
 
 const activityChips = computed<FilterChip[]>(() => {
   const filters = activeTable.state.filters
   const list: FilterChip[] = []
   const daysLabel = daysOptions.find((option) => option.value === filters.days)?.label
-  if (daysLabel && filters.days !== '1') list.push({ key: 'days', label: '时间范围', value: daysLabel })
+  if (daysLabel && filters.days !== '1')
+    list.push({ key: 'days', label: t('page.ip.chip.days'), value: daysLabel })
   if (filters.q) list.push({ key: 'q', label: 'IP', value: filters.q })
   if (filters.status) {
-    const label = statusOptions.find((option) => option.value === filters.status)?.label
-    list.push({ key: 'status', label: '状态', value: label || filters.status })
+    const label = statusOptions.value.find((option) => option.value === filters.status)?.label
+    list.push({ key: 'status', label: t('page.ip.chip.status'), value: label || filters.status })
   }
   if (filters.usage) {
     const label = usageOptions.find((option) => option.value === filters.usage)?.label
-    list.push({ key: 'usage', label: '流量', value: label || filters.usage })
+    list.push({ key: 'usage', label: t('page.ip.chip.usage'), value: label || filters.usage })
   }
-  if (filters.min && filters.min !== '0') list.push({ key: 'min', label: '至少请求', value: filters.min })
+  if (filters.min && filters.min !== '0')
+    list.push({ key: 'min', label: t('page.ip.chip.minRequests'), value: filters.min })
   return list
 })
 
@@ -417,14 +431,17 @@ function renderIp(row: TableRow): VNodeChild {
         h('span', { class: 'ip-mono', title: item.ip }, item.ip || FMT_EMPTY),
       default: () =>
         h('div', { class: 'ip-pop' }, [
-          h('p', { class: 'ip-pop__title' }, '客户端识别'),
+          h('p', { class: 'ip-pop__title' }, t('page.ip.cell.clientTitle')),
           h('pre', { class: 'ip-pop__text' }, item.client.tooltip),
           h(Copyable, { value: item.ip, muted: true }),
         ]),
     },
   )
-  const nodes: VNodeChild[] = [trigger, h(HelpTip, { content: item.client.tooltip, label: '客户端识别' })]
-  if (item.isCurrent) nodes.push(h('small', { class: 'ip-current' }, '当前访问 IP'))
+  const nodes: VNodeChild[] = [
+    trigger,
+    h(HelpTip, { content: item.client.tooltip, label: t('page.ip.cell.clientTitle') }),
+  ]
+  if (item.isCurrent) nodes.push(h('small', { class: 'ip-current' }, t('page.ip.cell.currentIp')))
   return h('div', { class: 'ip-cell' }, nodes)
 }
 
@@ -452,13 +469,16 @@ function renderBlockedRequests(row: TableRow): VNodeChild {
 function renderCredits(row: TableRow): VNodeChild {
   const item = row as IpActivityRow
   const avg = item.avgCredits === null ? FMT_EMPTY : item.avgCredits.toFixed(4)
-  return renderNumber(fmtCredit(item.credits), '均 ' + avg)
+  return renderNumber(fmtCredit(item.credits), t('page.ip.cell.avg', { value: avg }))
 }
 
 function renderTokens(row: TableRow): VNodeChild {
   const item = row as IpActivityRow
   const avg = item.avgTokens === null ? FMT_EMPTY : fmtCompact(item.avgTokens)
-  return renderNumber(fmtCompact(item.tokens), '均 ' + avg + ' · ' + fmtInt(item.knownUsage) + ' 次有用量')
+  return renderNumber(
+    fmtCompact(item.tokens),
+    t('page.ip.cell.tokensSub', { avg, count: fmtInt(item.knownUsage) }),
+  )
 }
 
 function renderLastSeen(row: TableRow): VNodeChild {
@@ -472,7 +492,7 @@ function renderStatus(row: TableRow): VNodeChild {
   return h(
     Badge,
     { tone: item.blocked ? 'danger' : 'ok', dot: true },
-    { default: () => (item.blocked ? '已封禁' : '允许') },
+    { default: () => (item.blocked ? t('page.ip.status.blocked') : t('page.ip.status.allowed')) },
   )
 }
 
@@ -480,8 +500,11 @@ function renderActivityActions(row: TableRow): VNodeChild {
   const item = row as IpActivityRow
   return h(RowActions, {
     actions: [
-      { key: 'toggle', label: item.blocked ? '解除封禁' : '封禁' },
-      { key: 'logs', label: '查看日志' },
+      {
+        key: 'toggle',
+        label: item.blocked ? t('page.ip.action.unblock') : t('page.ip.action.block'),
+      },
+      { key: 'logs', label: t('page.ip.action.viewLogs') },
     ],
     max: 1,
     onSelect: (key: string) => {
@@ -493,7 +516,7 @@ function renderActivityActions(row: TableRow): VNodeChild {
 const activityColumns = computed<TableColumn[]>(() => [
   {
     key: 'ip',
-    title: 'IP 地址',
+    title: t('page.ip.col.ip'),
     mobile: 'title',
     width: 200,
     sortable: true,
@@ -502,7 +525,7 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'requests',
-    title: '请求次数',
+    title: t('page.ip.col.requests'),
     mobile: 'meta',
     width: 110,
     numeric: true,
@@ -512,7 +535,7 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'failed',
-    title: '失败次数',
+    title: t('page.ip.col.failed'),
     mobile: 'meta',
     width: 104,
     numeric: true,
@@ -522,7 +545,7 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'blocked_requests',
-    title: '封禁拦截',
+    title: t('page.ip.col.blockedRequests'),
     mobile: 'meta',
     width: 104,
     numeric: true,
@@ -532,7 +555,7 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'credits',
-    title: '积分',
+    title: t('page.ip.col.credits'),
     mobile: 'meta',
     width: 132,
     numeric: true,
@@ -552,7 +575,7 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'last_seen',
-    title: '最近请求',
+    title: t('page.ip.col.lastSeen'),
     mobile: 'meta',
     width: 132,
     numeric: true,
@@ -562,14 +585,14 @@ const activityColumns = computed<TableColumn[]>(() => [
   },
   {
     key: 'status',
-    title: '状态',
+    title: t('page.ip.col.status'),
     mobile: 'subtitle',
     width: 96,
     render: renderStatus,
   },
   {
     key: 'actions',
-    title: '操作',
+    title: t('page.ip.col.actions'),
     mobile: 'actions',
     width: 132,
     hideable: false,
@@ -604,18 +627,22 @@ const blockedSummary = computed(() => {
   const total = blocked.value?.length ?? 0
   const enabled = blockedCount.value
   if (blockedTable.state.filters.bq || blockedTable.state.filters.bs) {
-    return '筛选出 ' + blockedFiltered.value.length + ' / 共 ' + total + ' 条 · 启用中 ' + enabled + ' 条'
+    return t('page.ip.blocked.summaryFiltered', {
+      shown: blockedFiltered.value.length,
+      total,
+      enabled,
+    })
   }
-  return '共 ' + total + ' 条封禁记录 · 启用中 ' + enabled + ' 条'
+  return t('page.ip.blocked.summary', { total, enabled })
 })
 
 const blockedChips = computed<FilterChip[]>(() => {
   const filters = blockedTable.state.filters
   const list: FilterChip[] = []
-  if (filters.bq) list.push({ key: 'bq', label: '搜索', value: filters.bq })
+  if (filters.bq) list.push({ key: 'bq', label: t('page.ip.chip.search'), value: filters.bq })
   if (filters.bs) {
-    const label = blockedStatusOptions.find((option) => option.value === filters.bs)?.label
-    list.push({ key: 'bs', label: '状态', value: label || filters.bs })
+    const label = blockedStatusOptions.value.find((option) => option.value === filters.bs)?.label
+    list.push({ key: 'bs', label: t('page.ip.chip.status'), value: label || filters.bs })
   }
   return list
 })
@@ -659,7 +686,8 @@ function renderBlockedCreated(row: TableRow): VNodeChild {
 
 function renderBlockedExpiry(row: TableRow): VNodeChild {
   const item = row as BlockedIpRow
-  if (item.expiry === 'permanent') return h('span', { class: 'ip-permanent' }, '永久')
+  if (item.expiry === 'permanent')
+    return h('span', { class: 'ip-permanent' }, t('page.ip.blocked.permanent'))
   const tone = expiryTone(item.expiresAt)
   return h(
     'span',
@@ -673,7 +701,7 @@ function renderBlockedStatus(row: TableRow): VNodeChild {
   return h(
     Badge,
     { tone: item.enabled ? 'danger' : 'neutral', dot: true },
-    { default: () => (item.enabled ? '已封禁' : '已解除') },
+    { default: () => (item.enabled ? t('page.ip.status.blocked') : t('page.ip.status.revoked')) },
   )
 }
 
@@ -681,8 +709,11 @@ function renderBlockedActions(row: TableRow): VNodeChild {
   const item = row as BlockedIpRow
   return h(RowActions, {
     actions: [
-      { key: 'toggle', label: item.enabled ? '解除封禁' : '重新封禁' },
-      { key: 'delete', label: '删除记录', danger: true },
+      {
+        key: 'toggle',
+        label: item.enabled ? t('page.ip.action.unblock') : t('page.ip.action.reblock'),
+      },
+      { key: 'delete', label: t('page.ip.action.deleteRecord'), danger: true },
     ],
     max: 1,
     onSelect: (key: string) => {
@@ -692,12 +723,12 @@ function renderBlockedActions(row: TableRow): VNodeChild {
 }
 
 const blockedColumns = computed<TableColumn[]>(() => [
-  { key: 'ip', title: 'IP / 网段', mobile: 'title', width: 200, sortable: true, sortOrder: blockedSortOrder('ip'), render: renderBlockedIp },
-  { key: 'note', title: '原因', mobile: 'subtitle', minWidth: 180, render: renderBlockedNote },
-  { key: 'created_at', title: '封禁时间', mobile: 'meta', width: 140, sortable: true, sortOrder: blockedSortOrder('created_at'), render: renderBlockedCreated },
-  { key: 'expires', title: '到期', mobile: 'meta', width: 140, render: renderBlockedExpiry },
-  { key: 'enabled', title: '状态', mobile: 'meta', width: 104, sortable: true, sortOrder: blockedSortOrder('enabled'), render: renderBlockedStatus },
-  { key: 'actions', title: '操作', mobile: 'actions', width: 132, hideable: false, fixed: 'right', render: renderBlockedActions },
+  { key: 'ip', title: t('page.ip.blocked.colIp'), mobile: 'title', width: 200, sortable: true, sortOrder: blockedSortOrder('ip'), render: renderBlockedIp },
+  { key: 'note', title: t('page.ip.blocked.colNote'), mobile: 'subtitle', minWidth: 180, render: renderBlockedNote },
+  { key: 'created_at', title: t('page.ip.blocked.colCreated'), mobile: 'meta', width: 140, sortable: true, sortOrder: blockedSortOrder('created_at'), render: renderBlockedCreated },
+  { key: 'expires', title: t('page.ip.blocked.colExpires'), mobile: 'meta', width: 140, render: renderBlockedExpiry },
+  { key: 'enabled', title: t('page.ip.col.status'), mobile: 'meta', width: 104, sortable: true, sortOrder: blockedSortOrder('enabled'), render: renderBlockedStatus },
+  { key: 'actions', title: t('page.ip.col.actions'), mobile: 'actions', width: 132, hideable: false, fixed: 'right', render: renderBlockedActions },
 ])
 
 /* ------------------------------------------------------------------ *
@@ -725,18 +756,22 @@ const deviceBlockedCount = computed(() => (devices.value || []).filter((row) => 
 const deviceSummary = computed(() => {
   const total = devices.value?.length ?? 0
   if (deviceTable.state.filters.dq || deviceTable.state.filters.ds) {
-    return '筛选出 ' + deviceFiltered.value.length + ' / 共 ' + total + ' 个 · 已封禁 ' + deviceBlockedCount.value + ' 个'
+    return t('page.ip.devices.summaryFiltered', {
+      shown: deviceFiltered.value.length,
+      total,
+      blocked: deviceBlockedCount.value,
+    })
   }
-  return '共 ' + total + ' 个设备标识 · 已封禁 ' + deviceBlockedCount.value + ' 个'
+  return t('page.ip.devices.summary', { total, blocked: deviceBlockedCount.value })
 })
 
 const deviceChips = computed<FilterChip[]>(() => {
   const filters = deviceTable.state.filters
   const list: FilterChip[] = []
-  if (filters.dq) list.push({ key: 'dq', label: '搜索', value: filters.dq })
+  if (filters.dq) list.push({ key: 'dq', label: t('page.ip.chip.search'), value: filters.dq })
   if (filters.ds) {
-    const label = deviceStatusOptions.find((option) => option.value === filters.ds)?.label
-    list.push({ key: 'ds', label: '状态', value: label || filters.ds })
+    const label = deviceStatusOptions.value.find((option) => option.value === filters.ds)?.label
+    list.push({ key: 'ds', label: t('page.ip.chip.status'), value: label || filters.ds })
   }
   return list
 })
@@ -791,7 +826,7 @@ function renderDeviceIps(row: TableRow): VNodeChild {
 function renderDeviceKeys(): VNodeChild {
   return h('span', { class: 'ip-dash-row' }, [
     h('span', { class: 'ip-dash' }, FMT_EMPTY),
-    h(HelpTip, { content: DEVICE_KEY_HELP, label: '关联 Key 说明' }),
+    h(HelpTip, { content: deviceKeyHelp.value, label: t('page.ip.devices.keyHelpLabel') }),
   ])
 }
 
@@ -807,16 +842,25 @@ function renderDeviceStatus(row: TableRow): VNodeChild {
     h(
       Badge,
       { key: 'state', tone: item.blocked ? 'danger' : 'ok', dot: true },
-      { default: () => (item.blocked ? '已封禁' : '允许') },
+      {
+        default: () => (item.blocked ? t('page.ip.status.blocked') : t('page.ip.status.allowed')),
+      },
     ),
-    h(Badge, { key: 'source', tone: 'neutral' }, { default: () => '客户端上报' }),
+    h(Badge, { key: 'source', tone: 'neutral' }, {
+      default: () => t('page.ip.devices.reported'),
+    }),
   ])
 }
 
 function renderDeviceActions(row: TableRow): VNodeChild {
   const item = row as IpDeviceRow
   return h(RowActions, {
-    actions: [{ key: 'toggle', label: item.blocked ? '解除设备封禁' : '封禁设备标识' }],
+    actions: [
+      {
+        key: 'toggle',
+        label: item.blocked ? t('page.ip.action.unblockDevice') : t('page.ip.action.blockDevice'),
+      },
+    ],
     max: 1,
     onSelect: (key: string) => {
       if (key === 'toggle') void toggleDevice(item)
@@ -825,12 +869,12 @@ function renderDeviceActions(row: TableRow): VNodeChild {
 }
 
 const deviceColumns = computed<TableColumn[]>(() => [
-  { key: 'kind_label', title: '设备标识', mobile: 'title', minWidth: 220, sortable: true, sortOrder: deviceSortOrder('kind_label'), render: renderDeviceKind },
-  { key: 'ips', title: '关联 IP', mobile: 'meta', minWidth: 200, render: renderDeviceIps },
-  { key: 'keys', title: '关联 Key', mobile: 'meta', width: 120, render: renderDeviceKeys },
-  { key: 'last_seen', title: '最近活动', mobile: 'meta', width: 140, sortable: true, sortOrder: deviceSortOrder('last_seen'), render: renderDeviceSeen },
-  { key: 'blocked', title: '状态', mobile: 'subtitle', width: 176, sortable: true, sortOrder: deviceSortOrder('blocked'), render: renderDeviceStatus },
-  { key: 'actions', title: '操作', mobile: 'actions', width: 140, hideable: false, fixed: 'right', render: renderDeviceActions },
+  { key: 'kind_label', title: t('page.ip.devices.colKind'), mobile: 'title', minWidth: 220, sortable: true, sortOrder: deviceSortOrder('kind_label'), render: renderDeviceKind },
+  { key: 'ips', title: t('page.ip.devices.colIps'), mobile: 'meta', minWidth: 200, render: renderDeviceIps },
+  { key: 'keys', title: t('page.ip.devices.colKeys'), mobile: 'meta', width: 120, render: renderDeviceKeys },
+  { key: 'last_seen', title: t('page.ip.devices.colLastSeen'), mobile: 'meta', width: 140, sortable: true, sortOrder: deviceSortOrder('last_seen'), render: renderDeviceSeen },
+  { key: 'blocked', title: t('page.ip.col.status'), mobile: 'subtitle', width: 176, sortable: true, sortOrder: deviceSortOrder('blocked'), render: renderDeviceStatus },
+  { key: 'actions', title: t('page.ip.col.actions'), mobile: 'actions', width: 140, hideable: false, fixed: 'right', render: renderDeviceActions },
 ])
 
 /* ------------------------------------------------------------------ *
@@ -905,15 +949,15 @@ async function onActivityAction(row: IpActivityRow, key: string): Promise<void> 
 
 async function unblockActivity(row: IpActivityRow): Promise<void> {
   if (row.blockedId === null) {
-    toast.warning('该 IP 没有可解除的封禁记录，请刷新列表')
+    toast.warning(t('page.ip.toast.noBlockRecord'))
     return
   }
   try {
     await patchBlockedIp(row.blockedId, { enabled: false })
-    toast.success('已解除封禁')
+    toast.success(t('page.ip.toast.unblocked'))
     await Promise.all([loadActivity(), loadBlocked()])
   } catch (error) {
-    toast.error(failureText('解除封禁', error))
+    toast.error(failureText(t('page.ip.action.unblock'), error))
   }
 }
 
@@ -928,46 +972,50 @@ async function onBlockedAction(row: BlockedIpRow, key: string): Promise<void> {
 async function toggleBlocked(row: BlockedIpRow): Promise<void> {
   if (!row.enabled) {
     const ok = await confirm({
-      title: '重新封禁 ' + row.ip + '？',
-      message: '该 IP 的全部 /v1 请求将立即返回 403。',
-      okText: '重新封禁',
+      title: t('page.ip.confirm.reblock.title', { ip: row.ip }),
+      message: t('page.ip.confirm.reblock.body'),
+      okText: t('page.ip.action.reblock'),
       danger: true,
     })
     if (!ok) return
   }
   try {
     await patchBlockedIp(row.id, { enabled: !row.enabled })
-    toast.success(row.enabled ? '已解除封禁' : '已重新封禁')
+    toast.success(row.enabled ? t('page.ip.toast.unblocked') : t('page.ip.toast.reblocked'))
     await Promise.all([loadBlocked(), loadActivity()])
   } catch (error) {
-    toast.error(failureText(row.enabled ? '解除封禁' : '重新封禁', error))
+    toast.error(
+      failureText(
+        row.enabled ? t('page.ip.action.unblock') : t('page.ip.action.reblock'),
+        error,
+      ),
+    )
   }
 }
 
 async function removeBlocked(row: BlockedIpRow): Promise<void> {
   const ok = await confirm({
-    title: '删除 ' + row.ip + ' 的封禁记录？',
-    message: '删除后该 IP 将允许访问网关。',
-    okText: '删除',
+    title: t('page.ip.confirm.delete.title', { ip: row.ip }),
+    message: t('page.ip.confirm.delete.body'),
+    okText: t('common.delete'),
     danger: true,
   })
   if (!ok) return
   try {
     await deleteBlockedIp(row.id)
-    toast.success('已删除封禁记录')
+    toast.success(t('page.ip.toast.deletedRecord'))
     await Promise.all([loadBlocked(), loadActivity()])
   } catch (error) {
-    toast.error(failureText('删除封禁记录', error))
+    toast.error(failureText(t('page.ip.action.deleteRecord'), error))
   }
 }
 
 async function toggleDevice(row: IpDeviceRow): Promise<void> {
   if (!row.blocked) {
     const ok = await confirm({
-      title: '封禁设备标识？',
-      message:
-        '确认封禁 ' + row.value + '？携带这个上报标识的请求换 IP 后仍返回 403。该标识未经硬件验证。',
-      okText: '封禁设备标识',
+      title: t('page.ip.confirm.blockDevice.title'),
+      message: t('page.ip.confirm.blockDevice.body', { value: row.value }),
+      okText: t('page.ip.action.blockDevice'),
       danger: true,
     })
     if (!ok) return
@@ -979,10 +1027,17 @@ async function toggleDevice(row: IpDeviceRow): Promise<void> {
       blocked: !row.blocked,
       note: row.note,
     })
-    toast.success(row.blocked ? '已解除设备封禁' : '已封禁设备标识')
+    toast.success(
+      row.blocked ? t('page.ip.toast.deviceUnblocked') : t('page.ip.toast.deviceBlocked'),
+    )
     await loadDevices()
   } catch (error) {
-    toast.error(failureText(row.blocked ? '解除设备封禁' : '封禁设备标识', error))
+    toast.error(
+      failureText(
+        row.blocked ? t('page.ip.action.unblockDevice') : t('page.ip.action.blockDevice'),
+        error,
+      ),
+    )
   }
 }
 
@@ -999,7 +1054,7 @@ const formErrorIp = ref('')
 const formErrorDuration = ref('')
 const submitting = ref(false)
 
-const drawerTitle = computed(() => '封禁 IP')
+const drawerTitle = computed(() => t('page.ip.drawer.title'))
 
 function openBlock(ip?: string): void {
   formIp.value = ip || ''
@@ -1037,12 +1092,12 @@ async function submitBlock(): Promise<void> {
   const currentIp = activity.value?.current_ip || ''
   const selfHint =
     currentIp && target.value === currentIp
-      ? '这是当前访问 IP，封禁后也会影响你从此 IP 发起的 API 请求。'
+      ? t('page.ip.confirm.block.selfHint')
       : ''
   const ok = await confirm({
-    title: '封禁 ' + target.value + '？',
-    message: '该 IP 的全部 /v1 与 /gw 请求将立即返回 403。' + selfHint,
-    okText: '封禁 IP',
+    title: t('page.ip.confirm.block.title', { ip: target.value }),
+    message: t('page.ip.confirm.block.body', { hint: selfHint }),
+    okText: t('page.ip.drawer.title'),
     danger: true,
   })
   if (!ok) return
@@ -1050,11 +1105,11 @@ async function submitBlock(): Promise<void> {
   submitting.value = true
   try {
     await blockIp({ ip: target.value, note: formNote.value.trim(), expires_at: plan.expiresAt })
-    toast.success('已封禁 IP ' + target.value)
+    toast.success(t('page.ip.toast.blocked', { ip: target.value }))
     drawerOpen.value = false
     await Promise.all([loadActivity(), loadBlocked()])
   } catch (error) {
-    toast.error(failureText('封禁 IP', error))
+    toast.error(failureText(t('page.ip.action.blockIp'), error))
   } finally {
     submitting.value = false
   }
@@ -1094,12 +1149,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="ip-page">
-    <PageHeader title="IP 管理" :help="HELP_TEXT">
+    <PageHeader :title="t('page.ip.title')" :help="helpText">
       <template #actions>
         <Btn variant="quiet" :icon="RefreshCw" :loading="refreshing" @click="refreshCurrent()">
-          刷新
+          {{ t('common.refresh') }}
         </Btn>
-        <Btn variant="primary" :icon="Ban" @click="openBlock()">封禁 IP</Btn>
+        <Btn variant="primary" :icon="Ban" @click="openBlock()">
+          {{ t('page.ip.action.blockIp') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -1109,7 +1166,7 @@ onBeforeUnmount(() => {
       <Segmented
         :options="VIEW_OPTIONS"
         :model-value="view"
-        aria-label="IP 视图"
+        :aria-label="t('page.ip.viewAria')"
         @update:model-value="setView"
       />
     </div>
@@ -1135,7 +1192,7 @@ onBeforeUnmount(() => {
             <n-input
               class="ip-filter__search"
               :value="activeTable.state.filters.q"
-              placeholder="搜索 IP"
+              :placeholder="t('page.ip.filter.searchIp')"
               clearable
               @update:value="(value: string) => change('q', value)"
             />
@@ -1157,7 +1214,7 @@ onBeforeUnmount(() => {
               :min="0"
               :max="1000000"
               :show-button="false"
-              placeholder="至少请求"
+              :placeholder="t('page.ip.filter.minRequests')"
               @update:value="(value: number | null) => change('min', value === null ? '0' : String(value))"
             />
             <n-input-number
@@ -1166,7 +1223,11 @@ onBeforeUnmount(() => {
               :value="Number(activeTable.state.filters.max || 0)"
               :min="0"
               :show-button="false"
-              :placeholder="activeTable.state.filters.usage === 'credits' ? '平均积分 ≤' : '平均 Token ≤'"
+              :placeholder="
+                activeTable.state.filters.usage === 'credits'
+                  ? t('page.ip.filter.maxCredits')
+                  : t('page.ip.filter.maxTokens')
+              "
               @update:value="(value: number | null) => change('max', value === null ? '0' : String(value))"
             />
           </template>
@@ -1176,11 +1237,16 @@ onBeforeUnmount(() => {
       <div class="ip-body">
         <ErrorBlock
           v-if="activityError && activity === null"
-          :title="'加载 IP 活动失败：' + activityError.message"
+          :title="t('page.ip.error.activity', { error: activityError.message })"
           :detail="activityError.detail"
           @retry="loadActivity()"
         />
-        <div v-else-if="activityFirstLoading" class="ip-skeleton" aria-busy="true" aria-label="IP 活动加载中">
+        <div
+          v-else-if="activityFirstLoading"
+          class="ip-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.ip.loading.activity')"
+        >
           <n-skeleton v-for="index in 6" :key="index" height="44px" />
         </div>
         <DataTable
@@ -1202,8 +1268,13 @@ onBeforeUnmount(() => {
         >
           <template #empty>
             <Empty :description="activityEmptyText">
-              <Btn v-if="activityHasFilters" variant="default" size="sm" @click="resetActivityFilters">
-                清除筛选
+              <Btn
+                v-if="activityHasFilters"
+                variant="default"
+                size="sm"
+                @click="resetActivityFilters"
+              >
+                {{ t('page.ip.clearFilters') }}
               </Btn>
             </Empty>
           </template>
@@ -1214,9 +1285,9 @@ onBeforeUnmount(() => {
     <!-- 封禁名单 -->
     <Card v-else-if="view === 'blocked'" flush class="ip-card">
       <div class="ip-section">
-        <h3 class="ip-section__title">封禁名单</h3>
-        <p class="ip-section__desc">{{ BLOCKED_HELP }}</p>
-        <HelpTip :content="BLOCKED_EXPIRY_HELP" label="到期说明" />
+        <h3 class="ip-section__title">{{ t('page.ip.view.blocked') }}</h3>
+        <p class="ip-section__desc">{{ blockedHelp }}</p>
+        <HelpTip :content="blockedExpiryHelp" :label="t('page.ip.blocked.expiryHelpLabel')" />
       </div>
       <div class="ip-filter">
         <FilterBar
@@ -1231,7 +1302,7 @@ onBeforeUnmount(() => {
             <n-input
               class="ip-filter__search"
               :value="blockedTable.state.filters.bq"
-              placeholder="搜索 IP / 原因"
+              :placeholder="t('page.ip.blocked.searchPlaceholder')"
               clearable
               @update:value="(value: string) => change('bq', value)"
             />
@@ -1247,11 +1318,16 @@ onBeforeUnmount(() => {
       <div class="ip-body">
         <ErrorBlock
           v-if="blockedError && blocked === null"
-          :title="'加载封禁名单失败：' + blockedError.message"
+          :title="t('page.ip.error.blocked', { error: blockedError.message })"
           :detail="blockedError.detail"
           @retry="loadBlocked()"
         />
-        <div v-else-if="blockedFirstLoading" class="ip-skeleton" aria-busy="true" aria-label="封禁名单加载中">
+        <div
+          v-else-if="blockedFirstLoading"
+          class="ip-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.ip.loading.blocked')"
+        >
           <n-skeleton v-for="index in 5" :key="index" height="44px" />
         </div>
         <DataTable
@@ -1266,7 +1342,7 @@ onBeforeUnmount(() => {
           :page-size="blockedTable.state.pageSize"
           :item-count="blockedPage.total"
           :page-sizes="[20, 50, 100]"
-          empty-description="暂无封禁记录"
+          :empty-description="t('page.ip.blocked.empty')"
           @update:page="blockedTable.setPage"
           @update:page-size="blockedTable.setPageSize"
           @update:sorter="onBlockedSorter"
@@ -1274,15 +1350,20 @@ onBeforeUnmount(() => {
           <template #empty>
             <Empty
               :description="
-                blockedChips.length
-                  ? '没有符合筛选的封禁记录。'
-                  : '暂无封禁记录。封禁后该 IP 的全部 /v1 请求直接 403。'
+                blockedChips.length ? t('page.ip.blocked.emptyFiltered') : t('page.ip.blocked.emptyBody')
               "
             >
-              <Btn v-if="blockedChips.length" variant="default" size="sm" @click="resetBlockedFilters">
-                清除筛选
+              <Btn
+                v-if="blockedChips.length"
+                variant="default"
+                size="sm"
+                @click="resetBlockedFilters"
+              >
+                {{ t('page.ip.clearFilters') }}
               </Btn>
-              <Btn v-else variant="primary" size="sm" :icon="Ban" @click="openBlock()">封禁 IP</Btn>
+              <Btn v-else variant="primary" size="sm" :icon="Ban" @click="openBlock()">
+                {{ t('page.ip.action.blockIp') }}
+              </Btn>
             </Empty>
           </template>
         </DataTable>
@@ -1292,9 +1373,9 @@ onBeforeUnmount(() => {
     <!-- 设备关联 -->
     <Card v-else flush class="ip-card">
       <div class="ip-section">
-        <h3 class="ip-section__title">设备关联</h3>
-        <p class="ip-section__desc">{{ DEVICES_HELP }}</p>
-        <HelpTip :content="DEVICES_NOTE" label="设备标识说明" />
+        <h3 class="ip-section__title">{{ t('page.ip.view.devices') }}</h3>
+        <p class="ip-section__desc">{{ devicesHelp }}</p>
+        <HelpTip :content="devicesNote" :label="t('page.ip.devices.noteLabel')" />
       </div>
       <div class="ip-filter">
         <FilterBar
@@ -1309,7 +1390,7 @@ onBeforeUnmount(() => {
             <n-input
               class="ip-filter__search"
               :value="deviceTable.state.filters.dq"
-              placeholder="搜索标识 / IP"
+              :placeholder="t('page.ip.devices.searchPlaceholder')"
               clearable
               @update:value="(value: string) => change('dq', value)"
             />
@@ -1325,11 +1406,16 @@ onBeforeUnmount(() => {
       <div class="ip-body">
         <ErrorBlock
           v-if="deviceError && devices === null"
-          :title="'加载设备关联失败：' + deviceError.message"
+          :title="t('page.ip.error.devices', { error: deviceError.message })"
           :detail="deviceError.detail"
           @retry="loadDevices()"
         />
-        <div v-else-if="deviceFirstLoading" class="ip-skeleton" aria-busy="true" aria-label="设备关联加载中">
+        <div
+          v-else-if="deviceFirstLoading"
+          class="ip-skeleton"
+          aria-busy="true"
+          :aria-label="t('page.ip.loading.devices')"
+        >
           <n-skeleton v-for="index in 5" :key="index" height="44px" />
         </div>
         <DataTable
@@ -1344,7 +1430,7 @@ onBeforeUnmount(() => {
           :page-size="deviceTable.state.pageSize"
           :item-count="devicePage.total"
           :page-sizes="[20, 50, 100]"
-          empty-description="暂无客户端上报的设备标识"
+          :empty-description="t('page.ip.devices.empty')"
           @update:page="deviceTable.setPage"
           @update:page-size="deviceTable.setPageSize"
           @update:sorter="onDeviceSorter"
@@ -1352,13 +1438,16 @@ onBeforeUnmount(() => {
           <template #empty>
             <Empty
               :description="
-                deviceChips.length
-                  ? '没有符合筛选的设备标识。'
-                  : '暂无客户端上报的设备标识。客户端上报设备 ID / 指纹 / MAC 后才会出现在这里。'
+                deviceChips.length ? t('page.ip.devices.emptyFiltered') : t('page.ip.devices.emptyBody')
               "
             >
-              <Btn v-if="deviceChips.length" variant="default" size="sm" @click="resetDeviceFilters">
-                清除筛选
+              <Btn
+                v-if="deviceChips.length"
+                variant="default"
+                size="sm"
+                @click="resetDeviceFilters"
+              >
+                {{ t('page.ip.clearFilters') }}
               </Btn>
             </Empty>
           </template>
@@ -1369,38 +1458,48 @@ onBeforeUnmount(() => {
     <FormDrawer
       v-model:show="drawerOpen"
       :title="drawerTitle"
-      submit-text="封禁 IP"
+      :submit-text="t('page.ip.drawer.title')"
       :submit-loading="submitting"
       @submit="submitBlock"
     >
       <FormField
-        label="IP 或 CIDR"
+        :label="t('page.ip.drawer.ip')"
         required
         :error="formErrorIp"
-        hint="IPv4 或 IPv6 单地址。CIDR 网段需要后端支持，当前接口只接受单个地址。"
+        :hint="t('page.ip.drawer.ipHint')"
       >
         <n-input
           v-model:value="formIp"
-          placeholder="IPv4 或 IPv6"
+          :placeholder="t('page.ip.drawer.ipPlaceholder')"
           maxlength="64"
           clearable
           @update:value="formErrorIp = ''"
         />
       </FormField>
 
-      <FormField label="原因" hint="可选。例如：异常刷请求。">
-        <n-input v-model:value="formNote" placeholder="例如：异常刷请求" maxlength="255" show-count />
+      <FormField :label="t('page.ip.drawer.note')" :hint="t('page.ip.drawer.noteHint')">
+        <n-input
+          v-model:value="formNote"
+          :placeholder="t('page.ip.drawer.notePlaceholder')"
+          maxlength="255"
+          show-count
+        />
       </FormField>
 
       <FormField
-        label="时长"
+        :label="t('page.ip.drawer.duration')"
         :error="formErrorDuration"
-        hint="到期由 blocked_ips.expires_at 判定；永久 = 不自动解封。"
+        :hint="t('page.ip.drawer.durationHint')"
       >
         <n-select :value="formDuration" :options="durationOptions" @update:value="onDurationChange" />
       </FormField>
 
-      <FormField v-if="formDuration === 'custom'" label="到期时间" required :error="formErrorDuration">
+      <FormField
+        v-if="formDuration === 'custom'"
+        :label="t('page.ip.drawer.expiresAt')"
+        required
+        :error="formErrorDuration"
+      >
         <n-date-picker
           v-model:value="formCustomMs"
           type="datetime"
