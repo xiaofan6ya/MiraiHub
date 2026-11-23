@@ -312,6 +312,12 @@ describe('StatsPage 覆盖率补测', () => {
     expect(wrapper.find('.stats-meta').text()).toContain('窗口')
     expect(wrapper.find('.stats-meta').text()).toContain('更新于')
 
+    // days=1 是滚动 24 小时，不是自然日：按钮与窗口说明都要按真实口径写
+    const daysGroup = segment(wrapper, '统计区间')
+    expect(daysGroup.text()).toContain('近 24 小时')
+    expect(daysGroup.text()).not.toContain('今日')
+    expect(wrapper.find('.stats-meta').text()).toContain('滚动窗口：最近 24 小时，不是自然日')
+
     // 卡片标题与副标题
     const titles = wrapper.findAll('.mh-card__title').map((item) => item.text())
     expect(titles).toEqual(['请求趋势', 'Token 趋势', '平台排行', '模型排行', 'Key 排行'])

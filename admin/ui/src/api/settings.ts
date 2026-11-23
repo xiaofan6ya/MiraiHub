@@ -15,6 +15,7 @@
  *   3. 密码规则前端只做「一致 + 最小长度」两件可提前发现的事，其余（旧密码是否正确）由后端 403 说明。
  */
 import { http } from './http'
+import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* -------------------------------------------------------------------------- */
 /* 运行配置                                                                    */
@@ -62,10 +63,14 @@ export interface RuntimeGroup {
 }
 
 /** 按后端 group 分组（保持 CATALOG 顺序，不排序、不合并）。 */
-export function groupRuntimeFields(fields: RuntimeField[] | null | undefined): RuntimeGroup[] {
+export function groupRuntimeFields(
+  fields: RuntimeField[] | null | undefined,
+  translate?: Translate,
+): RuntimeGroup[] {
+  const tr = translate ?? defaultTranslate
   const groups: RuntimeGroup[] = []
   for (const field of fields || []) {
-    const name = field.group || '其它'
+    const name = field.group || tr('page.settings.runtime.otherGroup')
     let target = groups.find((item) => item.group === name)
     if (!target) {
       target = { group: name, items: [] }
@@ -173,24 +178,33 @@ export const PROXY_STATE_LABELS: Record<string, string> = {
   disabled: '已停用',
 }
 
-export function proxyStateOf(node: ProxyNode | null | undefined): {
+export function proxyStateOf(
+  node: ProxyNode | null | undefined,
+  translate?: Translate,
+): {
   label: string
   tone: 'ok' | 'warn' | 'neutral'
 } {
+  const tr = translate ?? defaultTranslate
   const state = String(node?.state || '')
-  if (state === 'ready') return { label: '可用', tone: 'ok' }
-  if (state === 'blocked') return { label: '静默中', tone: 'warn' }
-  return { label: '已停用', tone: 'neutral' }
+  if (state === 'ready') return { label: tr('proxy.state.ready'), tone: 'ok' }
+  if (state === 'blocked') return { label: tr('proxy.state.blocked'), tone: 'warn' }
+  return { label: tr('proxy.state.disabled'), tone: 'neutral' }
 }
 
 /** 「共 N 个节点，可用 A，静默 B，停用 C · 可并发槽位 S」。 */
-export function proxySummaryText(summary: ProxySummary | null | undefined): string {
+export function proxySummaryText(
+  summary: ProxySummary | null | undefined,
+  translate?: Translate,
+): string {
   if (!summary) return ''
-  return (
-    '共 ' + Number(summary.total || 0) + ' 个节点，可用 ' + Number(summary.ready || 0) +
-    '，静默 ' + Number(summary.blocked || 0) + '，停用 ' + Number(summary.disabled || 0) +
-    ' · 可并发槽位 ' + Number(summary.slots || 0)
-  )
+  return (translate ?? defaultTranslate)('proxy.summary', {
+    total: Number(summary.total || 0),
+    ready: Number(summary.ready || 0),
+    blocked: Number(summary.blocked || 0),
+    disabled: Number(summary.disabled || 0),
+    slots: Number(summary.slots || 0),
+  })
 }
 
 /** 按分组 / 关键字过滤节点（名称、地址、分组都参与匹配）。 */
@@ -212,16 +226,20 @@ export function filterProxies(
 }
 
 /** 新增节点表单校验（与后端一致：地址 8 字符起、并发 1–32）。 */
-export function validateProxyInput(input: { url?: string; max_concurrency?: number }): string {
+export function validateProxyInput(
+  input: { url?: string; max_concurrency?: number },
+  translate?: Translate,
+): string {
+  const tr = translate ?? defaultTranslate
   const url = String(input.url || '').trim()
-  if (!url) return '请填写代理地址'
-  if (url.length < 8) return '代理地址至少 8 个字符'
-  if (url.includes('***')) return '这是打码后的展示值，请重新填写完整地址'
+  if (!url) return tr('settings.validation.urlRequired')
+  if (url.length < 8) return tr('settings.validation.urlShort')
+  if (url.includes('***')) return tr('settings.validation.urlMasked')
   if (!/^https?:\/\//i.test(url) && !/^socks5h?:\/\//i.test(url) && !url.startsWith('env:')) {
-    return '代理地址必须以 http:// / https:// / socks5:// 开头，或写成 env:变量名'
+    return tr('settings.validation.urlScheme')
   }
   const conc = Number(input.max_concurrency ?? 1)
-  if (!Number.isFinite(conc) || conc < 1 || conc > 32) return '单节点并发需在 1–32 之间'
+  if (!Number.isFinite(conc) || conc < 1 || conc > 32) return tr('settings.validation.concurrency')
   return ''
 }
 
@@ -264,12 +282,14 @@ export function validatePasswordChange(
   oldPassword: string,
   newPassword: string,
   confirmPassword: string,
+  translate?: Translate,
 ): string {
-  if (!oldPassword) return '请输入当前密码'
-  if (!newPassword) return '请输入新密码'
-  if (newPassword.length < 6) return '新密码长度不能少于 6 位'
-  if (newPassword !== confirmPassword) return '两次输入的新密码不一致'
-  if (newPassword === oldPassword) return '新密码不能与当前密码相同'
+  const tr = translate ?? defaultTranslate
+  if (!oldPassword) return tr('settings.validation.oldRequired')
+  if (!newPassword) return tr('settings.validation.newRequired')
+  if (newPassword.length < 6) return tr('settings.validation.newShort')
+  if (newPassword !== confirmPassword) return tr('settings.validation.mismatch')
+  if (newPassword === oldPassword) return tr('settings.validation.same')
   return ''
 }
 
@@ -362,15 +382,22 @@ export interface SourceLine {
   mono?: boolean
 }
 
-export function sourceStatusLines(status: AppSourceStatus | null | undefined): SourceLine[] {
+export function sourceStatusLines(
+  status: AppSourceStatus | null | undefined,
+  translate?: Translate,
+): SourceLine[] {
   if (!status) return []
+  const tr = translate ?? defaultTranslate
   const text = (value: unknown): string => (value ? String(value) : '—')
   return [
-    { label: '客户端安装目录', value: text(status.install_dir), mono: true },
-    { label: 'app.asar', value: text(status.asar), mono: true },
-    { label: '逆向产物目录', value: text(status.source_dir), mono: true },
-    { label: 'Python / Node', value: text(status.python) + ' / ' + (status.node || '—') },
-    { label: '可拆包', value: status.can_unpack ? '是' : '否（未找到 app.asar）' },
+    { label: tr('settings.source.install'), value: text(status.install_dir), mono: true },
+    { label: tr('settings.source.asar'), value: text(status.asar), mono: true },
+    { label: tr('settings.source.output'), value: text(status.source_dir), mono: true },
+    { label: tr('settings.source.runtime'), value: text(status.python) + ' / ' + (status.node || '—') },
+    {
+      label: tr('settings.source.canUnpack'),
+      value: status.can_unpack ? tr('settings.source.yes') : tr('settings.source.no'),
+    },
   ]
 }
 

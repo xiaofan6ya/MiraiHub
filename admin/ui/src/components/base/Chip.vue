@@ -3,6 +3,7 @@
 import { computed } from 'vue'
 import { NTag } from 'naive-ui'
 import { copyText, useComponentToast } from '../_internal/feedback'
+import { t } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -34,10 +35,10 @@ async function onClick(): Promise<void> {
   if (!interactive.value) return
   const ok = await copyText(props.value || '')
   if (ok) {
-    toast.success('已复制')
+    toast.success(t('common.copied'))
     emit('copied', props.value || '')
   } else {
-    toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+    toast.error(t('common.copyFailed'))
   }
 }
 </script>

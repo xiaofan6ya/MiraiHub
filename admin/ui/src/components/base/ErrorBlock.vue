@@ -3,6 +3,7 @@
 import { computed, ref } from 'vue'
 import { ChevronDown, TriangleAlert } from 'lucide-vue-next'
 import Btn from './Btn.vue'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -14,13 +15,15 @@ const props = withDefaults(
     retry?: boolean
     compact?: boolean
   }>(),
-  { detail: undefined, retryLabel: '重试', retry: true, compact: false },
+  { detail: undefined, retryLabel: undefined, retry: true, compact: false },
 )
 
 const emit = defineEmits<{ (event: 'retry'): void }>()
 
+const { t } = useI18n()
 const open = ref(false)
 const hasDetail = computed(() => Boolean(props.detail && props.detail.trim()))
+const retryText = computed(() => props.retryLabel ?? t('common.retry'))
 </script>
 
 <template>
@@ -31,12 +34,12 @@ const hasDetail = computed(() => Boolean(props.detail && props.detail.trim()))
       <template v-if="hasDetail">
         <button class="mh-error__toggle" type="button" :aria-expanded="open" @click="open = !open">
           <ChevronDown :size="14" :class="{ 'is-open': open }" />
-          {{ open ? '收起详细信息' : '展开详细信息' }}
+          {{ open ? t('common.collapseDetails') : t('common.expandDetails') }}
         </button>
         <pre v-if="open" class="mh-error__detail mono">{{ detail }}</pre>
       </template>
     </div>
-    <Btn v-if="retry" variant="default" size="sm" @click="emit('retry')">{{ retryLabel }}</Btn>
+    <Btn v-if="retry" variant="default" size="sm" @click="emit('retry')">{{ retryText }}</Btn>
   </div>
 </template>
 

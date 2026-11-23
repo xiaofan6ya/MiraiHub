@@ -60,7 +60,10 @@ describe('SentinelPage 覆盖率补测', () => {
     const { wrapper } = await mountPage()
     expect(wrapper.find('h1').text()).toContain('风控哨兵')
     expect(wrapper.text()).toContain('3 个账号被风控')
-    expect(wrapper.text()).toContain('今日请求')
+    // traffic 是 window=3600 的滚动窗口（contracts/sentinel §2.1），不是自然日：
+    // 统计格必须写「近 1 小时请求」，不能再叫「今日请求」。
+    expect(wrapper.text()).toContain('近 1 小时请求')
+    expect(wrapper.text()).not.toContain('今日请求')
   })
   it('切换受影响账号页签并写 query', async () => {
     getStatus.mockResolvedValue(status()); getTraffic.mockResolvedValue(traffic())

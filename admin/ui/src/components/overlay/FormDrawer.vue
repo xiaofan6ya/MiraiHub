@@ -3,6 +3,7 @@
 import { computed } from 'vue'
 import { NDrawer, NDrawerContent } from 'naive-ui'
 import Btn from '../base/Btn.vue'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -20,8 +21,8 @@ const props = withDefaults(
   }>(),
   {
     size: 'md',
-    submitText: '保存',
-    cancelText: '取消',
+    submitText: undefined,
+    cancelText: undefined,
     submitLoading: false,
     submitDisabled: false,
     maskClosable: false,
@@ -35,7 +36,10 @@ const emit = defineEmits<{
   (event: 'cancel'): void
 }>()
 
+const { t } = useI18n()
 const width = computed(() => (props.size === 'lg' ? 640 : 480))
+const submitLabel = computed(() => props.submitText ?? t('common.save'))
+const cancelLabel = computed(() => props.cancelText ?? t('common.cancel'))
 
 function close(): void {
   emit('update:show', false)
@@ -57,14 +61,14 @@ function close(): void {
       </div>
       <template v-if="!hideFooter" #footer>
         <div class="mh-form__actions">
-          <Btn variant="default" @click="close">{{ cancelText }}</Btn>
+          <Btn variant="default" @click="close">{{ cancelLabel }}</Btn>
           <Btn
             variant="primary"
             :loading="submitLoading"
             :disabled="submitDisabled"
             @click="emit('submit')"
           >
-            {{ submitText }}
+            {{ submitLabel }}
           </Btn>
         </div>
       </template>

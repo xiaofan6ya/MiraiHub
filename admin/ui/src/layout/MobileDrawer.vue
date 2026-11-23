@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, watch } from 'vue'
 import SideNav from './SideNav.vue'
+import { useI18n } from '@/i18n'
 
 /**
  * ≤1023px 的导航抽屉（03-shell §3）：宽 264px，左侧滑出 200ms，带遮罩。
  * 不用 Naive 的 NDrawer，是为了让宽度/遮罩/动画与设计稿一一对应（遮罩用 --scrim）。
  */
 const props = defineProps<{ open: boolean }>()
+const { t } = useI18n()
 const emit = defineEmits<{
   (event: 'update:open', value: boolean): void
   (event: 'open-sessions'): void
@@ -56,7 +58,7 @@ function onLogout(): void {
     <transition name="mh-drawer">
       <div v-if="open" class="drawer-root">
         <div class="drawer-scrim" @click="close" />
-        <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="导航菜单">
+        <div class="drawer-panel" role="dialog" aria-modal="true" :aria-label="t('shell.navMenu')">
           <SideNav
             variant="drawer"
             @navigate="close"

@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import { Bot } from 'lucide-vue-next'
 import { MODEL_ICONS } from './modelIcons'
 import { resolveModelIconKey } from './modelIconResolve'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
@@ -16,6 +17,7 @@ const props = withDefaults(
   { model: undefined, vendor: undefined, size: 16, label: undefined },
 )
 
+const { t } = useI18n()
 const key = computed(() => resolveModelIconKey(props.vendor || props.model))
 const entry = computed(() => (key.value ? MODEL_ICONS[key.value] : undefined))
 const fill = computed(() => (entry.value?.fill === 'solid' ? 'currentColor' : 'none'))
@@ -26,7 +28,7 @@ const fill = computed(() => (entry.value?.fill === 'solid' ? 'currentColor' : 'n
     class="mh-micon"
     :style="{ width: size + 'px', height: size + 'px' }"
     role="img"
-    :aria-label="label || model || vendor || '模型'"
+    :aria-label="label || model || vendor || t('common.model')"
   >
     <svg
       v-if="entry"

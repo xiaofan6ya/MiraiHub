@@ -13,7 +13,9 @@ import './styles/base.css'
 import App from './App.vue'
 import router from './router'
 import { initTheme } from './theme/useTheme'
+import { initLocale } from './i18n'
 
 initTheme()
+initLocale()
 
 createApp(App).use(createPinia()).use(router).mount('#app')

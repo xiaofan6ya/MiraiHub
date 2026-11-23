@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import HelpTip from '@/components/base/HelpTip.vue'
 import { groupOf, isPageKey, type PageKey } from '@/router/pages'
+import { groupTitle, pageTitle, useI18n } from '@/i18n'
 
 /**
  * 页头（03-shell §2.3）：标题 + 说明气泡 + 右侧操作区 + 同组页签。
@@ -17,11 +18,17 @@ const props = defineProps<{
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 
 const pageKey = computed<PageKey | null>(() => (isPageKey(route.name) ? route.name : null))
-const title = computed(() => props.title ?? String(route.meta.title ?? ''))
+const title = computed(() =>
+  props.title ?? (pageKey.value ? pageTitle(pageKey.value) : String(route.meta.title ?? '')),
+)
 const tabs = computed(() => (pageKey.value ? groupOf(pageKey.value).pages : []))
 const showTabs = computed(() => tabs.value.length > 1)
+const groupLabel = computed(() =>
+  pageKey.value ? groupTitle(groupOf(pageKey.value).key) : String(route.meta.group ?? ''),
+)
 
 function go(key: PageKey): void {
   if (key === pageKey.value) return
@@ -34,14 +41,19 @@ function go(key: PageKey): void {
     <div class="ph-row">
       <h1 class="ph-title">
         {{ title }}
-        <HelpTip v-if="help" :content="help" label="页面说明" />
+        <HelpTip v-if="help" :content="help" :label="t('shell.pageHelp')" />
       </h1>
       <div class="ph-actions">
         <slot name="actions" />
       </div>
     </div>
 
-    <nav v-if="showTabs" class="ph-tabs" role="tablist" :aria-label="String(route.meta.group ?? '页面')">
+    <nav
+      v-if="showTabs"
+      class="ph-tabs"
+      role="tablist"
+      :aria-label="t('shell.pageTabsAria', { group: groupLabel })"
+    >
       <button
         v-for="tab in tabs"
         :key="tab.key"
@@ -52,7 +64,7 @@ function go(key: PageKey): void {
         :aria-selected="tab.key === pageKey ? 'true' : 'false'"
         @click="go(tab.key)"
       >
-        {{ tab.title }}
+        {{ pageTitle(tab.key) }}
       </button>
     </nav>
   </header>

@@ -6,6 +6,7 @@ import { NDialogProvider, NDropdown, NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 import GrowthPage from '@/pages/GrowthPage.vue'
 import { usePlatformStore } from '@/stores/platform'
+import type { PlatformSpec } from '@/api/platforms'
 import type { GrowthAccountTasksPayload, GrowthCenterAccount, GrowthTask } from '@/api/growth'
 
 // 真实 useJob 的 snapshot/percent 是 ref；GrowthPage 把它们放进深层 reactive 的
@@ -648,6 +649,189 @@ describe('GrowthPage 失败态与平台能力', () => {
     await refresh!.trigger('click')
     await flushPromises()
     expect(callsTo('/api/growth-center/accounts', 'GET').length).toBeGreaterThan(1)
+
+    page.unmount()
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * 批量预取：熔断（整站 502）与取消（卸载 / 切平台）
+ *
+ * 故障现场：194 个账号，任务清单接口全部 502。旧实现会把 194 个请求跑完，
+ * 切路由也不停，每张卡各留一条 502。—— 这里盯死三件事：
+ *   1. 连续 8 个失败就熔断，队列不再往下走；
+ *   2. 顶部只有一条全局提示，不是逐卡 N 条；
+ *   3. 卸载 / 切平台后不再发新请求。
+ * ------------------------------------------------------------------ */
+
+const STORM_SIZE = 194
+
+function stormAccounts(size: number): GrowthCenterAccount[] {
+  return Array.from({ length: size }, (_, index) => ({
+    id: 500 + index,
+    name: '风暴账号' + String(index + 1).padStart(3, '0'),
+    status: 'active',
+    streak_days: 1,
+    energy: 5,
+  }))
+}
+
+/** 账号列表正常、任务清单全 502 的故障 handler。 */
+function stormHandler(size: number, detail = '上游超时'): Handler {
+  return (url, method) => {
+    if (method === 'GET' && /\/api\/growth-center\/accounts$/.test(url)) {
+      return { body: { items: stormAccounts(size), excluded_enterprise: 0 } }
+    }
+    if (method === 'GET' && /\/api\/growth\/accounts\/\d+\/tasks/.test(url)) {
+      return { status: 502, body: { detail } }
+    }
+    return undefined
+  }
+}
+
+/**
+ * 任务清单请求永远挂起（只有 abort 才会 reject 成 AbortError）的 fetch。
+ * 用来观察「卸载 / 切平台之后有没有第 3 个请求」——真浏览器里就是取消在途请求。
+ */
+function installStuckTasks(size: number): { tasks(): number } {
+  let taskCalls = 0
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: unknown, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : String((input as { url?: string })?.url || input)
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method === 'GET' && /\/api\/growth-center\/accounts$/.test(url)) {
+        return Promise.resolve(jsonResponse({ items: stormAccounts(size), excluded_enterprise: 0 }))
+      }
+      if (method === 'GET' && /\/api\/growth\/accounts\/\d+\/tasks/.test(url)) {
+        taskCalls += 1
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal
+          const cancel = () => {
+            const error = new Error('aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }
+          if (signal?.aborted) cancel()
+          else signal?.addEventListener('abort', cancel)
+        })
+      }
+      if (method === 'GET' && /\/api\/platforms$/.test(url)) {
+        return Promise.resolve(jsonResponse({ items: [] }))
+      }
+      if (url.includes('/api/platforms/current')) {
+        return Promise.resolve(jsonResponse({ ok: true }))
+      }
+      return Promise.resolve(jsonResponse({ detail: 'unmocked ' + method + ' ' + url }, 404))
+    }),
+  )
+  return { tasks: () => taskCalls }
+}
+
+function countOf(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
+describe('GrowthPage 批量预取：熔断与取消', () => {
+  it('任务清单连续 8 个账号失败即熔断，不再把 194 个账号跑完', async () => {
+    installFetch(stormHandler(STORM_SIZE))
+    const page = await mountGrowth()
+    await flushPromises()
+    await flushPromises()
+
+    const attempts = callsTo('/tasks').length
+    expect(attempts).toBeGreaterThanOrEqual(8)
+    // 并发 2：第 8 个失败落定时，另一个 worker 最多已经领走 1 个在途请求
+    expect(attempts).toBeLessThanOrEqual(9)
+    expect(attempts).toBeLessThan(STORM_SIZE)
+
+    // 顶部一条全局提示，写清失败阈值与「还没请求」的数量
+    const alerts = page.wrapper.findAll('.gw-bulk-error')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].text()).toContain('连续 8 个账号加载失败')
+    expect(alerts[0].text()).toContain('剩余 ' + (STORM_SIZE - attempts) + ' 个账号未请求')
+    expect(alerts[0].text()).toContain('上游超时')
+
+    // 逐卡 502 收进那条全局提示里：卡片里没有错误块，全文只出现一次失败文案
+    expect(page.wrapper.findAll('.gw-card__error')).toHaveLength(0)
+    expect(countOf(page.wrapper.text(), '加载任务清单失败')).toBe(1)
+
+    page.unmount()
+  })
+
+  it('熔断后顶部重试只补没拿到的账号，恢复后提示消失', async () => {
+    let failing = true
+    installFetch((url, method, body) => {
+      if (method === 'GET' && /\/api\/growth-center\/accounts$/.test(url)) {
+        return { body: { items: stormAccounts(30), excluded_enterprise: 0 } }
+      }
+      const match = /\/api\/growth\/accounts\/(\d+)\/tasks/.exec(url)
+      if (method === 'GET' && match) {
+        if (failing) return { status: 502, body: { detail: '上游超时' } }
+        return {
+          body: tasksFor(Number(match[1]), FIVE_TASKS, {
+            total: 5,
+            done: 2,
+            claimable: 1,
+            claimable_credit: 50,
+            actionable: 1,
+          }),
+        }
+      }
+      return defaultHandler()(url, method, body)
+    })
+    const page = await mountGrowth()
+    await flushPromises()
+    await flushPromises()
+    expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(1)
+    const firstBurst = callsTo('/tasks').length
+
+    failing = false
+    const retry = page.wrapper.find('.gw-bulk-error button')
+    expect(retry.exists()).toBe(true)
+    await retry.trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(0)
+    // 重试只补「没有 payload」的账号：首轮失败的 + 从未请求的，合计正好 30 个
+    expect(callsTo('/tasks').length).toBe(firstBurst + 30)
+    expect(page.wrapper.findAll('article.gw-card')[0].text()).toContain('发送一条对话')
+
+    page.unmount()
+  })
+
+  it('页面卸载后中止预取队列，不再发新的任务清单请求', async () => {
+    const probe = installStuckTasks(60)
+    const page = await mountGrowth()
+    await flushPromises()
+    expect(probe.tasks()).toBe(2) // 并发 2 的在途请求
+
+    page.unmount()
+    await flushPromises()
+    expect(probe.tasks()).toBe(2) // 队列已停：没有第 3 个请求
+  })
+
+  it('切到不支持成长计划的平台时中止队列并清掉全局提示', async () => {
+    const probe = installStuckTasks(60)
+    const pinia = createPinia()
+    const store = usePlatformStore(pinia)
+    store.items = [
+      { id: 'workbuddy', label: 'WorkBuddy', storage_platform: 'workbuddy' },
+      { id: 'trae', label: 'Trae', storage_platform: 'trae' },
+    ] as unknown as PlatformSpec[]
+    const page = await mountGrowth({ pinia })
+    await flushPromises()
+    expect(page.wrapper.findAll('article.gw-card').length).toBeGreaterThan(0)
+    expect(probe.tasks()).toBe(2)
+
+    store.setCurrent('trae')
+    await flushPromises()
+
+    expect(page.wrapper.text()).toContain('当前平台没有成长计划')
+    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(0)
+    expect(probe.tasks()).toBe(2) // 旧队列已 abort，不再请求任务清单
 
     page.unmount()
   })

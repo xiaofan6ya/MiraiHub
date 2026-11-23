@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 空状态：32px 灰图标 + 一句说明 + 0–2 个操作。 */
 import { computed } from 'vue'
+import { useI18n } from '@/i18n'
 import { Inbox } from 'lucide-vue-next'
 import { NEmpty } from 'naive-ui'
 import type { Component } from 'vue'
@@ -13,11 +14,12 @@ const props = withDefaults(
     /** 紧凑模式：表格内嵌。 */
     compact?: boolean
   }>(),
-  { description: '暂无数据', icon: undefined, compact: false },
+  { description: undefined, icon: undefined, compact: false },
 )
 
+const { t } = useI18n()
 const iconComponent = computed(() => props.icon ?? Inbox)
-const desc = computed(() => props.description)
+const desc = computed(() => props.description ?? t('common.empty'))
 </script>
 
 <template>

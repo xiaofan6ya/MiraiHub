@@ -10,12 +10,14 @@
  *   1. 平台能力不硬编码：platformStore.supports('growth')（PLATFORM_ONLY_TABS：growth → workbuddy）；
  *      store 里那份映射是唯一真值，本页只读它。
  *   2. 「可做」「可领」只看后端字段：actionable / accept_status / summary.claimable。
- *   3. 任务清单接口单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，失败的卡单独报错。
+ *   3. 任务清单接口单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，失败的卡单独报错；
+ *      但连续 8 个都失败说明上游/网关整体挂了 → 熔断整条队列，顶部只留一条全局提示；
+ *      页面卸载 / 切平台 / 新一轮预取都会 abort 旧队列（194 个账号全 502 时不能一路跑完）。
  */
 import { computed, effectScope, markRaw, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
-import { MoreHorizontal, RefreshCw, Sparkles, Trophy } from 'lucide-vue-next'
+import { MoreHorizontal, RefreshCw, Sparkles, TriangleAlert, Trophy } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
   Badge,
@@ -94,7 +96,19 @@ const tasksError = reactive<Record<number, string>>({})
 const expanded = reactive<Record<number, boolean>>({})
 
 let controller: AbortController | null = null
+/** 任务清单批量预取的取消句柄：卸载 / 切平台 / 新一轮预取都会 abort 它。 */
+let tasksAbort: AbortController | null = null
 let tasksToken = 0
+
+/** 任务清单并发上限（后端单次 1–3.3s，串行会等到天荒地老）。 */
+const TASK_CONCURRENCY = 2
+/**
+ * 连续失败熔断阈值。整站 502 时 194 个账号会一路排队到底（每张卡都留一条 502），
+ * 连续 8 个都失败已经能判定上游/网关整体不可用，继续排队只是刷屏。
+ */
+const TASK_FAILURE_LIMIT = 8
+/** 熔断后的全局失败提示（顶部一次），替代逐卡错误。 */
+const bulkTasksError = ref<{ message: string; detail: string } | null>(null)
 
 const firstLoading = computed(() => loading.value && !accounts.value.length)
 
@@ -131,31 +145,84 @@ async function loadAccounts(): Promise<void> {
   }
 }
 
-/** 逐账号拉任务清单：并发 2（后端单次 1–3.3s，串行会等到天荒地老）。 */
+/** 停掉当前预取队列（卸载 / 切平台 / 新一轮预取调用），在途请求由 signal 取消。 */
+function abortTaskQueue(): void {
+  tasksAbort?.abort()
+  tasksAbort = null
+  tasksToken += 1
+  for (const key of Object.keys(tasksLoading)) delete tasksLoading[Number(key)]
+}
+
+/**
+ * 逐账号拉任务清单：并发 2（后端单次 1–3.3s，串行会等到天荒地老）。
+ *
+ * 两个上限缺一个都会在整站 502 时刷屏：
+ *   · 并发 2 —— 不把后端打满；
+ *   · 连续失败 8 个即熔断 —— 停掉整条队列，卡片级错误收成顶部一条全局提示。
+ * 队列挂在 tasksAbort 上，卸载 / 切平台时 abort，迟到的响应直接丢掉。
+ */
 async function loadAllTasks(force = false): Promise<void> {
   if (!supported.value) return
-  const token = ++tasksToken
-  const ids = accounts.value.map((account) => account.id)
+  abortTaskQueue()
+  const abort = new AbortController()
+  const token = tasksToken
+  const ids = accounts.value
+    .map((account) => account.id)
+    .filter((id) => force || !tasksByAccount[id])
   if (!ids.length) return
+  tasksAbort = abort
+  bulkTasksError.value = null
+
   let cursor = 0
+  let attempted = 0
+  let consecutiveFailures = 0
+  let lastError = ''
+  let tripped = false
+
+  const stale = (): boolean => abort.signal.aborted || token !== tasksToken
+
   const worker = async (): Promise<void> => {
-    while (cursor < ids.length) {
-      const index = cursor++
-      const id = ids[index]
-      if (!force && tasksByAccount[id]) continue
+    while (cursor < ids.length && !tripped && !stale()) {
+      const id = ids[cursor++]
+      attempted += 1
       tasksLoading[id] = true
       delete tasksError[id]
       try {
-        tasksByAccount[id] = await getAccountTasks(id, force)
+        const payload = await getAccountTasks(id, force, abort.signal)
+        if (stale()) return
+        tasksByAccount[id] = payload
+        consecutiveFailures = 0
       } catch (error) {
-        tasksError[id] = failureText('加载任务清单', error)
+        if (stale() || isAbortError(error)) return
+        consecutiveFailures += 1
+        lastError = failureText('加载任务清单', error)
+        tasksError[id] = lastError
+        if (consecutiveFailures >= TASK_FAILURE_LIMIT) tripped = true
       } finally {
         tasksLoading[id] = false
       }
-      if (token !== tasksToken) return
     }
   }
-  await Promise.all([worker(), worker()])
+
+  await Promise.all(Array.from({ length: TASK_CONCURRENCY }, () => worker()))
+  if (tasksAbort === abort) tasksAbort = null
+  if (!tripped || stale()) return
+
+  // 熔断：逐卡 502 只会把页面刷成一片红，改成顶部一条全局提示 + 一个重试入口。
+  for (const key of Object.keys(tasksError)) delete tasksError[Number(key)]
+  const rest = ids.length - attempted
+  bulkTasksError.value = {
+    message:
+      '任务清单连续 ' + TASK_FAILURE_LIMIT + ' 个账号加载失败，已暂停批量预取' +
+      (rest > 0 ? '（剩余 ' + rest + ' 个账号未请求）' : ''),
+    detail: lastError,
+  }
+}
+
+/** 熔断后的重试：只补没拿到的账号（已加载的跳过），不会再跑一遍全量。 */
+function retryBulkTasks(): void {
+  bulkTasksError.value = null
+  void loadAllTasks(false)
 }
 
 async function reloadAccountTasks(id: number): Promise<void> {
@@ -466,6 +533,9 @@ onMounted(() => {
   offPlatform = platformStore.onChange((detail) => {
     if (detail.selector === lastSelector) return
     lastSelector = detail.selector
+    // 平台上下文已切换：旧队列的请求会带着新的 X-Platform 出去，先停掉再重新取。
+    abortTaskQueue()
+    bulkTasksError.value = null
     if (!supported.value) {
       accounts.value = []
       return
@@ -480,6 +550,8 @@ onBeforeUnmount(() => {
   offPlatform = null
   controller?.abort()
   controller = null
+  // 离开页面就别再把剩下的任务清单请求跑完（会刷到别的页面的控制台里）。
+  abortTaskQueue()
   for (const timer of refreshTimers) clearTimeout(timer)
   refreshTimers.length = 0
   for (const scope of jobScopes) scope.stop()
@@ -487,7 +559,12 @@ onBeforeUnmount(() => {
 })
 
 watch(supported, (value) => {
-  if (value && !accounts.value.length) void loadAccounts()
+  if (!value) {
+    abortTaskQueue()
+    bulkTasksError.value = null
+    return
+  }
+  if (!accounts.value.length) void loadAccounts()
 })
 </script>
 
@@ -526,6 +603,15 @@ watch(supported, (value) => {
     </div>
 
     <template v-else>
+      <div v-if="bulkTasksError" class="gw-bulk-error" role="alert">
+        <TriangleAlert :size="16" class="gw-bulk-error__icon" />
+        <div class="gw-bulk-error__body">
+          <p class="gw-bulk-error__title">{{ bulkTasksError.message }}</p>
+          <p v-if="bulkTasksError.detail" class="gw-bulk-error__detail">{{ bulkTasksError.detail }}</p>
+        </div>
+        <Btn size="sm" variant="default" @click="retryBulkTasks">重试</Btn>
+      </div>
+
       <StatStrip :items="stats" :columns="6" />
 
       <Card>
@@ -754,6 +840,44 @@ watch(supported, (value) => {
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--danger);
+}
+
+.gw-bulk-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--r-ctl);
+  background: var(--danger-soft);
+}
+
+.gw-bulk-error__icon {
+  flex: none;
+  color: var(--danger);
+  margin-top: 2px;
+}
+
+.gw-bulk-error__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.gw-bulk-error__title {
+  margin: 0;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg);
+}
+
+.gw-bulk-error__detail {
+  margin: 2px 0 0;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gw-tasks {

@@ -8,6 +8,8 @@ import { isMobile, openCommandPalette } from './shellState'
 import { useHeartbeatStore } from '@/stores/heartbeat'
 import { useTheme } from '@/theme/useTheme'
 import { apiBaseUrl, copyText } from '@/platform/clipboard'
+import { groupTitle, pageTitle, useI18n } from '@/i18n'
+import { groupOf, isPageKey } from '@/router/pages'
 
 /**
  * 顶栏（03-shell §2.2）：高 56px、吸顶。
@@ -21,22 +23,35 @@ const route = useRoute()
 const message = useMessage()
 const heartbeat = useHeartbeatStore()
 const { mode, cycle } = useTheme()
+const { t, locale } = useI18n()
 
 const platformScoped = computed(() => Boolean(route.meta.platformScoped))
-const groupTitle = computed(() => String(route.meta.group ?? ''))
-const pageTitle = computed(() => String(route.meta.title ?? ''))
+const pageKey = computed(() => (isPageKey(route.name) ? route.name : null))
+const groupLabel = computed(() =>
+  pageKey.value ? groupTitle(groupOf(pageKey.value).key) : String(route.meta.group ?? ''),
+)
+const pageLabel = computed(() =>
+  pageKey.value ? pageTitle(pageKey.value) : String(route.meta.title ?? ''),
+)
 
 const statusText = computed(() => heartbeat.statusText)
 const statusTone = computed(() => heartbeat.statusTone)
 
 const beatText = computed(() => {
   if (!heartbeat.lastBeatAt) return '—'
-  return new Date(heartbeat.lastBeatAt).toLocaleTimeString('zh-CN', { hour12: false })
+  const tag = locale.value === 'en-US' ? 'en-US' : 'zh-CN'
+  return new Date(heartbeat.lastBeatAt).toLocaleTimeString(tag, { hour12: false })
 })
-const statusTip = computed(() => '上游 ' + heartbeat.endpoint + ' · 最后心跳 ' + beatText.value)
+const statusTip = computed(() =>
+  t('shell.statusTip', { endpoint: heartbeat.endpoint, time: beatText.value }),
+)
 
 const themeLabel = computed(() =>
-  mode.value === 'light' ? '浅色' : mode.value === 'dark' ? '深色' : '跟随系统',
+  mode.value === 'light'
+    ? t('shell.themeLight')
+    : mode.value === 'dark'
+      ? t('shell.themeDark')
+      : t('shell.themeSystem'),
 )
 const themeIcon = computed(() =>
   mode.value === 'light' ? Sun : mode.value === 'dark' ? Moon : MonitorCog,
@@ -51,8 +66,8 @@ const shortcutLabel = computed(() => {
 async function copyApi(): Promise<void> {
   const url = apiBaseUrl()
   const ok = await copyText(url)
-  if (ok) message.success('已复制 ' + url)
-  else message.error('复制失败，请手动选中地址')
+  if (ok) message.success(t('common.copied') + ' ' + url)
+  else message.error(t('common.copyFailed'))
 }
 </script>
 
@@ -63,17 +78,17 @@ async function copyApi(): Promise<void> {
         v-if="isMobile"
         type="button"
         class="topbar-icon-btn"
-        aria-label="展开导航菜单"
+        :aria-label="t('shell.openMenu')"
         @click="emit('open-mobile-nav')"
       >
         <Menu :size="18" />
       </button>
 
       <PlatformPicker v-if="platformScoped" />
-      <nav v-else class="breadcrumb" aria-label="位置">
-        <span class="crumb-group">{{ groupTitle }}</span>
+      <nav v-else class="breadcrumb" :aria-label="t('shell.breadcrumbAria')">
+        <span class="crumb-group">{{ groupLabel }}</span>
         <span class="crumb-sep" aria-hidden="true">/</span>
-        <span class="crumb-page">{{ pageTitle }}</span>
+        <span class="crumb-page">{{ pageLabel }}</span>
       </nav>
     </div>
 
@@ -81,18 +96,18 @@ async function copyApi(): Promise<void> {
       <button
         type="button"
         class="cmdk"
-        aria-label="搜索或跳转"
+        :aria-label="t('shell.searchOrJump')"
         :aria-keyshortcuts="'Control+K Meta+K'"
         @click="openCommandPalette"
       >
         <Search :size="16" class="cmdk-icon" />
-        <span class="cmdk-label">搜索或跳转</span>
+        <span class="cmdk-label">{{ t('shell.searchOrJump') }}</span>
         <kbd class="cmdk-kbd">{{ shortcutLabel }}</kbd>
       </button>
 
       <n-tooltip placement="bottom" :delay="200">
         <template #trigger>
-          <span class="status" role="status" :aria-label="'服务状态：' + statusText">
+          <span class="status" role="status" :aria-label="t('shell.serviceStatus', { status: statusText })">
             <span class="status-dot" :class="statusTone" />
             <span class="status-text">{{ statusText }}</span>
           </span>
@@ -102,12 +117,12 @@ async function copyApi(): Promise<void> {
 
       <n-tooltip placement="bottom" :delay="200">
         <template #trigger>
-          <button type="button" class="topbar-btn" aria-label="复制 API 地址" @click="copyApi">
+          <button type="button" class="topbar-btn" :aria-label="t('shell.copyApi')" @click="copyApi">
             <Copy :size="16" />
-            <span class="btn-text">API 地址</span>
+            <span class="btn-text">{{ t('shell.apiAddress') }}</span>
           </button>
         </template>
-        复制 {{ apiBaseUrl() }}
+        {{ t('shell.copyApiTip', { url: apiBaseUrl() }) }}
       </n-tooltip>
 
       <n-tooltip placement="bottom" :delay="200">
@@ -115,13 +130,13 @@ async function copyApi(): Promise<void> {
           <button
             type="button"
             class="topbar-icon-btn"
-            :aria-label="'主题：' + themeLabel + '，点击切换'"
+            :aria-label="t('shell.themeTip', { theme: themeLabel })"
             @click="cycle"
           >
             <component :is="themeIcon" :size="16" />
           </button>
         </template>
-        主题：{{ themeLabel }}（点击切换）
+        {{ t('shell.themeTip', { theme: themeLabel }) }}
       </n-tooltip>
     </div>
   </header>

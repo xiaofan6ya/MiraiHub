@@ -1,22 +1,26 @@
 <script setup lang="ts">
 /** 收纳旧版页面上大段灰色说明：CircleHelp 14px + 弹层，最大宽 320px。 */
 import { CircleHelp } from 'lucide-vue-next'
+import { computed } from 'vue'
 import { NPopover } from 'naive-ui'
+import { useI18n } from '@/i18n'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     /** 无插槽时的说明文字。 */
     content?: string
     label?: string
   }>(),
-  { content: undefined, label: '说明' },
+  { content: undefined, label: undefined },
 )
+const { t } = useI18n()
+const labelText = computed(() => props.label ?? t('common.help'))
 </script>
 
 <template>
   <n-popover trigger="hover" placement="top" :show-arrow="true" :style="{ maxWidth: '320px' }">
     <template #trigger>
-      <button class="mh-help" type="button" :aria-label="label">
+      <button class="mh-help" type="button" :aria-label="labelText">
         <CircleHelp :size="14" />
       </button>
     </template>

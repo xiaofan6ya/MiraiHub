@@ -61,11 +61,10 @@ import {
   type SentinelStatusPayload,
 } from '@/api/overview'
 import type { StatsDashboardPayload } from '@/api/stats'
+import { useI18n } from '@/i18n'
 
-const HELP_TEXT =
-  '一眼看：服务是否正常、额度还剩多少、今天流量分到哪些平台、哪些账号需要处理。' +
-  '额度只统计启用中的账号；请求数含失败，Token 与积分只算成功请求；' +
-  '缓存命中率的分母只算「有缓存统计之后」的输入 token。'
+const { t } = useI18n()
+const helpText = computed(() => t('page.overview.help'))
 
 const toast = useToast()
 const router = useRouter()
@@ -78,10 +77,12 @@ const table = useTableQuery('overview', {
 
 const days = computed(() => normalizeOverviewDays(table.state.filters.days))
 
-const dayOptions: Array<SegmentedOption<string>> = OVERVIEW_DAYS.map((value) => ({
-  label: value === 1 ? '今日' : value + ' 天',
-  value: String(value),
-}))
+const dayOptions = computed<Array<SegmentedOption<string>>>(() =>
+  OVERVIEW_DAYS.map((value) => ({
+    label: value === 1 ? t('page.overview.range.today') : t('page.overview.range.days', { days: value }),
+    value: String(value),
+  })),
+)
 
 function setDays(value: string | number): void {
   table.setFilter('days', String(normalizeOverviewDays(value)))
@@ -138,9 +139,14 @@ async function load(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载概览', error), detail }
+    loadError.value = { message: failureText(t('page.overview.loadError'), error), detail }
     // 已有数据时刷新失败：只提示，保留旧数据。
-    toast.error(failureText(payload.value ? '刷新概览' : '加载概览', error))
+    toast.error(
+      failureText(
+        t(payload.value ? 'page.overview.refreshError' : 'page.overview.loadError'),
+        error,
+      ),
+    )
   } finally {
     if (controller === current) {
       controller = null
@@ -159,27 +165,34 @@ const hero = computed(() =>
     payload.value?.today,
     payload.value?.window,
     payload.value?.average_credits,
+    t,
   ),
 )
-const usageItems = computed(() => buildUsageItems(payload.value?.window, days.value))
-const monitorRows = computed(() => buildMonitorRows(payload.value?.monitor))
+const usageItems = computed(() => buildUsageItems(payload.value?.window, days.value, t))
+const monitorRows = computed(() => buildMonitorRows(payload.value?.monitor, t))
 const monitorTotal = computed(() => Number(payload.value?.monitor?.total ?? 0))
-const conclusion = computed(() => monitorConclusion(payload.value?.monitor))
-const alerts = computed(() => buildAlerts(payload.value, sentinel.value))
-const cache = computed(() => buildCache(payload.value?.cache))
-const lanes = computed(() => buildLanes(traffic.value, platformStore.platforms))
+const conclusion = computed(() => monitorConclusion(payload.value?.monitor, t))
+const alerts = computed(() => buildAlerts(payload.value, sentinel.value, t))
+const cache = computed(() => buildCache(payload.value?.cache, t))
+const lanes = computed(() => buildLanes(traffic.value, platformStore.platforms, t))
 const trafficTotal = computed(() => lanesTotal(lanes.value))
 
 const modelCount = computed(() => Number(payload.value?.models ?? 0))
 const platformCount = computed(() => platformStore.platforms.length)
-const platformLabel = computed(() => payload.value?.platform_label || '全部平台')
-const rangeLabel = computed(() => daysLabel(days.value))
+const platformLabel = computed(() => payload.value?.platform_label || t('page.overview.allPlatforms'))
+const rangeLabel = computed(() => daysLabel(days.value, t))
 const trafficTitle = computed(() =>
-  (days.value === 1 ? '今日' : '近 ' + days.value + ' 天') + '流量',
+  days.value === 1
+    ? t('page.overview.traffic.todayTitle')
+    : t('page.overview.traffic.daysTitle', { days: days.value }),
 )
 const updatedText = computed(() => (updatedAt.value ? fmtTime(updatedAt.value) : '—'))
 const statusText = computed(() =>
-  loadError.value ? '服务异常' : firstLoading.value ? '正在加载' : '服务运行中',
+  loadError.value
+    ? t('page.overview.status.error')
+    : firstLoading.value
+      ? t('page.overview.status.loading')
+      : t('page.overview.status.ok'),
 )
 const statusTone = computed(() => (loadError.value ? 'danger' : firstLoading.value ? 'neutral' : 'ok'))
 
@@ -189,8 +202,8 @@ const baseUrl = computed(() =>
 
 async function copyBase(): Promise<void> {
   const ok = await copyText(baseUrl.value)
-  if (ok) toast.success('已复制')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问，请手动选中复制')
+  if (ok) toast.success(t('common.copied'))
+  else toast.error(t('common.copyFailed'))
 }
 
 /** 点击线路：切到该平台（全局上下文）并打开平台管理页。 */
@@ -233,15 +246,17 @@ watch(days, () => {
 
 <template>
   <div class="ov-page">
-    <PageHeader title="概览" :help="HELP_TEXT">
+    <PageHeader :help="helpText">
       <template #actions>
         <Segmented
           :options="dayOptions"
           :model-value="String(days)"
-          aria-label="统计区间"
+          :aria-label="t('page.overview.rangeAria')"
           @update:model-value="setDays"
         />
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="load()">
+          {{ t('page.overview.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
@@ -252,7 +267,12 @@ watch(days, () => {
       @retry="load()"
     />
 
-    <div v-else-if="firstLoading" class="ov-skeleton" aria-busy="true" aria-label="概览加载中">
+    <div
+      v-else-if="firstLoading"
+      class="ov-skeleton"
+      aria-busy="true"
+      :aria-label="t('page.overview.loadingAria')"
+    >
       <n-skeleton height="48px" />
       <div class="ov-hero">
         <n-skeleton height="196px" />
@@ -272,10 +292,12 @@ watch(days, () => {
           <StatusDot :tone="statusTone" :label="statusText" :pulse="!loadError && !firstLoading" />
           <span class="ov-status__label">Base URL</span>
           <code class="mono ov-status__url">{{ baseUrl }}</code>
-          <IconBtn label="复制 Base URL" :icon="Copy" @click="copyBase" />
-          <span class="ov-status__meta">{{ platformCount }} 个平台 · {{ modelCount }} 个模型</span>
-          <span class="ov-status__meta">当前：{{ platformLabel }}</span>
-          <span class="ov-status__right">更新于 {{ updatedText }}</span>
+          <IconBtn :label="t('page.overview.copyBase')" :icon="Copy" @click="copyBase" />
+          <span class="ov-status__meta">
+            {{ t('page.overview.platformsModels', { platforms: platformCount, models: modelCount }) }}
+          </span>
+          <span class="ov-status__meta">{{ t('page.overview.current', { platform: platformLabel }) }}</span>
+          <span class="ov-status__right">{{ t('page.overview.updatedAt', { time: updatedText }) }}</span>
         </div>
       </Card>
 
@@ -299,8 +321,8 @@ watch(days, () => {
       <div class="ov-hero">
         <Card class="ov-balance">
           <div class="ov-balance__head">
-            <span class="ov-label">剩余额度</span>
-            <Badge tone="neutral">{{ modelCount }} 个模型</Badge>
+            <span class="ov-label">{{ t('page.overview.balance.remaining') }}</span>
+            <Badge tone="neutral">{{ t('page.overview.balance.models', { count: modelCount }) }}</Badge>
           </div>
           <p class="ov-balance__value">{{ hero.remainText }}</p>
           <p class="ov-balance__rows">
@@ -311,7 +333,7 @@ watch(days, () => {
           <Meter
             :value="hero.ratio * 100"
             :tone="hero.tone"
-            :aria-label="'剩余额度占比 ' + hero.ratioText"
+            :aria-label="t('page.overview.balance.ratioAria', { ratio: hero.ratioText })"
           />
           <p class="ov-note">{{ hero.caption }}</p>
           <p v-if="hero.note" class="ov-note">{{ hero.note }}</p>
@@ -323,28 +345,30 @@ watch(days, () => {
       <div class="ov-grid">
         <Card :title="trafficTitle" :loading="loading">
           <template #extra>
-            <span class="ov-note">{{ rangeLabel }} · 点击线路切换平台</span>
+            <span class="ov-note">{{ t('page.overview.traffic.hint', { range: rangeLabel }) }}</span>
           </template>
           <RouteRibbon
-            :source="{ label: '调用方', total: trafficTotal }"
+            :source="{ label: t('page.overview.source'), total: trafficTotal }"
             :lanes="lanes"
             @select="onLaneSelect"
           />
-          <p v-if="!lanes.length" class="ov-note">
-            当前窗口没有平台流量。发起一次调用后这里会出现分流线路。
-          </p>
+          <p v-if="!lanes.length" class="ov-note">{{ t('page.overview.traffic.empty') }}</p>
         </Card>
 
-        <Card title="账号状态" :loading="loading">
+        <Card :title="t('page.overview.accounts.title')" :loading="loading">
           <template #extra>
-            <RouterLink class="ov-link" to="/accounts">全部 →</RouterLink>
+            <RouterLink class="ov-link" to="/accounts">{{ t('page.overview.accounts.all') }}</RouterLink>
           </template>
           <div v-if="monitorTotal > 0" class="ov-monitor">
             <div v-for="row in monitorRows" :key="row.key" class="ov-monitor__row">
               <span class="ov-monitor__label" :class="{ 'is-faint': row.faint }">
                 {{ row.label }}
               </span>
-              <Meter :value="row.pct" :tone="row.tone" :aria-label="row.label + ' 占比'" />
+              <Meter
+                :value="row.pct"
+                :tone="row.tone"
+                :aria-label="t('page.overview.accounts.ratioAria', { label: row.label })"
+              />
               <span class="ov-monitor__count tnum" :class="{ 'is-faint': row.faint }">
                 {{ row.count }}
               </span>
@@ -359,20 +383,22 @@ watch(days, () => {
               <template v-else>{{ conclusion.text }}</template>
             </p>
           </div>
-          <Empty v-else description="还没有账号。先到账号池添加或导入账号。" compact>
-            <Btn variant="default" size="sm" @click="router.push('/accounts')">去账号池</Btn>
+          <Empty v-else :description="t('page.overview.accounts.empty')" compact>
+            <Btn variant="default" size="sm" @click="router.push('/accounts')">
+              {{ t('page.overview.accounts.go') }}
+            </Btn>
           </Empty>
         </Card>
       </div>
 
       <!-- 缓存命中 -->
-      <Card title="缓存命中" :loading="loading">
+      <Card :title="t('page.overview.cache.title')" :loading="loading">
         <div class="ov-cache">
           <Ring
             :value="cache.value"
             :text="cache.text"
             tone="brand"
-            label="输入命中率"
+            :label="t('page.overview.cache.ringLabel')"
           />
           <div class="ov-cache__body">
             <KV :items="cache.kv" label-width="84px" />

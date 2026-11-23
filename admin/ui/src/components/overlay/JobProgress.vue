@@ -10,13 +10,14 @@ import Btn from '../base/Btn.vue'
 import Meter from '../data/Meter.vue'
 import type { BadgeTone } from '../base/badge'
 import type { JobItem } from './job'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(
   defineProps<{
     jobs: JobItem[]
     title?: string
   }>(),
-  { title: '后台任务' },
+  { title: undefined },
 )
 
 const emit = defineEmits<{
@@ -25,24 +26,27 @@ const emit = defineEmits<{
 }>()
 
 const visible = computed(() => props.jobs)
+const { t } = useI18n()
 
-const STATUS: Record<JobItem['status'], { label: string; tone: BadgeTone; meter: BadgeTone }> = {
-  running: { label: '进行中', tone: 'brand', meter: 'brand' },
-  done: { label: '已完成', tone: 'ok', meter: 'ok' },
-  failed: { label: '部分失败', tone: 'danger', meter: 'danger' },
-}
+const titleText = computed(() => props.title ?? t('job.title'))
+
+const statusMap = computed<Record<JobItem['status'], { label: string; tone: BadgeTone; meter: BadgeTone }>>(() => ({
+  running: { label: t('job.running'), tone: 'brand', meter: 'brand' },
+  done: { label: t('job.done'), tone: 'ok', meter: 'ok' },
+  failed: { label: t('job.failed'), tone: 'danger', meter: 'danger' },
+}))
 </script>
 
 <template>
-  <aside v-if="visible.length" class="mh-jobs" aria-live="polite" :aria-label="title">
+  <aside v-if="visible.length" class="mh-jobs" aria-live="polite" :aria-label="titleText">
     <div v-for="job in visible" :key="job.id" class="mh-jobs__card">
       <div class="mh-jobs__head">
         <span class="mh-jobs__name">{{ job.name }}</span>
-        <Badge :tone="STATUS[job.status].tone">{{ STATUS[job.status].label }}</Badge>
+        <Badge :tone="statusMap[job.status].tone">{{ statusMap[job.status].label }}</Badge>
         <button
           class="mh-jobs__close"
           type="button"
-          aria-label="隐藏该任务"
+          :aria-label="t('job.hideAria')"
           @click="emit('hide', job.id)"
         >
           <X :size="14" />
@@ -50,18 +54,18 @@ const STATUS: Record<JobItem['status'], { label: string; tone: BadgeTone; meter:
       </div>
       <Meter
         :value="job.percent"
-        :tone="STATUS[job.status].meter"
+        :tone="statusMap[job.status].meter"
         :show-value="true"
-        :aria-label="job.name + ' 进度'"
+        :aria-label="t('job.progress', { name: job.name })"
       />
       <div class="mh-jobs__meta">
-        <span v-if="job.succeeded !== undefined" class="tnum">成功 {{ job.succeeded }}</span>
-        <span v-if="job.failed !== undefined" class="tnum">失败 {{ job.failed }}</span>
+        <span v-if="job.succeeded !== undefined" class="tnum">{{ t('job.succeeded', { count: job.succeeded }) }}</span>
+        <span v-if="job.failed !== undefined" class="tnum">{{ t('job.failedCount', { count: job.failed }) }}</span>
         <span v-if="job.message" class="mh-jobs__msg">{{ job.message }}</span>
       </div>
       <div class="mh-jobs__actions">
-        <Btn variant="quiet" size="sm" @click="emit('view', job.id)">查看详情</Btn>
-        <Btn variant="quiet" size="sm" @click="emit('hide', job.id)">隐藏</Btn>
+        <Btn variant="quiet" size="sm" @click="emit('view', job.id)">{{ t('job.view') }}</Btn>
+        <Btn variant="quiet" size="sm" @click="emit('hide', job.id)">{{ t('job.hide') }}</Btn>
       </div>
     </div>
   </aside>

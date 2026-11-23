@@ -1,21 +1,30 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import {
   NConfigProvider,
   NDialogProvider,
   NLoadingBarProvider,
   NMessageProvider,
+  dateEnUS,
   dateZhCN,
+  enUS,
   zhCN,
 } from 'naive-ui'
 import { useNaiveTheme } from '@/theme/naiveTheme'
+import { useI18n } from '@/i18n'
 
 const { theme, themeOverrides } = useNaiveTheme()
+const { locale } = useI18n()
+
+/** Naive 自带的分页 / 日期面板文案跟随界面语言，避免中英混排。 */
+const naiveLocale = computed(() => (locale.value === 'en-US' ? enUS : zhCN))
+const naiveDateLocale = computed(() => (locale.value === 'en-US' ? dateEnUS : dateZhCN))
 </script>
 
 <template>
   <n-config-provider
-    :locale="zhCN"
-    :date-locale="dateZhCN"
+    :locale="naiveLocale"
+    :date-locale="naiveDateLocale"
     :theme="theme"
     :theme-overrides="themeOverrides"
   >
