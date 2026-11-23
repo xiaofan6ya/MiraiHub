@@ -155,3 +155,72 @@ def cancel(auth_id: str) -> dict:
     if session["status"] == "pending":
         session["status"] = "canceled"
     return _public(session)
+
+
+# ---------------------------------------------------------------------------
+# 浏览器登录：粘贴网页 Cookie → 换发模型凭据
+# ---------------------------------------------------------------------------
+#: 网页会话里必需/可选的三件套（Cookie 名大小写两种写法都认）
+COOKIE_KEYS = {
+    "token": ("token",),
+    "account_id": ("account_id", "accountId"),
+    "sso_session_id": ("ssoSessionId", "sso_sessionid", "sso_session_id"),
+}
+
+
+class CookieError(Exception):
+    """Cookie 解析/换票失败（带用户能照做的一句话）。"""
+
+
+def parse_cookie_header(text: str) -> dict:
+    """把浏览器里复制的 Cookie（整段或 DevTools 的 `name=value` 多行）解析成三件套。
+
+    只认 `token` / `account_id` / `ssoSessionId`，其它 cookie 原样忽略 ——
+    换票只需要这三样，多的字段带过去只是多一分泄露面。
+    """
+    raw = str(text or "")
+    # DevTools 里复制出来的往往是多行 `name=value`；正常 Cookie 头是 `a=b; c=d`
+    pairs = {}
+    for chunk in raw.replace("\n", ";").split(";"):
+        piece = chunk.strip()
+        if not piece or "=" not in piece:
+            continue
+        name, _, value = piece.partition("=")
+        name = name.strip()
+        value = value.strip().strip('"')
+        if name and value:
+            pairs[name] = value
+    found = {}
+    for target, aliases in COOKIE_KEYS.items():
+        for alias in aliases:
+            if pairs.get(alias):
+                found[target] = pairs[alias]
+                break
+    if not found.get("token") or not found.get("account_id"):
+        raise CookieError("这段 Cookie 里缺 token 或 account_id："
+                          "请在已登录的 AStudio 网页端复制**完整**的 Cookie 头")
+    return found
+
+
+def cookie_login(db: Session, cookie_text: str) -> dict:
+    """浏览器登录：Cookie → `auth/bearer-token` 换 modelBearerToken → 入库。"""
+    from admin.platform.astudio.core import client as astudio_client
+
+    session = parse_cookie_header(cookie_text)
+    try:
+        key = astudio_client.exchange_model_token(session)
+    except Exception as exc:  # noqa: BLE001 - 上游错误原样带出（含「会话失效」）
+        message = getattr(exc, "message", None) or str(exc)
+        raise CookieError("换发模型凭据失败：%s" % message) from exc
+
+    record = {
+        "key": key,
+        "session_token": session.get("token", ""),
+        "account_id": session.get("account_id", ""),
+        "sso_session_id": session.get("sso_session_id", ""),
+        "uid": session.get("account_id", ""),
+        "source": "browser",
+    }
+    account, _created = astudio_accounts.import_record(db, record)
+    return {"status": "done", "account_id": int(account.id or 0),
+            "account": account.name or ""}

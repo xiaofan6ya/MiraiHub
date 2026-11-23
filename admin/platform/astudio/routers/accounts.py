@@ -256,3 +256,19 @@ def auth_cancel(body: AuthIdIn, _: bool = Depends(require_admin)):
     from admin.platform.astudio.services import webauth
 
     return webauth.cancel((body.auth_id or "").strip())
+
+
+class CookieIn(BaseModel):
+    cookie: str = ""
+
+
+@router.post("/auth/cookie")
+def auth_cookie(body: CookieIn, _: bool = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    """浏览器登录：粘贴网页 Cookie → 换发模型凭据 → 入库。"""
+    from admin.platform.astudio.services import webauth
+
+    try:
+        return {"ok": True, **webauth.cookie_login(db, body.cookie)}
+    except webauth.CookieError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc

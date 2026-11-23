@@ -1089,3 +1089,56 @@ def test_auth_poll_unknown_session():
 
     assert webauth.poll(None, "nope")["status"] == "expired"
     assert webauth.cancel("nope")["status"] == "expired"
+
+
+# ---------------------------------------------------------------------------
+# 浏览器登录（粘贴 Cookie → 换票）
+# ---------------------------------------------------------------------------
+def test_parse_cookie_header_variants():
+    from admin.platform.astudio.services import webauth
+
+    one = webauth.parse_cookie_header("token=t1; account_id=42; ssoSessionId=s1")
+    assert one == {"token": "t1", "account_id": "42", "sso_session_id": "s1"}
+    # DevTools 复制出来的多行格式
+    multi = webauth.parse_cookie_header("token=t1\naccount_id=42\nsso_sessionid=s1")
+    assert multi["sso_session_id"] == "s1"
+    # 缺必需字段要报可执行的一句话
+    with pytest.raises(webauth.CookieError) as info:
+        webauth.parse_cookie_header("foo=bar")
+    assert "Cookie" in str(info.value)
+
+
+def test_cookie_login_exchanges_and_imports(monkeypatch):
+    from admin.platform.astudio.services import webauth
+
+    calls = []
+    monkeypatch.setattr(webauth, "parse_cookie_header",
+                        webauth.parse_cookie_header)
+    from admin.platform.astudio.core import client as astudio_client
+    monkeypatch.setattr(astudio_client, "exchange_model_token",
+                        lambda session, **kw: calls.append(session) or "MODEL-JWT")
+
+    class FakeAccount:
+        id = 21
+        name = "u1"
+
+    imported = []
+    monkeypatch.setattr(webauth.astudio_accounts, "import_record",
+                        lambda db, record: (imported.append(record), (FakeAccount(), True))[1])
+    out = webauth.cookie_login(None, "token=t1; account_id=42; ssoSessionId=s1")
+    assert out["status"] == "done" and out["account_id"] == 21
+    assert calls and calls[0]["account_id"] == "42"
+    assert imported[0]["key"] == "MODEL-JWT" and imported[0]["source"] == "browser"
+
+
+def test_cookie_login_reports_exchange_failure(monkeypatch):
+    from admin.platform.astudio.services import webauth
+    from admin.platform.astudio.core import client as astudio_client
+
+    def boom(session, **kw):
+        raise RuntimeError("AStudio 会话已失效")
+
+    monkeypatch.setattr(astudio_client, "exchange_model_token", boom)
+    with pytest.raises(webauth.CookieError) as info:
+        webauth.cookie_login(None, "token=t1; account_id=42")
+    assert "会话已失效" in str(info.value)

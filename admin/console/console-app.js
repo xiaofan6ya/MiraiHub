@@ -7817,9 +7817,66 @@ async function platformBeginAuth(spec, storage) {
       <p id="astudioAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">
         等待本机登录态…（${installed ? "请在本机桌面端登录" : "装好并登录后自动继续"}）
       </p>
+
+      <details class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <summary class="text-xs" style="cursor:pointer;color:var(--fg-muted)">
+          没有桌面端？用浏览器登录（粘贴 Cookie 换票）
+        </summary>
+        <div class="mt-2">
+          <p class="text-xs mb-1" style="color:var(--fg-subtle);line-height:1.7">
+            在浏览器打开 <a href="https://agent.xfyun.cn/" target="_blank" rel="noopener"
+              style="color:var(--brand)">agent.xfyun.cn</a> 登录后，按 F12 → Network → 任选一条
+            <code>agent.xfyun.cn</code> 的请求 → 复制 Request Headers 里的整条 <code>Cookie</code>，
+            粘到下面。
+          </p>
+          <textarea id="astudioCookie" rows="3" class="w-full text-xs"
+            style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg)"
+            placeholder="token=...; account_id=...; ssoSessionId=..." spellcheck="false"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            <span id="astudioCookieErr" class="text-xs" style="color:var(--danger)"></span>
+            <button type="button" id="astudioCookieBtn" class="console-btn primary">用这段 Cookie 登录</button>
+          </div>
+        </div>
+      </details>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
         <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
       </div>`, "max-w-lg");
+
+    const cookieBtn = document.getElementById("astudioCookieBtn");
+    if (cookieBtn) cookieBtn.addEventListener("click", async () => {
+      const input = document.getElementById("astudioCookie");
+      const errEl = document.getElementById("astudioCookieErr");
+      const statusEl = document.getElementById("astudioAuthStatus");
+      const value = (input && input.value || "").trim();
+      if (errEl) errEl.textContent = "";
+      if (!value) { if (errEl) errEl.textContent = "先把 Cookie 粘进来"; return; }
+      const restore = btnBusy(cookieBtn, "换票中");
+      try {
+        const r = await api("/api/astudio/auth/cookie", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cookie: value }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("AStudio 登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
+    });
 
     for (let i = 0; i < 160; i += 1) {
       await new Promise(resolve => setTimeout(resolve, 2000));
