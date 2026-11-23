@@ -170,7 +170,7 @@ describe('应用外壳', () => {
   it('24 个页面都能点开，标题/侧栏高亮/文档标题同步', async () => {
     const { router, wrapper } = await mountShell(1440)
     // 已接入真实页面的 key；其余仍应是 _Placeholder（逐页交付，路由表始终完整）。
-    const implemented = new Set(['maintenance', 'sync', 'alerts', 'groups'])
+    const implemented = new Set(['maintenance', 'sync', 'alerts', 'groups', 'ip', 'schedules', 'models', 'market'])
     for (const page of PAGES) {
       await router.push('/' + page.key)
       // 已实现页面是 defineAsyncComponent：等动态 import 解析完再断言。
