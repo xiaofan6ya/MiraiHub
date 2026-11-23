@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import platform
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -11,6 +13,25 @@ from packaging.version import InvalidVersion, Version
 
 from desktop.common import METADATA, REPOSITORY, RELEASES_URL, VERSION, atomic_json
 from desktop.runtime import download
+
+
+#: 每个平台在 Release 里的产物后缀。macOS 按 CPU 分，x64 与 arm64 各一个包。
+ASSET_SUFFIX = {
+    "windows": "windows-x64.exe",
+    "android": "android-arm64.apk",
+    "macos-arm64": "macos-arm64.zip",
+    "macos-x64": "macos-x64.zip",
+}
+
+
+def default_platform() -> str:
+    """当前客户端应该在 Release 里找哪个产物。"""
+    if METADATA["asset"].endswith(".apk"):
+        return "android"
+    if sys.platform == "darwin":
+        machine = (platform.machine() or "").lower()
+        return "macos-arm64" if machine in ("arm64", "aarch64") else "macos-x64"
+    return "windows"
 
 
 def newer(tag: str, current=VERSION) -> bool:
@@ -32,11 +53,10 @@ def release_url(url: str) -> str:
 class UpdateService:
     def __init__(self, base: Path, platform: str | None = None):
         self.base = base
-        self.platform = platform or ("android" if METADATA["asset"].endswith(".apk") else "windows")
-        if self.platform not in ("windows", "android"):
+        self.platform = platform or default_platform()
+        if self.platform not in ASSET_SUFFIX:
             raise ValueError("Unsupported update platform")
-        suffix = "android-arm64.apk" if self.platform == "android" else "windows-x64.exe"
-        self.asset_pattern = "miraihub-{version}-" + suffix
+        self.asset_pattern = "miraihub-{version}-" + ASSET_SUFFIX[self.platform]
         self.cache = base / f"releases-cache-{self.platform}.json"
         self.lock = threading.Lock()
         self.releases = []

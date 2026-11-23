@@ -25,6 +25,8 @@ BUILTIN = (
     "admin.platform.wps_lingxi",
     "admin.platform.marvis",
     "admin.platform.krowork",
+    "admin.platform.astudio",
+    "admin.platform.codar",
 )
 
 _loaded: list[str] = []

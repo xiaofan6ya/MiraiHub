@@ -17,8 +17,12 @@ import os
 import sys
 import threading
 import webbrowser
-import winreg
 from pathlib import Path
+
+try:  # 注册表只在 Windows 存在；macOS 上模块必须还能 import（窗口模式会用到）
+    import winreg
+except ImportError:  # pragma: no cover - 非 Windows
+    winreg = None
 
 logger = logging.getLogger("desktop.tray")
 
@@ -38,7 +42,15 @@ except Exception:  # dependency is optional
 
 
 def available() -> bool:
-    """True when the tray can run in this interpreter."""
+    """True when the tray can run in this interpreter.
+
+    macOS 上返回 False：pystray 的 AppKit 后端要和 pywebview 共用 Cocoa 的
+    主 run loop，两个都起的结果是一个卡死。macOS 固定走窗口模式。
+    """
+    if sys.platform == "darwin":
+        return False
+    if winreg is None:
+        return False
     return pystray is not None and Image is not None
 
 
@@ -102,6 +114,9 @@ def compose(base, state: str, box: int = 64):
 # ---------------------------------------------------------------------------
 
 def autostart_enabled() -> bool:
+    """Windows 注册表 Run 键；其它平台没有这个概念（返回 False）。"""
+    if winreg is None:
+        return False
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as handle:
             value, _ = winreg.QueryValueEx(handle, AUTOSTART_NAME)
@@ -112,6 +127,8 @@ def autostart_enabled() -> bool:
 
 def set_autostart(enabled: bool) -> bool:
     """Register or clear this EXE under HKCU Run. Requires a frozen build."""
+    if winreg is None:
+        return False  # macOS / Linux：没有 HKCU Run
     if not getattr(sys, "frozen", False):
         return False  # a source checkout has no stable entry point to register
     command = f'"{sys.executable}" --tray'

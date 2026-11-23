@@ -229,11 +229,23 @@ async def _security_headers(request: Request, call_next):
         or _p in ("/join", "/join/", "/", "/j")
         or (_p.startswith("/static/") and _p.endswith(".html"))
     )
+    # 桌面客户端（pywebview / macOS WKWebView）的桥接**是用 eval 注入的**：
+    # CSP 不含 'unsafe-eval' 时，注入只完成一半 —— `window.pywebview.api` 是个
+    # 空对象、`desktop_login` 之类的函数永远不出现，`pywebviewready` 也不触发
+    # （2026-11-23 在真机 WKWebView 上三组对照实测：无 CSP / 加 unsafe-eval
+    # 就正常，只有严格 CSP 会断）。Windows 的 WebView2 走自己的脚本通道，
+    # 不受这条影响，所以这个问题只在 macOS 上暴露。
+    #
+    # 只对桌面壳放行：它固定带 `?desktop=1`（desktop.js 也会补上）。
+    # 普通浏览器打开后台**不带**这个参数，CSP 保持原样。
+    _desktop_shell = (request.query_params or {}).get("desktop") == "1"
+    _script_src = ("script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+                   if _desktop_shell else "script-src 'self' 'unsafe-inline'")
     if _is_html_doc:
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            + _script_src + "; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "font-src 'self' data:; "
@@ -484,6 +496,16 @@ try:
     app.include_router(krowork_accounts_router.router)
 except Exception:  # noqa: BLE001 - krowork 目录被裁剪时降级为不挂载
     logger.exception("KroWork 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.astudio.routers import accounts as astudio_accounts_router
+    app.include_router(astudio_accounts_router.router)
+except Exception:  # noqa: BLE001 - astudio 目录被裁剪时降级为不挂载
+    logger.exception("AStudio 管理接口挂载失败（其它功能不受影响）")
+try:
+    from admin.platform.codar.routers import accounts as codar_accounts_router
+    app.include_router(codar_accounts_router.router)
+except Exception:  # noqa: BLE001 - codar 目录被裁剪时降级为不挂载
+    logger.exception("科搭 Codar 管理接口挂载失败（其它功能不受影响）")
 if os.getenv("WORKBUDDY_ANDROID") != "1" and not env_guard.IS_PROD:
     # 逆向产物管理（任意目录创建 + 递归读取）：**生产不挂载**。
     # 中间件还有一道 404，双保险 —— 见 env_guard.PROD_BLOCKED_PREFIXES。

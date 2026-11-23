@@ -337,7 +337,9 @@ MiraiHub/
 │   │   ├── raccoon/         │
 │   │   ├── codearts/        │
 │   │   ├── minimax/         │
-│   │   └── wps_lingxi/      ┘
+│   │   ├── wps_lingxi/      │
+│   │   ├── astudio/         ├ 各平台模块（可整目录删除）
+│   │   └── codar/           ┘
 │   └── console/             管理后台前端
 ├── desktop/                 Windows 桌面版（pywebview）
 ├── android/                 Android 壳
@@ -365,6 +367,8 @@ MiraiHub/
 | CodeArts | `codearts` | 华为云 CodeArts，每日签到领权益 |
 | MiniMax Code | `minimax` | Anthropic Messages 上游 |
 | WPS 灵犀 | `wps-lingxi` | Cookie 登录 + 桌面 agent-runtime 通路 |
+| AStudio | `astudio` | 讯飞 Astron Studio，OpenAI Responses 网关，每日登录积分可签到 |
+| 科搭 Codar | `codar` | SpeedAI 科搭，OpenAI + Claude 双协议，滚动 24h 签到 |
 
 接入新平台请读 [admin/platform/skill/SKILL.md](admin/platform/skill/SKILL.md)，
 **不要改 `admin/` 根目录的文件**。

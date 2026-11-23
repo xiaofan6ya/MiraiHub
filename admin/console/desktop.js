@@ -173,6 +173,11 @@ window.WBDesktop = (() => {
     await check();
   }
   async function initializeNative() {
+    // pywebview 的注入分两步：先把 `window.pywebview.api` 对象挂上来，再异步
+    // 把方法写进去、并发 `pywebviewready`。macOS（WKWebView）上这两步之间的
+    // 空窗比 Windows 明显，页面若在空窗里调用就会拿到「api 存在但
+    // desktop_login 不是函数」。所以拿方法名当就绪判据，而不是拿对象当。
+    if (typeof window.pywebview?.api?.desktop_login !== 'function') return;
     if (initialized) return;
     initialized = true; native = true;
     document.documentElement.classList.add('native-window');
@@ -206,7 +211,11 @@ window.WBDesktop = (() => {
       document.getElementById('localBoot')?.remove();
       document.getElementById('topbarMode').textContent = '本地运行';
     } catch (error) {
-      document.getElementById('localBootStatus').textContent = `本地连接失败：${error.message}`;
+      const message = String(error && error.message || error);
+      document.getElementById('localBootStatus').textContent =
+        /is not a function|undefined/.test(message)
+          ? `本地桥接尚未就绪（${message}），点「重新连接」重试`
+          : `本地连接失败：${message}`;
       initialized = false;
     }
     check(true);
@@ -220,6 +229,16 @@ window.WBDesktop = (() => {
     if (item) document.getElementById('topbarTitle').textContent = [...item.childNodes]
       .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim();
   });
-  if (window.pywebview?.api) initializeNative();
+  if (typeof window.pywebview?.api?.desktop_login === 'function') initializeNative();
+  // 兜底轮询：万一 pywebviewready 因为导航时序丢了，方法一到位就补上（最多等 10s）
+  let bridgeTries = 0;
+  const bridgeTimer = setInterval(() => {
+    if (typeof window.pywebview?.api?.desktop_login === 'function') {
+      clearInterval(bridgeTimer);
+      initializeNative();
+    } else if (++bridgeTries > 40) {
+      clearInterval(bridgeTimer);
+    }
+  }, 250);
   return {openUpdates, retryLocal: initializeNative, checkUpdatesAtStartup: () => check(true)};
 })();

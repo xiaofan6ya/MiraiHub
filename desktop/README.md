@@ -1,4 +1,4 @@
-# MiraiHub Windows 桌面版
+# MiraiHub 桌面版（Windows / macOS）
 
 名称与路径中的 `***` 表示已脱敏，实际参数、文件名和存储位置以现有源码及配置为准；兼容参数保留原格式。
 
@@ -7,6 +7,32 @@
 Python 运行时、项目全部 Python 依赖、网页、字体及图标都内置在单文件 EXE 中。桌面版自动使用 SQLite（WAL 模式）与内存限流，默认监听 `0.0.0.0:8790`，支持本机与局域网访问。后续优先使用 `config.json` 保存的端口；只有该端口被占用时才选择空闲端口，并在服务成功启动后保存，重启继续复用。API Keys 页可选择并复制检测到的局域网地址；本地应用自动进入工作台，远程管理页仍需要登录。
 
 Node.js 22.14.0 第一次在后台自动准备：依次尝试 npmmirror、华为云镜像、Node 官方源，并校验固定 SHA256；只保留 Node 执行器与许可证，无需 npm 或安装管理员权限。下载不阻塞窗口与后台使用，失败可在版本窗口重试。设备风控 SDK 仍来自用户已安装的 wb 客户端，项目不包含第三方账号或 SDK；使用网关需要添加自己的有效账号。
+
+## macOS
+
+支持 macOS 12 及以上（Apple Silicon 与 Intel 各一个包）。双击 `.app` 即可运行，
+不需要安装 Python、pip、MySQL 或 Redis。
+
+- **产物**：`miraihub-<版本>-macos-arm64.zip` / `-macos-x64.zip`，解压后把
+  `MiraiHub.app` 拖进「应用程序」。zip 里带可执行权限与包结构（用 `ditto`
+  打的包，普通 zip 解压后双击会提示「应用已损坏」）。
+- **数据目录**：`~/Library/Application Support/MiraiHub`（可用
+  `WORKBUDDY_DESKTOP_DATA` 覆盖）。里面的 `config.json`、`runtime/`、
+  `logs/`、`webview/` 与 Windows 版同名同义。
+- **WebView**：用系统自带的 WKWebView，不额外安装运行库；不需要 WebView2，
+  也不下载它。
+- **Node.js**：与 Windows 一样在首次启动时下载 22.14.0（darwin-arm64 /
+  darwin-x64 归档，同样按钉死的 SHA256 校验），解压到
+  `<数据目录>/runtime/node-22.14.0/`。
+- **托盘**：macOS 版固定走窗口模式。pystray 的 AppKit 后端与 pywebview 的
+  Cocoa 主循环争同一个 run loop，同时启用会有一个起不来；关窗口即退出，
+  需要常驻请用 `--no-tray` 之外的窗口最小化，或把服务单独跑在服务器上。
+- **首次打开**：包没有公证（无 Apple 开发者签名）。第一次双击若提示
+  「无法验证开发者」，在「系统设置 → 隐私与安全性」里点「仍要打开」，或
+  执行一次 `xattr -dr com.apple.quarantine /Applications/MiraiHub.app`。
+- **更新**：检测更新后下载 zip 并打开其所在目录，退出客户端后手动替换
+  「应用程序」里的 `MiraiHub.app`。macOS 不会就地替换正在运行的 `.app`
+  ——包替换到一半失败会留下一个打不开的应用，手动替换更稳。
 
 使用系统 WebView2，避免随 EXE 携带完整 Chromium。系统缺少 WebView2 时，自动从 Microsoft 官方地址下载签名验证过的安装引导程序并静默安装。首次启动需要联网，准备完后复用已安装环境，普通启动不下载运行时。上游 API 本身需要联网。
 

@@ -22,6 +22,10 @@
 ## 产物
 
 - Windows：`dist/` 下的 `*-windows-x64.exe` 与对应 `.exe.sha256`。
+- macOS：`dist/` 下的 `*-macos-arm64.zip` / `*-macos-x64.zip`（内含 `.app`）
+  与对应 `.zip.sha256`。在 macOS 上执行
+  `python scripts/build_desktop.py`，图标由 `sips` / `iconutil` 从
+  `desktop/assets/app.svg` 生成，不需要额外工具。
 - Android：`dist/android/` 下的 `*-android-arm64.apk` 与对应 `.apk.sha256`。
 - 完整日志：`build/package-logs/`；两端成功后生成 `dist/build-版本号.json`。
 
