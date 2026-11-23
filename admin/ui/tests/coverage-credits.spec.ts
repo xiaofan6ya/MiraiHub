@@ -569,3 +569,7 @@ describe('平台切换', () => {
     expect(getUsage).toHaveBeenCalledTimes(2)
   })
 })
+
+// Naive message 的 auto-hide 定时器会在 jsdom 销毁后触发；用可自动推进的假时钟并在收尾清空。
+beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }) })
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })

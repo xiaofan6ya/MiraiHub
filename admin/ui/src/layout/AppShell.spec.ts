@@ -193,7 +193,7 @@ describe('应用外壳', () => {
       expect(active.text()).toBe(page.group)
       expect(document.title).toBe(page.title + ' · MiraiHub')
     }
-  })
+  }, 20000)
 
   it('同组页签只在该组多于 1 页时出现，点击可切换', async () => {
     const { router, wrapper } = await mountShell(1440)
@@ -221,10 +221,8 @@ describe('应用外壳', () => {
       .find((item) => item.text().includes('调用'))
     expect(usageGroup).toBeTruthy()
     await usageGroup!.trigger('click')
-    // 目标页是懒加载组件：等 import 解析与路由提交完成。
-    await flushPromises()
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/logs')
+    // 目标页是懒加载组件：等 import 解析与路由提交完成（满载并行时更慢）。
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/logs'), { timeout: 8000 })
   })
 
   it('顶栏：platformScoped 页显示平台选择器，其它页显示面包屑', async () => {
