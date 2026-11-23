@@ -8,7 +8,7 @@ describe('Badge tone 映射', () => {
     expect(badgeToneStyle('warn')).toEqual({ text: 'var(--warn)', bg: 'var(--warn-soft)' })
     expect(badgeToneStyle('danger')).toEqual({ text: 'var(--danger)', bg: 'var(--danger-soft)' })
     expect(badgeToneStyle('neutral')).toEqual({
-      text: 'var(--fg-muted)',
+      text: 'var(--fg-2)',
       bg: 'var(--neutral-soft)',
     })
     expect(badgeToneStyle('brand')).toEqual({ text: 'var(--brand)', bg: 'var(--brand-soft)' })

@@ -13,7 +13,7 @@ export const BADGE_TONES: Record<BadgeTone, BadgeToneStyle> = {
   ok: { text: 'var(--ok)', bg: 'var(--ok-soft)' },
   warn: { text: 'var(--warn)', bg: 'var(--warn-soft)' },
   danger: { text: 'var(--danger)', bg: 'var(--danger-soft)' },
-  neutral: { text: 'var(--fg-muted)', bg: 'var(--neutral-soft)' },
+  neutral: { text: 'var(--fg-2)', bg: 'var(--neutral-soft)' },
   brand: { text: 'var(--brand)', bg: 'var(--brand-soft)' },
 }
 
