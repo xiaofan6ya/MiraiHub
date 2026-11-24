@@ -13,6 +13,9 @@
  *   3. 任务清单接口单次 1–3.3s（后端 3s 缓存）→ 逐账号并发 2 拉取，先到先渲染，失败的卡单独报错；
  *      但连续 8 个都失败说明上游/网关整体挂了 → 熔断整条队列，顶部只留一条全局提示；
  *      页面卸载 / 切平台 / 新一轮预取都会 abort 旧队列（194 个账号全 502 时不能一路跑完）。
+ *
+ * 文案全部走 useI18n().t（page.growth.*）：模板里的 t() 在 render 里读 locale，
+ * 切语言立即重算；api/growth.ts 的纯函数只管数值与语气，标签由本页按 key 取。
  */
 import { computed, effectScope, markRaw, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -36,7 +39,8 @@ import { useConfirm, useJob, useTableQuery, useToast, type JobSnapshot } from '@
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
 import { failureText } from '@/utils/error'
-import { fmtCredit, fmtInt } from '@/utils/format'
+import { FMT_EMPTY, fmtCredit, fmtInt } from '@/utils/format'
+import { useI18n, type MessageKey } from '@/i18n'
 import {
   GROWTH_ACTIONS,
   claimGrowth,
@@ -57,13 +61,15 @@ import {
   type GrowthActionItem,
   type GrowthCard,
   type GrowthCenterAccount,
+  type GrowthClaimPayload,
   type GrowthStateFilter,
   type GrowthTask,
+  type GrowthTaskStatus,
 } from '@/api/growth'
 
-const HELP_TEXT =
-  '成长计划只对声明支持的平台有意义；任务进度来自上游真实账号，做任务与领奖都会写入积分流水。' +
-  '任务清单单次拉取较慢（后端有 3 秒缓存），逐账号加载，失败只影响那一张卡。'
+const { t } = useI18n()
+/** 页头说明（语种跟随 useI18n）。 */
+const helpText = computed(() => t('page.growth.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -78,9 +84,9 @@ const filters = table.state.filters as unknown as { q: string; state: string }
 
 const supported = computed(() => platformStore.supports('growth'))
 const platformLabel = computed(
-  () => platformStore.currentSpec?.label || platformStore.platform || '当前平台',
+  () => platformStore.currentSpec?.label || platformStore.platform || t('page.growth.platformFallback'),
 )
-const title = computed(() => '成长计划 · ' + platformLabel.value)
+const title = computed(() => t('page.growth.title', { platform: platformLabel.value }))
 
 /* ------------------------------------------------------------------ *
  * 取数
@@ -135,8 +141,8 @@ async function loadAccounts(): Promise<void> {
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
-    loadError.value = { message: failureText('加载成长账号', error), detail }
-    toast.error(failureText('加载成长账号', error))
+    loadError.value = { message: failureText(t('page.growth.action.loadAccounts'), error), detail }
+    toast.error(failureText(t('page.growth.action.loadAccounts'), error))
   } finally {
     if (controller === current) {
       controller = null
@@ -195,7 +201,7 @@ async function loadAllTasks(force = false): Promise<void> {
       } catch (error) {
         if (stale() || isAbortError(error)) return
         consecutiveFailures += 1
-        lastError = failureText('加载任务清单', error)
+        lastError = failureText(t('page.growth.action.loadTasks'), error)
         tasksError[id] = lastError
         if (consecutiveFailures >= TASK_FAILURE_LIMIT) tripped = true
       } finally {
@@ -213,8 +219,8 @@ async function loadAllTasks(force = false): Promise<void> {
   const rest = ids.length - attempted
   bulkTasksError.value = {
     message:
-      '任务清单连续 ' + TASK_FAILURE_LIMIT + ' 个账号加载失败，已暂停批量预取' +
-      (rest > 0 ? '（剩余 ' + rest + ' 个账号未请求）' : ''),
+      t('page.growth.bulk.failed', { limit: TASK_FAILURE_LIMIT }) +
+      (rest > 0 ? t('page.growth.bulk.remaining', { rest }) : ''),
     detail: lastError,
   }
 }
@@ -231,7 +237,7 @@ async function reloadAccountTasks(id: number): Promise<void> {
   try {
     tasksByAccount[id] = await getAccountTasks(id, true)
   } catch (error) {
-    tasksError[id] = failureText('加载任务清单', error)
+    tasksError[id] = failureText(t('page.growth.action.loadTasks'), error)
   } finally {
     tasksLoading[id] = false
   }
@@ -254,7 +260,6 @@ const filtered = computed(() =>
 const pageData = computed(() =>
   pageGrowthCards(filtered.value, table.state.page, table.state.pageSize || 20),
 )
-const stats = computed(() => growthStats(cards.value, excluded.value))
 const claimableTotal = computed(() =>
   cards.value.reduce((sum, card) => sum + Number(card.claimable || 0), 0),
 )
@@ -262,12 +267,38 @@ const claimableCredit = computed(() =>
   cards.value.reduce((sum, card) => sum + Number(card.claimableCredit || 0), 0),
 )
 
-const stateOptions = [
-  { label: '全部账号', value: '' },
-  { label: '有可领奖励', value: 'claimable' },
-  { label: '有可做任务', value: 'runnable' },
-  { label: '已禁用', value: 'disabled' },
+/** 统计条标签按 api/growth.ts:growthStats 的固定顺序取（数值与语气仍由那份纯函数算）。 */
+const STAT_LABEL_KEYS: MessageKey[] = [
+  'page.growth.stat.accounts',
+  'page.growth.stat.tasks',
+  'page.growth.stat.done',
+  'page.growth.stat.claimable',
+  'page.growth.stat.credit',
+  'page.growth.stat.energy',
 ]
+
+const stats = computed<ReturnType<typeof growthStats>>(() =>
+  growthStats(cards.value, excluded.value).map((item, index) => {
+    const labelKey = STAT_LABEL_KEYS[index] ?? STAT_LABEL_KEYS[0]
+    return {
+      ...item,
+      label: t(labelKey),
+      foot:
+        index === 0
+          ? excluded.value > 0
+            ? t('page.growth.stat.excluded', { count: excluded.value })
+            : t('page.growth.stat.caption')
+          : item.foot,
+    }
+  }),
+)
+
+const stateOptions = computed(() => [
+  { label: t('page.growth.state.all'), value: '' },
+  { label: t('page.growth.state.claimable'), value: 'claimable' },
+  { label: t('page.growth.state.runnable'), value: 'runnable' },
+  { label: t('page.growth.state.disabled'), value: 'disabled' },
+])
 
 const search = ref(filters.q)
 watch(
@@ -279,18 +310,20 @@ watch(
 
 const chips = computed<FilterChip[]>(() => {
   const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: '搜索', value: filters.q })
+  if (filters.q) list.push({ key: 'q', label: t('page.growth.chip.search'), value: filters.q })
   if (filters.state) {
-    const hit = stateOptions.find((item) => item.value === filters.state)
-    list.push({ key: 'state', label: '状态', value: hit ? hit.label : filters.state })
+    const hit = stateOptions.value.find((item) => item.value === filters.state)
+    list.push({ key: 'state', label: t('page.growth.chip.state'), value: hit ? hit.label : filters.state })
   }
   return list
 })
 
-const summary = computed(
-  () =>
-    '共 ' + cards.value.length + ' 个账号 · 可领 ' + claimableTotal.value + ' 条 · ' +
-    fmtCredit(claimableCredit.value) + ' 积分',
+const summary = computed(() =>
+  t('page.growth.summary', {
+    accounts: cards.value.length,
+    claimable: claimableTotal.value,
+    credit: fmtCredit(claimableCredit.value),
+  }),
 )
 
 function onFilterChange(values: Record<string, unknown>): void {
@@ -333,6 +366,33 @@ function progressText(card: GrowthCard): string {
   return progress.label
 }
 
+/** 任务状态文案：语气仍取 api/growth.ts:taskStatusOf，标签按 key 跟随语言。 */
+const TASK_STATUS_KEYS: Record<string, MessageKey> = {
+  completed: 'page.growth.taskStatus.completed',
+  claimed: 'page.growth.taskStatus.claimed',
+  not_accepted: 'page.growth.taskStatus.notAccepted',
+  accepted: 'page.growth.taskStatus.accepted',
+}
+
+function taskStatusKey(task: GrowthTask | null | undefined): MessageKey {
+  const status = String(task?.accept_status || '').toLowerCase()
+  const key = TASK_STATUS_KEYS[status]
+  if (key) return key
+  return String(task?.level || '') === 'skip'
+    ? 'page.growth.taskStatus.skipped'
+    : 'page.growth.taskStatus.accepted'
+}
+
+function taskBadge(task: GrowthTask): GrowthTaskStatus {
+  const status = taskStatusOf(task)
+  return { label: t(taskStatusKey(task)), tone: status.tone }
+}
+
+/** 单任务领奖按钮只看上游原值（不用译后的文案做判断）。 */
+function isClaimableTask(task: GrowthTask): boolean {
+  return String(task.accept_status || '').toLowerCase() === 'completed'
+}
+
 /* ------------------------------------------------------------------ *
  * 操作：做任务 / 领奖 / 成长动作
  * ------------------------------------------------------------------ */
@@ -352,11 +412,20 @@ function trackJob(id: string, name: string): void {
       pollUrl: '/api/growth/job/',
       onFinish: (snapshot: JobSnapshot) => {
         const result = (snapshot.result || {}) as { tasks_done?: number; credit?: number; failed?: number[] }
-        if (snapshot.status === 'failed') toast.error(name + ' 失败：' + (snapshot.error || '未知错误'))
-        else {
+        if (snapshot.status === 'failed') {
+          toast.error(
+            t('page.growth.job.failed', {
+              name,
+              reason: snapshot.error || t('page.growth.unknownError'),
+            }),
+          )
+        } else {
           toast.success(
-            name + ' 完成：' + Number(result.tasks_done || 0) + ' 个任务 · ' +
-            fmtCredit(Number(result.credit || 0)) + ' 积分',
+            t('page.growth.job.done', {
+              name,
+              tasks: Number(result.tasks_done || 0),
+              credit: fmtCredit(Number(result.credit || 0)),
+            }),
           )
         }
         void loadAllTasks(true)
@@ -392,17 +461,29 @@ function hideJob(id: string): void {
   jobHandles.value = jobHandles.value.filter((entry) => entry.id !== id)
 }
 
+/** claim 结果 → Toast 文案（数量与积分仍由 api/growth.ts:summarizeClaim 汇总）。 */
+function claimToast(payload: GrowthClaimPayload | null | undefined): string {
+  const result = summarizeClaim(payload)
+  const credit = fmtCredit(result.credit)
+  if (result.failed > 0 && !result.tasks) {
+    return t('page.growth.claim.failed', { count: result.failed })
+  }
+  return result.failed > 0
+    ? t('page.growth.claim.okPartial', { count: result.tasks, credit, failed: result.failed })
+    : t('page.growth.claim.ok', { count: result.tasks, credit })
+}
+
 async function runTasks(card: GrowthCard): Promise<void> {
   if (!card.canRun) {
-    toast.info('这个账号当前没有可自动完成的任务')
+    toast.info(t('page.growth.toast.noRunnable'))
     return
   }
   try {
     const job = await runGrowthTasks([card.account.id])
-    if (job?.job_id) trackJob(job.job_id, card.account.name + ' 做任务')
-    toast.info(job?.reused ? '已有任务在跑，已接上进度' : '做任务已提交后台执行')
+    if (job?.job_id) trackJob(job.job_id, t('page.growth.job.name', { name: card.account.name }))
+    toast.info(job?.reused ? t('page.growth.toast.attached') : t('page.growth.toast.submitted'))
   } catch (error) {
-    toast.error(failureText('提交做任务', error))
+    toast.error(failureText(t('page.growth.action.submitRun'), error))
   }
 }
 
@@ -410,62 +491,74 @@ async function claimAccount(card: GrowthCard): Promise<void> {
   if (card.claimable <= 0) return
   try {
     const payload = await claimGrowth([card.account.id])
-    toast.success(summarizeClaim(payload).text)
+    toast.success(claimToast(payload))
     await reloadAccountTasks(card.account.id)
   } catch (error) {
-    toast.error(failureText('领取奖励', error))
+    toast.error(failureText(t('page.growth.action.claim'), error))
   }
 }
 
 async function claimTask(card: GrowthCard, task: GrowthTask): Promise<void> {
   try {
     const payload = await claimGrowth([card.account.id], [task.task_code])
-    toast.success(summarizeClaim(payload).text)
+    toast.success(claimToast(payload))
     await reloadAccountTasks(card.account.id)
   } catch (error) {
-    toast.error(failureText('领取奖励', error))
+    toast.error(failureText(t('page.growth.action.claim'), error))
   }
 }
 
 async function claimAll(): Promise<void> {
   const ids = cards.value.filter((card) => card.claimable > 0).map((card) => card.account.id)
   if (!ids.length) {
-    toast.info('当前没有可领取的奖励')
+    toast.info(t('page.growth.toast.noClaimable'))
     return
   }
   const ok = await confirm({
-    title: '领取全部可领奖励？',
-    message: '将对 ' + ids.length + ' 个账号领取已完成任务的奖励，共 ' + claimableTotal.value + ' 条。',
-    okText: '全部领取',
+    title: t('page.growth.confirm.claimAllTitle'),
+    message: t('page.growth.confirm.claimAllBody', {
+      count: ids.length,
+      claimable: claimableTotal.value,
+    }),
+    okText: t('page.growth.confirm.claimAllOk'),
   })
   if (!ok) return
   try {
     const payload = await claimGrowth(ids)
-    toast.success(summarizeClaim(payload).text)
+    toast.success(claimToast(payload))
     await loadAllTasks(true)
   } catch (error) {
-    toast.error(failureText('领取全部奖励', error))
+    toast.error(failureText(t('page.growth.action.claimAll'), error))
   }
 }
 
 async function runAction(card: GrowthCard, item: GrowthActionItem): Promise<void> {
   if (card.disabled) {
-    toast.info('请先启用账号或重新登录')
+    toast.info(t('page.growth.disabledHint'))
     return
   }
+  const label = actionLabel(item.key)
   try {
     const result = await postGrowthAction(card.account.id, item.action, item.tier)
+    const credit = Number(result?.credit || 0)
     if (result?.ok) {
+      const reason = result.reason || t('page.growth.action.defaultReason')
       toast.success(
-        item.label + '：' + (result.reason || '已完成') +
-        (Number(result.credit || 0) > 0 ? '（+' + fmtCredit(Number(result.credit)) + ' 积分）' : ''),
+        credit > 0
+          ? t('page.growth.action.done', { label, reason, credit: fmtCredit(credit) })
+          : t('page.growth.action.donePlain', { label, reason }),
       )
     } else {
-      toast.error(item.label + '：' + (result?.reason || '操作未确认，请刷新状态后核对'))
+      toast.error(
+        t('page.growth.action.donePlain', {
+          label,
+          reason: result?.reason || t('page.growth.action.unconfirmed'),
+        }),
+      )
     }
     await reloadAccountTasks(card.account.id)
   } catch (error) {
-    toast.error(failureText(item.label, error))
+    toast.error(failureText(label, error))
   }
 }
 
@@ -474,13 +567,13 @@ const refreshTimers: Array<ReturnType<typeof setTimeout>> = []
 async function refreshCenter(card: GrowthCard): Promise<void> {
   try {
     const result = await refreshGrowthCenter(card.account.id)
-    toast.info(result?.running ? '成长状态刷新中，稍后自动重读任务清单' : '已发起刷新')
+    toast.info(result?.running ? t('page.growth.toast.refreshing') : t('page.growth.toast.refreshStarted'))
     const timer = setTimeout(() => {
       void reloadAccountTasks(card.account.id)
     }, 2500)
     refreshTimers.push(timer)
   } catch (error) {
-    toast.error(failureText('刷新成长状态', error))
+    toast.error(failureText(t('page.growth.action.refreshCenter'), error))
   }
 }
 
@@ -488,15 +581,35 @@ async function refreshCenter(card: GrowthCard): Promise<void> {
  * 卡片 ⋯ 菜单
  * ------------------------------------------------------------------ */
 
+/** 成长动作文案：动作/档位仍是 api/growth.ts:GROWTH_ACTIONS 的真值，这里只按 key 取标签。 */
+const ACTION_LABEL_KEYS: Record<string, MessageKey> = {
+  checkin: 'page.growth.growthAction.checkin',
+  open: 'page.growth.growthAction.open',
+  gift: 'page.growth.growthAction.gift',
+  draw: 'page.growth.growthAction.draw',
+  'redeem-7': 'page.growth.growthAction.redeem7',
+  'redeem-14': 'page.growth.growthAction.redeem14',
+  'redeem-28': 'page.growth.growthAction.redeem28',
+}
+
+function actionLabel(key: string): string {
+  const labelKey = ACTION_LABEL_KEYS[key]
+  return labelKey ? t(labelKey) : key
+}
+
 function actionOptions(card: GrowthCard): DropdownOption[] {
   const options: DropdownOption[] = GROWTH_ACTIONS.map((item) => ({
-    label: item.label,
+    label: actionLabel(item.key),
     key: item.key,
     disabled: card.disabled,
   }))
   options.push({ type: 'divider', key: 'divider-1' })
-  options.push({ label: '刷新成长状态', key: 'refresh-center', disabled: card.disabled })
-  options.push({ label: '打开任务清单', key: 'open-tasks' })
+  options.push({
+    label: t('page.growth.action.refreshCenter'),
+    key: 'refresh-center',
+    disabled: card.disabled,
+  })
+  options.push({ label: t('page.growth.menu.openTasks'), key: 'open-tasks' })
   return options
 }
 
@@ -570,7 +683,7 @@ watch(supported, (value) => {
 
 <template>
   <div class="gw-page">
-    <PageHeader :title="title" :help="HELP_TEXT">
+    <PageHeader :title="title" :help="helpText">
       <template #actions>
         <Btn
           variant="primary"
@@ -578,14 +691,16 @@ watch(supported, (value) => {
           :disabled="!supported || claimableTotal === 0 || loading"
           @click="claimAll"
         >
-          全部领奖
+          {{ t('page.growth.claimAll') }}
         </Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" :disabled="!supported" @click="refresh">刷新</Btn>
+        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" :disabled="!supported" @click="refresh">
+          {{ t('page.growth.refresh') }}
+        </Btn>
       </template>
     </PageHeader>
 
-    <Empty v-if="!supported" description="当前平台没有成长计划。切换到支持成长体系的平台后再回来。">
-      <Btn variant="default" size="sm" @click="router.push('/accounts')">去账号池</Btn>
+    <Empty v-if="!supported" :description="t('page.growth.unsupported')">
+      <Btn variant="default" size="sm" @click="router.push('/accounts')">{{ t('page.growth.goAccounts') }}</Btn>
     </Empty>
 
     <ErrorBlock
@@ -595,7 +710,12 @@ watch(supported, (value) => {
       @retry="refresh"
     />
 
-    <div v-else-if="firstLoading" class="gw-skeleton" aria-busy="true" aria-label="成长账号加载中">
+    <div
+      v-else-if="firstLoading"
+      class="gw-skeleton"
+      aria-busy="true"
+      :aria-label="t('page.growth.loadingAria')"
+    >
       <div class="gw-skeleton__strip"><n-skeleton text :repeat="2" /></div>
       <div class="gw-skeleton__grid">
         <div v-for="index in 4" :key="index" class="gw-skeleton__card"><n-skeleton text :repeat="5" /></div>
@@ -609,7 +729,7 @@ watch(supported, (value) => {
           <p class="gw-bulk-error__title">{{ bulkTasksError.message }}</p>
           <p v-if="bulkTasksError.detail" class="gw-bulk-error__detail">{{ bulkTasksError.detail }}</p>
         </div>
-        <Btn size="sm" variant="default" @click="retryBulkTasks">重试</Btn>
+        <Btn size="sm" variant="default" @click="retryBulkTasks">{{ t('page.growth.retry') }}</Btn>
       </div>
 
       <StatStrip :items="stats" :columns="6" />
@@ -627,7 +747,7 @@ watch(supported, (value) => {
             <n-input
               v-model:value="search"
               class="gw-search"
-              placeholder="搜索账号"
+              :placeholder="t('page.growth.searchPlaceholder')"
               clearable
               @update:value="(value: string) => onFilterChange({ q: value })"
             />
@@ -635,7 +755,7 @@ watch(supported, (value) => {
               class="gw-select"
               :value="filters.state"
               :options="stateOptions"
-              aria-label="账号状态筛选"
+              :aria-label="t('page.growth.stateAria')"
               @update:value="setState"
             />
           </template>
@@ -647,9 +767,15 @@ watch(supported, (value) => {
               <div class="gw-card__title">
                 <h3 :title="card.account.name">{{ card.account.name }}</h3>
                 <div class="gw-card__chips">
-                  <Badge :tone="card.disabled ? 'neutral' : 'ok'">{{ card.disabled ? '已禁用' : '可用' }}</Badge>
-                  <Badge tone="neutral">连续 {{ card.account.streak_days ?? '—' }} 天</Badge>
-                  <Badge tone="neutral">能量 {{ card.account.energy ?? '—' }}</Badge>
+                  <Badge :tone="card.disabled ? 'neutral' : 'ok'">
+                    {{ card.disabled ? t('page.growth.badge.disabled') : t('page.growth.badge.active') }}
+                  </Badge>
+                  <Badge tone="neutral">
+                    {{ t('page.growth.badge.streak', { days: card.account.streak_days ?? FMT_EMPTY }) }}
+                  </Badge>
+                  <Badge tone="neutral">
+                    {{ t('page.growth.badge.energy', { value: card.account.energy ?? FMT_EMPTY }) }}
+                  </Badge>
                   <Badge v-if="card.progress.levelLabel" tone="brand">{{ card.progress.levelLabel }}</Badge>
                 </div>
               </div>
@@ -661,24 +787,30 @@ watch(supported, (value) => {
                 :value="card.progress.done"
                 :max="card.progress.total || 1"
                 tone="brand"
-                :aria-label="card.account.name + ' 任务进度'"
+                :aria-label="t('page.growth.progressAria', { name: card.account.name })"
               />
-              <span class="gw-card__meter-note">任务完成度 {{ card.progress.percent }}%</span>
+              <span class="gw-card__meter-note">
+                {{ t('page.growth.meterNote', { percent: card.progress.percent }) }}
+              </span>
             </div>
 
             <div v-if="card.loading" class="gw-card__loading"><n-skeleton text :repeat="3" /></div>
 
             <div v-else-if="card.error" class="gw-card__error">
               <p>{{ card.error }}</p>
-              <Btn size="sm" variant="default" @click="reloadAccountTasks(card.account.id)">重试</Btn>
+              <Btn size="sm" variant="default" @click="reloadAccountTasks(card.account.id)">
+                {{ t('page.growth.retry') }}
+              </Btn>
             </div>
 
             <div v-else class="gw-tasks">
               <div class="gw-tasks__head">
-                <span>任务清单（{{ card.summary.done }}/{{ card.summary.total }}）</span>
-                <span v-if="card.claimable" class="gw-tasks__claimable">可领 {{ card.claimable }} 条</span>
+                <span>{{ t('page.growth.tasks.title', { done: card.summary.done, total: card.summary.total }) }}</span>
+                <span v-if="card.claimable" class="gw-tasks__claimable">
+                  {{ t('page.growth.tasks.claimable', { count: card.claimable }) }}
+                </span>
                 <Btn v-if="hasMoreTasks(card)" size="sm" variant="quiet" @click="toggleExpand(card.account.id)">
-                  {{ expanded[card.account.id] ? '收起' : '展开全部' }}
+                  {{ expanded[card.account.id] ? t('page.growth.tasks.collapse') : t('page.growth.tasks.expand') }}
                 </Btn>
               </div>
               <ul v-if="card.tasks.length" class="gw-task-list">
@@ -686,33 +818,33 @@ watch(supported, (value) => {
                   <span class="gw-task__title" :title="task.strategy || task.title || task.task_code">
                     {{ task.title || task.task_code }}
                   </span>
-                  <Badge :tone="taskStatusOf(task).tone">{{ taskStatusOf(task).label }}</Badge>
+                  <Badge :tone="taskBadge(task).tone">{{ taskBadge(task).label }}</Badge>
                   <Badge v-if="task.level_label" tone="neutral">{{ task.level_label }}</Badge>
                   <span v-if="task.progress?.target" class="gw-task__progress tnum">
                     {{ task.progress.current ?? 0 }}/{{ task.progress.target }}
                   </span>
                   <span class="gw-task__reward tnum">
-                    {{ task.reward_credit ? fmtCredit(task.reward_credit) + ' 积分' : '—' }}
+                    {{ task.reward_credit ? t('page.growth.task.reward', { credit: fmtCredit(task.reward_credit) }) : FMT_EMPTY }}
                   </span>
                   <Btn
-                    v-if="taskStatusOf(task).label === '可领取'"
+                    v-if="isClaimableTask(task)"
                     size="sm"
                     variant="quiet"
                     @click="claimTask(card, task)"
                   >
-                    领奖
+                    {{ t('page.growth.task.claim') }}
                   </Btn>
                 </li>
               </ul>
-              <Empty v-else compact description="这个账号还没有拉到任务清单。" />
+              <Empty v-else compact :description="t('page.growth.tasks.empty')" />
             </div>
 
             <footer class="gw-card__actions">
               <Btn size="sm" variant="default" :icon="Sparkles" :disabled="card.disabled || !card.canRun" @click="runTasks(card)">
-                做任务
+                {{ t('page.growth.card.run') }}
               </Btn>
               <Btn size="sm" variant="quiet" :disabled="card.disabled || !card.claimable" @click="claimAccount(card)">
-                领奖{{ card.claimable ? ' ' + card.claimable : '' }}
+                {{ t('page.growth.card.claim') }}{{ card.claimable ? ' ' + card.claimable : '' }}
               </Btn>
               <n-dropdown
                 trigger="click"
@@ -720,30 +852,48 @@ watch(supported, (value) => {
                 :options="actionOptions(card)"
                 @select="(key: string | number) => onActionSelect(card, key)"
               >
-                <Btn size="sm" variant="quiet" :icon="MoreHorizontal" aria-label="更多成长操作">更多</Btn>
+                <Btn size="sm" variant="quiet" :icon="MoreHorizontal" :aria-label="t('page.growth.card.moreAria')">
+                  {{ t('page.growth.card.more') }}
+                </Btn>
               </n-dropdown>
             </footer>
           </article>
         </div>
 
-        <Empty v-else :description="filters.q || filters.state ? '没有符合条件的账号。' : '当前平台还没有可管理的成长账号。'">
-          <Btn v-if="filters.q || filters.state" variant="default" size="sm" @click="resetFilters">清除筛选</Btn>
-          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">刷新</Btn>
+        <Empty
+          v-else
+          :description="filters.q || filters.state ? t('page.growth.empty.filtered') : t('page.growth.empty.all')"
+        >
+          <Btn v-if="filters.q || filters.state" variant="default" size="sm" @click="resetFilters">
+            {{ t('page.growth.clearFilters') }}
+          </Btn>
+          <Btn v-else variant="quiet" size="sm" :icon="RefreshCw" @click="refresh">{{ t('page.growth.refresh') }}</Btn>
         </Empty>
 
         <div v-if="pageData.pageCount > 1" class="gw-pager">
-          <Btn variant="quiet" size="sm" :disabled="pageData.page <= 1" @click="table.setPage(pageData.page - 1)">上一页</Btn>
-          <span class="tnum">第 {{ pageData.page }} / {{ pageData.pageCount }} 页 · 共 {{ pageData.total }} 个账号</span>
-          <Btn variant="quiet" size="sm" :disabled="pageData.page >= pageData.pageCount" @click="table.setPage(pageData.page + 1)">下一页</Btn>
+          <Btn variant="quiet" size="sm" :disabled="pageData.page <= 1" @click="table.setPage(pageData.page - 1)">
+            {{ t('page.growth.pager.prev') }}
+          </Btn>
+          <span class="tnum">
+            {{ t('page.growth.pager.text', { page: pageData.page, pageCount: pageData.pageCount, total: pageData.total }) }}
+          </span>
+          <Btn
+            variant="quiet"
+            size="sm"
+            :disabled="pageData.page >= pageData.pageCount"
+            @click="table.setPage(pageData.page + 1)"
+          >
+            {{ t('page.growth.pager.next') }}
+          </Btn>
         </div>
 
         <p v-if="excluded > 0" class="gw-footnote">
-          已排除 {{ excluded }} 个企业版账号（不参与成长任务）。
+          {{ t('page.growth.footnote.excluded', { count: excluded }) }}
         </p>
       </Card>
     </template>
 
-    <JobProgress :jobs="jobItems" title="成长任务" @hide="hideJob" />
+    <JobProgress :jobs="jobItems" :title="t('page.growth.job.title')" @hide="hideJob" />
   </div>
 </template>
 
