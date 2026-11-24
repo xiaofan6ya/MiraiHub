@@ -1107,6 +1107,10 @@
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
   <link rel="stylesheet" href="/admin/assets/desktop.css?v=20261102-ui1" />
+  <!-- 四处定向 UI 修正（#96）。**必须排在 desktop.css 之后**：里面的规则要压过
+       desktop.css 的 `.topbar-actions button` 基样式，文档顺序是最后一道保险。
+       见 ui-polish.css 文件头，为什么这里不重设设计令牌。 -->
+  <link rel="stylesheet" href="/admin/assets/ui-polish.css?v=20261124-issue96" />
   <script src="/admin/assets/boot-desktop.js?v=20261103-noinline1"></script>
 <script defer src="/static/phone-session.js"></script>
 <script defer src="/admin/assets/icons.js?v=20261026-lucide-1"></script>

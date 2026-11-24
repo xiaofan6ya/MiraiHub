@@ -1,0 +1,124 @@
+/* ============================================================================
+   UI 精修 · #96（四处定向修复）
+   ----------------------------------------------------------------------------
+   范围刻意收窄：只做这四处，不碰调色牌、不改组件基样式、不重设设计令牌。
+
+   令牌一律复用 index.html 里既有的 `--brand` / `--brand-rgb` / `--brand-ink`
+   （浅色 :201 起、深色 :328 起），本文件里 `:root` 出现 **0 次** ——
+   上一版 theme-redesign.css 是在 `:root` 里重定义了一整套 token，结果被后面
+   同名定义按文档顺序盖回去，只剩组件规则生效，出来「旧配色 + 深色侧栏」的
+   半套皮肤。同样的坑不踩第二次。
+
+   加载位置：index.html 中排在 desktop.css 之后（当前最后一支 CSS）。
+   ========================================================================== */
+
+/* ── 1. 侧边栏激活项：品牌色 3px 左边条 ─────────────────────────────────── */
+/* 底座其实早就画好了：index.html:465 的 `.side-item::after` 就是
+   `width:3px; background:var(--brand)`，只是**没有任何一条规则在激活态把
+   height 从 0 撑开**，于是它常年高 0px、等于不存在。
+   所以这里只补高度，几何 / 颜色 / `transition:height` 全用现成的。
+
+   为什么不用 `border-left: 3px`：真边框会把按钮内容整体右移 3px，要补
+   `padding-left` 才能抵消，而那又会牵连 hover 与移动端断点。枚举现成的
+   伪元素色条零位移，且自带 0.22s 过渡。 */
+.side-item.active::after {
+  height: 18px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .side-item::after { transition: none; }
+}
+
+/* ── 2. 顶栏「复制 API 地址」：品牌色描边 ───────────────────────────────── */
+/* 基样式在 desktop.css:54 的 `.topbar-actions button`（border:1px solid var(--border)），
+   与旁边的「版本与更新」图标按钮同权重，看不出主操作。
+   这里用 (0,3,0) 的复合选择器自然压过它，不靠 `!important`；
+   只命中 `.topbar-endpoint`，不波及 `.topbar-update`；
+   也不碰 width / padding —— 移动端 console.css:5606 那条
+   `.topbar-endpoint{width:36px;padding:0}` 继续生效。 */
+.desktop-topbar .topbar-actions .topbar-endpoint {
+  border-color: rgba(var(--brand-rgb), .45);
+  color: var(--brand-ink);
+  background: rgba(var(--brand-rgb), .05);
+}
+.desktop-topbar .topbar-actions .topbar-endpoint:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: rgba(var(--brand-rgb), .10);
+}
+:root[data-theme="dark"] .desktop-topbar .topbar-actions .topbar-endpoint {
+  border-color: rgba(var(--brand-rgb), .40);
+  color: var(--brand);
+  background: rgba(var(--brand-rgb), .10);
+}
+:root[data-theme="dark"] .desktop-topbar .topbar-actions .topbar-endpoint:hover {
+  border-color: var(--brand-ink);
+  background: rgba(var(--brand-rgb), .16);
+}
+
+/* ── 3. 用量日志统计条：给它一个容器 ────────────────────────────────────── */
+/* `#logStats`（index.html:2291）只有 `text-sm mt-3` 两个工具类，内容是
+   logStatChips() 生成的胶囊（console.css:2784 的 `.logstat`）。
+   整条没有边界也没有内边距，和下面的表格连成一片，扫视时找不到。
+
+   这里只加「容器感」：内边距 + 左侧 3px 品牌色条 + 轻底色 + 圆角。
+   内部胶囊的边框 / 颜色 / 字号一条都不改。
+   `:not(:empty)` 保证没数据时整个容器不出现，不留空框。 */
+#logStats:not(:empty) {
+  padding: 7px 12px;
+  margin: 12px 0 4px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+:root[data-theme="dark"] #logStats:not(:empty) {
+  background: var(--surface);
+  border-color: var(--border);
+  border-left-color: var(--brand);
+}
+
+/* ── 4. 模型标签云：超 5 行折叠 + 展开入口 ──────────────────────────────── */
+/* 折叠**不用** max-height / overflow:hidden。
+   原因：芯片浮层 `.model-chip-pop`（console.css:4354）是 `position:absolute`
+   从芯片下缘展开的，给任何祖先加 `overflow:hidden` 都会连它一起裁掉 ——
+   平台明细看不到、`model_id` 也复制不到。
+   实际做法是「行级隐藏」：由 console-app.js 量出芯片的真实行号，第 6 行之后
+   加 `.is-row-hidden`。容器本身不裁剪，浮层怎么展开都不会被切。
+
+   阈值也由 JS 按**实测行数**判定（超过 5 行才折叠），不写死 groups.length：
+   6~20 个模型在窄屏一样会超过 5 行，写死数量就会出现「被截断但没有展开入口」。
+   下面的 `.is-row-hidden` 与 `.share-models-toggle` 只是给 JS 用的样式。 */
+#shareModels .is-row-hidden {
+  display: none;
+}
+.share-models-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid rgba(var(--brand-rgb), .28);
+  border-radius: 999px;
+  background: rgba(var(--brand-rgb), .07);
+  color: var(--brand-ink);
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.share-models-toggle:hover {
+  border-color: var(--brand);
+  background: rgba(var(--brand-rgb), .12);
+}
+.share-models-toggle[hidden] {
+  display: none;
+}
+:root[data-theme="dark"] .share-models-toggle {
+  border-color: rgba(var(--brand-rgb), .45);
+  background: rgba(var(--brand-rgb), .14);
+  color: var(--brand);
+}
+:root[data-theme="dark"] .share-models-toggle:hover {
+  border-color: var(--brand);
+  background: rgba(var(--brand-rgb), .22);
+}

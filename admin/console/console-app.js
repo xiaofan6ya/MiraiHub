@@ -12102,6 +12102,8 @@ function toggleApiShare(btn) {
   const open = box.classList.toggle('is-collapsed') === false;
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   try { localStorage.setItem('wb_api_share_open', open ? '1' : '0'); } catch (e) {}
+  // 分享卡展开的那一刻 #shareModels 才第一次有布局高度，量行数要等到这时候（#96）
+  if (open) scheduleShareModelsLayout();
 }
 
 /** 恢复上次的展开状态（首屏渲染时调用一次）。 */
@@ -12113,6 +12115,9 @@ function restoreApiShareState() {
   try { open = localStorage.getItem('wb_api_share_open') === '1'; } catch (e) {}
   box.classList.toggle('is-collapsed', !open);
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // 首屏恢复成展开态时也排一次量行数（#96）；面板此刻可能还 hidden，
+  // 量不到会自动跳过，等 activateTab 触发 loadShareInfo 时补上。
+  if (open) scheduleShareModelsLayout();
 }
 
 async function loadShareInfo() {
@@ -12193,9 +12198,117 @@ async function loadShareInfo() {
           }).join("")
         : '<span class="text-xs text-slate-400">未配置模型白名单（放行全部模型）</span>';
       // 复制事件由 document 上的委派处理器统一接管（见 copyRawText 附近的说明）
+
+      // 标签云渲染完之后再量行数（#96）。这里只是排一次 60ms 防抖；
+      // 面板还 hidden / 分享卡还收着时量不到，那一次会自己跳过，
+      // 由 activateTab 与 toggleApiShare 在真正可见时补量。
+      scheduleShareModelsLayout();
     }
   } catch (e) {}
 }
+
+/* ── 模型标签云折叠（#96） ──────────────────────────────────────────────────
+   为什么不用 CSS `max-height` + `overflow:hidden`：芯片浮层 `.model-chip-pop`
+   是 `position:absolute` 从芯片下缘展开的（console.css:4354），祖先一旦裁剪，
+   平台明细就看不到、`model_id` 也复制不到 —— 上一版 PR 正是栽在这里。
+
+   现在的做法是「行级隐藏」：量出每个芯片在容器内的 y 坐标分行，超过 5 行时
+   给第 6 行之后的芯片加 `.is-row-hidden`。容器本身**完全不裁剪**，浮层照常
+   向下展开。
+
+   阈值也改成实测行数，而不是 `groups.length > 20`：6~20 个模型在窄屏一样会
+   超过 5 行，写死数量就会出现「被截断但没有展开入口」。折叠类与展开按钮由
+   **同一个判定**产生 —— 按钮不在就不折叠，从结构上排掉那种状态。
+   ========================================================================== */
+const SHARE_MODELS_MAX_ROWS = 5;
+let _shareModelsLayoutTimer = 0;
+
+/** 60ms 防抖：一次渲染只量一次；隐藏态下量不到就跳过，等下次触发。 */
+function scheduleShareModelsLayout() {
+  clearTimeout(_shareModelsLayoutTimer);
+  _shareModelsLayoutTimer = setTimeout(layoutShareModelsCollapse, 60);
+}
+
+/** 展开/收起按钮：跟着 `#shareModels` 走，只建一次；重渲染时是兄弟节点，不受 innerHTML 影响。 */
+function ensureShareModelsToggle(box) {
+  let btn = $("#shareModelsToggle");
+  if (btn) return btn;
+  if (!box || !box.parentNode) return null;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = "shareModelsToggle";
+  btn.className = "share-models-toggle";
+  btn.hidden = true;
+  btn.setAttribute("aria-expanded", "false");
+  btn.addEventListener("click", () => {
+    const expanded = !box.classList.contains("is-expanded");
+    box.classList.toggle("is-expanded", expanded);
+    if (expanded) {
+      box.querySelectorAll(".is-row-hidden").forEach(el => el.classList.remove("is-row-hidden"));
+      syncShareModelsToggle(box, $("#shareModelsToggle"));
+    } else {
+      // 收起：重新量一次行数再按「第 5 行之后隐藏」放回去，比记旧集合稳
+      layoutShareModelsCollapse();
+    }
+  });
+  box.parentNode.insertBefore(btn, box.nextSibling);
+  return btn;
+}
+
+function syncShareModelsToggle(box, btn, total) {
+  if (!btn) return;
+  const expanded = box.classList.contains("is-expanded");
+  const count = total == null ? box.querySelectorAll(".model-chip-wrap").length : total;
+  btn.textContent = expanded ? "收起" : "展开全部 " + count + " 个模型";
+  btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+function layoutShareModelsCollapse() {
+  const box = $("#shareModels");
+  if (!box) return;
+  const chips = Array.from(box.querySelectorAll(".model-chip-wrap"));
+  const btn = $("#shareModelsToggle");
+  // 先把上一轮的隐藏还原：隐藏项不占行，不还原就会越量行数越少
+  chips.forEach(el => el.classList.remove("is-row-hidden"));
+  const boxRect = box.getBoundingClientRect();
+  // 面板还 hidden / 分享卡还收着时高度是 0、所有芯片 top 都是 0。
+  // 这时候**什么都不做**，绝不用数量去猜一个阈值，等下次触发再量。
+  if (!chips.length || boxRect.height <= 0) {
+    if (btn) btn.hidden = true;
+    return;
+  }
+  // 一次性把坐标量完再动 DOM：边量边隐会触发重排，后面的测量值就废了
+  const tops = chips.map(el => Math.round(el.getBoundingClientRect().top - boxRect.top));
+  const rows = [];
+  tops.forEach(top => {
+    if (!rows.length || top - rows[rows.length - 1] > 2) rows.push(top);
+  });
+  if (rows.length <= SHARE_MODELS_MAX_ROWS) {
+    // 没超过 5 行：不需要展开入口，也就绝不能折叠
+    box.classList.remove("is-expanded");
+    if (btn) { btn.hidden = true; btn.setAttribute("aria-expanded", "false"); }
+    return;
+  }
+  const toggle = ensureShareModelsToggle(box);
+  if (!box.classList.contains("is-expanded")) {
+    const limit = rows[SHARE_MODELS_MAX_ROWS - 1];
+    chips.forEach((el, i) => { if (tops[i] > limit + 2) el.classList.add("is-row-hidden"); });
+  }
+  if (toggle) {
+    toggle.hidden = false;
+    syncShareModelsToggle(box, toggle, chips.length);
+  }
+}
+
+// 窗口宽度变化会改变「一行放得下几个芯片」，行数跟着变 —— 收起态下重新量一次。
+let _shareModelsResizeTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(_shareModelsResizeTimer);
+  _shareModelsResizeTimer = setTimeout(() => {
+    const box = $("#shareModels");
+    if (box && !box.classList.contains("is-expanded")) layoutShareModelsCollapse();
+  }, 150);
+});
 function renderShareAddress(origin) {
   // 两个 SDK 对 base_url 的约定不同，必须分别给出：
   //   OpenAI 系    -> origin + "/v1"（SDK 自己拼 /chat/completions）
