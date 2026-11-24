@@ -7,6 +7,7 @@
  *   3. 与旧版输出对齐的口径写在每个函数上方；旧版有分歧时按 05-patterns §4 的规则，
  *      差异见 docs/ui-v2/contracts/platform-context.md 的"格式化口径"一节。
  */
+import { t } from '@/i18n'
 
 /** 空值的统一占位符（旧版 console-app.js:325 FMT_EMPTY）。 */
 export const FMT_EMPTY = '—'
@@ -198,14 +199,14 @@ export function fmtRelative(value: unknown, now = Date.now()): string {
   const date = toDate(value)
   if (!date) return FMT_EMPTY
   const diff = now - date.getTime()
-  if (diff < 60000) return '刚刚'
-  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前'
-  if (diff < DAY_MS) return Math.floor(diff / 3600000) + ' 小时前'
+  if (diff < 60000) return t('common.relative.justNow')
+  if (diff < 3600000) return t('common.relative.minutes', { count: Math.floor(diff / 60000) })
+  if (diff < DAY_MS) return t('common.relative.hours', { count: Math.floor(diff / 3600000) })
   const p = beijingParts(date)
   const q = beijingParts(new Date(now))
   const dateDay = Date.UTC(p.y, p.mo - 1, p.d)
   const nowDay = Date.UTC(q.y, q.mo - 1, q.d)
-  if (diff > 0 && nowDay - dateDay === DAY_MS) return '昨天'
+  if (diff > 0 && nowDay - dateDay === DAY_MS) return t('common.relative.yesterday')
   if (p.y === q.y) return pad2(p.mo) + '-' + pad2(p.d)
   return p.y + '-' + pad2(p.mo) + '-' + pad2(p.d)
 }
