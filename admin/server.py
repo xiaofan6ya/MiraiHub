@@ -753,13 +753,16 @@ def login(
     # 「全局锁」，任何人打几次错误密码就能把真管理员锁在门外。
     ip = client_ip_from_request(request)
     fingerprint = _login_fingerprint(request) if request else None
-    locked, wait = is_locked(ip, username, fingerprint)
-    if locked:
-        raise HTTPException(
-            status_code=429,
-            detail=f"登录尝试过于频繁，请 {wait} 秒后再试",
-            headers={"Retry-After": str(wait)},
-        )
+    # 登录失败锁定默认关闭（ADMIN_LOGIN_RATE_LIMIT=1 才启用，见 config.py）。
+    rate_limited = bool(getattr(settings, "LOGIN_RATE_LIMIT_ENABLED", False))
+    if rate_limited:
+        locked, wait = is_locked(ip, username, fingerprint)
+        if locked:
+            raise HTTPException(
+                status_code=429,
+                detail=f"登录尝试过于频繁，请 {wait} 秒后再试",
+                headers={"Retry-After": str(wait)},
+            )
     # 未配置凭据时直接拒绝（不能退化成「空口令可登录」）
     if not settings.ADMIN_USERNAME or not settings.ADMIN_PASSWORD:
         raise HTTPException(
@@ -769,7 +772,8 @@ def login(
     if username != settings.ADMIN_USERNAME or not verify_password(password, _get_stored_hash()):
         # 三个维度各自计数：成对键锁「这个 IP × 这个用户名」，
         # IP 全局键兜住换用户名撒网，指纹键兜住换 IP 共用指纹。
-        record_failure(ip, username, fingerprint)
+        if rate_limited:
+            record_failure(ip, username, fingerprint)
         logger.warning("后台登录失败 ip=%s username=%s fp=%s", ip, username[:40], fingerprint or "-")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     # 密码正确：清空成对与 IP 全局计数（指纹维度也一并清，避免误伤后续正常登录）。

@@ -331,6 +331,11 @@ class Settings:
     LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("ADMIN_LOGIN_IP_MAX_ATTEMPTS", "0"))  # 0 = 自动取主维度阈值 ×3
     LOGIN_WINDOW_SECONDS = int(os.getenv("ADMIN_LOGIN_WINDOW_SECONDS", "300"))  # 5 分钟窗口
     LOGIN_LOCK_SECONDS = int(os.getenv("ADMIN_LOGIN_LOCK_SECONDS", "900"))      # 锁 15 分钟
+    #: 登录失败锁定总开关（2026-11-24 默认关闭：管理员反馈总把自己锁在门外）。
+    #: 关闭后输错密码只返回 401，不计数、不锁定。公网部署想恢复防爆破时设
+    #: ADMIN_LOGIN_RATE_LIMIT=1，上面四个阈值照常生效。
+    LOGIN_RATE_LIMIT_ENABLED = os.getenv("ADMIN_LOGIN_RATE_LIMIT", "0").strip().lower() in (
+        "1", "true", "yes", "on")
 
     # ---------- 风控封号自动复核（11140 等 account_fault）----------
     #: 后台定时对「禁用/冷却中的风控号」做一次**真实模型调用**探测：

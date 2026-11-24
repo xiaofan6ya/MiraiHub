@@ -506,19 +506,28 @@ def responses_input_to_messages(items) -> list[dict]:
                 messages.append({"role": role, "content": "".join(texts)})
             continue
         if kind == "function_call":
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": str(item.get("call_id") or item.get("id")
-                               or ("call_%d" % len(messages))),
-                    "type": "function",
-                    "function": {
-                        "name": str(item.get("name") or "unknown"),
-                        "arguments": str(item.get("arguments") or "{}"),
-                    },
-                }],
-            })
+            call = {
+                "id": str(item.get("call_id") or item.get("id")
+                           or ("call_%d" % len(messages))),
+                "type": "function",
+                "function": {
+                    "name": str(item.get("name") or "unknown"),
+                    "arguments": str(item.get("arguments") or "{}"),
+                },
+            }
+            # 并行工具调用：Responses 协议把同一轮的 N 个调用拆成 N 个
+            # 相邻的 function_call 项（Codex「Ran code and ran commands」
+            # 就是这种形态）。逐个转成 N 条 assistant 消息会得到
+            #     assistant(tc1) → assistant(tc2) → tool(1) → tool(2)
+            # 这是非法的 chat 序列（tool_calls 之后必须紧跟它的 tool 结果），
+            # Marvis 上游直接回 400 3000101 invalid parameter。
+            # 所以：紧挨着的上一条是 assistant（含前面那句说明文字）就并进去。
+            last = messages[-1] if messages else None
+            if isinstance(last, dict) and last.get("role") == "assistant":
+                last.setdefault("tool_calls", []).append(call)
+            else:
+                messages.append({"role": "assistant", "content": None,
+                                 "tool_calls": [call]})
             continue
         if kind == "function_call_output":
             out = item.get("output")
@@ -536,7 +545,106 @@ def responses_input_to_messages(items) -> list[dict]:
             continue
         # reasoning / local_shell_call / web_search_call / item_reference 等：
         # 上游 chat 协议不可承载，丢弃。
-    return messages
+    return repair_tool_pairing(messages)
+
+
+def repair_tool_pairing(messages: list) -> list:
+    """把 OpenAI messages 里的工具调用整理成上游一定认的合法序列。
+
+    严格的 chat 后端（Marvis / DeepSeek 系）要求：带 `tool_calls` 的 assistant
+    之后**紧跟**它每个 id 的 `role=tool` 结果，中间不能插别的消息；`tool`
+    结果也必须有前置的调用。任何一条不满足都整条 400（Marvis 回
+    `3000101 invalid parameter`，不说是哪条）。客户端历史里常见的破坏形态：
+
+      1. 调用与结果之间插进了 user / system 消息（Codex 的子代理完成通知、
+         环境上下文、用户在工具执行中追加的话）；
+      2. 结果的调用被丢了（`local_shell_call` 等不可承载项被丢弃，但它的
+         `function_call_output` 还在）——孤儿结果；
+      3. 调用没有结果（客户端中断 / 截断历史）——悬空调用；
+      4. 相邻两条 assistant 各带一部分 tool_calls（并行调用被拆开）。
+
+    处置：插队的消息**挪到**这组结果之后（不丢内容）；孤儿结果丢掉；悬空
+    调用从 tool_calls 里摘掉（assistant 正文保留，摘空就去掉键）；相邻
+    assistant 的 tool_calls 合并。已合法的序列原样返回同一个列表对象。
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    has_tools = any(isinstance(m, dict) and (m.get("role") == "tool" or m.get("tool_calls"))
+                    for m in messages)
+    if not has_tools:
+        return messages
+
+    out: list = []
+    deferred: list = []          # 调用与结果之间插队的消息
+    pending: dict = {}           # 待回结果的 call id -> 所属 assistant
+    owner = None                 # 当前这组调用所属的 assistant 消息（out 里的对象）
+    changed = False
+
+    def close_group() -> None:
+        nonlocal owner, changed
+        if owner is not None and pending:
+            keep = [tc for tc in owner.get("tool_calls") or []
+                    if not (isinstance(tc, dict) and tc.get("id") in pending)]
+            if keep:
+                owner["tool_calls"] = keep
+            else:
+                owner.pop("tool_calls", None)
+                if not owner.get("content"):
+                    # 摘空了又没有正文：整条去掉（空 assistant 同样会被严格后端拒）
+                    for index in range(len(out) - 1, -1, -1):
+                        if out[index] is owner:
+                            del out[index]
+                            break
+            changed = True
+        pending.clear()
+        owner = None
+        if deferred:
+            out.extend(deferred)
+            deferred.clear()
+
+    for raw in messages:
+        if not isinstance(raw, dict):
+            (deferred if pending else out).append(raw)
+            continue
+        role = raw.get("role")
+        if role == "assistant" and raw.get("tool_calls"):
+            calls = [tc for tc in raw.get("tool_calls") or [] if isinstance(tc, dict)]
+            if pending and not deferred and owner is not None and owner is out[-1]:
+                # 4. 相邻 assistant 各带一部分并行调用：并进上一条
+                owner["tool_calls"] = list(owner.get("tool_calls") or []) + calls
+                if raw.get("content") and not owner.get("content"):
+                    owner["content"] = raw.get("content")
+                for tc in calls:
+                    pending[str(tc.get("id") or "")] = owner
+                changed = True
+                continue
+            close_group()
+            msg = dict(raw, tool_calls=calls)
+            out.append(msg)
+            owner = msg
+            for tc in calls:
+                pending[str(tc.get("id") or "")] = msg
+            continue
+        if role == "tool":
+            tid = str(raw.get("tool_call_id") or "")
+            if tid and tid in pending:
+                pending.pop(tid, None)
+                out.append(raw)
+                if deferred:
+                    changed = True
+                if not pending:
+                    close_group()
+                continue
+            # 2. 孤儿结果：没有前置调用（或调用已被关闭）
+            changed = True
+            continue
+        if pending:
+            # 1. 插队消息：先存着，等这组结果回齐再放
+            deferred.append(raw)
+            continue
+        out.append(raw)
+    close_group()
+    return out if changed else messages
 
 
 def responses_to_openai(body: dict) -> dict:
