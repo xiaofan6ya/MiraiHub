@@ -96,7 +96,6 @@ async function copyApi(): Promise<void> {
       <button
         type="button"
         class="cmdk"
-        :aria-label="t('shell.searchOrJump')"
         :aria-keyshortcuts="'Control+K Meta+K'"
         @click="openCommandPalette"
       >

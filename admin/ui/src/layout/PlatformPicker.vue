@@ -92,7 +92,6 @@ watch(open, (value) => {
         class="picker"
         :aria-expanded="open ? 'true' : 'false'"
         aria-haspopup="listbox"
-        :aria-label="t('picker.switchAria', { name: currentLabel })"
       >
         <PlatformLogo :id="currentSpec?.icon || currentId" :size="20" />
         <span class="picker-label">{{ currentLabel }}</span>
