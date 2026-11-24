@@ -2315,10 +2315,20 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                     "Marvis 登录态已过期%s：请在控制台「授权登录」重新扫码（QQ / 微信）"
                     % extra, status=401, code="credential_expired", kind="auth",
                     detail=detail)
+            # 额度类失败（3000001 / 1000007）必须落一个「不可选」标记：
+            # `select_account` 只看 `balance_remain > 0 OR IS NULL`，而这类号
+            # 余额停在旧的正数、`last_used_at` 又因为从没成功过而恒排队首，
+            # 于是每条请求都先白撞它们一次（2026-11-24 线上实测单日 3582 次 402）。
+            # 交给 `note_failure` 按 `balance_total` 分流：有配额痕迹的号进
+            # 30 分钟降级窗口（`degrade_until`，可恢复），没有配额痕迹的才清零。
+            # `max_input_tokens`（3000100）是「该号 × 该模型」的当次预算问题，
+            # 已由 `account_model_cool` 单独处理，不能在这里清零整个号的余额。
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "risk_control") else 0))
+                cool_seconds=(600 if exc.kind in ("auth", "risk_control") else 0),
+                zero_balance=(exc.kind == "quota_exceeded"),
+                code=str(exc.code or ""))
             last_error = exc
             exclude.add(account.id)
             # 参数类错误换号也没用，直接停
