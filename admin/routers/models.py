@@ -119,13 +119,20 @@ def _invalidate_routing_cache() -> None:
         pass
 
 
-def _get_enabled_models(db: Session) -> set[str]:
-    """获取当前启用的模型 ID 集合（用于代理过滤）。"""
+def _get_enabled_models(db: Session, platform: str | None = None) -> set[str]:
+    """获取当前启用的模型 ID 集合（用于代理过滤）。
+
+    `platform` 给定时只看该平台（委托 `workbuddy.scoping.enabled_models`，D3）；
+    默认 None = 旧行为（全库），未改造的调用方不受影响。
+    """
+    if platform is not None:
+        from admin.platform.workbuddy import scoping
+        return scoping.enabled_models(db, platform)
     rows = db.query(ModelConfig).filter(ModelConfig.enabled == 1).all()
     return {m.model_id for m in rows}
 
 
-def _get_free_models(db: Session) -> set[str]:
+def _get_free_models(db: Session, platform: str | None = None) -> set[str]:
     """获取当前启用且**真免费**的模型 ID 集合。
 
     ## 判定规则
@@ -141,7 +148,12 @@ def _get_free_models(db: Session) -> set[str]:
 
     原来把 `is NULL` 和 `== 0` 一起当免费，还漏了负值 ——
     Loomy 这种「无量纲」平台会被整体误判成免费。
+
+    `platform` 给定时只看该平台（委托 `workbuddy.scoping.free_models`，D3）。
     """
+    if platform is not None:
+        from admin.platform.workbuddy import scoping
+        return scoping.free_models(db, platform)
     rows = db.query(ModelConfig).filter(
         ModelConfig.enabled == 1,
         (
@@ -192,8 +204,14 @@ def _is_free_model(db: Session, platform: str, model_id: str) -> bool:
     return (target, model_id) in _get_free_models_scoped(db)
 
 
-def _is_model_allowed(db: Session, model_id: str) -> bool:
-    """检查模型是否在白名单内。没有任何配置时放行全部（向后兼容）。"""
+def _is_model_allowed(db: Session, model_id: str, platform: str | None = None) -> bool:
+    """检查模型是否在白名单内。没有任何配置时放行全部（向后兼容）。
+
+    `platform` 给定时只按该平台的白名单判（该平台没有配置时放行，D3）。
+    """
+    if platform is not None:
+        from admin.platform.workbuddy import scoping
+        return scoping.is_model_allowed(db, model_id, platform)
     configs = db.query(ModelConfig).all()
     if not configs:
         return True  # 未配置任何模型规则，放行
@@ -1643,7 +1661,8 @@ async def _speed_test_run(body, request, db):
         max_tokens = 64
     messages = body.get("messages") or _SPEED_TEST_PROMPT
 
-    if not _is_model_allowed(db, model):
+    # 测速走的是 WorkBuddy 主号池（proxy._select_account），白名单也只看 WorkBuddy（D3）
+    if not _is_model_allowed(db, model, platform="workbuddy"):
         raise HTTPException(400, "模型未启用")
     from admin.routers.proxy import (_blocking_call, _select_account, _classify_error,
                                      _apply_account_policy, _parse_usage, _looks_like_inband_error,

@@ -15,6 +15,7 @@ from admin.growth_center import (fields, identity, load_snapshot, record_result,
                                   snapshot_key, stamp, store_snapshot, update_snapshot)
 from admin.growth_plan import _DAY_TZ, _Lease, _read, _write
 from admin.models import Account, GrowthPlanRecord, Schedule, SystemSetting
+from admin.platform.workbuddy import scoping as wb_scope
 from admin.security import require_admin
 from admin.schedule_timing import cycle_label
 
@@ -29,6 +30,8 @@ def _account(db, aid):
     account = db.get(Account, aid)
     if account is None:
         raise HTTPException(404, "账号不存在")
+    # 成长中心是 WorkBuddy 专属（D2）：别的平台的号 400，不去打腾讯的成长接口
+    wb_scope.require_workbuddy(account, "成长中心")
     return account
 
 
@@ -40,7 +43,9 @@ def _status(aid):
 @router.get("/accounts")
 def list_accounts(db: Session = Depends(get_db)):
     from admin.scheduler import _account_label
-    all_rows = db.query(Account).order_by(Account.id).all()
+    # 只列 WorkBuddy 账号（D2）：原来返回全部平台的号，前端对每个号逐个请求
+    # `/growth/accounts/{id}/tasks`（实测 194 个号里大部分不是 WorkBuddy）。
+    all_rows = wb_scope.filter_workbuddy(db.query(Account)).order_by(Account.id).all()
     # 企业版账号不参与成长任务：不进列表，但把数量回给前端 ——
     # 否则用户只看到「暂无账号」，会以为号丢了。
     rows = [a for a in all_rows if not (a.enterprise_id or "").strip()]

@@ -121,7 +121,11 @@ def _redis_put(key, value, ttl):
     if client is None:
         return
     try:
-        payload = json.dumps(value, ensure_ascii=False, default=str)
+        # 第 5 轮：MySQL DECIMAL 聚合偶尔回 Decimal；default=str 会把它写成字符串 "1.23"，
+        # 别的 worker 从 L2 读回来就是字符串（前端显示 / 再做加法都错）→ Decimal 转 float
+        from admin.money import json_default
+
+        payload = json.dumps(value, ensure_ascii=False, default=json_default)
         client.setex("wb:stats:" + key[0] + ":" + key[1],
                      int(min(max(ttl, 10.0), _REDIS_TTL_CAP)), payload)
     except Exception:  # noqa: BLE001
@@ -139,9 +143,21 @@ def cache_get(key):
     return hit
 
 
+def _normalize(value):
+    """第 5 轮：只在未命中（compute / put）时走一遍，把 MySQL 回来的 Decimal 转 float，
+    让 L1 与 L2 拿到同一种数字类型（命中路径不受影响）。"""
+    try:
+        from admin.money import floatify
+
+        return floatify(value)
+    except Exception:  # noqa: BLE001 - 缓存永远不能打断业务
+        return value
+
+
 def cache_put(key, value, ttl=None):
     """写入两层。序列化失败的值只进 L1（Redis 层静默跳过）。"""
     ttl = _DEFAULT_TTL if ttl is None else float(ttl)
+    value = _normalize(value)
     _l1_put(key, value, ttl)
     _redis_put(key, value, ttl)
 
@@ -170,7 +186,7 @@ def cached(key, compute, ttl=None):
             return hit
         # leader 失败/超时：自己算，不再排队
     try:
-        value = compute()
+        value = _normalize(compute())
         ttl = _DEFAULT_TTL if ttl is None else float(ttl)
         _l1_put(key, value, ttl)
     finally:

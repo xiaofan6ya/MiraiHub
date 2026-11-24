@@ -2,9 +2,23 @@
 from datetime import datetime
 
 from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Float, Index,
-                      Integer, String, Text, UniqueConstraint)
+                      Integer, Numeric, String, Text, UniqueConstraint)
 
 from admin.db import Base
+
+
+def Money():
+    """金额 / 积分 / 倍率列的类型（修复批次 3 · D8，审查 B-3）。
+
+    SQLAlchemy 的 `Float()` 在 MySQL 上生成 4 字节单精度 `FLOAT`（约 7 位有效数字）：
+    `credit_used` 累计到 20 万左右时最小步长约 0.016，一次 0.01 积分的扣费会被
+    **直接舍掉**，Key 限额永远到不了。MySQL / MariaDB 上改用 `DECIMAL(18,6)`；
+    `asdecimal=False` 让 Python 侧仍拿到 float，业务代码不受影响。
+    SQLite 的 REAL 本来就是双精度，保持 `Float` 不变（老库、新库都不受影响）。
+    已有 MySQL 库的列由 `admin.money_columns.migrate_money_columns()` 迁移一次。
+    """
+    decimal = Numeric(18, 6, asdecimal=False)
+    return Float().with_variant(decimal, "mysql").with_variant(decimal, "mariadb")
 
 
 class Account(Base):
@@ -141,9 +155,9 @@ class ApiKey(Base):
     name = Column(String(120), default="")
     key_hash = Column(String(128), unique=True, nullable=False)
     key_prefix = Column(String(16), default="")  # 展示用前缀
-    key_full = Column(String(2048), default="")  # 完整密钥（仅管理后台查看用，base64 编码存储）
-    credit_limit = Column(Float, default=0)  # 限额（credits）；unlimited=True 时忽略
-    credit_used = Column(Float, default=0)
+    key_full = Column(String(2048), default="")  # 完整密钥（仅管理后台查看用，secret_box 加密存储（兼容旧 base64））
+    credit_limit = Column(Money(), default=0)  # 限额（credits）；unlimited=True 时忽略
+    credit_used = Column(Money(), default=0)
     unlimited = Column(Integer, default=1)  # New keys default to unlimited; existing limits are preserved.
     # 该 Key 并发上限：NULL=跟随全局 ADMIN_GATEWAY_MAX_CONCURRENT；0=不限；N=最多 N 路在途
     # 注意：这是准入层限制，与账号层 ADMIN_POOL_MAX_IN_FLIGHT（防单号雪崩）相互独立。
@@ -284,7 +298,7 @@ class UsageLog(Base):
     api_key_id = Column(Integer, nullable=False, default=0)
     account_id = Column(Integer, nullable=False, default=0)
     model = Column(String(120), default="")
-    credits = Column(Float, default=0)
+    credits = Column(Money(), default=0)
     # 详细用量：优先取上游 usage 字段；缺省为 NULL
     prompt_tokens = Column(Integer, nullable=True, default=None)
     completion_tokens = Column(Integer, nullable=True, default=None)
@@ -352,7 +366,7 @@ class UsageRollup(Base):
     completion_tokens = Column(BigInteger, nullable=False, default=0)
     total_tokens = Column(BigInteger, nullable=False, default=0)
     cached_tokens = Column(BigInteger, nullable=False, default=0)
-    credits = Column(Float, nullable=False, default=0)
+    credits = Column(Money(), nullable=False, default=0)
     latency_sum = Column(BigInteger, nullable=False, default=0)
     latency_count = Column(BigInteger, nullable=False, default=0)
     ttfb_sum = Column(BigInteger, nullable=False, default=0)
@@ -678,7 +692,7 @@ class ModelConfig(Base):
     model_id = Column(String(120), nullable=False)  # 模型 ID，如 "deepseek-v4-flash"
     enabled = Column(Integer, default=1)  # 0/1
     note = Column(String(255), default="")
-    credit_multiplier = Column(Float, default=0)  # 积分消耗倍率；0=免费模型
+    credit_multiplier = Column(Money(), default=0)  # 积分消耗倍率；0=免费模型
     credits_raw = Column(String(120), default="")  # 原始 credits 字符串（如 "x0.05" / "x0.00 credits"）
     description = Column(Text, default="")  # 官方模型说明，独立于用户备注
     upstream_metadata = Column(Text, default="{}")  # 官方活动规则 / 名称，保留完整时间配置
@@ -724,7 +738,7 @@ class VideoTask(Base):
     result_json = Column(Text, default="{}")
     error_code = Column(String(64), default="")
     error_message = Column(String(512), default="")
-    credits = Column(Float, default=0)
+    credits = Column(Money(), default=0)
     #: 创建任务时写入的用量日志行（在途时 credits=0）。完成后再按上游
     #: 真实 usage.credit 回填同一条，避免一次生成在账本里出现两行。
     usage_log_id = Column(Integer, default=0)
@@ -797,7 +811,7 @@ class AgentAsset(Base):
     bytes = Column(Integer, default=0)
     duration_s = Column(Float, default=0)
     prompt = Column(Text, default="")
-    credits = Column(Float, default=0)
+    credits = Column(Money(), default=0)
     meta_json = Column(Text, default="{}")
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -853,6 +867,10 @@ class Schedule(Base):
     #: 平台一多就会把 Trae 的号也塞进 WorkBuddy 的签到/成长任务里，
     #: 轻则报错刷日志，重则把上游风控引到无辜账号上。
     platform = Column(String(24), default="workbuddy")
+    #: 任务绑定的区（`cn` / `intl`）；空 = 不限区（按账号自己的区跑，与原行为一致）。
+    #: N-9：调度器一直在读 `schedule.realm`，模型里却没有这一列（恒为空）。
+    #: 老库由 `db.init_db` 的 `_ensure_column("schedules", "realm", ...)` 补列。
+    realm = Column(String(16), default="")
     interval_minutes = Column(Integer, default=60)
     timing_config = Column(Text, default="")  # 空值保留系统预设；JSON 为用户执行周期
     enabled = Column(Integer, default=1)  # 0/1

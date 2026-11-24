@@ -383,6 +383,16 @@ def _reasoning_effort(payload: dict) -> str:
     return reasoning_effort_of(payload)
 
 
+def _usage_write_session():
+    """记账写会话（P7）：开了 `ADMIN_SQLITE_BEGIN_IMMEDIATE=1` 时用 `db.write_session()`
+    （BEGIN IMMEDIATE，避免 WAL 下读锁升级写锁立刻 SQLITE_BUSY），否则同原来的 `SessionLocal()`。"""
+    from admin import db as _admin_db
+
+    if getattr(_admin_db, "_SQLITE_EXPLICIT_BEGIN", False):
+        return _admin_db.write_session()
+    return SessionLocal()
+
+
 def _record_usage(key_id: int, account_id: int, model: str, credits: float | None,
                   updated_auth_json: str | None, *,
                   client_ip: str = "", use_case: str = "",
@@ -403,107 +413,128 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
     - None 表示上游未返回真实积分，此时按模型倍率估算；
     - 0.0 表示上游明确返回 0 或请求失败，不再估算。
 
-    若本次使用了估算值，会启动后台线程在 60 秒后调用上游用量接口回写真实积分。
+    若本次使用了估算值，会启动后台线程在 60 秒后调用上游用量接口回写真实积分；
+    该线程在启动**之前**取 job 租约（排空会等它，封口后不再启动），见
+    _start_real_credits_backfill。
     """
     log_id = None
     try:
-        db = SessionLocal()
-        try:
-            # 先取账号：错误记录（无号 / 准入失败）时 account_id 可能为 0，
-            # 但只要有账号就必须先拿到它，才能按**平台**选对倍率。
-            acc = (db.query(Account).filter(Account.id == account_id).with_for_update().first()
-                   if account_id else None)
-            resolved_platform = (platform or (getattr(acc, "platform", "") if acc else "")
-                                 or registry.DEFAULT_PLATFORM)
-            # 上游 usage 没给 credits 时，用本地模型配置的 credit_multiplier 估算。
-            # credit_multiplier 在 model_configs 里保存的是「每千 token 积分」，
-            # 因此估算公式为 total_tokens * multiplier / 1000；
-            # 当 total_tokens 缺失时用 completion_tokens 兜底。
-            estimated = False
-            original_credits = credits
-            # **`credits <= 0` 也要估算**，不能只判 `None`。
-            #
-            # 实测 WorkBuddy 上游返回 `usage.credit = 0`（它根本没算积分，
-            # 而不是「免费」）。按原逻辑 0 表示「上游明确说免费」→ 直接落库，
-            # 于是所有请求积分都是 0。
-            #
-            # 判据：模型在库里配了正倍率，就按倍率估算 —— 库里的倍率是
-            # 我们自己维护的定价，比上游那个 0 可信。
-            if (credits is None or float(credits or 0) <= 0) and (total_tokens or completion_tokens):
-                # 必须限定平台：不同平台可以有同名 model_id
-                # （workbuddy 与 trae 都有 `glm-5.2`），不带平台条件时
-                # `.first()` 可能命中另一个平台的倍率，导致记错账。
-                #
-                # **模型名要做候选匹配**：客户端发的是规范 slug
-                # （`deepseek-v4.1-flash-workbuddy`，带平台后缀），
-                # 库里存的是上游原始 id（`deepseek-v4.1-flash`）。
-                # 只按字面量精确查 → 查不到 → 倍率 0 → 积分显示 0
-                # 。
-                from admin.platform.shared import _billing_candidates
+        _credits_in = credits
 
-                mc = None
-                for _name in _billing_candidates(model or ""):
-                    mc = db.query(ModelConfig).filter(
-                        ModelConfig.model_id == _name,
-                        ModelConfig.platform == resolved_platform,
-                        ModelConfig.enabled == 1).first()
-                    if mc is not None and (mc.credit_multiplier or 0) > 0:
-                        break
-                    # 兜底只认**没有平台归属**的历史行，不能跨平台借用倍率：
-                    # 同一个可读名在 workbuddy 是 0.11、在 marvis 是 -1，
-                    # 借错了算出来差一个数量级、甚至正负相反。
-                    mc = db.query(ModelConfig).filter(
-                        ModelConfig.model_id == _name,
-                        ModelConfig.enabled == 1,
-                        or_(ModelConfig.platform.is_(None),
-                            ModelConfig.platform == "")).first()
-                    if mc is not None and (mc.credit_multiplier or 0) > 0:
-                        break
-                # **只有正倍率才是「倍率」**（issue #78）。
+        def _commit_once():
+            # P7：开会话 → 扣费 → 写日志 → commit 整段可安全重试 —— commit 之前
+            # 任何失败都整体回滚，重来不会重复扣费。commit 之后的步骤（汇总表、
+            # 内容缓存、真实积分回填）不在重试范围内。
+            credits = _credits_in
+            db = _usage_write_session()
+            try:
+                # 先取账号：错误记录（无号 / 准入失败）时 account_id 可能为 0，
+                # 但只要有账号就必须先拿到它，才能按**平台**选对倍率。
+                acc = (db.query(Account).filter(Account.id == account_id).with_for_update().first()
+                       if account_id else None)
+                resolved_platform = (platform or (getattr(acc, "platform", "") if acc else "")
+                                     or registry.DEFAULT_PLATFORM)
+                # 上游 usage 没给 credits 时，用本地模型配置的 credit_multiplier 估算。
+                # credit_multiplier 在 model_configs 里保存的是「每千 token 积分」，
+                # 因此估算公式为 total_tokens * multiplier / 1000；
+                # 当 total_tokens 缺失时用 completion_tokens 兜底。
+                estimated = False
+                original_credits = credits
+                # **`credits <= 0` 也要估算**，不能只判 `None`。
                 #
-                # `credit_multiplier < 0` 是约定里的「该平台没有倍率概念、
-                # 按上游 usage 计量」标记（见 `admin/routers/models.py` 的
-                # `_get_free_models`）：Trae 全表、CodeArts、MiniMax、Loomy
-                # 以及 workbuddy 的 hunyuan-chat / kling-video-v3 都是 -1。
+                # 实测 WorkBuddy 上游返回 `usage.credit = 0`（它根本没算积分，
+                # 而不是「免费」）。按原逻辑 0 表示「上游明确说免费」→ 直接落库，
+                # 于是所有请求积分都是 0。
                 #
-                # 原来用真值判断 `if mult:`，负值一样过 → 每次请求算出
-                # `tokens * -1 / 1000` 的**负积分** → Key 的「已用」被反向
-                # 冲减，越用越小，最后变成 -61.754 甚至 -106836（等于凭空
-                # 涨额度），剩余额度还会超过限额本身。
-                mult = float(getattr(mc, "credit_multiplier", 0) or 0) if mc else 0.0
-                if mult > 0:
-                    toks = total_tokens if total_tokens else completion_tokens
-                    credits = float(toks) * mult / 1000.0
-                    estimated = True
-            if credits is None:
-                credits = 0.0
-            _logger.info("记录用量 platform=%s model=%s raw_credits=%s est=%s pt=%s ct=%s tt=%s cached=%s client_ip=%s use_case=%s",
-                         resolved_platform, model, original_credits, credits, prompt_tokens, completion_tokens, total_tokens,
-                         cached_tokens, client_ip, use_case)
-            # 扣减量一律取绝对值（issue #78）：`credits` 的符号只表达「计量
-            # 方向」，不代表「给用户加额度」。上游偶尔回负的 credit，或历史
-            # 数据里算出负值，直接累加都会把「已用」往回冲。
-            debit = abs(float(credits or 0))
-            db.query(ApiKey).filter(ApiKey.id == key_id).update(
-                {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + debit}, synchronize_session=False)
-            if acc is not None:
-                acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(debit))
-                acc.last_used_at = datetime.utcnow()
-                if updated_auth_json and persist_auth:
-                    acc.auth_json = updated_auth_json
-            diagnostic_json, attempted_account = request_metrics.usage_evidence(error_kind)
-            log = UsageLog(
-                diagnostic_json=diagnostic_json,
-                platform=(resolved_platform or "").lower(),
-                api_key_id=key_id, account_id=account_id or attempted_account, model=model, credits=credits,
-                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-                total_tokens=total_tokens, cached_tokens=cached_tokens,
-                client_ip=client_ip or "", use_case=use_case or "",
-                reasoning_effort=reasoning_effort,
-                seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms, error_kind=error_kind or "",
-            )
-            db.add(log)
-            db.commit()
+                # 判据：模型在库里配了正倍率，就按倍率估算 —— 库里的倍率是
+                # 我们自己维护的定价，比上游那个 0 可信。
+                if (credits is None or float(credits or 0) <= 0) and (total_tokens or completion_tokens):
+                    # 必须限定平台：不同平台可以有同名 model_id
+                    # （workbuddy 与 trae 都有 `glm-5.2`），不带平台条件时
+                    # `.first()` 可能命中另一个平台的倍率，导致记错账。
+                    #
+                    # **模型名要做候选匹配**：客户端发的是规范 slug
+                    # （`deepseek-v4.1-flash-workbuddy`，带平台后缀），
+                    # 库里存的是上游原始 id（`deepseek-v4.1-flash`）。
+                    # 只按字面量精确查 → 查不到 → 倍率 0 → 积分显示 0
+                    # 。
+                    from admin.platform.shared import _billing_candidates
+
+                    mc = None
+                    for _name in _billing_candidates(model or ""):
+                        mc = db.query(ModelConfig).filter(
+                            ModelConfig.model_id == _name,
+                            ModelConfig.platform == resolved_platform,
+                            ModelConfig.enabled == 1).first()
+                        if mc is not None and (mc.credit_multiplier or 0) > 0:
+                            break
+                        # 兜底只认**没有平台归属**的历史行，不能跨平台借用倍率：
+                        # 同一个可读名在 workbuddy 是 0.11、在 marvis 是 -1，
+                        # 借错了算出来差一个数量级、甚至正负相反。
+                        mc = db.query(ModelConfig).filter(
+                            ModelConfig.model_id == _name,
+                            ModelConfig.enabled == 1,
+                            or_(ModelConfig.platform.is_(None),
+                                ModelConfig.platform == "")).first()
+                        if mc is not None and (mc.credit_multiplier or 0) > 0:
+                            break
+                    # **只有正倍率才是「倍率」**（issue #78）。
+                    #
+                    # `credit_multiplier < 0` 是约定里的「该平台没有倍率概念、
+                    # 按上游 usage 计量」标记（见 `admin/routers/models.py` 的
+                    # `_get_free_models`）：Trae 全表、CodeArts、MiniMax、Loomy
+                    # 以及 workbuddy 的 hunyuan-chat / kling-video-v3 都是 -1。
+                    #
+                    # 原来用真值判断 `if mult:`，负值一样过 → 每次请求算出
+                    # `tokens * -1 / 1000` 的**负积分** → Key 的「已用」被反向
+                    # 冲减，越用越小，最后变成 -61.754 甚至 -106836（等于凭空
+                    # 涨额度），剩余额度还会超过限额本身。
+                    mult = float(getattr(mc, "credit_multiplier", 0) or 0) if mc else 0.0
+                    if mult > 0:
+                        toks = total_tokens if total_tokens else completion_tokens
+                        credits = float(toks) * mult / 1000.0
+                        estimated = True
+                if credits is None:
+                    credits = 0.0
+                _logger.info("记录用量 platform=%s model=%s raw_credits=%s est=%s pt=%s ct=%s tt=%s cached=%s client_ip=%s use_case=%s",
+                             resolved_platform, model, original_credits, credits, prompt_tokens, completion_tokens, total_tokens,
+                             cached_tokens, client_ip, use_case)
+                # 扣减量一律取绝对值（issue #78）：`credits` 的符号只表达「计量
+                # 方向」，不代表「给用户加额度」。上游偶尔回负的 credit，或历史
+                # 数据里算出负值，直接累加都会把「已用」往回冲。
+                debit = abs(float(credits or 0))
+                db.query(ApiKey).filter(ApiKey.id == key_id).update(
+                    {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + debit}, synchronize_session=False)
+                if acc is not None:
+                    acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(debit))
+                    acc.last_used_at = datetime.utcnow()
+                    if updated_auth_json and persist_auth:
+                        acc.auth_json = updated_auth_json
+                diagnostic_json, attempted_account = request_metrics.usage_evidence(error_kind)
+                log = UsageLog(
+                    diagnostic_json=diagnostic_json,
+                    platform=(resolved_platform or "").lower(),
+                    api_key_id=key_id, account_id=account_id or attempted_account, model=model, credits=credits,
+                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                    total_tokens=total_tokens, cached_tokens=cached_tokens,
+                    client_ip=client_ip or "", use_case=use_case or "",
+                    reasoning_effort=reasoning_effort,
+                    seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms, error_kind=error_kind or "",
+                )
+                db.add(log)
+                db.commit()
+                return db, log, estimated, credits
+            except BaseException:
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                db.close()
+                raise
+
+        from admin import db as _admin_db
+        db, log, estimated, credits = _admin_db.retry_on_locked(_commit_once)
+        try:
             log_id = log.id
             # 小时级预聚合：数据看板 / 模型广场读这张表，不再扫全表。
             # 失败已在 rollup.record 内部吞掉并降级，绝不会影响记账。
@@ -524,18 +555,88 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
             except Exception:
                 _logger.warning("Request content cache failed for usage %s", log_id)
             if estimated and account_id and updated_auth_json:
-                threading.Thread(
-                    target=_fetch_real_credits,
-                    args=(log_id, account_id, updated_auth_json, model, credits, log.created_at),
-                    kwargs={"request_ids": request_metrics.sent_upstream_request_ids()},
-                    daemon=True,
-                ).start()
+                _start_real_credits_backfill(
+                    log_id, account_id, updated_auth_json, model, credits,
+                    log.created_at, request_metrics.sent_upstream_request_ids())
         finally:
             db.close()
     except Exception as e:  # 记账失败不应影响已返回的响应，但必须留痕便于排查
         _logger.exception("记录用量失败 key=%s acc=%s model=%s credits=%s: %s",
                           key_id, account_id, model, credits, e)
     return log_id
+
+
+def _start_real_credits_backfill(log_id: int, account_id: int, auth_json: str,
+                                 model: str, estimated_credits: float,
+                                 created_at: datetime,
+                                 request_ids: list[str] | None = None):
+    """起一个**已计入在途**的真实用量回填线程（优雅退出任务 2 的 job 租约）。
+
+    这个线程要打上游、再把真实积分写回 usage_logs + api_keys。它脱离了 HTTP
+    请求，却必然在响应发出之后才跑完：不计数的话，排空会以为「已经没有任何工作」，
+    进程于是在回填途中退出，账本停在估算值上（就是任务 2 要消灭的那类静默丢失）。
+
+    ## 为什么用 admin.jobrunner 的封装，而不是在这里直接 lifecycle.try_admit
+
+    两者封口语义完全等价（take_job_lease() 内部就是 try_admit("job")），但
+    jobrunner 那层同时给出 release_job_lease()（幂等、吞异常）与 admission_closed()：
+    取与放只有一种写法、只有一处约定。直接在本文件重写一份 try/finally 会留下
+    第三套释放约定，后来人不知道该照哪个抄。生命周期模块的公共 API 也不在这次
+    任务的改动范围里。
+
+    ## 封口后为什么直接跳过（而不是硬起线程）
+
+    已封口时 take_job_lease() 返回 None，这里就**不再启动**这一路。代价是这条记录
+    停在估算值上 —— 回填是「把估算校正成上游真实值」的补偿动作，不是正确性前提
+    （估算值早在响应前就随记账提交了；上游用量接口有分钟级延迟，本来也只能稍后补）。
+    反过来，硬起一个没被计数的线程会让排空误判归零，那才是真正的问题。
+
+    ## 为什么不会把 drain 永久卡住
+
+    线程体是**一次**有限等待 + 一次查询 + 一次回写（见 _fetch_real_credits：没有
+    循环重试、没有「轮询到远端生成完」），租约在它的 finally 里释放。最长占用约等于
+    上游用量发布窗口（60s 左右）；关闭钩子另有 ADMIN_SHUTDOWN_DRAIN_TIMEOUT 兜底，
+    人工强退通道也不受它限制。
+
+    返回取到的租约（封口时返回 None），便于测试与诊断；线程自己负责释放。
+
+    变更记录：本文件的这一处改造曾被工作区里的一次并发 git 操作
+    （stash / checkout / cherry-pick）抹掉，此处按原设计恢复。
+
+    N6：默认改走 `admin.real_credits` 的单线程延迟队列（同账号同窗口合并成一次查询），
+    签名和返回值（租约 / None）不变；`WB_REAL_CREDITS_QUEUE=0` 回到下面的一请求一线程。
+    """
+    from admin import real_credits
+    if real_credits.queue_enabled():
+        return real_credits.enqueue(log_id, account_id, auth_json, model,
+                                    estimated_credits, created_at, request_ids)
+
+    from admin import jobrunner
+
+    lease = jobrunner.take_job_lease()
+    if lease is None:
+        _logger.info("服务已封口，跳过真实用量回填 log=%s（保留估算值 credits=%s）",
+                     log_id, estimated_credits)
+        return None
+
+    def _run():
+        # 正常结束、异常、以及 _fetch_real_credits 内部的提前 return 都走这个 finally：
+        # 「谁取的租约谁释放」，线程是唯一所有者（finish 本身幂等）。
+        try:
+            _fetch_real_credits(log_id, account_id, auth_json, model,
+                                estimated_credits, created_at,
+                                request_ids=request_ids)
+        finally:
+            jobrunner.release_job_lease(lease)
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="wb-real-credits").start()
+    except BaseException:
+        # 线程没起来：租约还在这一条所有权上，就地释放再把异常抛回调用方
+        # （记账已提交，调用方只会记一条「记录用量失败」日志，不会回滚扣费）。
+        jobrunner.release_job_lease(lease)
+        raise
+    return lease
 
 
 def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str,
@@ -575,6 +676,11 @@ def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str
             best = next((by_id[i] for i in wanted if i in by_id), None)
             matched_by = "requestId"
             if best is None:
+                if wanted:
+                    # A delayed or paginated bill must not borrow another request's cost.
+                    _logger.info("真实积分回写未找到请求 ID log=%s model=%s ids=%s",
+                                 log_id, model, wanted[:3])
+                    return
                 client_name = (settings.UPSTREAM_CLIENT_NAME or "WorkBuddy").strip() or "WorkBuddy"
                 candidates = [
                     r for r in data
@@ -601,7 +707,9 @@ def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str
                 log = db.query(UsageLog).filter(UsageLog.id == log_id).with_for_update().first()
                 if log is None:
                     return
-                delta = real - log.credits
+                # 第 5 轮：log.credits 可能为 NULL（旧行）/ Decimal（MySQL 丢类型时），统一转 float
+                from admin.money import as_float
+                delta = real - as_float(log.credits)
                 if abs(delta) < 0.0001:
                     return
                 log.credits = real
@@ -2568,7 +2676,12 @@ def _pick_best_model(db: Session, requested_model: str,
     requested_model = strip_model_context_suffix(requested_model)
 
     # 检查是否有任何配置记录（无配置=向后兼容，放行全部）
-    has_any_config = db.query(ModelConfig).first() is not None
+    # D3：只看 WorkBuddy 自己的配置。别的平台登记了模型不代表 WorkBuddy 配过白名单；
+    # 原来按全库判，WorkBuddy 没配置时 auto 会挑到别的平台的模型。
+    from admin.platform.workbuddy import scoping as _wb_scoping
+    has_any_config = (db.query(ModelConfig)
+                      .filter(_wb_scoping.platform_cond(ModelConfig.platform, "workbuddy"))
+                      .first() is not None)
 
     # 具体模型：有配置时校验白名单，无配置直接放行
     if requested_model and requested_model != "auto":
@@ -2578,7 +2691,7 @@ def _pick_best_model(db: Session, requested_model: str,
             return requested_model if requested_model in allowed else None
         if not has_any_config:
             return requested_model  # 无配置，放行
-        if _is_model_allowed(db, requested_model):
+        if _is_model_allowed(db, requested_model, platform="workbuddy"):
             return requested_model
         return None  # 被白名单拒绝
 
@@ -2586,7 +2699,7 @@ def _pick_best_model(db: Session, requested_model: str,
     if allowed is not None:
         # 分组内：免费优先，否则任意组内模型
         allowed = {mid for mid in allowed if not model_metadata.is_media_model(mid)}
-        free_in_group = _get_free_models(db) & allowed
+        free_in_group = _get_free_models(db, platform="workbuddy") & allowed
         if free_in_group:
             return sorted(free_in_group)[0]
         if allowed:
@@ -2608,12 +2721,12 @@ def _pick_best_model(db: Session, requested_model: str,
             pass
         return "deepseek-v4-flash"  # 兜底：无配置且后端不可达时用默认模型
 
-    free_models = {mid for mid in _get_free_models(db) if not model_metadata.is_media_model(mid)}
+    free_models = {mid for mid in _get_free_models(db, platform="workbuddy") if not model_metadata.is_media_model(mid)}
     if free_models:
         return list(free_models)[0]  # 取第一个免费模型
 
     # 无免费模型：取任意一个启用的
-    enabled = {mid for mid in _get_enabled_models(db) if not model_metadata.is_media_model(mid)}
+    enabled = {mid for mid in _get_enabled_models(db, platform="workbuddy") if not model_metadata.is_media_model(mid)}
     if enabled:
         return list(enabled)[0]
 
@@ -2628,8 +2741,8 @@ def _candidate_models(db: Session, tried: set, allowed: set[str] | None = None) 
     """
     from admin.routers.models import _get_enabled_models, _get_free_models
 
-    free = {mid for mid in _get_free_models(db) - tried if not model_metadata.is_media_model(mid)}
-    paid = {mid for mid in (_get_enabled_models(db) - free) - tried if not model_metadata.is_media_model(mid)}
+    free = {mid for mid in _get_free_models(db, platform="workbuddy") - tried if not model_metadata.is_media_model(mid)}
+    paid = {mid for mid in (_get_enabled_models(db, platform="workbuddy") - free) - tried if not model_metadata.is_media_model(mid)}
     if allowed is not None:
         free &= allowed
         paid &= allowed
@@ -3697,10 +3810,12 @@ async def responses_proxy(
                             obj = converter.get_nonstream_response()
                             cost_info = _parse_usage(r.text)
                             # 同 /v1/messages 非流式分支：整条响应是在
-                            # `client.post()` 里拿全的，没有单独的流式首字节时刻，
-                            # 按整条耗时补 ttfb，否则用量页速度列是 “—”。
+                            # `client.post()` 里拿全的，没有「首字」这个时刻。
+                            # N2（r3）：ttfb 记 NULL，不再用整条耗时冒充首字
+                            # （读取侧 `rollup.streamed_ttfb` / `ttfb_valid_clause`
+                            # 本来就排除 ttfb≥latency 与 NULL，与 Marvis `_bill` 一致）。
                             latency_ms = int((time.perf_counter() - request_start) * 1000)
-                            ttfb_ms = latency_ms
+                            ttfb_ms = None
                             acc_i.last_used_at = datetime.utcnow()
                             await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
                             updated = sess_i.updated_json()
@@ -4191,12 +4306,12 @@ async def anthropic_messages(
                             cost_info = _parse_usage("\n".join(raw_lines))
                             # 非流式同样是「攒完整条 SSE 再一次性回给客户端」，
                             # 中间并没有真的少了首字节 —— 只是首字节发生在
-                            # `client.post()` 返回之前，没被计时。缺了 ttfb 会让
-                            # 用量页的速度列整列显示 “—”（算不出生成速度）。
-                            # 这里按整条响应耗时补上：语义是「等到第一个可用数据
-                            # 的时间」，对非流式就是全部内容到齐的时刻。
+                            # `client.post()` 返回之前，没被计时。以前按整条耗时补
+                            # ttfb，但读取侧早已把 ttfb≥latency 的样本排除，补了也
+                            # 不进首字统计，反而让明细里的「首字」等于总耗时。
                             latency_ms = int((time.perf_counter() - request_start) * 1000)
-                            ttfb_ms = latency_ms
+                            # N2（r3）：非流式没有首字时刻，ttfb 记 NULL（见 Responses 非流式分支）。
+                            ttfb_ms = None
                             acc_i.last_used_at = datetime.utcnow()
                             await _blocking_call(_note_success, db2, acc_i)  # 成功清零连败计数
                             updated = sess_i.updated_json()

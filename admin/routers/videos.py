@@ -654,6 +654,7 @@ async def _bill(task: VideoTask, acc) -> None:
         def _update():
             from admin import db as db_module
             from admin.models import ApiKey, UsageLog
+            from sqlalchemy import func
             # 走模块属性而不是本地名字：测试替换、多进程热更新都依赖这一层间接。
             db = db_module.SessionLocal()
             try:
@@ -662,7 +663,9 @@ async def _bill(task: VideoTask, acc) -> None:
                     return 0
                 if credits:
                     db.query(ApiKey).filter(ApiKey.id == task.api_key_id).update(
-                        {ApiKey.credit_used: (ApiKey.credit_used or 0) + abs(credits)},
+                        # 第 5 轮：原来写 `(ApiKey.credit_used or 0)` —— 对列对象做 Python `or`
+                        # 恒取左边，SQL 里 NULL + x 仍是 NULL，NULL 的 Key 永远不累计用量
+                        {ApiKey.credit_used: func.coalesce(ApiKey.credit_used, 0) + abs(credits)},
                         synchronize_session=False)
                     account = db.query(Account).filter(Account.id == task.account_id).first()
                     if account is not None:
@@ -753,13 +756,18 @@ async def list_videos(db: Session = Depends(get_db), limit: int = 20, after: str
         return error(401, '缺少或无效 API Key', 'invalid_api_key', type_='authentication_error')
     size = max(1, min(100, int(limit or 20)))
     await proxy._blocking_call(maybe_purge, db)
-    query = db.query(VideoTask).filter(VideoTask.api_key_id == key.id)
-    if after:
-        previous = db.query(VideoTask).filter(VideoTask.video_id == str(after),
-                                              VideoTask.api_key_id == key.id).first()
-        if previous is not None:
-            query = query.filter(VideoTask.id < previous.id)
-    rows = query.order_by(VideoTask.id.desc()).limit(size).all()
+
+    def _page():
+        # 第 4 轮 R4-BE-07：分页查询也离开事件循环（原来只有鉴权 / 清理放进了线程）。
+        query = db.query(VideoTask).filter(VideoTask.api_key_id == key.id)
+        if after:
+            previous = db.query(VideoTask).filter(VideoTask.video_id == str(after),
+                                                  VideoTask.api_key_id == key.id).first()
+            if previous is not None:
+                query = query.filter(VideoTask.id < previous.id)
+        return query.order_by(VideoTask.id.desc()).limit(size).all()
+
+    rows = await proxy._blocking_call(_page)
     return {
         'object': 'list',
         'data': [_video_response(row) for row in rows],
@@ -781,8 +789,11 @@ async def delete_video(video_id: str, db: Session = Depends(get_db),
     if task is None:
         return error(404, f'视频任务 {video_id} 不存在', 'video_not_found', type_='not_found')
     row_id = task.id
-    db.query(VideoTask).filter(VideoTask.id == row_id).delete(synchronize_session=False)
-    await proxy._blocking_call(db.commit)
+    def _delete():
+        db.query(VideoTask).filter(VideoTask.id == row_id).delete(synchronize_session=False)
+        db.commit()
+
+    await proxy._blocking_call(_delete)
     return {'id': video_id, 'object': 'video.deleted', 'deleted': True}
 
 
