@@ -276,7 +276,8 @@ watch(days, () => {
       <n-skeleton height="48px" />
       <!-- 与真实卡片同尺寸的静态文案：LCP 在首屏即锁定，不再等 /api/overview。 -->
       <div class="mh-card ov-skeleton__note">
-        <p class="ov-note">{{ t('common.loading') }}</p>
+        <p class="ov-balance__value">{{ t('common.loading') }}</p>
+        <p class="ov-note">{{ t('page.overview.balance.remaining') }}</p>
       </div>
       <div class="ov-hero">
         <n-skeleton height="196px" />
