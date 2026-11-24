@@ -539,7 +539,8 @@ def fetch_model_map(*, force: bool = False) -> ModelMap:
 
     url = endpoints.host_of(region) + endpoints.PATH_MODEL_MAP
     try:
-        with httpx.Client(timeout=TIMEOUT) as client:
+        from admin import http_shared
+        with httpx.Client(**http_shared.client_kwargs("krowork", timeout=TIMEOUT)) as client:  # P3：共享连接池 + 共享 TLS 上下文 + 建连 10s（cookie 仍按请求隔离）
             resp = client.get(url, headers=headers(snap.id_token))
         if resp.status_code >= 400:
             raise _error_of(resp, tag="model-map")
@@ -621,7 +622,8 @@ def call_json(path: str, payload: dict, *, ref: ModelRef, realm: str = "cn",
     head = headers(tok, model=ref.id, user_id=user_id)
     body = _payload_with_body(payload, ref)
     try:
-        with httpx.Client(timeout=TIMEOUT) as client:
+        from admin import http_shared
+        with httpx.Client(**http_shared.client_kwargs("krowork", timeout=TIMEOUT)) as client:  # P3：共享连接池 + 共享 TLS 上下文 + 建连 10s（cookie 仍按请求隔离）
             resp = client.post(url, json=body, headers=head)
     except httpx.HTTPError as exc:
         raise UpstreamError("上游连接失败：%s" % exc, status=502, kind="network") from None
@@ -654,7 +656,8 @@ def open_stream(path: str, payload: dict, *, ref: ModelRef, realm: str = "cn",
     url = endpoints.host_of(realm) + path
     head = headers(tok, model=ref.id, user_id=user_id)
     body = _payload_with_body(payload, ref)
-    client = httpx.Client(timeout=TIMEOUT)
+    from admin import http_shared
+    client = httpx.Client(**http_shared.client_kwargs("krowork", timeout=TIMEOUT))  # P3：共享连接池 + 共享 TLS 上下文 + 建连 10s（cookie 仍按请求隔离）
     request = client.build_request("POST", url, json=body, headers=head)
     try:
         resp = client.send(request, stream=True)
@@ -666,7 +669,10 @@ def open_stream(path: str, payload: dict, *, ref: ModelRef, realm: str = "cn",
             text = resp.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             text = ""
-        client.close()
+        try:
+            resp.close()   # 读错误体失败时也要关：共享连接池里漏关的连接不会被 GC 带走
+        finally:
+            client.close()
         fake = httpx.Response(resp.status_code, text=text)
         err = _error_of(fake, tag=path)
         if err.status == 401:
@@ -746,7 +752,10 @@ def commerce_get(path: str, tok: str = "", realm: str = "cn", *,
     if headers:
         head.update(headers)
     try:
-        with httpx.Client(timeout=httpx.Timeout(timeout)) as http:
+        from admin import http_shared
+
+        with httpx.Client(**http_shared.client_kwargs(
+                "krowork", timeout=httpx.Timeout(timeout))) as http:
             resp = http.get(endpoints.api_of(realm) + path, headers=head,
                             params=params or None)
     except httpx.HTTPError as exc:
@@ -858,7 +867,10 @@ def claim_checkin(realm: str = "cn", tok: str = "") -> dict:
     if not token:
         raise UpstreamError("没有可用的 KroWork 凭证", status=401, kind="auth")
     try:
-        with httpx.Client(timeout=httpx.Timeout(20.0)) as http:
+        from admin import http_shared
+
+        with httpx.Client(**http_shared.client_kwargs(
+                "krowork", timeout=httpx.Timeout(20.0))) as http:
             resp = http.post(
                 endpoints.api_of(realm) + endpoints.PATH_CHECKIN_CLAIM,
                 headers={"Authorization": "Bearer " + token,

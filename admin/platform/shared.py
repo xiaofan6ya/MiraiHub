@@ -867,7 +867,8 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
                  detail: str = "", status: int = 0, model: str = "",
                  public_platform: str = "", cool_seconds: int = 0,
                  zero_balance: bool = False, code: str = "",
-                 signal: str = "", severity: str = "") -> None:
+                 signal: str = "", severity: str = "",
+                 count_error: bool = True) -> None:
     """把失败写回账号，并按需要进哨兵。**不抛异常**。
 
     ## `zero_balance`：额度类失败要**落一个 0 到余额列**
@@ -886,7 +887,11 @@ def note_failure(db: Session, account: Account | None, *, kind: str,
         now = datetime.utcnow()
         account.last_err_at = now
         account.last_err_msg = (detail or kind or "")[:255]
-        account.err_count = int(account.err_count or 0) + 1
+        # count_error=False：这次失败**不是这个号的问题**（例如上游 5100007
+        # 服务端内部错误）。err_count 一旦被这类码刷上去，选号与熔断会把好号
+        # 当坏号处理 —— 2026-11-19 线上一个 2 MB 合成请求就打脏了三个号。
+        if count_error:
+            account.err_count = int(account.err_count or 0) + 1
         if zero_balance:
             # 只降不升：已经记 0 的保持 0，不要把它改回未知（NULL）——
             # NULL 会被选号当成「余额未知，放行」，等于又把空号放回队列。
