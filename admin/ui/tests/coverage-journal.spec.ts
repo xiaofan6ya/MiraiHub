@@ -124,13 +124,15 @@ describe('JournalPage 首屏统计加载态', () => {
     expect(listCreditEvents).toHaveBeenCalled()
     // 还没拿到 total：不能把「未知」显示成 0
     expect(wrapper.text()).not.toContain('共 0 条')
-    expect(wrapper.text()).toContain('加载中…')
+    // v2.1：首屏未返回时表格区是骨架（不再往工具栏塞「加载中…」文案）
+    expect(wrapper.find('.journal-skeleton').exists()).toBe(true)
+    expect(wrapper.find('.journal-skeleton').attributes('aria-busy')).toBe('true')
 
     pending.resolve(payload())
     await flush()
 
     expect(wrapper.text()).toContain('共 317 条')
-    expect(wrapper.text()).not.toContain('加载中…')
+    expect(wrapper.find('.journal-skeleton').exists()).toBe(false)
   })
 
   it('真正空页才显示「共 0 条」', async () => {

@@ -9,6 +9,7 @@ import { NCheckbox, NInput, NModal } from 'naive-ui'
 import Btn from '../base/Btn.vue'
 import { canConfirm } from './confirmGate'
 import { useI18n } from '@/i18n'
+import { useKeepAliveSuspended } from '@/composables/useKeepAliveSuspended'
 
 const props = withDefaults(
   defineProps<{
@@ -46,6 +47,8 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const typed = ref('')
+/** 页面被 KeepAlive 缓存时收起（Teleport 出去的弹窗不跟页面走），回来原样恢复。 */
+const suspended = useKeepAliveSuspended()
 const checked = ref(false)
 
 const confirmLabel = computed(() => props.confirmText ?? t('common.confirm'))
@@ -84,7 +87,7 @@ function cancel(): void {
 
 <template>
   <n-modal
-    :show="show"
+    :show="show && !suspended"
     preset="card"
     class="mh-confirm"
     :style="{ width: '420px', maxWidth: 'calc(100vw - 32px)' }"

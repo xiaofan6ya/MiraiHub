@@ -21,6 +21,12 @@ import * as statsApi from '@/api/stats'
 import type { StatsDashboardPayload, StatsUsagePayload } from '@/api/stats'
 import * as platformsApi from '@/api/platforms'
 
+/** 后端 UTC 小时桶 → 本地时区 HH:mm（图表横轴口径；断言与运行测试的机器时区无关）。 */
+function localHM(utcBucket: string): string {
+  const date = new Date(utcBucket.replace(' ', 'T') + 'Z')
+  return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
+}
+
 vi.mock('@/api/stats', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/stats')>()
   return { ...actual, getStatsDashboard: vi.fn(), getStatsUsage: vi.fn() }
@@ -297,7 +303,7 @@ describe('StatsPage 覆盖率补测', () => {
 
     expect(wrapper.find('h1').text()).toContain('数据看板')
 
-    // StatStrip 五格
+    // KPI 行五张卡（v2.1 由 StatStrip 换成 KpiCard）
     expect(wrapper.text()).toContain('请求数')
     expect(wrapper.text()).toContain('12,500')
     expect(wrapper.text()).toContain('成功 12,300 · 失败 200')
@@ -336,19 +342,20 @@ describe('StatsPage 覆盖率补测', () => {
     expect(wrapper.text()).toContain('80.0%')
   })
 
-  it('两张图拿到真实 option：请求趋势含全部请求 + 各模型，Token 为三根堆叠柱', async () => {
+  it('两张图拿到真实 option：请求趋势含全部请求 + 各模型，Token 为输入堆叠 + 输出折线', async () => {
     const { wrapper } = await mountPage()
 
     const charts = wrapper.findAll('.chart-stub')
     expect(charts).toHaveLength(2)
 
     expect(charts[0].attributes('data-series')).toBe('全部请求|gpt-4o')
-    expect(charts[0].attributes('data-labels')).toBe('14:00|15:00')
+    expect(charts[0].attributes('data-labels')).toBe(localHM('2026-11-23 14:00') + '|' + localHM('2026-11-23 15:00'))
     expect(charts[0].attributes('data-height')).toBe('260px')
 
-    expect(charts[1].attributes('data-series')).toBe('输入|输出|缓存命中')
-    expect(charts[1].attributes('data-labels')).toBe('14:00|15:00')
-    expect(charts[1].attributes('data-height')).toBe('240px')
+    // v2.1：输入（已扣缓存）+ 缓存命中堆叠，输出改右轴折线（量级差 1–2 个数量级时不再贴零）
+    expect(charts[1].attributes('data-series')).toBe('输入（未命中缓存）|缓存命中|输出')
+    expect(charts[1].attributes('data-labels')).toBe(localHM('2026-11-23 14:00') + '|' + localHM('2026-11-23 15:00'))
+    expect(charts[1].attributes('data-height')).toBe('260px')
 
     // 缓存脚注来自 usage.trend：cached / prompt = 300 / 3000
     expect(wrapper.text()).toContain('缓存命中 10.0%')
@@ -459,7 +466,7 @@ describe('StatsPage 覆盖率补测', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.text()).toContain('加载数据看板失败：dashboard down')
-    expect(wrapper.find('.mh-strip').exists()).toBe(false)
+    expect(wrapper.find('.stats-kpis').exists()).toBe(false)
 
     getStatsDashboard.mockResolvedValue(dashboard())
     const retry = wrapper
@@ -471,7 +478,7 @@ describe('StatsPage 覆盖率补测', () => {
     await flush()
 
     expect(wrapper.findAll('.mh-error')).toHaveLength(0)
-    expect(wrapper.find('.mh-strip').exists()).toBe(true)
+    expect(wrapper.find('.stats-kpis').exists()).toBe(true)
   })
 
   it('刷新失败只提示，保留上次成功的数据', async () => {
@@ -483,7 +490,7 @@ describe('StatsPage 覆盖率补测', () => {
     await flush()
     await flush()
 
-    expect(wrapper.find('.mh-strip').exists()).toBe(true)
+    expect(wrapper.find('.stats-kpis').exists()).toBe(true)
     expect(wrapper.text()).toContain('12,500')
     expect(wrapper.findAll('.mh-error')).toHaveLength(0)
     expect(bodyText()).toContain('刷新数据看板失败：refresh boom')
@@ -510,7 +517,7 @@ describe('StatsPage 覆盖率补测', () => {
     expect(wrapper.findAll('.chart-stub')).toHaveLength(0)
 
     // 无样本的成功率是 —（不冒充 0%）
-    expect(wrapper.findAll('.mh-strip .mh-stat__num')[1].text()).toBe('—')
+    expect(wrapper.findAll('.mh-kpi__num')[1].text()).toBe('—')
   })
 
   it('从分享链接还原 days / grain，并标出选中项', async () => {

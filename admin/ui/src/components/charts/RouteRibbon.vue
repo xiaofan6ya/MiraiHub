@@ -3,14 +3,27 @@
  * 线路带（全站唯一视觉记忆点）：SVG 自绘，不用 ECharts。
  * 线宽 = 2 + 18 × 占比；颜色 = 健康度；首选平台 brand 描边 +「首选」；流量脉冲。
  * <640px 退化为纵向条形列表。
+ *
+ * v2.1（10-visual-refresh §1.8）：
+ *   · 有流量时，0 流量线路画成 1px `--border-strong` 细线（idle），整体始终是扇形，
+ *     只有一个平台有流量时不会退化成一根实心粗条；
+ *   · `maxHeight` 给定时按线路数压缩行高（22–36px），英雄卡里 12 个平台也能放进 280px。
+ *
+ * 第 4 轮：
+ *   · `windowMinutes`：lanes 的 count 覆盖的时间窗（分钟，默认 1440 = 今日 / 24h）。脉冲速率按
+ *     「count / windowMinutes = 每分钟请求数」换算，概览切到 7 天 / 30 天时不再快 7 / 30 倍；
+ *   · 脉冲固定按请求次数（count）算，metric='tokens' 时也一样（token 数比次数大几个数量级，会把所有线路顶到最快）；
+ *   · 暂停收进组件：标签页隐藏、页面被 KeepAlive 缓存（离开）、线路带滚出视口时 `svg.pauseAnimations()`，
+ *     回来 `unpauseAnimations()`。页面里原来的兜底可以删（留着也不冲突）。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import Badge from '../base/Badge.vue'
 import PlatformLogo from '../identity/PlatformLogo.vue'
 import { usePrefersReducedMotion } from '../_internal/media'
 import { useI18n } from '@/i18n'
 import {
   RIBBON_LANE_HEIGHT,
+  RIBBON_LANE_MIN_HEIGHT,
   healthColor,
   healthOf,
   healthTone,
@@ -18,6 +31,7 @@ import {
   laneRatio,
   lineWidth,
   normalizeRate,
+  ribbonLaneHeight,
   pulseDuration,
   type RibbonLane,
 } from './routeRibbon'
@@ -31,8 +45,12 @@ const props = withDefaults(
     metric?: 'count' | 'tokens'
     /** 单位后缀（默认「次」） */
     unit?: string
+    /** 线路区最大高度（px）；不传 = 每条 36px 不压缩（旧行为）。 */
+    maxHeight?: number
+    /** count 覆盖的时间窗（分钟）。今日 / 24h = 1440（默认），7 天 = 10080，30 天 = 43200。 */
+    windowMinutes?: number
   }>(),
-  { metric: 'count', unit: undefined },
+  { metric: 'count', unit: undefined, maxHeight: undefined, windowMinutes: 1440 },
 )
 
 const emit = defineEmits<{ (event: 'select', platformId: string): void }>()
@@ -43,10 +61,57 @@ const { t, localeTag } = useI18n()
 const unitText = computed(() => props.unit ?? t('ribbon.unit'))
 
 const wrap = ref<HTMLElement | null>(null)
+const svgRef = ref<SVGSVGElement | null>(null)
 const width = ref(560)
 let observer: ResizeObserver | null = null
+let visibilityObserver: IntersectionObserver | null = null
+
+/* ---------- 脉冲暂停：隐藏 / 离开 / 滚出视口任一成立就暂停 ---------- */
+let pageHidden = typeof document !== 'undefined' && document.hidden
+let inactive = false
+let offscreen = false
+
+function syncAnimations(): void {
+  const svg = svgRef.value
+  if (!svg || typeof svg.pauseAnimations !== 'function') return
+  try {
+    if (pageHidden || inactive || offscreen) svg.pauseAnimations()
+    else svg.unpauseAnimations()
+  } catch {
+    /* 旧浏览器 / jsdom：没有 SMIL 时间线，忽略 */
+  }
+}
+
+function onVisibility(): void {
+  pageHidden = document.hidden
+  syncAnimations()
+}
+
+onActivated(() => {
+  inactive = false
+  syncAnimations()
+})
+
+onDeactivated(() => {
+  inactive = true
+  syncAnimations()
+})
 
 onMounted(() => {
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibility)
+    pageHidden = document.hidden
+  }
+  if (svgRef.value && typeof IntersectionObserver === 'function') {
+    visibilityObserver = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1]
+      if (!entry) return
+      offscreen = !entry.isIntersecting
+      syncAnimations()
+    })
+    visibilityObserver.observe(svgRef.value)
+  }
+  syncAnimations()
   const el = wrap.value
   if (!el) return
   if (typeof ResizeObserver === 'function') {
@@ -63,11 +128,29 @@ onMounted(() => {
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = null
+  visibilityObserver?.disconnect()
+  visibilityObserver = null
+  if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
 })
+
+/** 每分钟请求数 = count / 时间窗分钟数（时间窗非法时按 1440）。 */
+const windowMins = computed(() => {
+  const value = Number(props.windowMinutes)
+  return Number.isFinite(value) && value > 0 ? value : 1440
+})
+
+function perMinute(lane: RibbonLane): number {
+  const count = Number(lane.count) || 0
+  return count > 0 ? count / windowMins.value : 0
+}
 
 const total = computed(() => Number(props.source?.total) || 0)
 const isEmpty = computed(() => isEmptyRibbon(total.value, props.lanes))
-const svgHeight = computed(() => Math.max(RIBBON_LANE_HEIGHT, props.lanes.length * RIBBON_LANE_HEIGHT))
+/** 单条线路的行高：按 maxHeight 压缩，下限 22px（行内文字仍可读）。 */
+const laneH = computed(() => ribbonLaneHeight(props.lanes.length, props.maxHeight))
+const svgHeight = computed(() =>
+  Math.max(RIBBON_LANE_MIN_HEIGHT * 2, props.lanes.length * laneH.value),
+)
 
 function valueOf(lane: RibbonLane): number {
   return props.metric === 'tokens' ? Number(lane.tokens ?? lane.count) || 0 : Number(lane.count) || 0
@@ -89,9 +172,12 @@ const geometry = computed(() => {
   const x0 = 0
   const x1 = Math.max(120, width.value)
   return props.lanes.map((lane, index) => {
-    const y = index * RIBBON_LANE_HEIGHT + RIBBON_LANE_HEIGHT / 2
+    const y = index * laneH.value + laneH.value / 2
+    const value = valueOf(lane)
+    /** 有流量的线路带里，0 流量的那几条画细灰线（不参与健康度着色）。 */
+    const idle = !isEmpty.value && value <= 0
     const health = isEmpty.value ? 'disabled' : healthOf(lane)
-    const w = isEmpty.value ? 2 : lineWidth(valueOf(lane), total.value)
+    const w = isEmpty.value ? 2 : idle ? 1 : lineWidth(value, total.value)
     const control1 = x0 + (x1 - x0) * 0.42
     const control2 = x0 + (x1 - x0) * 0.58
     const d = `M ${x0} ${midY} C ${control1} ${midY}, ${control2} ${y}, ${x1} ${y}`
@@ -101,12 +187,15 @@ const geometry = computed(() => {
       y,
       d,
       width: w,
-      color: healthColor(health),
+      idle,
+      color: idle ? 'var(--border-strong)' : healthColor(health),
+      /** 文字侧（成功率、圆点）的颜色：idle 用 faint，不用边框色。 */
+      textColor: idle ? 'var(--fg-faint)' : healthColor(health),
       health,
-      dashed: health === 'disabled' && Boolean(lane.disabled),
+      dashed: Boolean(lane.disabled) && (idle || health === 'disabled'),
       preferred: Boolean(lane.preferred) && !isEmpty.value,
-      pulse: !reducedMotion.value && !isEmpty.value && valueOf(lane) > 0
-        ? pulseDuration(valueOf(lane) / 1440)
+      pulse: !reducedMotion.value && !isEmpty.value && value > 0 && perMinute(lane) > 0
+        ? pulseDuration(perMinute(lane))
         : '',
     }
   })
@@ -143,7 +232,7 @@ function select(lane: RibbonLane): void {
               class="mh-ribbon__bar-fill"
               :style="{
                 width: (laneRatio(valueOf(lane), total) * 100).toFixed(2) + '%',
-                background: healthColor(isEmpty ? 'disabled' : healthOf(lane)),
+                background: healthColor(isEmpty || valueOf(lane) <= 0 ? 'disabled' : healthOf(lane)),
               }"
             />
           </div>
@@ -160,7 +249,9 @@ function select(lane: RibbonLane): void {
       </div>
       <div ref="wrap" class="mh-ribbon__canvas">
         <svg
+          ref="svgRef"
           class="mh-ribbon__svg"
+          :class="{ 'is-empty': isEmpty }"
           :width="Math.max(120, width)"
           :height="svgHeight"
           :viewBox="`0 0 ${Math.max(120, width)} ${svgHeight}`"
@@ -179,6 +270,7 @@ function select(lane: RibbonLane): void {
               :d="item.d"
               fill="none"
               :stroke="item.color"
+              :stroke-opacity="item.idle ? 0.9 : 1"
               :stroke-width="item.width"
               :stroke-dasharray="item.dashed ? '4 4' : undefined"
               stroke-linecap="round"
@@ -196,16 +288,22 @@ function select(lane: RibbonLane): void {
         <span v-if="isEmpty" class="mh-ribbon__empty">{{ t('ribbon.noTraffic') }}</span>
       </div>
       <ul class="mh-ribbon__lanes">
-        <li v-for="item in geometry" :key="item.lane.id" class="mh-ribbon__lane">
+        <li
+          v-for="item in geometry"
+          :key="item.lane.id"
+          class="mh-ribbon__lane"
+          :class="{ 'is-idle': item.idle }"
+          :style="{ height: laneH + 'px' }"
+        >
           <button class="mh-ribbon__lane-btn" type="button" @click="select(item.lane)">
-            <PlatformLogo :id="item.lane.logo || item.lane.id" :size="18" />
+            <PlatformLogo :id="item.lane.logo || item.lane.id" :size="laneH < 30 ? 16 : 18" />
             <span class="mh-ribbon__lane-name">{{ item.lane.name }}</span>
             <Badge v-if="item.lane.preferred" tone="brand">{{ t('ribbon.preferred') }}</Badge>
             <span class="mh-ribbon__lane-count tnum">{{ fmt(valueOf(item.lane)) }}</span>
-            <span class="mh-ribbon__lane-rate tnum" :style="{ color: item.color }">
+            <span class="mh-ribbon__lane-rate tnum" :style="{ color: item.textColor }">
               {{ rateText(item.lane) }}
             </span>
-            <i class="mh-ribbon__lane-dot" :style="{ background: item.color }" aria-hidden="true" />
+            <i class="mh-ribbon__lane-dot" :style="{ background: item.textColor }" aria-hidden="true" />
           </button>
         </li>
       </ul>
@@ -320,6 +418,11 @@ function select(lane: RibbonLane): void {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--fg-2);
+}
+
+.mh-ribbon__lane.is-idle .mh-ribbon__lane-name,
+.mh-ribbon__lane.is-idle .mh-ribbon__lane-count {
+  color: var(--fg-faint);
 }
 
 .mh-ribbon__lane-count {

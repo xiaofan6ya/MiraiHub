@@ -171,7 +171,7 @@ describe('i18n 批次 D：成长计划 / 智能体中英切换', () => {
     const zh = await mountRoute(GrowthPage, '/growth')
     expect(zh).toContain('成长计划')
     expect(zh).toContain('全部领奖')
-    expect(zh).toContain('任务总数')
+    expect(zh).toContain('任务完成')
     expect(zh).toContain('做任务')
     expect(zh).toContain('已排除 2 个企业版账号')
 

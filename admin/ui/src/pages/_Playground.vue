@@ -5,7 +5,7 @@
  */
 import { computed, h, ref } from 'vue'
 import { NInput, NSelect } from 'naive-ui'
-import { CircleHelp, Plus, RefreshCw, Settings2, Trash2 } from 'lucide-vue-next'
+import { Activity, CircleHelp, Plus, RefreshCw, Settings2, Trash2 } from 'lucide-vue-next'
 import { useTheme, type ThemeMode } from '@/theme/useTheme'
 import {
   BADGE_TONE_NAMES,
@@ -31,14 +31,17 @@ import {
   IconBtn,
   JobProgress,
   KV,
+  KpiCard,
   Meter,
   ModelIcon,
   PlatformLogo,
   Ring,
   RouteRibbon,
   RowActions,
+  SaveBar,
   Section,
   Segmented,
+  Sparkline,
   StatCard,
   StatStrip,
   StackMeter,
@@ -58,6 +61,19 @@ import {
 } from '@/components'
 
 const { mode, effectiveTheme, setMode } = useTheme()
+
+/* ---------------- v2.1 新组件（KpiCard / Sparkline / SaveBar） ---------------- */
+const kpiSpark = [12, 18, 15, 22, 30, 26, 34, 41, 38, 45, 52, 49]
+const kpiSparkDown = [40, 38, 35, 36, 30, 28, 26, 22, 24, 19, 18, 16]
+const saveDirty = ref(2)
+const saveBusy = ref(false)
+function fakeSave(): void {
+  saveBusy.value = true
+  setTimeout(() => {
+    saveBusy.value = false
+    saveDirty.value = 0
+  }, 600)
+}
 
 const modes: Array<{ label: string; value: ThemeMode }> = [
   { label: '浅色', value: 'light' },
@@ -482,6 +498,31 @@ const themeLabel = computed(() => (effectiveTheme.value === 'dark' ? '深色' : 
             />
           </div>
           <p class="pg__text">已重试 {{ retryCount }} 次。</p>
+        </Card>
+      </div>
+    </section>
+
+    <!-- v2.1 新组件 -->
+    <section class="pg__group">
+      <h2 class="pg__group-title">KPI 与保存条（v2.1）</h2>
+      <div class="mh-kpis">
+        <KpiCard label="今日请求" :value="5397" unit="次" :delta="12.4" :spark="kpiSpark" :icon="Activity" hint="近 24 小时 · 成功率 98.2%" />
+        <KpiCard label="平均首字" value="4.6s" :delta="8.1" delta-good="down" tone="warn" :spark="kpiSparkDown" />
+        <KpiCard label="可用账号" :value="null" hint="暂无数据" tone="neutral" />
+        <KpiCard label="加载中" :value="null" loading />
+      </div>
+      <div class="pg__grid">
+        <Card title="Sparkline">
+          <div class="pg__stack">
+            <Sparkline :data="kpiSpark" />
+            <Sparkline :data="kpiSparkDown" tone="danger" :area="false" />
+            <Sparkline :data="[0, 0, 0, 0]" tone="neutral" />
+          </div>
+        </Card>
+        <Card title="SaveBar" class="pg__wide">
+          <p class="pg__text">改动 {{ saveDirty }} 项。</p>
+          <Btn size="sm" @click="saveDirty += 1">再改一项</Btn>
+          <SaveBar :dirty="saveDirty" :saving="saveBusy" @save="fakeSave" @discard="saveDirty = 0" />
         </Card>
       </div>
     </section>

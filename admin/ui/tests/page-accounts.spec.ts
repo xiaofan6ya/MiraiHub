@@ -141,7 +141,8 @@ describe('maskAccountId / toAccountRows：行数据', () => {
   it('余额占比与语气、到期、今日消耗、绑定 Key、能力声明', () => {
     const rows = toAccountRows(items, usage)
     expect(rows[0].balancePct).toBeCloseTo(95.28, 1)
-    expect(rows[0].balanceTone).toBe('brand')
+    // 第 5 轮设计定稿：Meter 不用品牌色装饰，健康余额用中性灰（<20% warn / <5% danger，禁用号 neutral）。
+    expect(rows[0].balanceTone).toBe('neutral')
     expect(rows[0].balanceTitle).toBe('4,764 / 5,000')
     expect(rows[0].expireText).toContain('天后到期')
     expect(rows[0].expireTone).toBe('neutral')
@@ -162,7 +163,7 @@ describe('maskAccountId / toAccountRows：行数据', () => {
     expect(rows[2].features.onboarding).toBe(true)
     expect(rows[2].features.growth).toBe(false)
     expect(rows[3].statusKey).toBe('degraded')
-    expect(rows[3].balanceTone).toBe('brand')
+    expect(rows[3].balanceTone).toBe('neutral')
   })
 
   it('无 usage 时今日消耗为 0；空 items 返回空数组', () => {

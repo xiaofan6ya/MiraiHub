@@ -70,28 +70,32 @@ describe('流水行转换', () => {
     expect(row.balanceText).toBe('4,764')
     expect(row.balanceRecorded).toBe(true)
     expect(row.sourceText).toBe('定时 · 每日签到')
-    expect(row.note).toBe('确认奖励 · 定时 · 每日签到')
+    // v2.1：类型已有独立一列，note 只写来源，不再把类型重复拼一遍
+    expect(row.note).toBe('定时 · 每日签到')
     expect(row.time).not.toBe('')
   })
 
   it('余额观察 + 负数 + 未记录余额 + 空来源', () => {
     const row = toJournalRow(item({ kind: 'observed', delta: -30, balance_after: null, source: '' }))
     expect(row.kindLabel).toBe('余额观察')
-    expect(row.kindTone).toBe('brand')
+    // 「余额观察」只是记录方式，不是状态：中性灰
+    expect(row.kindTone).toBe('neutral')
     expect(row.deltaText).toBe('-30')
-    expect(row.deltaTone).toBe('danger')
+    // 负数是正常消耗，用正文色 fg，不用红
+    expect(row.deltaTone).toBe('fg')
     expect(row.balanceText).toBe('未记录')
     expect(row.balanceRecorded).toBe(false)
     expect(row.sourceText).toBe(FMT_EMPTY)
-    expect(row.note).toBe('余额观察')
+    // 来源为空时 note 也是占位符（不再回退成类型名）
+    expect(row.note).toBe(FMT_EMPTY)
     // 没传平台名时显示 —，不猜平台
     expect(row.platformText).toBe(FMT_EMPTY)
     expect(toJournalRows(null)).toEqual([])
   })
 
-  it('变动着色：正数 ok、负数 danger、0 中性', () => {
+  it('变动着色：正数 ok、负数 fg（正文色）、0 中性', () => {
     expect(deltaTone(12)).toBe('ok')
-    expect(deltaTone(-12)).toBe('danger')
+    expect(deltaTone(-12)).toBe('fg')
     expect(deltaTone(0)).toBe('neutral')
     expect(deltaTone(null)).toBe('neutral')
     expect(toJournalRow(item({ delta: 0 })).deltaText).toBe('0')

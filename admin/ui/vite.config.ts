@@ -13,8 +13,13 @@ const API_TARGET = 'http://127.0.0.1:8790'
  */
 const VENDOR_CHUNKS: ReadonlyArray<{ name: string; test: RegExp }> = [
   {
+    // echarts 全家（含它独占的 tslib）单独成块，只被 chartRuntime 的动态 import 引用，
+    // 首屏 / 公共 chunk 里不出现（fix_plan 第 6 批第 4 条）。
+    // tslib 只有 echarts / zrender 依赖（node_modules 里逐个 package.json 核对过）：
+    // 不显式归进来时 rollup 可能把它放进入口共享 chunk，入口就会静态 import 这一块。
+    // 以后若有首屏依赖也用到 tslib，要把 tslib 挪到 vendor-vue，否则 echarts 块会被拖进首屏。
     name: 'vendor-echarts',
-    test: /[\\/]node_modules[\\/](?:echarts|zrender|vue-echarts)[\\/]/,
+    test: /[\\/]node_modules[\\/](?:echarts|zrender|vue-echarts|tslib)[\\/]/,
   },
   {
     // naive-ui 这一块只装它自己的**运行时依赖**：CSS-in-JS（css-render / seemly）、
@@ -52,6 +57,9 @@ interface BuiltChunk {
   imports: string[]
   code: string
 }
+
+/** 首屏 modulepreload 黑名单：echarts 一族只在图表真正要画时才下载。 */
+const EXCLUDED_PRELOAD = /vendor-echarts|chartRuntime/
 
 /**
  * 把首屏路由的 chunk 写进 index.html 的 `<link rel="modulepreload">`。
@@ -100,6 +108,8 @@ function preloadFirstRoute(routeChunkName: string, minBytes: number): Plugin {
             walk(file)
             // 入口 chunk 自己已经是 <script type="module">，再写一条只是重复请求。
             if (file.isEntry) continue
+            // 图表库永远不进首屏 modulepreload（第 4 轮防回归：即便将来某个首屏 chunk 静态引用了它）。
+            if (EXCLUDED_PRELOAD.test(file.name || dep)) continue
             const href = base + dep
             if (already.has(href) || file.code.length < minBytes) continue
             picked.push(href)
@@ -119,6 +129,51 @@ function preloadFirstRoute(routeChunkName: string, minBytes: number): Plugin {
     },
   }
 }
+
+/**
+ * 字体预加载（11-polish-motion §2「字体：font-display: swap，Plex 拉丁子集 preload」）。
+ *
+ * 字体文件来自 @fontsource（main.ts 引入，CSS 里已是 `font-display: swap`），构建后文件名带哈希，
+ * 不能在 index.html 里手写 href —— 这里在产物里按名字前缀找到 woff2，把 index.html 里的
+ * `<!-- mh:font-preload -->` 占位替换成 `<link rel="preload" as="font" type="font/woff2" crossorigin>`。
+ * 只预加载正文最常用的两档（Plex 400 / 500 拉丁子集，各 ≈23KB）；600 与 JetBrains Mono 交给 swap。
+ * dev 下没有 bundle，占位原样留着（是注释，无副作用）。
+ */
+function preloadFonts(prefixes: readonly string[]): Plugin {
+  let base = '/'
+  return {
+    name: 'mh-preload-fonts',
+    apply: 'build',
+    configResolved(config) {
+      base = config.base
+    },
+    transformIndexHtml: {
+      order: 'post',
+      handler(html, ctx) {
+        if (!/(^|\/)index\.html$/.test(ctx.path)) return html
+        const bundle = ctx.bundle
+        if (!bundle) return html
+        const files = Object.values(bundle) as Array<{ type: string; fileName: string }>
+        const tags: string[] = []
+        for (const prefix of prefixes) {
+          const hit = files.find((file) => {
+            if (file.type !== 'asset' || !file.fileName.endsWith('.woff2')) return false
+            const name = file.fileName.split('/').pop() || ''
+            return name.startsWith(prefix + '-') || name === prefix + '.woff2'
+          })
+          if (hit) {
+            tags.push(`<link rel="preload" as="font" type="font/woff2" crossorigin href="${base + hit.fileName}">`)
+          }
+        }
+        const block = tags.join('\n    ')
+        if (html.includes(FONT_PRELOAD_MARK)) return html.replace(FONT_PRELOAD_MARK, block)
+        return block ? html.replace('</head>', `    ${block}\n  </head>`) : html
+      },
+    },
+  }
+}
+
+const FONT_PRELOAD_MARK = '<!-- mh:font-preload -->'
 
 /**
  * 把入口 CSS 内联进 index.html，消掉 render-blocking 的样式请求。
@@ -168,7 +223,12 @@ function inlineEntryCss(): Plugin {
 
 export default defineConfig({
   base: '/admin/v2/',
-  plugins: [vue(), preloadFirstRoute('OverviewPage', 4096), inlineEntryCss()],
+  plugins: [
+    vue(),
+    preloadFirstRoute('OverviewPage', 4096),
+    inlineEntryCss(),
+    preloadFonts(['ibm-plex-sans-latin-400-normal', 'ibm-plex-sans-latin-500-normal']),
+  ],
   resolve: {
     alias: {
       '@': '/src',
@@ -202,6 +262,8 @@ export default defineConfig({
     // UI mount + i18n 切换在满载并行时会超过默认 5s；20s 只放宽上限，不放宽断言。
     testTimeout: 20000,
     setupFiles: ['./tests/setup.ts'],
+    // 第 5 轮起界面时间按浏览器本地时区显示；测试固定在 UTC+8，断言不随 CI 机器时区漂移。
+    env: { TZ: 'Asia/Shanghai' },
     include: ['tests/**/*.spec.ts', 'src/**/*.spec.ts'],
     css: false,
   },

@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  CALENDAR_ZONE_HINT,
+  calendarZoneHint,
   buildCycleLabel,
   buildProxyPoolOptions,
   buildScheduleInput,
@@ -125,7 +125,7 @@ describe('toScheduleRows：接口 items → 表格行', () => {
     expect(rows.map((row) => row.key)).toEqual(['3', '8', '12'])
     expect(rows[0].displayName).toBe('每天 08:47 · 签到领取积分（WorkBuddy）')
     expect(rows[0].cycleText).toBe('每天 09:00')
-    expect(rows[0].zoneHint).toBe(CALENDAR_ZONE_HINT)
+    expect(rows[0].zoneHint).toBe(calendarZoneHint())
     expect(rows[0].taskLabel).toBe('签到领取积分（WorkBuddy）')
     expect(rows[2].platformLabel).toBe('Qoder 中国版')
   })

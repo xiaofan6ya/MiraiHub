@@ -11,6 +11,8 @@
  * 页面里禁止直接 fetch。
  */
 import { onUnauthorized } from './auth'
+import { pickText } from '@/utils/miniLocale'
+import { DEDUPE_WINDOW_MS, clearDedupePrefix, dedupeRequest } from '@/composables/dedupe'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'
 
@@ -26,6 +28,12 @@ export interface HttpOptions {
   signal?: AbortSignal
   /** 可选的硬超时（毫秒）。仅心跳这类后台探活使用，页面请求不要设。 */
   timeoutMs?: number
+  /**
+   * 同 key 请求合并（11-polish-motion §2，**只对 GET 生效、默认关**）：
+   * true = 同一 URL（含 query）+ 同一平台头的 GET 在途或结束 300ms 内复用同一次结果；
+   * 传数字 = 自定义窗口毫秒。带 signal 的请求不合并（取消一个不能连累别人）。
+   */
+  dedupe?: boolean | number
 }
 
 /** 非 2xx 统一抛它。页面只需要读 message；细节（detail）留给 ErrorBlock 展开。 */
@@ -202,7 +210,7 @@ export function messageFromPayload(status: number, payload: ErrorPayload): strin
       if (typeof value === 'string' && value.trim()) return value.trim()
     }
   }
-  return '请求失败（HTTP ' + status + '）'
+  return pickText('请求失败（HTTP ' + status + '）', 'Request failed (HTTP ' + status + ')')
 }
 
 async function toApiError(response: Response): Promise<ApiError> {
@@ -240,7 +248,7 @@ async function readBody<T>(response: Response): Promise<T> {
     try {
       return JSON.parse(text) as T
     } catch {
-      throw new ApiError(response.status, '响应不是合法的 JSON', text)
+      throw new ApiError(response.status, pickText('响应不是合法的 JSON', 'Response is not valid JSON'), text)
     }
   }
   return text as unknown as T
@@ -253,6 +261,39 @@ export async function http<T = unknown>(
 ): Promise<T> {
   const upper = String(method).toUpperCase()
   const headers = buildHeaders(upper, options.headers)
+  if (upper === 'GET' && options.dedupe && !options.signal) {
+    const windowMs = typeof options.dedupe === 'number' ? options.dedupe : DEDUPE_WINDOW_MS
+    return dedupeRequest<T>(dedupeKey(path, headers, options), () => send<T>(upper, path, headers, options), windowMs)
+  }
+  if (SAFE_METHODS.has(upper)) return send<T>(upper, path, headers, options)
+  // 写操作：无论成败都让 300ms 合并窗口里的旧 GET 结果作废，紧跟着的重拉一定拿到新数据。
+  return send<T>(upper, path, headers, options).finally(() => clearDedupePrefix(DEDUPE_PREFIX))
+}
+
+const DEDUPE_PREFIX = 'http:'
+
+/**
+ * 合并键（第 4 轮修）：平台头 + 完整 URL（含 query）+ **调用方自带的其它请求头** + 超时。
+ * 原来只看平台头和 URL：同一 URL 一个带 `X-Export-Confirm`、一个不带，会被并成一次，拿到错的结果。
+ */
+function dedupeKey(path: string, headers: Headers, options: HttpOptions): string {
+  const extra = Object.keys(options.headers || {})
+    .map((name) => name.toLowerCase())
+    .filter((name) => name !== PLATFORM_HEADER_NAME.toLowerCase())
+    .sort()
+    .map((name) => name + '=' + (headers.get(name) || ''))
+    .join('&')
+  return (
+    DEDUPE_PREFIX +
+    (headers.get(PLATFORM_HEADER_NAME) || '') +
+    ' ' +
+    resolveUrl(path, options.query) +
+    (extra ? ' |' + extra : '') +
+    (options.timeoutMs ? ' t' + options.timeoutMs : '')
+  )
+}
+
+async function send<T>(upper: string, path: string, headers: Headers, options: HttpOptions): Promise<T> {
   let body: BodyInit | undefined
   const raw = options.body
   if (raw !== undefined && raw !== null) {
@@ -348,6 +389,54 @@ export async function download(path: string, query?: Query, filename?: string): 
     setTimeout(() => URL.revokeObjectURL(href), 0)
   }
   return { filename: name, size: blob.size }
+}
+
+/** 二进制响应（不触发浏览器保存）：调用方自己决定怎么处理 blob。 */
+export interface BlobResult {
+  blob: Blob
+  /** Content-Disposition 里的文件名；没有时为空串。 */
+  filename: string
+}
+
+/**
+ * 任意方法取二进制（例如 POST /api/maintenance/backup 只接受 POST）。
+ * 与 http() 同一套请求头（CSRF / X-Platform）、同一套错误处理（非 2xx → ApiError，401 回登录页），
+ * 让 api/*.ts 不再需要自己写 fetch（review_notes 待优化清单第 6 条）。
+ */
+export async function fetchBlob(
+  method: HttpMethod | string,
+  path: string,
+  options: HttpOptions = {},
+): Promise<BlobResult> {
+  const upper = String(method).toUpperCase()
+  const headers = buildHeaders(upper, options.headers)
+  let body: BodyInit | undefined
+  const raw = options.body
+  if (raw !== undefined && raw !== null) {
+    if (isRawBody(raw)) {
+      body = raw as BodyInit
+    } else {
+      if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+      body = JSON.stringify(raw)
+    }
+  }
+  const abort = createAbortHandle(options.signal, options.timeoutMs)
+  try {
+    const response = await fetch(resolveUrl(path, options.query), {
+      method: upper,
+      credentials: 'same-origin',
+      headers,
+      body,
+      signal: abort.signal,
+    })
+    if (!response.ok) throw await toApiError(response)
+    const blob = await response.blob()
+    return { blob, filename: filenameFromContentDisposition(response.headers.get('content-disposition')) }
+  } finally {
+    abort.dispose()
+    // 与 http() 同口径：写方法（POST 备份 / 导出任务等）结束后作废 GET 合并窗口（第 5 轮）。
+    if (!SAFE_METHODS.has(upper)) clearDedupePrefix(DEDUPE_PREFIX)
+  }
 }
 
 export interface StreamEventMeta {

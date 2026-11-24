@@ -17,6 +17,7 @@
  *   · 账号没有 note 字段：备注列展示绑定 Key，可编辑的是账号名称与并发上限（PATCH /{id}）。
  */
 import { http } from './http'
+import { EXPORT_CONFIRM_HEADER, EXPORT_CONFIRM_VALUE, isExportConfirmRequired } from './platforms-admin'
 import { fmtCredit, fmtExpiry, fmtInt, fmtRelative, expiryTone } from '@/utils/format'
 import { t as defaultTranslate, type Translate } from '@/i18n'
 
@@ -296,23 +297,154 @@ export interface ExportRequest {
   keyword?: string
 }
 
-export function exportAccountsAsync(body: ExportRequest): Promise<AccountJobSnapshot> {
-  return http<AccountJobSnapshot>('POST', '/api/accounts/export-async', { body })
+/**
+ * 账号池异步导出（JSONL，含可回灌的凭证）。
+ *
+ * r3：后端 export_guard 的口径是「完整凭证要二次确认」。`/api/accounts/export-async` 目前尚未接入闸门，
+ * 但一旦接入会回 428 `export_confirm_required` —— 页面捕获后弹确认框，再以 `confirmed=true`
+ * 带 `X-Export-Confirm: include-secrets` 重发（与平台管理页 exportPlatformsAll 同一约定）。
+ */
+export function exportAccountsAsync(body: ExportRequest, confirmed = false): Promise<AccountJobSnapshot> {
+  return http<AccountJobSnapshot>('POST', '/api/accounts/export-async', {
+    body,
+    headers: confirmed ? { [EXPORT_CONFIRM_HEADER]: EXPORT_CONFIRM_VALUE } : undefined,
+  })
+}
+
+/** 后端要求确认才肯导出完整凭证：HTTP 428，detail.code（或 detail.detail.code）= export_confirm_required。 */
+export function isAccountExportConfirmRequired(error: unknown): boolean {
+  // r4：与平台管理页共用同一判定（api/platforms-admin.ts），不再各写一份
+  return isExportConfirmRequired(error)
 }
 
 export function getAccountJob(jobId: string): Promise<AccountJobSnapshot> {
   return http<AccountJobSnapshot>('GET', '/api/accounts/job/' + encodeURIComponent(jobId))
 }
 
-export function getModelLimits(): Promise<{ items: Array<Record<string, unknown>> }> {
-  return http('GET', '/api/accounts/model-limits')
+export function getModelLimits(signal?: AbortSignal): Promise<{ items: Array<Record<string, unknown>> }> {
+  return http('GET', '/api/accounts/model-limits', { signal })
 }
 
-export function getCreditDetails(id: number, refresh = false): Promise<CreditDetailsPayload> {
+export function getCreditDetails(
+  id: number,
+  refresh = false,
+  signal?: AbortSignal,
+): Promise<CreditDetailsPayload> {
   return http<CreditDetailsPayload>('GET', '/api/accounts/' + id + '/credit-details', {
     query: refresh ? { refresh: 1 } : undefined,
+    signal,
   })
 }
+
+/* -------------------------------------------------------------------------- */
+/* 去重（D1：分组键改为 (平台, 区, uid)）                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface DuplicateAccountRef {
+  id: number
+  name: string
+  created_at: string
+}
+
+/** GET /api/accounts/duplicates 的 groups[]（data-scoping D1 起多了 platform / realm）。 */
+export interface DuplicateGroup {
+  uid: string
+  /** 落库平台（workbuddy / codebuddy 归一成 workbuddy）。 */
+  platform?: string
+  /** 'cn' | 'intl' | ''（WorkBuddy 的 domain 是主机名，不参与分组，恒为空）。 */
+  realm?: string
+  keep: DuplicateAccountRef
+  remove: DuplicateAccountRef[]
+}
+
+export interface DuplicatesPayload {
+  total: number
+  unique: number
+  groups: DuplicateGroup[]
+  redundant: number
+}
+
+export interface DedupeResult {
+  removed: number
+  kept: number
+  items: Array<{ id: number; name: string; uid: string; platform?: string; realm?: string }>
+}
+
+/** 跟随 X-Platform：只在当前平台作用域内查重。 */
+export function getDuplicates(signal?: AbortSignal): Promise<DuplicatesPayload> {
+  return http<DuplicatesPayload>('GET', '/api/accounts/duplicates', { signal })
+}
+
+/** 清理重复：每组保留 id 最小的那条；被 API Key 绑定（单选或多选）的号永不删除。 */
+export function dedupeAccounts(): Promise<DedupeResult> {
+  return http<DedupeResult>('POST', '/api/accounts/dedupe')
+}
+
+export interface DuplicateSection {
+  /** 分组键 platform:realm，用作 v-for key。 */
+  key: string
+  platform: string
+  realm: string
+  groups: DuplicateGroup[]
+  /** 本分组里可清理的冗余账号数。 */
+  redundant: number
+}
+
+/**
+ * 按 (platform, realm) 把重复组分段展示（fixlog_data_scoping §6.5）。
+ * 旧后端没有 platform / realm 字段时落到同一段（platform=''），不猜。
+ * 段内按冗余数降序，段与段按平台名、区排序，保证同一平台的两个区相邻。
+ */
+export function groupDuplicates(payload: DuplicatesPayload | null | undefined): DuplicateSection[] {
+  const map = new Map<string, DuplicateSection>()
+  for (const group of payload?.groups || []) {
+    const platform = String(group.platform || '').toLowerCase()
+    const realm = String(group.realm || '').toLowerCase()
+    const key = platform + ':' + realm
+    let section = map.get(key)
+    if (!section) {
+      section = { key, platform, realm, groups: [], redundant: 0 }
+      map.set(key, section)
+    }
+    section.groups.push(group)
+    section.redundant += Array.isArray(group.remove) ? group.remove.length : 0
+  }
+  const sections = Array.from(map.values())
+  for (const section of sections) {
+    section.groups.sort((a, b) => (b.remove?.length || 0) - (a.remove?.length || 0))
+  }
+  return sections.sort((a, b) => a.platform.localeCompare(b.platform) || a.realm.localeCompare(b.realm))
+}
+
+/* -------------------------------------------------------------------------- */
+/* 页头 meta / 工具栏统计                                                       */
+/* -------------------------------------------------------------------------- */
+
+export interface AccountsOverview {
+  total: number
+  /** 冷却 + 熔断 + 降级（「N 个冷却」）。 */
+  cooling: number
+  disabled: number
+  /** 可用 = 未禁用、未冷却且剩余积分 > 0（第 1 轮审查 P0-9：原来把已禁用也算成可用）。 */
+  available: number
+  /** 剩余积分合计只算未禁用的账号（与后端 summary.balance_remain 同口径）。 */
+  remain: number
+}
+
+export function accountsOverview(rows: AccountRow[]): AccountsOverview {
+  const out: AccountsOverview = { total: rows.length, cooling: 0, disabled: 0, available: 0, remain: 0 }
+  for (const row of rows) {
+    if (row.statusKey === 'disabled') {
+      out.disabled += 1
+      continue
+    }
+    if (row.statusKey !== 'active') out.cooling += 1
+    else if (row.balanceRemain > 0) out.available += 1
+    out.remain += row.balanceRemain
+  }
+  return out
+}
+
 /* -------------------------------------------------------------------------- */
 /* 纯函数：行数据 / 状态 / 筛选 / 排序 / 分页 / 能力声明                          */
 /* -------------------------------------------------------------------------- */
@@ -482,7 +614,9 @@ export function toAccountRows(
       balanceRemain: remain,
       balanceTotal: total,
       balancePct: pct,
-      balanceTone: pct <= 0 ? 'danger' : pct < 5 ? 'danger' : pct < 20 ? 'warn' : 'brand',
+      // 只有「余额紧张」才着色；健康余额与已禁用账号都用中性灰（第 1 轮审查 P1-2：Meter 不用品牌色装饰）。
+      balanceTone:
+        status.key === 'disabled' ? 'neutral' : pct < 5 ? 'danger' : pct < 20 ? 'warn' : 'neutral',
       balanceTitle: fmtInt(remain) + ' / ' + fmtInt(total),
       expireAt,
       expireText: expireAt ? fmtExpiry(expireAt) : '—',

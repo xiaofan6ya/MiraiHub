@@ -199,6 +199,11 @@ function bodyText(): string {
   return document.body.textContent || ''
 }
 
+/** 底部保存条（SettingsLayout）：保存只有这一种方式，没有改动时不渲染。 */
+function saveBarEl(wrapper: VueWrapper): HTMLElement | null {
+  return wrapper.element.querySelector('.mh-savebar') as HTMLElement | null
+}
+
 function switchByLabel(wrapper: VueWrapper, label: string): VueWrapper<any> | undefined {
   return wrapper
     .findAllComponents(NSwitch)
@@ -240,17 +245,18 @@ describe('OpenEntryPage · 首屏四个区块', () => {
     }
 
     const gateCard = wrapper.find('#openentry-gate')
-    // state 是 computed：页头 Badge 与卡片 Badge 都必须跟着 gate 走（旧版在 setup 时求值一次，永远「已关闭」）。
-    expect(wrapper.find('.ph-actions').text()).toContain('已开放')
+    // state 是 computed：卡片 Badge 必须跟着 gate 走（旧版在 setup 时求值一次，永远「已关闭」）。
+    // 页头不再重复显示状态徽章，也没有与开关重复的「关闭入口使全部失效」按钮（第 2 轮审查 P1-6 / P2）。
+    expect(wrapper.find('.ph-actions').text()).not.toContain('已开放')
     expect(gateCard.text()).toContain('已开放')
     expect(switchByLabel(wrapper, '自助注册入口总开关')!.props('value')).toBe(true)
-    expect(buttonByText(gateCard.element, '关闭入口使全部失效')?.disabled).toBe(false)
-    expect(gateCard.text()).toContain('代次 7 · 可用票据 3 · 有效邀请码 1')
+    expect(buttonByText(gateCard.element, '关闭入口使全部失效')).toBeNull()
+    expect(gateCard.text()).toContain('第 7 轮 · 有效链接 3 条 · 有效邀请码 1 个')
     expect(gateCard.text()).toContain('链接有效 1 天')
 
     const links = wrapper.find('#openentry-links')
     expect(links.text()).toContain('入口已开启')
-    expect(links.text()).toContain('当前有效 2 条 · 代次 7')
+    expect(links.text()).toContain('当前有效 2 条 · 第 7 轮')
     expect(links.text()).toContain('http://localhost:3000/j#k=Ab3dE9xQ2k')
     expect(links.text()).toContain('剩余 23 小时')
     expect(links.text()).toContain('永久有效')
@@ -263,7 +269,10 @@ describe('OpenEntryPage · 首屏四个区块', () => {
     const copyCard = wrapper.find('#openentry-copy')
     const inputs = copyCard.findAll('input')
     expect((inputs[0].element as HTMLInputElement).value).toBe('MiraiHub 注册')
-    expect(copyCard.text()).toContain('预览仅示意排版，公开页样式以 join.html 为准')
+    expect(copyCard.text()).toContain('预览只示意排版，实际样式以公开注册页为准')
+    // 开发者用语不再出现在界面上
+    expect(wrapper.text()).not.toContain('/api/open')
+    expect(wrapper.text()).not.toContain('jti')
   })
 
   it('刷新按钮重新并发取三份数据', async () => {
@@ -294,7 +303,8 @@ describe('OpenEntryPage · 入口总开关', () => {
     )
     const { wrapper } = await mountPage()
 
-    await click(wrapper.find('#openentry-gate').element, '关闭入口使全部失效')
+    switchByLabel(wrapper, '自助注册入口总开关')!.vm.$emit('update:value', false)
+    await settle()
     expect(bodyText()).toContain('关闭自助注册入口？')
     expect(bodyText()).toContain('已签发的全部访问链接与邀请码同时失效')
     await clickDialog('关闭入口')
@@ -304,14 +314,13 @@ describe('OpenEntryPage · 入口总开关', () => {
     expect(getAdminTickets.mock.calls.length).toBeGreaterThan(1)
     expect(bodyText()).toContain('入口已关闭，旧链接全部失效')
     expect(wrapper.find('#openentry-gate').text()).toContain('已关闭')
-    // 页头 Badge 也随重载后的 gate 变化（不是只在 setup 时算一次）
-    expect(wrapper.find('.ph-actions').text()).toContain('已关闭')
-    expect(wrapper.find('#openentry-gate').text()).toContain('代次 8')
+    expect(wrapper.find('#openentry-gate').text()).toContain('第 8 轮')
   })
 
   it('取消确认框不推进代次', async () => {
     const { wrapper } = await mountPage()
-    await click(wrapper.find('#openentry-gate').element, '关闭入口使全部失效')
+    switchByLabel(wrapper, '自助注册入口总开关')!.vm.$emit('update:value', false)
+    await settle()
     await clickDialog('取消')
 
     expect(toggleGate).not.toHaveBeenCalled()
@@ -399,25 +408,52 @@ describe('OpenEntryPage · 链接时效', () => {
   it('改档位后出现未保存标记，保存后提交 ticket_ttl 并重载配置', async () => {
     const { wrapper } = await mountPage()
     const before = getOpenConfig.mock.calls.length
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(saveBarEl(wrapper), '没改动时不应有保存条').toBeNull()
 
     const ttl = wrapper.findAllComponents(NSelect)[0]
     ttl.vm.$emit('update:value', '3600')
     await flush()
-    expect(wrapper.text()).toContain('有未保存的修改')
-
-    await click(wrapper.find('#openentry-gate').element, '保存时效')
+    // 计数型 dirty → 保存条文案是「有 N 项未保存」（旧断言停在布尔型的「有未保存的修改」）。
+    expect(saveBarEl(wrapper)?.textContent).toContain('有 1 项未保存')
+    await click(saveBarEl(wrapper)!, '保存')
 
     expect(saveOpenConfig).toHaveBeenCalledWith({ ticket_ttl: 3600 })
     expect(getOpenConfig.mock.calls.length).toBeGreaterThan(before)
     expect(bodyText()).toContain('链接时效已保存：新签发的链接按新时效生效')
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(saveBarEl(wrapper), '保存后保存条应消失').toBeNull()
   })
 
-  it('时效未变时保存按钮禁用（不会白发请求）', async () => {
+  it('时效未变时不出现保存条（不会白发请求）', async () => {
     const { wrapper } = await mountPage()
-    const saveButton = buttonByText(wrapper.find('#openentry-gate').element, '保存时效')
-    expect(saveButton?.disabled).toBe(true)
+    expect(saveBarEl(wrapper)).toBeNull()
+    expect(buttonByText(wrapper.find('#openentry-gate').element, '保存时效')).toBeNull()
+  })
+
+  it('时效和文案同时改：保存条一次保存两块，先保存的那块重读配置不会冲掉另一块的草稿', async () => {
+    const { wrapper } = await mountPage()
+    wrapper.findAllComponents(NSelect)[0].vm.$emit('update:value', '3600')
+    const card = wrapper.find('#openentry-copy')
+    await card.findAll('input')[0].setValue('新的标题')
+    await flush()
+    expect(saveBarEl(wrapper)?.textContent).toContain('有 2 项未保存')
+
+    await click(saveBarEl(wrapper)!, '保存')
+    await settle()
+    expect(saveOpenConfig).toHaveBeenCalledWith({ ticket_ttl: 3600 })
+    const copyCall = saveOpenConfig.mock.calls.find((call) => 'page_copy' in (call[0] as object))
+    expect(copyCall, '文案也要保存').toBeTruthy()
+    expect((copyCall![0] as { page_copy: { title: string } }).page_copy.title).toBe('新的标题')
+  })
+
+  it('放弃：草稿回到上次读到的配置，不发请求', async () => {
+    const { wrapper } = await mountPage()
+    wrapper.findAllComponents(NSelect)[0].vm.$emit('update:value', '3600')
+    await flush()
+    const before = getOpenConfig.mock.calls.length
+    await click(saveBarEl(wrapper)!, '放弃')
+    expect(saveBarEl(wrapper)).toBeNull()
+    expect(saveOpenConfig).not.toHaveBeenCalled()
+    expect(getOpenConfig.mock.calls.length).toBe(before)
   })
 })
 
@@ -463,9 +499,9 @@ describe('OpenEntryPage · 公开页文案', () => {
     const inputs = card.findAll('input')
     await inputs[0].setValue('标'.repeat(41))
     await flush()
-    expect(wrapper.text()).toContain('有未保存的修改')
+    expect(saveBarEl(wrapper)?.textContent).toContain('有 1 项未保存')
 
-    await click(card.element, '保存文案')
+    await click(saveBarEl(wrapper)!, '保存')
     expect(saveOpenConfig).not.toHaveBeenCalled()
     expect(bodyText()).toContain('标题不能超过 40 字')
   })
@@ -508,7 +544,7 @@ describe('OpenEntryPage · 公开页文案', () => {
     expect(card.text()).toContain('第一行：填邀请码即可注册')
     expect(card.text()).toContain('第二行：仅限内部同事')
 
-    await click(card.element, '保存文案')
+    await click(saveBarEl(wrapper)!, '保存')
     expect(saveOpenConfig).toHaveBeenCalledWith({
       page_copy: {
         title: '内测入口',
@@ -518,7 +554,7 @@ describe('OpenEntryPage · 公开页文案', () => {
       },
     })
     expect(bodyText()).toContain('公开页文案已保存')
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(saveBarEl(wrapper), '保存后保存条应消失').toBeNull()
   })
 
   it('恢复默认要确认，确认后提交空文案', async () => {
@@ -547,7 +583,16 @@ describe('OpenEntryPage · 空态与错误态', () => {
 
     const links = wrapper.find('#openentry-links')
     expect(links.text()).toContain('当前有效 0 条')
-    expect(links.text()).toContain('还没有链接，点「生成访问链接」签发')
+    expect(links.text()).toContain('还没有链接，点右上角「生成访问链接」签发')
+    // 生成按钮只在卡头放一个
+    expect(Array.from(links.element.querySelectorAll('button')).filter((b) => (b.textContent || '').trim() === '生成访问链接').length).toBe(1)
+  })
+
+  it('入口关闭且没有链接：空状态提示先开启入口', async () => {
+    getGateStatus.mockResolvedValue(gate({ open: false }))
+    getAdminTickets.mockResolvedValue(adminTickets({ open: false, count: 0, tickets: [] }))
+    const { wrapper } = await mountPage()
+    expect(wrapper.find('#openentry-links').text()).toContain('入口关闭中：先在上方打开「自助注册入口」')
   })
 
   it('三份数据都失败时各自渲染 ErrorBlock，重试只重取自己那一块', async () => {
@@ -584,7 +629,8 @@ describe('OpenEntryPage · 空态与错误态', () => {
     toggleGate.mockRejectedValue(new Error('409 入口状态被其它管理员改动'))
     const { wrapper } = await mountPage()
 
-    await click(wrapper.find('#openentry-gate').element, '关闭入口使全部失效')
+    switchByLabel(wrapper, '自助注册入口总开关')!.vm.$emit('update:value', false)
+    await settle()
     await clickDialog('关闭入口')
 
     expect(bodyText()).toContain('关闭入口失败：409 入口状态被其它管理员改动')

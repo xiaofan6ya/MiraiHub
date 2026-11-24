@@ -11,7 +11,7 @@
  */
 import { http } from './http'
 import { t as defaultTranslate, type Translate } from '@/i18n'
-import { FMT_EMPTY, fmtDuration, fmtInt } from '@/utils/format'
+import { FMT_EMPTY, fmtCompact, fmtDuration, fmtInt } from '@/utils/format'
 
 export interface GatewayStrategyOption {
   value: string
@@ -346,8 +346,11 @@ export function speedPayloadText(
   return tr('page.gateway.speed.payload', { hours: fmtInt(payload.hours), count })
 }
 
-/** 平台额度：千分位；没有数据时 —（不显示 0 冒充无数据）。 */
+/**
+ * 平台额度：量级缩写（64,620,435 → 64.6M，第 1 轮审查 P2）；没有数据时 —（不显示 0 冒充无数据）。
+ * 完整数字放在调用处的 title 里。
+ */
 export function formatBalance(value: number | null | undefined): string {
   if (value === null || value === undefined) return FMT_EMPTY
-  return fmtInt(value)
+  return fmtCompact(value)
 }

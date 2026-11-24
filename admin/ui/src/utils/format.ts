@@ -6,6 +6,13 @@
  *   2. 数字一律等宽（tabular-nums 由样式负责），本文件只管文本；
  *   3. 与旧版输出对齐的口径写在每个函数上方；旧版有分歧时按 05-patterns §4 的规则，
  *      差异见 docs/ui-v2/contracts/platform-context.md 的"格式化口径"一节。
+ *
+ * 时区（第 5 轮，11-polish-motion §3「所有时间显示本地时区，悬停显示完整时间」）：
+ *   · fmtTime / fmtFullTime / fmtRelative 一律按**浏览器本地时区**（UTC+8 的使用者与旧版输出完全一致）；
+ *   · 悬停用 fmtTimeTitle（完整时间 + 时区偏移，如 `2026-11-24 23:05:00 UTC+08:00`），
+ *     或直接用 timeText() / <TimeText>；
+ *   · 必须与后端日历周期同口径的地方（定时任务「下次执行」、按北京时间切日的统计）显式用
+ *     fmtBeijingTime / fmtBeijingFullTime / beijingParts。
  */
 import { t } from '@/i18n'
 
@@ -13,7 +20,7 @@ import { t } from '@/i18n'
 export const FMT_EMPTY = '—'
 
 const DAY_MS = 86400000
-/** 后端时间一律按 UTC 存、统一 +8 展示（旧版 fmtTime 的做法，与服务器时区无关）。 */
+/** 北京时间偏移：只给显式的 fmtBeijing* / beijingParts 用（后端日历周期按北京时间切）。 */
 const BEIJING_OFFSET_MS = 8 * 3600 * 1000
 
 function looseNumber(value: unknown): number | null {
@@ -80,8 +87,16 @@ export function fmtPct(value: unknown, digits = 1): string {
  *   < 60s   → 3.95s
  *   >= 60s  → 1m 30s / 75m 12s
  *
- * 入参单位固定是毫秒（后端 elapsed_ms / ttfb_ms / total_ms）。
- * 负数与非数一律 emdash：0 会被读成"瞬间"，而实际是没测到。
+ * **单位约定：入参固定是毫秒**（后端 elapsed_ms / latency_ms / ttfb_ms / avg_*_ms 全是 ms）。
+ * 本函数不做任何量级猜测或换算，调用方也不要为了「显示正常」自行 ÷1000 / ×1000。
+ *
+ * 已知问题（不在这里修）：/api/stats/dashboard、/api/stats/model-market 的 avg_ttfb_ms /
+ * avg_latency_ms 曾被后端汇总表放大约 1000 倍（rollup 的 count 被当成布尔，见 fix_plan N1），
+ * 页面因此显示「430m 24s」。那是**后端数据错误**，由后端 rollup 修复并重建汇总表；
+ * 前端若在这里除以 1000，修好后端之后所有正确数据都会被缩小 1000 倍。
+ *
+ * 0 原样显示为 0ms；「无样本」请调用方自行判断后显示 FMT_EMPTY（例如 requests === 0 时）。
+ * 负数与非数一律 emdash（后端用 -1 / null 表示没测到）。
  */
 export function fmtDuration(ms: unknown): string {
   const n = looseNumber(ms)
@@ -108,6 +123,47 @@ export interface DateParts {
   h: number
   mi: number
   s: number
+}
+
+/**
+ * 把 Date 拆成**浏览器本地时区**的各段（图表时间轴用）。
+ *
+ * 图表横轴、列表时间都按使用者本地时区显示（第 1 轮审查 P0-4；第 5 轮起 fmtTime 也走这里）。
+ */
+export function localParts(date: Date): DateParts {
+  return {
+    y: date.getFullYear(),
+    mo: date.getMonth() + 1,
+    d: date.getDate(),
+    h: date.getHours(),
+    mi: date.getMinutes(),
+    s: date.getSeconds(),
+  }
+}
+
+/** 后端小时桶键："2026-11-23 15:00" / "2026-11-23T15:00:00Z" / 带偏移的 ISO。 */
+const HOUR_BUCKET = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/
+
+/**
+ * 时间桶键 → 本地时区的各段；不是小时桶（天桶 "2026-11-23"、空串、文案）时返回 null。
+ *
+ * 后端桶键是对 UTC 的 created_at 直接 strftime 出来的（admin/routers/stats.py:_bucket_expr /
+ * _bucket_keys），不带时区后缀 —— 按 toDate 的约定当 UTC 解析，再换成本地时间。
+ * 后端将来若改成带偏移的 ISO（如 "+08:00"），这里按偏移解析，结果仍然正确。
+ *
+ * 天桶没有时刻，无法换算（后端按 UTC 自然日切分），调用方原样显示月日。
+ */
+export function bucketLocalParts(key: unknown): DateParts | null {
+  const text = String(key ?? '').trim()
+  if (!HOUR_BUCKET.test(text)) return null
+  const date = toDate(text)
+  return date ? localParts(date) : null
+}
+
+/** 本地时区 HH:mm（图表横轴 / 分钟柱标签）。 */
+export function fmtLocalHM(date: Date): string {
+  const p = localParts(date)
+  return pad2(p.h) + ':' + pad2(p.mi)
 }
 
 /** 把 Date 拆成北京时间（UTC+8）的各段。 */
@@ -150,63 +206,138 @@ export function toDate(value: unknown): Date | null {
   return Number.isNaN(fallback) ? null : new Date(fallback)
 }
 
-/**
- * 紧凑时间：今天 → 22:27:36；今年 → 10-30 22:27；更早 → 2025-10-30 22:27。
- *
- * 展示时区固定为北京时间（与旧版一致）。解析不出但又不是空值时原样返回，
- * 免得把一个后端新格式的时间直接吞成 "—"。
- */
-export function fmtTime(value: unknown): string {
-  if (value === null || value === undefined || value === '') return FMT_EMPTY
-  const date = toDate(value)
-  if (!date) return String(value).trim().replace('T', ' ')
-  const p = beijingParts(date)
-  const now = beijingParts(new Date())
-  if (p.y === now.y && p.mo === now.mo && p.d === now.d) {
+function compactParts(p: DateParts, q: DateParts): string {
+  if (p.y === q.y && p.mo === q.mo && p.d === q.d) {
     return pad2(p.h) + ':' + pad2(p.mi) + ':' + pad2(p.s)
   }
-  if (p.y === now.y) {
-    return pad2(p.mo) + '-' + pad2(p.d) + ' ' + pad2(p.h) + ':' + pad2(p.mi)
-  }
+  if (p.y === q.y) return pad2(p.mo) + '-' + pad2(p.d) + ' ' + pad2(p.h) + ':' + pad2(p.mi)
   return p.y + '-' + pad2(p.mo) + '-' + pad2(p.d) + ' ' + pad2(p.h) + ':' + pad2(p.mi)
 }
 
-/** 完整时间：YYYY-MM-DD HH:mm:ss（北京时间）。悬停 tooltip 用。 */
-export function fmtFullTime(value: unknown): string {
-  const date = toDate(value)
-  if (!date) return FMT_EMPTY
-  const p = beijingParts(date)
+function fullParts(p: DateParts): string {
   return (
-    p.y +
-    '-' +
-    pad2(p.mo) +
-    '-' +
-    pad2(p.d) +
-    ' ' +
-    pad2(p.h) +
-    ':' +
-    pad2(p.mi) +
-    ':' +
-    pad2(p.s)
+    p.y + '-' + pad2(p.mo) + '-' + pad2(p.d) + ' ' + pad2(p.h) + ':' + pad2(p.mi) + ':' + pad2(p.s)
   )
 }
 
 /**
- * 相对时间：刚刚 / 3 分钟前 / 2 小时前 / 昨天 / 10-30（今年）/ 2025-10-30。
- * tooltip 里请配 fmtFullTime。
+ * 紧凑时间（浏览器本地时区）：今天 → 22:27:36；今年 → 10-30 22:27；更早 → 2025-10-30 22:27。
+ *
+ * 第 5 轮起按本地时区（原为固定北京时间；UTC+8 的使用者输出不变）。解析不出但又不是空值时
+ * 原样返回，免得把一个后端新格式的时间直接吞成 "—"。悬停请配 fmtTimeTitle。
+ */
+export function fmtTime(value: unknown, now?: Date): string {
+  if (value === null || value === undefined || value === '') return FMT_EMPTY
+  const date = toDate(value)
+  if (!date) return String(value).trim().replace('T', ' ')
+  // 被当回调传（arr.map(fmtTime)）时第二个参数是下标，不能当「现在」用。
+  return compactParts(localParts(date), localParts(now instanceof Date ? now : new Date()))
+}
+
+/** 完整时间：YYYY-MM-DD HH:mm:ss（浏览器本地时区，不带偏移；悬停请用 fmtTimeTitle）。 */
+export function fmtFullTime(value: unknown): string {
+  const date = toDate(value)
+  if (!date) return FMT_EMPTY
+  return fullParts(localParts(date))
+}
+
+/**
+ * 该时刻浏览器本地时区的 UTC 偏移：`UTC+08:00` / `UTC-04:30` / `UTC±00:00`。
+ * 按**该时刻**算（夏令时前后不同）。
+ */
+export function fmtTzOffset(value: unknown = new Date()): string {
+  const date = toDate(value)
+  if (!date) return ''
+  const minutes = -date.getTimezoneOffset()
+  const sign = minutes > 0 ? '+' : minutes < 0 ? '-' : '±'
+  const abs = Math.abs(minutes)
+  return 'UTC' + sign + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60)
+}
+
+/** 悬停用的完整时间：`2026-11-24 23:05:00 UTC+08:00`（本地时区 + 偏移）。空值返回空串（不出 tooltip）。 */
+export function fmtTimeTitle(value: unknown): string {
+  const date = toDate(value)
+  if (!date) return ''
+  return fullParts(localParts(date)) + ' ' + fmtTzOffset(date)
+}
+
+/** 机器可读时间（<time datetime>）：ISO 8601 UTC。解析不出返回空串。 */
+export function toIsoString(value: unknown): string {
+  const date = toDate(value)
+  return date ? date.toISOString() : ''
+}
+
+/** 模板一次拿齐：`<time :datetime="x.iso" :title="x.title">{{ x.text }}</time>`。 */
+export interface TimeText {
+  text: string
+  title: string
+  iso: string
+}
+
+/** 紧凑时间（本地）+ 悬停完整时间（含偏移）+ ISO。relative=true 时 text 用 fmtRelative。 */
+export function timeText(value: unknown, options: { relative?: boolean; now?: number } = {}): TimeText {
+  const date = toDate(value)
+  if (!date) {
+    const raw = value === null || value === undefined ? '' : String(value).trim()
+    return { text: raw ? raw.replace('T', ' ') : FMT_EMPTY, title: '', iso: '' }
+  }
+  const now = options.now ?? Date.now()
+  return {
+    text: options.relative ? fmtRelative(date, now) : fmtTime(date, new Date(now)),
+    title: fmtTimeTitle(date),
+    iso: date.toISOString(),
+  }
+}
+
+/**
+ * 紧凑时间（**固定北京时间**）：今天 → 22:27:36；今年 → 10-30 22:27；更早 → 2025-10-30 22:27。
+ * 只给必须与后端日历周期同口径的地方用（定时任务「下次执行」等），旁边请标注「北京时间」
+ * （已有词条 `page.schedules.zoneHint`）。
+ */
+export function fmtBeijingTime(value: unknown, now?: Date): string {
+  if (value === null || value === undefined || value === '') return FMT_EMPTY
+  const date = toDate(value)
+  if (!date) return String(value).trim().replace('T', ' ')
+  return compactParts(beijingParts(date), beijingParts(now instanceof Date ? now : new Date()))
+}
+
+/** 完整时间（固定北京时间）：YYYY-MM-DD HH:mm:ss。 */
+export function fmtBeijingFullTime(value: unknown): string {
+  const date = toDate(value)
+  if (!date) return FMT_EMPTY
+  return fullParts(beijingParts(date))
+}
+
+/**
+ * 相对时间：刚刚 / 3 分钟前 / 2 小时前 / 昨天 / 10-30（今年）/ 2025-10-30（「昨天」与日期按本地时区）。
+ * tooltip 里请配 fmtTimeTitle（或直接用 relativeTime / timeText({ relative: true })）。
  */
 export function fmtRelative(value: unknown, now = Date.now()): string {
   const date = toDate(value)
   if (!date) return FMT_EMPTY
   const diff = now - date.getTime()
+  // 将来的时间（下次执行、到期时刻）：1 分钟以上才说「N 分钟后 / N 小时后」，再远显示日期。
+  if (diff <= -60000) {
+    const ahead = -diff
+    if (ahead < 3600000) return t('common.relative.inMinutes', { count: Math.floor(ahead / 60000) })
+    if (ahead < DAY_MS) return t('common.relative.inHours', { count: Math.floor(ahead / 3600000) })
+    return dayLabel(date, now)
+  }
   if (diff < 60000) return t('common.relative.justNow')
   if (diff < 3600000) return t('common.relative.minutes', { count: Math.floor(diff / 60000) })
   if (diff < DAY_MS) return t('common.relative.hours', { count: Math.floor(diff / 3600000) })
-  const p = beijingParts(date)
-  const q = beijingParts(new Date(now))
+  const p = localParts(date)
+  const q = localParts(new Date(now))
   const dateDay = Date.UTC(p.y, p.mo - 1, p.d)
   const nowDay = Date.UTC(q.y, q.mo - 1, q.d)
-  if (diff > 0 && nowDay - dateDay === DAY_MS) return t('common.relative.yesterday')
+  if (nowDay - dateDay === DAY_MS) return t('common.relative.yesterday')
+  return dayLabel(date, now)
+}
+
+/** 相对时间超出范围时的日期：今年 MM-DD，更早 / 更晚 YYYY-MM-DD（本地时区）。 */
+function dayLabel(date: Date, now: number): string {
+  const p = localParts(date)
+  const q = localParts(new Date(now))
   if (p.y === q.y) return pad2(p.mo) + '-' + pad2(p.d)
   return p.y + '-' + pad2(p.mo) + '-' + pad2(p.d)
 }
@@ -218,9 +349,9 @@ export function fmtExpiry(value: unknown, now = Date.now()): string {
   const diff = date.getTime() - now
   if (diff <= 0) {
     const days = Math.floor(-diff / DAY_MS)
-    return days >= 1 ? '已过期 ' + days + ' 天' : '已过期'
+    return days >= 1 ? t('format.expiredDays', { count: days }) : t('format.expired')
   }
-  return Math.ceil(diff / DAY_MS) + ' 天后到期'
+  return t('format.expiresIn', { count: Math.ceil(diff / DAY_MS) })
 }
 
 export type ExpiryTone = 'neutral' | 'warn' | 'danger'
@@ -248,4 +379,105 @@ export function maskSecret(value: unknown): string {
   if (text.length <= 4) return '…'
   if (text.length <= 10) return text.charAt(0) + '…' + text.charAt(text.length - 1)
   return text.slice(0, 6) + '…' + text.slice(-4)
+}
+
+/* ------------------------------------------------------------------ *
+ * v2.1 补充（10-visual-refresh §5：无效值「—」、负倍率「按量计费」、拼接带分隔、
+ * 时间本地时区 + 相对时间悬停显示绝对时间）
+ * ------------------------------------------------------------------ */
+
+/** 文案拼接的统一分隔符（第 1 轮审查 P0-7 / 第 2 轮 P0-15：不能直接把两段字连在一起）。 */
+export const JOIN_SEP = ' · '
+
+/** 判断「无效值」：null / undefined / 空串 / NaN / ±Infinity / 已经是 FMT_EMPTY。 */
+export function isBlank(value: unknown): boolean {
+  if (value === null || value === undefined) return true
+  if (typeof value === 'number') return !Number.isFinite(value)
+  if (typeof value === 'string') {
+    const text = value.trim()
+    return text === '' || text === FMT_EMPTY
+  }
+  return false
+}
+
+/**
+ * 无效值显示「—」，其余交给 formatter（默认 String）。
+ * 注意 0 不是无效值：0 原样显示；「没有样本」请调用方自己判断后传 null。
+ */
+export function orDash<T>(value: T | null | undefined, formatter?: (value: T) => string): string {
+  if (isBlank(value)) return FMT_EMPTY
+  const text = formatter ? formatter(value as T) : String(value)
+  return isBlank(text) ? FMT_EMPTY : text
+}
+
+/**
+ * 把若干段文字用「 · 」连起来，自动跳过空段和「—」。
+ *   joinParts(['上下文 128K', '输出 16K'])   → '上下文 128K · 输出 16K'
+ *   joinParts(['每 1 小时', null, '下次 23:30']) → '每 1 小时 · 下次 23:30'
+ * 全部为空时返回 FMT_EMPTY（而不是空串，免得单元格里什么都没有）。
+ */
+export function joinParts(parts: ReadonlyArray<unknown>, sep: string = JOIN_SEP): string {
+  const kept = parts
+    .filter((part) => !isBlank(part) && part !== false)
+    .map((part) => String(part).trim())
+    .filter(Boolean)
+  return kept.length ? kept.join(sep) : FMT_EMPTY
+}
+
+/**
+ * 倍率：×1.50；负数（后端约定 -1 = 该平台没有倍率概念，按 token 计量）显示「按量计费」；
+ * 无效值「—」（第 3 轮审查 A2：别再显示 ×-1.00）。
+ */
+export function fmtMultiplier(value: unknown, digits = 2): string {
+  const n = looseNumber(value)
+  if (n === null) return FMT_EMPTY
+  if (n < 0) return t('common.metered')
+  return '×' + n.toFixed(digits)
+}
+
+/** 指标耗时的合理上限：平均首字 / 平均耗时超过 1 小时，基本可以断定是汇总数据错了。 */
+export const LATENCY_SANITY_MAX_MS = 3600 * 1000
+
+/**
+ * 指标类耗时（平均首字 / 平均耗时 / P90）：与 fmtDuration 同口径，但超过 1 小时显示「数据异常」
+ * 并在控制台警告一次（第 3 轮审查 C：后端汇总表曾放大约 1000 倍）。
+ * 单条请求的耗时继续用 fmtDuration（真实的长请求可以超过 1 小时）。
+ */
+export function fmtLatency(ms: unknown, maxMs: number = LATENCY_SANITY_MAX_MS): string {
+  const n = looseNumber(ms)
+  if (n === null || n < 0) return FMT_EMPTY
+  if (n > maxMs) {
+    warnOnce('latency', '[format] 指标耗时 ' + n + 'ms 超过 ' + maxMs + 'ms，疑似后端汇总数据错误')
+    return t('common.dataAnomaly')
+  }
+  return fmtDuration(n)
+}
+
+const warned = new Set<string>()
+function warnOnce(key: string, message: string): void {
+  if (warned.has(key)) return
+  warned.add(key)
+  if (typeof console !== 'undefined') console.warn(message)
+}
+
+/** 紧凑时间（浏览器本地时区）。第 5 轮起与 fmtTime 相同，保留旧名兼容。 */
+export function fmtLocalTime(value: unknown, now?: Date): string {
+  return fmtTime(value, now)
+}
+
+/** 完整时间（浏览器本地时区）：YYYY-MM-DD HH:mm:ss。第 5 轮起与 fmtFullTime 相同，保留旧名兼容。 */
+export function fmtLocalFullTime(value: unknown): string {
+  return fmtFullTime(value)
+}
+
+/** 相对时间 + 悬停用的完整时间（本地时区 + 偏移），模板里写 `:title="r.title"`。 */
+export interface RelativeTime {
+  text: string
+  title: string
+}
+
+export function relativeTime(value: unknown, now = Date.now()): RelativeTime {
+  const date = toDate(value)
+  if (!date) return { text: FMT_EMPTY, title: '' }
+  return { text: fmtRelative(date, now), title: fmtTimeTitle(date) }
 }

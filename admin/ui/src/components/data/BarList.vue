@@ -43,6 +43,14 @@ const denominator = computed(() => {
   return props.items.reduce((acc, item) => acc + (Number(item.value) || 0), 0)
 })
 
+/**
+ * 条长按**最大项**缩放（第 2 轮审查 P2：按总数缩放时最长的条才 13%，8 根条都很短）；
+ * 右侧百分比仍是占全部的份额（denominator）。
+ */
+const scaleMax = computed(() =>
+  rows.value.reduce((max, item) => Math.max(max, Number(item.value) || 0), 0),
+)
+
 function pctOf(value: number): string {
   if (!denominator.value) return '0.0%'
   return ((value / denominator.value) * 100).toFixed(1) + '%'
@@ -58,7 +66,7 @@ const fmt = computed(() => props.format ?? defaultFormat)
       <Meter
         class="mh-barlist__meter"
         :value="item.value"
-        :max="denominator || 1"
+        :max="scaleMax || 1"
         :tone="item.tone ?? 'brand'"
         :aria-label="item.label + ' · ' + t('common.shareAria')"
       />

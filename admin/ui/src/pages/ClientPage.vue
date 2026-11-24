@@ -25,12 +25,14 @@ import {
   ErrorBlock,
   FormField,
   HelpTip,
+  IconBtn,
   Section,
+  Segmented,
   type KvItem,
   type TableColumn,
   type TableRow,
 } from '@/components'
-import { useConfirm, useToast } from '@/composables'
+import { useConfirm, useRevisit, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError } from '@/api/http'
 import { errorMessage, failureText } from '@/utils/error'
@@ -133,7 +135,9 @@ const versionDirty = computed(
 const fingerprintDirty = computed(
   () => dirtyFields(fingerprintForm, fingerprintBaseline, FINGERPRINT_FIELDS).length > 0,
 )
-const dirty = computed(() => versionDirty.value || fingerprintDirty.value)
+/** 保存条显示「有 N 项未保存」：版本、指纹两块各算一项。 */
+const dirty = computed(() => Number(versionDirty.value) + Number(fingerprintDirty.value))
+const savingCards = computed(() => saving.version || saving.fingerprint)
 
 const firstLoading = computed(() => profile.value === null && loading.value)
 const pageError = computed(() => (profile.value === null ? error.value : null))
@@ -191,7 +195,32 @@ function resetCard(kind: 'version' | 'fingerprint'): void {
   const baseline = kind === 'version' ? versionBaseline : fingerprintBaseline
   const form = kind === 'version' ? versionForm : fingerprintForm
   fillForm(form, baseline)
+}
+
+/** 保存条「保存」：有改动的卡片依次保存（各自的校验与提示不变）。 */
+async function saveAll(): Promise<void> {
+  if (savingCards.value) return
+  if (versionDirty.value) await saveCard('version')
+  if (fingerprintDirty.value) await saveCard('fingerprint')
+}
+
+/** 保存条「放弃」：两块都回到上次读到的值。 */
+function discardAll(): void {
+  resetCard('version')
+  resetCard('fingerprint')
   toast.info(t('page.client.toast.restored'))
+}
+
+/** 取值策略：卡片内的分段控件（原来是页头一个伪装成按钮的状态，第 2 轮审查 P2）。 */
+const sourceOptions = computed(() => [
+  { label: t('page.client.sourceMode.detect'), value: 'auto' },
+  { label: t('page.client.sourceMode.saved'), value: 'saved' },
+])
+const sourceValue = computed(() => (profile.value?.source === 'saved' ? 'saved' : 'auto'))
+
+function onSourceChange(value: string | number): void {
+  if (String(value) === sourceValue.value) return
+  void toggleSource()
 }
 
 async function toggleSource(): Promise<void> {
@@ -261,11 +290,6 @@ const sources = computed(() => sourceRows(profile.value?.sources))
 const sourcesOpen = ref(false)
 const visibleSources = computed(() => (sources.value.length > 10 && !sourcesOpen.value ? sources.value.slice(0, 10) : sources.value))
 
-const sourceMode = computed(() =>
-  profile.value?.source === 'saved'
-    ? t('page.client.sourceMode.saved')
-    : t('page.client.sourceMode.detect'),
-)
 const platformLabel = computed(() => platform.currentSpec?.label || platform.storagePlatform || 'WorkBuddy')
 
 const scanKv = computed<KvItem[]>(() => {
@@ -278,7 +302,6 @@ const scanKv = computed<KvItem[]>(() => {
         ? t('page.client.kv.detectedYes', { count: Object.keys(profile.value.detected || {}).length })
         : t('page.client.kv.detectedNo'),
     },
-    { label: t('page.client.kv.sourceMode'), value: sourceMode.value },
     {
       label: t('page.client.kv.savedFields'),
       value: String(Object.keys(profile.value.saved || {}).length),
@@ -324,6 +347,15 @@ const headerColumns = computed<TableColumn[]>(() => [
 
 let stopPlatformWatch: (() => void) | null = null
 
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (!dirty.value) void loadProfile()
+  },
+  { minIntervalMs: 10_000 },
+)
+
 onMounted(() => {
   void loadProfile()
   // 客户端档案是 WorkBuddy 的全局设置；按任务书保持平台订阅（切平台重取一次，
@@ -345,19 +377,17 @@ onBeforeUnmount(() => {
     :help="helpText"
     :sections="sections"
     :dirty="dirty"
+    :saving="savingCards"
+    @save="saveAll"
+    @discard="discardAll"
   >
     <template #actions>
-      <Btn variant="default" :icon="Search" :loading="saving.detect" @click="runDetect">
-        {{ t('page.client.action.detect') }}
-      </Btn>
-      <Btn variant="quiet" :loading="saving.source" :disabled="!profile" @click="toggleSource">
-        {{ t('page.client.sourceModeLabel', { mode: sourceMode }) }}
-      </Btn>
+      <IconBtn :label="t('common.refresh')" :icon="RefreshCw" :loading="loading" @click="loadProfile" />
       <Btn variant="quiet" :loading="saving.reset" :disabled="!profile" @click="resetAll">
         {{ t('page.client.action.reset') }}
       </Btn>
-      <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="loadProfile">
-        {{ t('common.refresh') }}
+      <Btn variant="primary" :icon="Search" :loading="saving.detect" @click="runDetect">
+        {{ t('page.client.action.detect') }}
       </Btn>
     </template>
 
@@ -371,8 +401,6 @@ onBeforeUnmount(() => {
       v-else-if="firstLoading"
       id="client-loading"
       :title="t('page.client.loadingCard')"
-      hide-save
-      hide-reset
     >
       <div class="cl-skeleton" aria-busy="true">
         <NSkeleton v-for="index in 6" :key="index" height="32px" />
@@ -384,19 +412,22 @@ onBeforeUnmount(() => {
       <SettingsCard
         id="client-scan"
         :title="t('page.client.section.scan')"
-        :loading="saving.detect"
-        hide-save
-        hide-reset
+        :description="t('page.client.scanIntro', { platform: platformLabel })"
       >
         <template #actions>
-          <Btn variant="quiet" size="sm" :loading="saving.detect" @click="runDetect">
-            {{ t('page.client.action.detectAgain') }}
-          </Btn>
           <HelpTip :content="scanHelp" :label="t('page.client.scanHelpLabel')" />
         </template>
 
-        <p class="cl-sub">{{ t('page.client.scanIntro', { platform: platformLabel }) }}</p>
-        <Section :title="t('page.client.section.state')" first>
+        <FormField :label="t('page.client.kv.sourceMode')" :hint="t('page.client.field.sourceHint')">
+          <Segmented
+            :options="sourceOptions"
+            :model-value="sourceValue"
+            :aria-label="t('page.client.kv.sourceMode')"
+            @update:model-value="onSourceChange"
+          />
+        </FormField>
+
+        <Section :title="t('page.client.section.state')">
           <div class="cl-rows">
             <div v-for="item in scanKv" :key="item.label" class="cl-row">
               <span class="cl-row__label">{{ item.label }}</span>
@@ -405,11 +436,11 @@ onBeforeUnmount(() => {
           </div>
         </Section>
 
-        <Section :title="t('page.client.section.dirs')">
-          <ul v-if="scan.dirs.length" class="cl-list">
+        <!-- 没有目录时不再单独列一节「扫描目录 —」：上面的状态行已经写了「0 个」。 -->
+        <Section v-if="scan.dirs.length" :title="t('page.client.section.dirs')">
+          <ul class="cl-list">
             <li v-for="dir in scan.dirs" :key="dir"><code class="mono">{{ dir }}</code></li>
           </ul>
-          <p v-else class="cl-sub">—</p>
         </Section>
 
         <Section v-if="scan.items.length" :title="t('page.client.section.credentialPaths')">
@@ -435,8 +466,7 @@ onBeforeUnmount(() => {
       <SettingsCard
         id="client-runtime"
         :title="t('page.client.section.runtime')"
-        hide-save
-        hide-reset
+        plain
       >
         <template #actions>
           <Badge v-if="runtime.warning" tone="warn" dot>{{ t('page.client.runtime.warning') }}</Badge>
@@ -468,7 +498,7 @@ onBeforeUnmount(() => {
       </SettingsCard>
 
       <!-- 3. 生效中的 UA -->
-      <SettingsCard id="client-ua" :title="t('page.client.section.ua')" hide-save hide-reset>
+      <SettingsCard id="client-ua" :title="t('page.client.section.ua')" plain>
         <template #actions>
           <HelpTip :content="uaHelp" :label="t('page.client.uaHelpLabel')" />
         </template>
@@ -482,13 +512,7 @@ onBeforeUnmount(() => {
         :title="t('page.client.section.version')"
         :description="t('page.client.version.description')"
         :dirty="versionDirty"
-        :loading="saving.version"
-        :save-label="t('page.client.action.saveVersion')"
-        :save-disabled="!versionDirty || saving.version"
-        @save="saveCard('version')"
-        @reset="resetCard('version')"
       >
-        <div class="cl-grid">
           <FormField
             v-for="field in VERSION_FIELDS"
             :key="field.key"
@@ -512,7 +536,6 @@ onBeforeUnmount(() => {
               @update:value="(value: string) => (versionForm[field.key] = value)"
             />
           </FormField>
-        </div>
       </SettingsCard>
 
       <!-- 5. 桌面事件指纹 -->
@@ -521,13 +544,7 @@ onBeforeUnmount(() => {
         :title="t('page.client.section.fingerprint')"
         :description="t('page.client.fingerprint.description')"
         :dirty="fingerprintDirty"
-        :loading="saving.fingerprint"
-        :save-label="t('page.client.action.saveFingerprint')"
-        :save-disabled="!fingerprintDirty || saving.fingerprint"
-        @save="saveCard('fingerprint')"
-        @reset="resetCard('fingerprint')"
       >
-        <div class="cl-grid">
           <FormField
             v-for="field in FINGERPRINT_FIELDS"
             :key="field.key"
@@ -551,11 +568,10 @@ onBeforeUnmount(() => {
               @update:value="(value: string) => (fingerprintForm[field.key] = value)"
             />
           </FormField>
-        </div>
       </SettingsCard>
 
       <!-- 6. 风控 / 审计请求头 -->
-      <SettingsCard id="client-headers" :title="t('page.client.section.headers')" hide-save hide-reset>
+      <SettingsCard id="client-headers" :title="t('page.client.section.headers')" plain>
         <template #actions>
           <HelpTip :content="headersHelp" :label="t('page.client.headersHelpLabel')" />
         </template>
@@ -575,10 +591,12 @@ onBeforeUnmount(() => {
       </SettingsCard>
 
       <!-- 7. 取值来源 -->
-      <SettingsCard id="client-sources" :title="t('page.client.section.sources')" hide-save hide-reset>
-        <template #actions>
-          <span class="cl-sub">{{ t('page.client.sources.intro') }}</span>
-        </template>
+      <SettingsCard
+        id="client-sources"
+        :title="t('page.client.section.sources')"
+        :description="t('page.client.sources.intro')"
+        plain
+      >
         <div v-if="sources.length" class="cl-rows">
           <div v-for="row in visibleSources" :key="row.key" class="cl-row">
             <span class="cl-row__label mono">{{ row.key }}</span>
@@ -677,7 +695,7 @@ onBeforeUnmount(() => {
 }
 
 .cl-list code {
-  font-size: 12.5px;
+  font-size: var(--fs-mono);
 }
 
 .cl-tag {

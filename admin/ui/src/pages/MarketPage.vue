@@ -11,30 +11,28 @@
  *
  * 约定：
  *   · 视图（卡片/列表）与时间窗口都存 localStorage；筛选/排序/分页同步路由 query；
- *   · 依赖平台上下文：订阅 usePlatformStore().onChange，平台真正变化时重新取数，卸载取消；
+ *   · 口径：**全网关**（/api/stats/model-market 不读 X-Platform），页头徽章写明；
+ *     因此不再订阅顶栏平台切换（platform_scoping_review §3）；要看某个平台用页内「平台」筛选；
  *   · 四态齐全：首次加载骨架 7 张卡 / 刷新保留旧数据（右上角转圈）/ 空 / 错误；
- *   · sparkline 用内联 SVG 自绘（不新增依赖）。
+ *   · 卡片拆到 ./Market/MarketCardItem.vue；迷你折线用公共 Sparkline（纯 SVG）。
  */
 import {
   computed,
-  defineComponent,
   h,
   onBeforeUnmount,
   onMounted,
   ref,
   watch,
-  type PropType,
   type VNodeChild,
 } from 'vue'
 import { useRouter } from 'vue-router'
-import { NInput, NSelect, NSkeleton } from 'naive-ui'
+import { NInput, NSelect } from 'naive-ui'
 import { Copy, RefreshCw, ScrollText } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
   Badge,
   Btn,
   Card,
-  Chip,
   Copyable,
   DataTable,
   Empty,
@@ -42,6 +40,7 @@ import {
   FilterBar,
   ModelIcon,
   Segmented,
+  Sparkline,
   type FilterChip,
   type SegmentedOption,
   type SorterPayload,
@@ -49,11 +48,13 @@ import {
   type TableRow,
 } from '@/components'
 import { useTableQuery, useToast } from '@/composables'
-import { usePlatformStore } from '@/stores/platform'
-import { FMT_EMPTY, fmtCompact, fmtCredit, fmtDuration, fmtPct } from '@/utils/format'
+import { FMT_EMPTY, fmtCompact, fmtCredit, fmtPct } from '@/utils/format'
 import { errorMessage } from '@/utils/error'
 import { ApiError, isAbortError } from '@/api/http'
 import { copyText } from '@/platform/clipboard'
+import { avgDurationText, durationState } from '@/api/stats'
+import MarketCardItem from './Market/MarketCardItem.vue'
+import { useRevisit } from '@/pages/_shared/useRevisit'
 import {
   MARKET_HOURS,
   filterMarketCards,
@@ -80,15 +81,16 @@ import {
   type MarketView,
   type ModelMarketPayload,
 } from '@/api/market'
-import { useI18n } from '@/i18n'
+import { groupTitle, useI18n } from '@/i18n'
+import { groupOf } from '@/router/pages'
 
 const { t } = useI18n()
 /** 旧版面板副标题原样保留（收进 ⓘ）；语种跟随 useI18n。 */
 const helpText = computed(() => t('page.market.help'))
+const eyebrow = computed(() => groupTitle(groupOf('market').key))
 
 const toast = useToast()
 const router = useRouter()
-const platformStore = usePlatformStore()
 
 const table = useTableQuery('market', {
   pageSize: 20,
@@ -179,12 +181,14 @@ async function load(): Promise<void> {
       // sparkline 只是锦上添花：拿不到就不画，不弹错
       getMarketTrend(hours.value, current.signal).catch(() => null),
     ])
+    // r4：副接口吞掉 AbortError 后旧请求仍可能 resolve；只认最后一次请求（防切时间窗时旧数据回写）。
+    if (controller !== current) return
     payload.value = market
     aggregate.value = agg
     trend.value = dash?.trend ?? null
     trendMissing.value = !indexTrendSeries(trend.value).size
   } catch (error) {
-    if (isAbortError(error)) return
+    if (isAbortError(error) || controller !== current) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     const failure = t('page.market.failure', {
       action: t('page.market.action.load'),
@@ -377,54 +381,6 @@ function openLogs(card: MarketCard): void {
 }
 
 /* ------------------------------------------------------------------ *
- * sparkline（内联 SVG，不新增依赖）
- * ------------------------------------------------------------------ */
-
-const Sparkline = defineComponent({
-  name: 'MarketSparkline',
-  props: {
-    values: { type: Array as PropType<number[]>, default: () => [] },
-    label: { type: String, default: '' },
-  },
-  setup(props) {
-    const WIDTH = 120
-    const HEIGHT = 28
-    return (): VNodeChild => {
-      if (!props.values.length) {
-        return h('span', { class: 'mkt-dash', title: t('page.market.spark.none') }, FMT_EMPTY)
-      }
-      const barWidth = WIDTH / props.values.length
-      return h(
-        'svg',
-        {
-          class: 'mkt-spark',
-          viewBox: '0 0 ' + WIDTH + ' ' + HEIGHT,
-          preserveAspectRatio: 'none',
-          role: 'img',
-          'aria-label': props.label || t('page.market.spark.label'),
-        },
-        props.values.map((ratio, index) =>
-          h('rect', {
-            key: index,
-            x: (index * barWidth + barWidth * 0.15).toFixed(2),
-            y: (HEIGHT - Math.max(ratio, 0.04) * HEIGHT).toFixed(2),
-            width: Math.max(barWidth * 0.7, 0.6).toFixed(2),
-            height: (Math.max(ratio, 0.04) * HEIGHT).toFixed(2),
-            rx: 1,
-          }),
-        ),
-      )
-    }
-  },
-})
-
-function sparkOf(card: MarketCard): string {
-  return card.sparkTotal === null
-    ? t('page.market.spark.none')
-    : t('page.market.spark.total', { count: fmtCompact(card.sparkTotal) })
-}
-
-/* ------------------------------------------------------------------ *
  * 列表视图列
  * ------------------------------------------------------------------ */
 
@@ -445,7 +401,11 @@ function renderModel(row: TableRow): VNodeChild {
 
 function renderMoney(row: TableRow): VNodeChild {
   const card = row as unknown as MarketCard
-  return h('span', { class: card.multiplier === null ? 'mkt-dash' : 'mkt-num' }, priceText(card))
+  return h(
+    'span',
+    { class: card.multiplier === null && !card.metered && !card.free ? 'mkt-dash' : 'mkt-num' },
+    priceText(card, t),
+  )
 }
 
 function renderRate(row: TableRow): VNodeChild {
@@ -459,6 +419,16 @@ function renderRate(row: TableRow): VNodeChild {
 
 function renderNum(text: string, muted = false): VNodeChild {
   return h('span', { class: muted ? 'mkt-num mkt-dash' : 'mkt-num' }, text)
+}
+
+/** 平均耗时单元格：无样本 —；> 1 小时「数据异常」（avgDurationText 的兜底）。 */
+function renderDuration(ms: number): VNodeChild {
+  const state = durationState(ms)
+  return h(
+    'span',
+    { class: state === 'none' ? 'mkt-num mkt-dash' : state === 'anomaly' ? 'mkt-num is-warn' : 'mkt-num' },
+    avgDurationText(ms, t),
+  )
 }
 
 function renderActions(row: TableRow): VNodeChild {
@@ -533,11 +503,7 @@ const columns = computed<TableColumn[]>(() => [
     mobile: 'meta',
     width: 88,
     numeric: true,
-    render: (row: TableRow) =>
-      renderNum(
-        fmtDuration((row as unknown as MarketCard).ttfbMs),
-        (row as unknown as MarketCard).ttfbMs <= 0,
-      ),
+    render: (row: TableRow) => renderDuration((row as unknown as MarketCard).ttfbMs),
   },
   {
     key: 'latency',
@@ -545,10 +511,7 @@ const columns = computed<TableColumn[]>(() => [
     mobile: 'hidden',
     width: 88,
     numeric: true,
-    render: (row: TableRow) => {
-      const card = row as unknown as MarketCard
-      return renderNum(fmtDuration(card.latencyMs), card.latencyMs <= 0)
-    },
+    render: (row: TableRow) => renderDuration((row as unknown as MarketCard).latencyMs),
   },
   {
     key: 'tps',
@@ -568,7 +531,13 @@ const columns = computed<TableColumn[]>(() => [
     title: t('page.market.col.spark'),
     mobile: 'hidden',
     width: 140,
-    render: (row: TableRow) => h(Sparkline, { values: (row as unknown as MarketCard).spark }),
+    render: (row: TableRow) => {
+      const card = row as unknown as MarketCard
+      if (!card.spark.length) return h('span', { class: 'mkt-dash', title: t('page.market.spark.none') }, FMT_EMPTY)
+      return h('div', { class: 'mkt-spark', title: t('page.market.spark.total', { count: fmtCompact(card.sparkTotal ?? 0) }) }, [
+        h(Sparkline, { data: card.spark, tone: 'brand', height: 24 }),
+      ])
+    },
   },
   {
     key: 'credits',
@@ -587,7 +556,7 @@ const columns = computed<TableColumn[]>(() => [
       const card = row as unknown as MarketCard
       return h(
         Badge,
-        { tone: card.available ? 'ok' : 'danger' },
+        { tone: card.available ? 'ok' : 'neutral', dot: true },
         {
           default: () =>
             card.available
@@ -620,26 +589,32 @@ const columns = computed<TableColumn[]>(() => [
  * 生命周期
  * ------------------------------------------------------------------ */
 
-let offPlatform: (() => void) | null = null
-let lastSelector = platformStore.selector
-
 onMounted(() => {
-  lastSelector = platformStore.selector
   void load()
-  offPlatform = platformStore.onChange((detail) => {
-    // 首屏 store 加载后也会 emit 一次：选择没变就别重复打接口。
-    if (detail.selector === lastSelector) return
-    lastSelector = detail.selector
-    void load()
-  })
 })
 
 onBeforeUnmount(() => {
-  offPlatform?.()
-  offPlatform = null
   controller?.abort()
   controller = null
 })
+
+// 回到 KeepAlive 缓存页：保留旧卡片静默刷新，不出骨架（11 §2）。
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
+useRevisit(() => silently(() => load()))
 
 // 切时间窗口 = 唯一需要重新请求的场景（契约 §9.2）。
 watch(hours, () => {
@@ -649,7 +624,10 @@ watch(hours, () => {
 
 <template>
   <div class="market-page">
-    <PageHeader :help="helpText">
+    <PageHeader :help="helpText" :eyebrow="eyebrow">
+      <template #meta>
+        <Badge tone="neutral">{{ t('page.market.scope') }}</Badge>
+      </template>
       <template #actions>
         <Segmented
           :options="viewOptions"
@@ -729,97 +707,19 @@ watch(hours, () => {
           aria-busy="true"
           :aria-label="t('page.market.loadingAria')"
         >
-          <div v-for="index in 7" :key="index" class="market-skeleton__card">
-            <n-skeleton text :repeat="4" />
-          </div>
+          <div v-for="index in 8" :key="index" class="mh-skeleton market-skeleton__card" />
         </div>
 
         <template v-else-if="view === 'cards'">
           <div v-if="pageData.items.length" class="market-grid">
-            <article
+            <MarketCardItem
               v-for="card in pageData.items"
               :key="card.key"
-              class="market-card"
-              :class="{ 'is-off': !card.available }"
-            >
-              <header class="market-card__head">
-                <ModelIcon :vendor="card.key" :model="card.callName" :size="20" />
-                <div class="market-card__title">
-                  <h3 :title="card.name">{{ card.name }}</h3>
-                  <div class="market-card__chips">
-                    <Chip
-                      v-for="label in card.platformLabels.slice(0, 3)"
-                      :key="label"
-                      :title="label"
-                    >
-                      {{ label }}
-                    </Chip>
-                    <Chip
-                      v-if="card.platformLabels.length > 3"
-                      :title="card.platformLabels.slice(3).join(t('page.market.chipsJoin'))"
-                    >
-                      +{{ card.platformLabels.length - 3 }}
-                    </Chip>
-                    <span v-if="!card.platformCount" class="market-dash">
-                      {{ t('page.market.card.noPlatform') }}
-                    </span>
-                  </div>
-                </div>
-                <Badge :tone="card.available ? 'ok' : 'danger'">
-                  {{
-                    card.available
-                      ? t('page.market.state.available')
-                      : t('page.market.state.unavailable')
-                  }}
-                </Badge>
-              </header>
-
-              <div class="market-card__price">
-                <b>{{ priceText(card) }}</b>
-                <span>
-                  {{ card.free ? t('page.market.card.freeNote') : t('page.market.card.priceNote') }}
-                </span>
-              </div>
-
-              <dl class="market-card__stats">
-                <div>
-                  <dt>{{ t('page.market.card.platforms') }}</dt>
-                  <dd class="tnum">{{ card.platformCount }}</dd>
-                </div>
-                <div>
-                  <dt>{{ t('page.market.card.rate') }}</dt>
-                  <dd class="tnum" :class="'is-' + rateTone(card.successRate)">
-                    {{ fmtPct(card.successRate) }}
-                  </dd>
-                </div>
-                <div>
-                  <dt>TTFT</dt>
-                  <dd class="tnum">{{ fmtDuration(card.ttfbMs) }}</dd>
-                </div>
-              </dl>
-
-              <div class="market-card__spark">
-                <span class="market-card__spark-label">
-                  {{
-                    t('page.market.card.spark', {
-                      window: hoursLabel,
-                      count: fmtCompact(card.requests),
-                    })
-                  }}
-                </span>
-                <Sparkline :values="card.spark" :label="sparkOf(card)" />
-              </div>
-
-              <footer class="market-card__foot">
-                <Btn variant="quiet" size="sm" :icon="Copy" @click="copyName(card)">
-                  {{ t('page.market.action.copy') }}
-                </Btn>
-                <Btn variant="quiet" size="sm" :icon="ScrollText" @click="openLogs(card)">
-                  {{ t('page.market.action.logs') }}
-                </Btn>
-                <code class="market-card__call" :title="card.callName">{{ card.callName }}</code>
-              </footer>
-            </article>
+              :card="card"
+              :hours-label="hoursLabel"
+              @copy="copyName"
+              @logs="openLogs"
+            />
           </div>
 
           <Empty v-else :description="emptyDescription">
@@ -867,7 +767,8 @@ watch(hours, () => {
           :data="tableRows"
           row-key="key"
           remote
-          :loading="loading"
+          :loading="loading && !silentRefresh"
+          :refreshing="loading && silentRefresh"
           :page="table.state.page"
           :page-size="table.state.pageSize"
           :item-count="pageData.total"
@@ -931,139 +832,13 @@ watch(hours, () => {
 .market-grid {
   display: grid;
   gap: var(--sp-3);
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  /* 同一行卡片等高、底部操作条对齐（卡片内 footer margin-top:auto） */
+  align-items: stretch;
 }
 
-.market-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding: var(--sp-4);
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-card);
-  background: var(--surface);
-}
-
-.market-card.is-off {
-  opacity: 0.55;
-}
-
-.market-card__head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-}
-
-.market-card__title {
-  flex: 1;
-  min-width: 0;
-}
-
-.market-card__title h3 {
-  margin: 0;
-  font-size: var(--fs-h2);
-  line-height: var(--lh-h2);
-  font-weight: 600;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.market-card__chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-1);
-  margin-top: var(--sp-1);
-}
-
-.market-card__price {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-}
-
-.market-card__price b {
-  font-family: var(--font-mono);
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--fg);
-}
-
-.market-card__price span {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-}
-
-.market-card__stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--sp-2);
-  margin: 0;
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border-soft);
-}
-
-.market-card__stats dt {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.market-card__stats dd {
-  margin: 2px 0 0;
-  font-size: var(--fs-body);
-  font-weight: 600;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.market-card__spark {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.market-card__spark-label {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
-
-.market-spark,
 :deep(.mkt-spark) {
-  display: block;
-  flex: 1;
-  min-width: 60px;
-  height: 28px;
-  color: var(--brand);
-  fill: currentColor;
-}
-
-.market-card__foot {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border-soft);
-}
-
-.market-card__call,
-:deep(.mkt-call) {
-  margin-left: auto;
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--fg-faint);
+  width: 112px;
 }
 
 .market-dash,
@@ -1145,17 +920,14 @@ watch(hours, () => {
 .market-skeleton {
   display: grid;
   gap: var(--sp-3);
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* 与 .market-grid 同列宽，数据到来不重排 */
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
 
+/* ≈ MarketCardItem 的实际高度 */
 .market-skeleton__card {
-  display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-4);
-  min-height: 180px;
-  border: 1px solid var(--border-soft);
+  min-height: 336px;
   border-radius: var(--r-card);
-  background: var(--surface);
 }
 
 .market-pager {
@@ -1190,10 +962,6 @@ watch(hours, () => {
   .market-grid,
   .market-skeleton {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .market-card__spark {
-    flex-wrap: wrap;
   }
 }
 </style>

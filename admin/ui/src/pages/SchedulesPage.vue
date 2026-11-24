@@ -12,43 +12,35 @@
  *   · 立即执行的结果是后端 run_task 的原样返回值，摘要与落库的 last_result 同源；
  *     执行后刷新该行（有 running 时按 4s 轮询到结束）。
  */
-import { computed, h, onBeforeUnmount, onMounted, ref, watch, type VNodeChild } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NCheckbox, NCheckboxGroup, NDatePicker, NInput, NInputNumber, NSelect, NSkeleton, NSwitch } from 'naive-ui'
 import { Plus, RefreshCw, Settings2 } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
-  Badge,
   Btn,
   Card,
-  CodeBlock,
   DataTable,
-  DetailDrawer,
   Empty,
   ErrorBlock,
   FilterBar,
   FormDrawer,
   FormField,
   HelpTip,
-  KV,
-  RowActions,
-  type FilterChip,
-  type KvItem,
-  type SorterPayload,
-  type TableColumn,
-  type TableRow,
 } from '@/components'
-import { useConfirm, usePolling, useTableQuery, useToast } from '@/composables'
+import { useConfirm, usePolling, useRevisit, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
-import { FMT_EMPTY, fmtInt, fmtTime } from '@/utils/format'
+import { FMT_EMPTY } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
 import { useI18n } from '@/i18n'
+import { useScheduleColumns } from './schedules/columns'
+import { useScheduleFilters } from './schedules/filters'
+import ScheduleGlobalProxyDrawer from './schedules/ScheduleGlobalProxyDrawer.vue'
+import ScheduleResultDrawer from './schedules/ScheduleResultDrawer.vue'
 import { ApiError, isAbortError } from '@/api/http'
 import {
-  CALENDAR_ZONE_HINT,
-  DEFAULT_PROXY_FORM,
+  calendarZoneHint,
   INTERVAL_UNIT_OPTIONS,
   MODE_OPTIONS,
-  RESULT_FIELD_LABELS,
   WEEKDAY_OPTIONS,
   buildProxyPoolOptions,
   buildScheduleInput,
@@ -64,7 +56,6 @@ import {
   listSchedules,
   paginateScheduleRows,
   parseScheduleResult,
-  putGlobalScheduleProxy,
   runSchedule,
   scheduleFormOf,
   scheduleStats,
@@ -165,346 +156,19 @@ watch(
   },
 )
 
-const platformFilterOptions = computed(() => {
-  const seen = new Map<string, string>()
-  for (const row of allRows.value) {
-    if (row.platform && !seen.has(row.platform)) seen.set(row.platform, row.platformLabel)
-  }
-  return [
-    { label: t('page.schedules.filter.platformAll'), value: '' },
-    ...Array.from(seen.entries())
-      .sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'))
-      .map(([value, label]) => ({ label, value })),
-  ]
-})
-
-const taskFilterOptions = computed(() => {
-  const options = (taskCatalog.value.length ? taskCatalog.value : []).map((item) => ({
-    label: item.label,
-    value: item.value,
-  }))
-  if (!options.length) {
-    for (const row of allRows.value) {
-      if (!options.some((option) => option.value === row.task)) {
-        options.push({ label: row.taskLabel, value: row.task })
-      }
-    }
-  }
-  return [{ label: t('page.schedules.filter.taskAll'), value: '' }, ...options]
-})
-
-const stateFilterOptions = computed(() => [
-  { label: t('page.schedules.filter.stateAll'), value: '' },
-  { label: t('page.schedules.filter.enabled'), value: 'enabled' },
-  { label: t('page.schedules.filter.disabled'), value: 'disabled' },
-  { label: t('page.schedules.filter.due'), value: 'due' },
-])
-
-const resultFilterOptions = computed(() => [
-  { label: t('page.schedules.filter.resultAll'), value: '' },
-  { label: t('page.schedules.filter.ok'), value: 'ok' },
-  { label: t('page.schedules.filter.warn'), value: 'warn' },
-  { label: t('page.schedules.filter.danger'), value: 'danger' },
-  { label: t('page.schedules.filter.none'), value: 'none' },
-])
-
-const stateChipLabel = computed(() => {
-  switch (table.state.filters.state) {
-    case 'enabled':
-      return t('page.schedules.filter.enabled')
-    case 'disabled':
-      return t('page.schedules.filter.disabled')
-    case 'due':
-      return t('page.schedules.filter.due')
-    default:
-      return ''
-  }
-})
-
-const resultChipLabel = computed(() => {
-  switch (table.state.filters.result) {
-    case 'ok':
-      return t('page.schedules.filter.ok')
-    case 'warn':
-      return t('page.schedules.filter.warn')
-    case 'danger':
-      return t('page.schedules.filter.danger')
-    case 'none':
-      return t('page.schedules.filter.none')
-    default:
-      return ''
-  }
-})
-
-const chips = computed<FilterChip[]>(() => {
-  const filters = table.state.filters
-  const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: t('page.schedules.filter.chipSearch'), value: filters.q })
-  if (filters.platform) {
-    const hit = platformFilterOptions.value.find((option) => option.value === filters.platform)
-    list.push({
-      key: 'platform',
-      label: t('page.schedules.filter.chipPlatform'),
-      value: hit?.label || filters.platform,
-    })
-  }
-  if (filters.task) {
-    const hit = taskFilterOptions.value.find((option) => option.value === filters.task)
-    list.push({ key: 'task', label: t('page.schedules.filter.chipTask'), value: hit?.label || filters.task })
-  }
-  if (filters.state) {
-    list.push({ key: 'state', label: t('page.schedules.filter.chipState'), value: stateChipLabel.value })
-  }
-  if (filters.result) {
-    list.push({ key: 'result', label: t('page.schedules.filter.chipResult'), value: resultChipLabel.value })
-  }
-  return list
-})
-
-const SORT_KEY_MAP: Record<string, string> = {
-  name: 'name',
-  platform: 'platform',
-  cycle: 'next_run_at',
-  last: 'last_run_at',
-}
-
-function sortOrderOf(stateKey: string): 'ascend' | 'descend' | false {
-  if (table.state.sortBy !== stateKey) return false
-  if (table.state.sortOrder === 'asc') return 'ascend'
-  if (table.state.sortOrder === 'desc') return 'descend'
-  return false
-}
-
-function onSorter(sorter: SorterPayload | null): void {
-  if (!sorter || !sorter.order) {
-    table.setSort('', '')
-    return
-  }
-  const stateKey = SORT_KEY_MAP[sorter.columnKey]
-  if (!stateKey) {
-    table.setSort('', '')
-    return
-  }
-  table.setSort(stateKey, sorter.order === 'ascend' ? 'asc' : 'desc')
-}
-
-/* ------------------------------ 单元格 ------------------------------ */
-
-function renderName(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  const children: VNodeChild[] = [
-    h('span', { class: 'sc-name', title: item.displayName }, item.displayName || FMT_EMPTY),
-  ]
-  if (item.running) {
-    children.push(
-      h(
-        Badge,
-        { tone: 'brand', dot: true, class: 'sc-name__badge' },
-        { default: () => t('page.schedules.cell.running') },
-      ),
-    )
-  }
-  if (item.stopAfter) {
-    children.push(
-      h(
-        'span',
-        { class: 'sc-name__stop', title: t('page.schedules.cell.stopAfterTitle') },
-        t('page.schedules.cell.stopAfter', { time: fmtTime(item.stopAfter) }),
-      ),
-    )
-  }
-  return h('div', { class: 'sc-name-cell' }, children)
-}
-
-function renderTask(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  return h('div', { class: 'sc-task' }, [
-    h('span', { class: 'sc-task__label', title: item.task }, item.taskLabel || FMT_EMPTY),
-    h('span', { class: 'sc-task__id mono', title: t('page.schedules.cell.taskIdTitle') }, item.task),
-  ])
-}
-
-function renderScope(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  return h('div', { class: 'sc-scope' }, [
-    h(
-      'span',
-      { title: t('page.schedules.cell.scopeTitle', { platform: item.platform || '—' }) },
-      item.platformLabel || FMT_EMPTY,
-    ),
-    h('span', { class: 'sc-scope__hint' }, t('page.schedules.cell.scopeHint')),
-  ])
-}
-
-function renderCycle(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  const children: VNodeChild[] = [
-    h('span', { class: 'sc-cycle__main' }, item.cycleText || FMT_EMPTY),
-  ]
-  if (item.zoneHint) {
-    children.push(h('span', { class: 'sc-cycle__zone' }, item.zoneHint))
-  }
-  children.push(
-    h(
-      'span',
-      { class: item.enabled && item.dueSoon ? 'sc-cycle__next is-due' : 'sc-cycle__next' },
-      t('page.schedules.cell.next', { text: item.nextText }),
-    ),
-  )
-  return h('div', { class: 'sc-cycle' }, children)
-}
-
-function renderProxy(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  const hints: string[] = []
-  hints.push(
-    item.concurrency > 0
-      ? t('page.schedules.cell.concurrency', { count: item.concurrency })
-      : t('page.schedules.cell.concurrencyAuto'),
-  )
-  hints.push(
-    item.budgetMinutes > 0
-      ? t('page.schedules.cell.budget', { count: item.budgetMinutes })
-      : t('page.schedules.cell.budgetDefault'),
-  )
-  hints.push(
-    item.staleMinutes > 0
-      ? t('page.schedules.cell.stale', { count: item.staleMinutes })
-      : t('page.schedules.cell.staleDefault'),
-  )
-  return h(
-    'div',
-    { class: 'sc-proxy', title: hints.join('\n') },
-    [
-      h('span', { class: item.proxyPool ? 'sc-proxy__main' : 'sc-proxy__main is-global' }, item.proxyText),
-      h('span', { class: 'sc-proxy__hint' }, hints[0] + ' · ' + hints[2]),
-    ],
-  )
-}
-
-function renderResult(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  const result = item.result
-  const children: VNodeChild[] = [
-    h('div', { class: 'sc-result__head' }, [
-      h(Badge, { tone: result.tone }, { default: () => result.label }),
-      h(
-        'span',
-        { class: 'sc-result__time', title: t('page.schedules.cell.lastRunTitle') },
-        item.lastRunAt ? fmtTime(item.lastRunAt) : t('page.schedules.cell.neverRun'),
-      ),
-    ]),
-  ]
-  if (result.summary) {
-    children.push(h('span', { class: 'sc-result__summary', title: result.summary }, result.summary))
-  }
-  return h('div', { class: 'sc-result' }, children)
-}
-
-function renderEnabled(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  return h(NSwitch, {
-    value: item.enabled,
-    size: 'small',
-    'aria-label': item.enabled
-      ? t('page.schedules.action.disableTask')
-      : t('page.schedules.action.enableTask'),
-    loading: togglingIds.value.includes(item.id),
-    'onUpdate:value': (value: boolean) => {
-      void onToggle(item, value)
-    },
-  })
-}
-
-function renderActions(row: TableRow): VNodeChild {
-  const item = row as ScheduleRow
-  return h(RowActions, {
-    actions: [
-      {
-        key: 'run',
-        label: t('page.schedules.action.run'),
-        disabled: runningIds.value.includes(item.id),
-      },
-      { key: 'edit', label: t('common.edit') },
-      { key: 'result', label: t('page.schedules.action.result') },
-      { key: 'delete', label: t('common.delete'), danger: true },
-    ],
-    max: 2,
-    onSelect: (key: string) => {
-      void onRowAction(item, key)
-    },
-  })
-}
-
-const columns = computed<TableColumn[]>(() => [
-  {
-    key: 'name',
-    title: t('page.schedules.col.name'),
-    mobile: 'title',
-    minWidth: 260,
-    sortable: true,
-    sortOrder: sortOrderOf('name'),
-    render: renderName,
-  },
-  {
-    key: 'task',
-    title: t('page.schedules.col.task'),
-    mobile: 'meta',
-    width: 168,
-    render: renderTask,
-  },
-  {
-    key: 'platform',
-    title: t('page.schedules.col.platform'),
-    mobile: 'subtitle',
-    width: 176,
-    sortable: true,
-    sortOrder: sortOrderOf('platform'),
-    render: renderScope,
-  },
-  {
-    key: 'cycle',
-    title: t('page.schedules.col.cycle'),
-    mobile: 'meta',
-    minWidth: 200,
-    sortable: true,
-    sortOrder: sortOrderOf('next_run_at'),
-    render: renderCycle,
-  },
-  {
-    key: 'proxy',
-    title: t('page.schedules.col.proxy'),
-    mobile: 'meta',
-    width: 200,
-    render: renderProxy,
-  },
-  {
-    key: 'last',
-    title: t('page.schedules.col.last'),
-    mobile: 'meta',
-    minWidth: 220,
-    sortable: true,
-    sortOrder: sortOrderOf('last_run_at'),
-    render: renderResult,
-  },
-  {
-    key: 'enabled',
-    title: t('page.schedules.col.enabled'),
-    mobile: 'meta',
-    width: 72,
-    hideable: false,
-    render: renderEnabled,
-  },
-  {
-    key: 'actions',
-    title: t('page.schedules.col.actions'),
-    mobile: 'actions',
-    width: 168,
-    hideable: false,
-    fixed: 'right',
-    render: renderActions,
-  },
-])
+const {
+  platformFilterOptions,
+  taskFilterOptions,
+  stateFilterOptions,
+  resultFilterOptions,
+  chips,
+  sortOrderOf,
+  onSorter,
+  onFilterChange,
+  applyFilter,
+  removeChip,
+  resetFilters,
+} = useScheduleFilters({ table, allRows, taskCatalog, search })
 
 /* ------------------------------------------------------------------ *
  * 取数
@@ -558,30 +222,6 @@ async function loadSchedules(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ *
- * 筛选 / 排序 / 分页
- * ------------------------------------------------------------------ */
-
-function onFilterChange(values: Record<string, unknown>): void {
-  const next: Record<string, string> = {}
-  for (const [name, value] of Object.entries(values)) next[name] = String(value ?? '')
-  table.setFilters(next)
-}
-
-function applyFilter(name: string, value: string | number | null): void {
-  table.setFilter(name, value === null || value === undefined ? '' : String(value))
-}
-
-function removeChip(key: string): void {
-  if (key === 'q') search.value = ''
-  table.setFilter(key, '')
-}
-
-function resetFilters(): void {
-  search.value = ''
-  table.reset()
-}
-
-/* ------------------------------------------------------------------ *
  * 行操作：立即执行 / 启停 / 编辑 / 删除 / 结果详情
  * ------------------------------------------------------------------ */
 
@@ -613,7 +253,14 @@ async function runOne(row: ScheduleRow): Promise<void> {
         t('page.schedules.toast.ran', { name: row.displayName, label: view.label, tail: textTail }),
       )
   } catch (error) {
-    toast.error(failureText(t('page.schedules.action.run'), error))
+    // 后端用同一套认领（fixlog_data_scoping D6）：调度器或另一次手动执行正在跑 → 409；数据库忙 → 503。
+    if (error instanceof ApiError && error.status === 409) {
+      toast.warning(t('page.schedules.toast.alreadyRunning', { name: row.displayName }))
+    } else if (error instanceof ApiError && error.status === 503) {
+      toast.warning(t('page.schedules.toast.runBusy', { name: row.displayName }))
+    } else {
+      toast.error(failureText(t('page.schedules.action.run'), error))
+    }
   } finally {
     runningIds.value = runningIds.value.filter((id) => id !== row.id)
     await loadSchedules()
@@ -669,11 +316,26 @@ async function removeOne(row: ScheduleRow): Promise<void> {
   }
 }
 
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * 轮询：有任务在执行时每 4s 刷新到结束（05-patterns §3）
  * ------------------------------------------------------------------ */
 
-const poll = usePolling(() => loadSchedules(), 4000, { immediate: false })
+const poll = usePolling(() => silently(() => loadSchedules()), 4000, { immediate: false })
 
 watch(anyRunning, (running) => {
   if (running) poll.start()
@@ -681,29 +343,22 @@ watch(anyRunning, (running) => {
 })
 
 /* ------------------------------------------------------------------ *
- * 结果详情抽屉
+ * 表格列（src/pages/schedules/columns.ts；togglingIds 在上面声明，必须在它之后调用）
+ * ------------------------------------------------------------------ */
+
+const columns = useScheduleColumns({ runningIds, togglingIds, sortOrderOf, onToggle, onRowAction })
+
+/* ------------------------------------------------------------------ *
+ * 结果详情抽屉（src/pages/schedules/ScheduleResultDrawer.vue）
  * ------------------------------------------------------------------ */
 
 const resultOpen = ref(false)
 const resultRow = ref<ScheduleRow | null>(null)
-const resultDetailRows = ref<TableRow[]>([])
 
-const resultSubtitle = computed(() => {
-  const row = resultRow.value
-  if (!row) return undefined
-  return t('page.schedules.result.subtitle', {
-    state: row.enabled
-      ? t('page.schedules.result.subtitleEnabled')
-      : t('page.schedules.result.subtitleDisabled'),
-    time: row.lastRunAt ? fmtTime(row.lastRunAt) : t('page.schedules.cell.neverRun'),
-  })
-})
-
-const resultTitle = computed(() =>
-  resultRow.value
-    ? t('page.schedules.result.titleOf', { name: resultRow.value.displayName })
-    : t('page.schedules.result.title'),
-)
+function openResult(row: ScheduleRow): void {
+  resultRow.value = row
+  resultOpen.value = true
+}
 
 const proxyHint = computed(() =>
   t('page.schedules.form.proxyHint', {
@@ -712,48 +367,6 @@ const proxyHint = computed(() =>
       : t('page.schedules.form.proxyDirect'),
   }),
 )
-
-const resultKv = computed<KvItem[]>(() => {
-  const parsed = resultRow.value?.result.parsed
-  if (!parsed) return []
-  const items: KvItem[] = []
-  for (const [key, value] of Object.entries(parsed)) {
-    if (Array.isArray(value) || (value && typeof value === 'object')) continue
-    const label = RESULT_FIELD_LABELS[key] || key
-    const textValue =
-      typeof value === 'boolean'
-        ? value
-          ? t('page.schedules.result.yes')
-          : t('page.schedules.result.no')
-        : value === null || value === ''
-          ? ''
-          : String(value)
-    items.push({ label, value: textValue.length > 240 ? textValue.slice(0, 240) + '…' : textValue })
-  }
-  return items
-})
-
-const resultDetailColumns = computed<TableColumn[]>(() => [
-  { key: 'account', title: t('page.schedules.result.colAccount'), mobile: 'title', minWidth: 160 },
-  { key: 'status', title: t('page.schedules.result.colStatus'), mobile: 'meta', width: 96 },
-  { key: 'credit', title: t('page.schedules.result.colCredit'), mobile: 'meta', width: 88, numeric: true },
-  { key: 'reason', title: t('page.schedules.result.colReason'), mobile: 'meta', minWidth: 200 },
-])
-
-function openResult(row: ScheduleRow): void {
-  resultRow.value = row
-  resultDetailRows.value = row.result.detail.map((item, index) => ({
-    key: String(item.account_id ?? index),
-    account: String(item.account ?? item.name ?? '#' + String(item.account_id ?? index)),
-    status:
-      item.ok === false
-        ? t('page.schedules.result.statusFailed')
-        : String(item.status || t('page.schedules.result.statusOk')),
-    credit: item.credit === undefined || item.credit === null ? '' : fmtInt(item.credit),
-    reason: String(item.reason ?? item.error ?? ''),
-  }))
-  resultOpen.value = true
-}
 
 /* ------------------------------------------------------------------ *
  * 表单抽屉（新建 / 编辑）
@@ -917,47 +530,19 @@ async function submit(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ *
- * 全局出口与并发
+ * 全局出口与并发（src/pages/schedules/ScheduleGlobalProxyDrawer.vue）
  * ------------------------------------------------------------------ */
 
 const globalOpen = ref(false)
-const globalForm = ref<ScheduleGlobalProxy>({ ...DEFAULT_PROXY_FORM, proxy_pool: '', concurrency: 0, time_budget_minutes: 0, stale_minutes: 0 })
-const globalSaving = ref(false)
-
-const globalProxyOptions = computed(() =>
-  buildProxyPoolOptions(proxyPayload.value, globalProxy.value, globalForm.value.proxy_pool),
-)
 
 async function openGlobalProxy(): Promise<void> {
   await ensureProxies(true)
-  globalForm.value = {
-    proxy_pool: globalProxy.value?.proxy_pool || '',
-    concurrency: Number(globalProxy.value?.concurrency || 0),
-    time_budget_minutes: Number(globalProxy.value?.time_budget_minutes || 0),
-    stale_minutes: Number(globalProxy.value?.stale_minutes || 0),
-  }
   globalOpen.value = true
 }
 
-async function saveGlobalProxy(): Promise<void> {
-  if (globalSaving.value) return
-  globalSaving.value = true
-  try {
-    const payload = await putGlobalScheduleProxy(globalForm.value)
-    globalProxy.value = {
-      proxy_pool: payload?.proxy_pool ?? globalForm.value.proxy_pool,
-      concurrency: Number(payload?.concurrency ?? globalForm.value.concurrency),
-      time_budget_minutes: Number(payload?.time_budget_minutes ?? globalForm.value.time_budget_minutes),
-      stale_minutes: Number(payload?.stale_minutes ?? globalForm.value.stale_minutes),
-    }
-    toast.success(t('page.schedules.toast.globalSaved'))
-    globalOpen.value = false
-    await loadSchedules()
-  } catch (error) {
-    toast.error(failureText(t('page.schedules.action.saveGlobal'), error))
-  } finally {
-    globalSaving.value = false
-  }
+async function onGlobalSaved(next: ScheduleGlobalProxy): Promise<void> {
+  globalProxy.value = next
+  await loadSchedules()
 }
 
 /* ------------------------------------------------------------------ *
@@ -965,6 +550,9 @@ async function saveGlobalProxy(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 let unsubscribePlatform: (() => void) | null = null
+
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+useRevisit(() => silently(() => loadSchedules()), { minIntervalMs: 10_000 })
 
 onMounted(() => {
   void loadSchedules()
@@ -1079,7 +667,8 @@ onBeforeUnmount(() => {
           :data="pageData.items"
           row-key="key"
           remote
-          :loading="loading"
+          :loading="loading && !silentRefresh"
+          :refreshing="loading && silentRefresh"
           :page="table.state.page"
           :page-size="table.state.pageSize"
           :item-count="pageData.total"
@@ -1171,7 +760,7 @@ onBeforeUnmount(() => {
           :label="t('page.schedules.form.time')"
           required
           :error="formErrors.time"
-          :hint="t('page.schedules.form.timeHint', { zone: CALENDAR_ZONE_HINT })"
+          :hint="t('page.schedules.form.timeHint', { zone: calendarZoneHint() })"
         >
           <n-input v-model:value="form.time" placeholder="09:00" maxlength="5" class="schedules-time" />
         </FormField>
@@ -1269,302 +858,17 @@ onBeforeUnmount(() => {
     </FormDrawer>
 
     <!-- 全局出口与并发 -->
-    <FormDrawer
+    <ScheduleGlobalProxyDrawer
       v-model:show="globalOpen"
-      :title="t('page.schedules.global.title')"
-      :submit-text="t('page.schedules.global.submit')"
-      :submit-loading="globalSaving"
-      @submit="saveGlobalProxy"
-    >
-      <p class="schedules-hint">{{ globalProxyHelp }}</p>
-
-      <FormField
-        :label="t('page.schedules.global.proxy')"
-        :hint="t('page.schedules.global.proxyHint')"
-      >
-        <n-select
-          :value="globalForm.proxy_pool"
-          :options="globalProxyOptions"
-          :placeholder="t('page.schedules.global.proxyPlaceholder')"
-          @update:value="(value: string) => (globalForm.proxy_pool = value)"
-        />
-      </FormField>
-
-      <FormField
-        :label="t('page.schedules.global.concurrency')"
-        :hint="t('page.schedules.global.concurrencyHint')"
-      >
-        <n-input-number v-model:value="globalForm.concurrency" :min="0" :max="64" :step="1" />
-      </FormField>
-
-      <FormField
-        :label="t('page.schedules.global.budget')"
-        :hint="t('page.schedules.global.budgetHint')"
-      >
-        <n-input-number v-model:value="globalForm.time_budget_minutes" :min="0" :max="720" :step="1" />
-      </FormField>
-
-      <FormField
-        :label="t('page.schedules.global.stale')"
-        :hint="t('page.schedules.global.staleHint')"
-      >
-        <n-input-number v-model:value="globalForm.stale_minutes" :min="0" :max="10080" :step="1" />
-      </FormField>
-    </FormDrawer>
+      :global-proxy="globalProxy"
+      :proxy-payload="proxyPayload"
+      :help="globalProxyHelp"
+      @saved="onGlobalSaved"
+    />
 
     <!-- 结果详情 -->
-    <DetailDrawer
-      v-model:show="resultOpen"
-      :title="resultTitle"
-      :badge="resultRow ? { tone: resultRow.result.tone, label: resultRow.result.label } : null"
-      :subtitle="resultSubtitle"
-    >
-      <template v-if="resultRow">
-        <p v-if="resultRow.result.summary" class="schedules-result__summary">
-          {{ resultRow.result.summary }}
-        </p>
-
-        <KV v-if="resultKv.length" :items="resultKv" />
-
-        <DataTable
-          v-if="resultDetailRows.length"
-          table-id="schedules-result"
-          :columns="resultDetailColumns"
-          :data="resultDetailRows"
-          row-key="key"
-          pagination
-          :page-size="10"
-        />
-
-        <CodeBlock
-          v-if="resultRow.result.raw"
-          :code="resultRow.result.raw"
-          language="json"
-          max-height="280px"
-        />
-        <p v-else class="schedules-hint">{{ t('page.schedules.result.empty') }}</p>
-      </template>
-    </DetailDrawer>
+    <ScheduleResultDrawer v-model:show="resultOpen" :row="resultRow" />
   </div>
 </template>
 
-<style scoped>
-.schedules-page {
-  display: grid;
-  gap: var(--sp-4);
-  min-width: 0;
-}
-
-.schedules-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: 0;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--warn-soft);
-  border-radius: var(--r-ctl);
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-}
-
-.schedules-card {
-  min-width: 0;
-}
-
-.schedules-filter {
-  padding: var(--sp-4) var(--sp-5) var(--sp-3);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.schedules-filter__search {
-  width: 240px;
-  max-width: 100%;
-}
-
-.schedules-filter__select {
-  width: 160px;
-}
-
-.schedules-body {
-  padding: var(--sp-3) var(--sp-5) var(--sp-5);
-  min-width: 0;
-}
-
-.schedules-skeleton {
-  display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-3) 0;
-}
-
-.sc-name-cell {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-.sc-name {
-  font-weight: 500;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.sc-name__stop {
-  flex-basis: 100%;
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--warn);
-}
-
-.sc-task,
-.sc-scope,
-.sc-cycle,
-.sc-proxy,
-.sc-result {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.sc-task__label,
-.sc-scope {
-  color: var(--fg);
-}
-
-.sc-task__id,
-.sc-scope__hint,
-.sc-cycle__zone,
-.sc-cycle__next,
-.sc-proxy__hint {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.sc-cycle__next.is-due {
-  color: var(--warn);
-}
-
-.sc-proxy__main.is-global {
-  color: var(--fg-muted);
-}
-
-.sc-result__head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.sc-result__time {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.sc-result__summary {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.schedules-readonly {
-  display: inline-block;
-  padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--r-ctl);
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-}
-
-.schedules-interval {
-  display: flex;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.schedules-interval__unit {
-  width: 120px;
-  flex: none;
-}
-
-.schedules-time {
-  width: 120px;
-}
-
-.schedules-weekdays {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-3);
-}
-
-.schedules-grid2 {
-  display: grid;
-  gap: var(--sp-4);
-}
-
-.schedules-enabled {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-}
-
-.schedules-hint {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
-  margin: 0;
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.schedules-result__summary {
-  margin: 0;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-ctl);
-  background: var(--surface-2);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-}
-
-@media (min-width: 720px) {
-  .schedules-grid2 {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 640px) {
-  .schedules-filter {
-    padding: var(--sp-3) var(--sp-4);
-  }
-
-  .schedules-body {
-    padding: var(--sp-2) var(--sp-4) var(--sp-4);
-  }
-
-  .schedules-filter__search,
-  .schedules-filter__select {
-    width: 100%;
-  }
-
-  .schedules-interval {
-    flex-wrap: wrap;
-  }
-}
-</style>
+<style scoped src="./schedules/SchedulesPage.css"></style>

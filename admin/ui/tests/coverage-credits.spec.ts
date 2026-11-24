@@ -13,7 +13,7 @@ import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-
 import { NConfigProvider, NDialogProvider, NInputNumber, NMessageProvider, NSelect } from 'naive-ui'
 import CreditsPage from '@/pages/CreditsPage.vue'
 import DataTable from '@/components/data/DataTable.vue'
-import StatStrip from '@/components/data/StatStrip.vue'
+import KpiCard from '@/components/data/KpiCard.vue'
 import StackMeter from '@/components/data/StackMeter.vue'
 import BarList from '@/components/data/BarList.vue'
 import DetailDrawer from '@/components/overlay/DetailDrawer.vue'
@@ -260,6 +260,19 @@ function button(wrapper: VueWrapper, label: string) {
   return found!
 }
 
+/** 策略区的两个控件：表分页/列设置里也有 NSelect，这里必须按 class 精确定位。 */
+function policySelect(wrapper: VueWrapper) {
+  const found = wrapper.findAllComponents(NSelect).find((item) => item.classes().includes('cr-mode'))
+  expect(found, 'policy NSelect').toBeTruthy()
+  return found!
+}
+
+function policyInterval(wrapper: VueWrapper) {
+  const found = wrapper.findAllComponents(NInputNumber).find((item) => item.classes().includes('cr-interval'))
+  expect(found, 'policy NInputNumber').toBeTruthy()
+  return found!
+}
+
 async function clickButton(wrapper: VueWrapper, label: string): Promise<void> {
   await button(wrapper, label).trigger('click')
   await flush()
@@ -313,18 +326,12 @@ afterEach(() => {
 })
 
 describe('首屏渲染', () => {
-  it('StatStrip / 风险分布 / 两张表 / BarList 都拿到 mock 数据', async () => {
+  it('KpiCard / 风险分布 / 两张表 / BarList 都拿到 mock 数据', async () => {
     const { wrapper } = await mountPage()
-    const strip = wrapper.findComponent(StatStrip)
-    const stripItems = strip.props('items') as Array<{ label: string; value: string | number }>
-    expect(stripItems.map((item) => item.label)).toEqual([
-      '账号总数',
-      '可用积分',
-      '7 天内到期',
-      '长期有效',
-      '最紧迫账号',
-    ])
-    expect(stripItems[1].value).toBe('12,954')
+    // v2.1：统计条改成 4 张 KpiCard（账号数移到页头 meta）
+    const kpis = wrapper.findAllComponents(KpiCard)
+    expect(kpis.map((item) => item.props('label'))).toEqual(['可用积分', '7 天内到期', '长期有效', '最紧迫账号'])
+    expect(kpis[0].props('value')).toBe('12,954')
     expect(wrapper.text()).toContain('账号调度策略')
     expect(wrapper.text()).toContain('到期风险分布')
     const stack = wrapper.findComponent(StackMeter)
@@ -338,7 +345,9 @@ describe('首屏渲染', () => {
     expect(accountData[1].rank).toBe(2)
     const bars = wrapper.findComponent(BarList)
     expect((bars.props('items') as unknown[]).length).toBe(2)
-    expect(wrapper.text()).toContain('2 个账号 · 自动：到期排名加权')
+    // v2.1：页头 meta = 账号总数 + 已采集快照覆盖（"3 个账号 · 已采集 2/3"）
+    expect(wrapper.find('.cr-meta').text()).toContain('3 个账号')
+    expect(wrapper.find('.cr-meta').text()).toContain('已采集 2/3')
   })
 })
 
@@ -476,26 +485,29 @@ describe('明细抽屉', () => {
 describe('账号调度策略', () => {
   it('改模式后保存：调用接口并重新加载到期数据', async () => {
     const { wrapper } = await mountPage()
-    // 初始 form.mode 未回填（页面 applyPolicyForm 在 dirty 时提前 return）→ dirty 为真：
-    // 先选回与 policy 相同的模式，让「保存策略」回到禁用，再改成另一种模式启用。
-    expect(btnComponent(wrapper, '保存策略').props('disabled')).toBe(false)
-    await wrapper.findComponent(NSelect).vm.$emit('update:value', 'expiry_weighted')
+    // v2.1：各卡不再有自己的保存按钮，统一收进页面底部 SaveBar；没有未保存改动时整条不出现。
+    // 首次取数后表单已回填成当前 policy，所以一进来是干净的。
+    expect(wrapper.find('[data-testid="mh-savebar"]').exists()).toBe(false)
+    await policySelect(wrapper).vm.$emit('update:value', 'expiry_weighted')
     await flush()
-    expect(btnComponent(wrapper, '保存策略').props('disabled')).toBe(true)
-    await wrapper.findComponent(NSelect).vm.$emit('update:value', 'expiring')
+    // 选回与 policy 相同的模式 = 没有改动 → SaveBar 仍然不出现
+    expect(wrapper.find('[data-testid="mh-savebar"]').exists()).toBe(false)
+    await policySelect(wrapper).vm.$emit('update:value', 'expiring')
     await flush()
-    expect(btnComponent(wrapper, '保存策略').props('disabled')).toBe(false)
-    await clickButton(wrapper, '保存策略')
+    expect(wrapper.find('[data-testid="mh-savebar"]').exists()).toBe(true)
+    await clickButton(wrapper, '保存')
     expect(savePolicy).toHaveBeenCalledWith({ mode: 'expiring', upstream_start_interval_ms: 75 })
     expect(getExpiry).toHaveBeenCalledTimes(2)
   })
 
   it('非法间隔不保存并提示（0–60000 整数）', async () => {
     const { wrapper } = await mountPage()
-    await wrapper.findComponent(NInputNumber).vm.$emit('update:value', 70000)
-    await wrapper.findComponent(NSelect).vm.$emit('update:value', 'expiring')
+    await policyInterval(wrapper).vm.$emit('update:value', 70000)
+    await policySelect(wrapper).vm.$emit('update:value', 'expiring')
     await flush()
-    await clickButton(wrapper, '保存策略')
+    // 保存按钮现在是 SaveBar 里的「保存」
+    expect(wrapper.find('[data-testid="mh-savebar"]').exists()).toBe(true)
+    await clickButton(wrapper, '保存')
     expect(savePolicy).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain('上游启动间隔必须是 0 到 60000 的整数毫秒')
   })

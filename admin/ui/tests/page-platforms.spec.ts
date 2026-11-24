@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  TIER_ORDER,
   aggregateAccounts,
   countByState,
   exportFilename,
@@ -10,7 +9,6 @@ import {
   platformActionsOf,
   scanPlanFor,
   successTone,
-  tierOf,
   toPlatformCards,
   type AccountSnapshotRow,
   type GatewayConfigPayload,
@@ -199,21 +197,18 @@ describe('toPlatformCards：平台列表 + 跑分 + 网关 + 账号聚合', () =
     expect(loomy.activeAccounts).toBeNull()
   })
 
-  it('平台自报 rating 优先，没有时用兜底表；未知平台不显示等级', () => {
+  it('r4：平台分级已删除——后端仍下发 rating.tier 时卡片模型里也没有分级字段', () => {
     const cards = toPlatformCards({
       platforms: [
         spec({ rating: { tier: 'elite', reason: '快', source: 'platform' } }),
         spec({ id: 'loomy', label: 'Loomy', storage_platform: 'loomy', realm: '', rating: {} }),
-        spec({ id: 'unknown-x', label: 'X', storage_platform: 'unknown-x', realm: '', rating: {} }),
       ],
     })
-    expect(cards[0].tier).toMatchObject({ key: 'elite', label: '人上人', reason: '快', source: 'platform' })
-    expect(cards[1].tier).toMatchObject({ key: 'hang', label: '夯', source: 'fallback' })
-    expect(cards[1].tier?.reason).toContain('新用户给的积分很足')
-    expect(cards[2].tier).toBeNull()
-    // 兜底表按落库平台名归并（trae-cn / trae-intl 共用 trae）
-    expect(tierOf(spec({ rating: {} }), 'trae')?.key).toBe('npc')
-    expect(TIER_ORDER.map((item) => item.key)).toEqual(['hang', 'elite', 'npc', 'bad'])
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect('tier' in card).toBe(false)
+      expect(JSON.stringify(card)).not.toMatch(/人上人|拉完了|夯/)
+    }
   })
 
   it('speed 完全缺失时字段为 null（显示 —，不冒充 0）', () => {

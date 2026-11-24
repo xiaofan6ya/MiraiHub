@@ -4,7 +4,7 @@ import SideNav from './SideNav.vue'
 import { useI18n } from '@/i18n'
 
 /**
- * ≤1023px 的导航抽屉（03-shell §3）：宽 264px，左侧滑出 200ms，带遮罩。
+ * <768px 的导航抽屉（10-visual-refresh §1.2）：宽 264px，左侧滑出 200ms，带遮罩；内容复用深墨蓝 SideNav。
  * 不用 Naive 的 NDrawer，是为了让宽度/遮罩/动画与设计稿一一对应（遮罩用 --scrim）。
  */
 const props = defineProps<{ open: boolean }>()
@@ -92,8 +92,8 @@ function onLogout(): void {
   left: 0;
   width: 264px;
   max-width: 86vw;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
+  background: var(--side-bg);
+  border-right: 1px solid var(--side-border);
   box-shadow: var(--shadow-pop);
   animation: mh-slide var(--t-slow) var(--ease);
 }

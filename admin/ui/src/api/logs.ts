@@ -12,7 +12,12 @@
  *   · 请求正文是进程内缓存（admin/request_payload.py），只能按 64 KiB 分页读，不进数据库。
  */
 import { download, http, type Query } from './http'
-import { FMT_EMPTY, fmtCredit, fmtDuration, fmtFullTime, fmtInt, fmtTime, toDate } from '@/utils/format'
+import { FMT_EMPTY, fmtCredit, fmtDuration, fmtLocalHM, fmtFullTime, fmtInt, fmtTime, toDate } from '@/utils/format'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 export type LogResultFilter = '' | 'success' | 'error'
 
@@ -330,28 +335,24 @@ export interface LogFilterState {
 }
 
 export const LOG_RANGE_OPTIONS = [
-  { label: '今日（自然日）', value: 'today' },
-  { label: '近 1 小时', value: 'hour' },
-  { label: '近 1 天', value: '1' },
-  { label: '近 3 天', value: '3' },
-  { label: '近 7 天', value: '7' },
-  { label: '近 30 天', value: '30' },
-  { label: '不限时间', value: '0' },
+  { get label() { return tx('page.logs.rangeOpt.today') }, value: 'today' },
+  { get label() { return tx('page.logs.rangeOpt.hour') }, value: 'hour' },
+  { get label() { return tx('page.logs.rangeOpt.d1') }, value: '1' },
+  { get label() { return tx('page.logs.rangeOpt.d3') }, value: '3' },
+  { get label() { return tx('page.logs.rangeOpt.d7') }, value: '7' },
+  { get label() { return tx('page.logs.rangeOpt.d30') }, value: '30' },
+  { get label() { return tx('page.logs.rangeOpt.all') }, value: '0' },
 ] as const
 
 export const LOG_RESULT_OPTIONS = [
-  { label: '全部结果', value: '' },
-  { label: '仅错误', value: 'error' },
-  { label: '仅成功', value: 'success' },
+  { get label() { return tx('page.logs.resultOpt.all') }, value: '' },
+  { get label() { return tx('page.logs.resultOpt.error') }, value: 'error' },
+  { get label() { return tx('page.logs.resultOpt.success') }, value: 'success' },
 ] as const
 
 export interface TimeWindow {
   start: string
   end: string
-}
-
-function pad2(value: number): string {
-  return String(value).padStart(2, '0')
 }
 
 /** 北京时间的「今天 00:00」→ UTC ISO 串（与旧版 _logQuery 同一口径）。 */
@@ -504,17 +505,17 @@ export function useCaseLabel(value: string): string {
   const stripped = raw.replace(/^(qoder|loomy|trae|wb|workbuddy|anthropic|openai)[-_]?/i, '')
   const key = stripped.toLowerCase()
   const names: Record<string, string> = {
-    chat: '对话',
-    completions: '补全',
-    messages: '消息',
-    responses: '响应',
-    embeddings: '向量',
-    images: '图片',
-    videos: '视频',
-    audio: '语音',
-    moderation: '审核',
-    'chat-completions': '对话',
-    'messages/count_tokens': '计数',
+    chat: tx('page.logs.useCase.chat'),
+    completions: tx('page.logs.useCase.completions'),
+    messages: tx('page.logs.useCase.messages'),
+    responses: tx('page.logs.useCase.responses'),
+    embeddings: tx('page.logs.useCase.embeddings'),
+    images: tx('page.logs.useCase.images'),
+    videos: tx('page.logs.useCase.videos'),
+    audio: tx('page.logs.useCase.audio'),
+    moderation: tx('page.logs.useCase.moderation'),
+    'chat-completions': tx('page.logs.useCase.chat'),
+    'messages/count_tokens': tx('page.logs.useCase.countTokens'),
   }
   return names[key] || names[stripped] || stripped || raw
 }
@@ -553,9 +554,9 @@ export function toLogRow(item: UsageLogRow): LogRowView {
     (value) => value !== null && value !== undefined,
   )
     ? [
-        '入 ' + fmtInt(item.prompt_tokens),
-        '出 ' + fmtInt(item.completion_tokens),
-        '缓存 ' + fmtInt(item.cached_tokens),
+        tx('page.logs.tokens.in', { n: fmtInt(item.prompt_tokens) }),
+        tx('page.logs.tokens.out', { n: fmtInt(item.completion_tokens) }),
+        tx('page.logs.tokens.cached', { n: fmtInt(item.cached_tokens) }),
       ].join(' · ')
     : FMT_EMPTY
   return {
@@ -563,7 +564,7 @@ export function toLogRow(item: UsageLogRow): LogRowView {
     timeShort: fmtTime(item.created_at),
     timeFull: fmtFullTime(item.created_at),
     isError,
-    resultLabel: isError ? (errorKind.slice(0, 16) || '失败') : '成功',
+    resultLabel: isError ? (errorKind.slice(0, 16) || tx('page.logs.result.fail')) : tx('page.logs.result.ok'),
     resultTone: isError ? 'danger' : 'ok',
     cacheRate: rate,
     cacheRateText: rate === null ? FMT_EMPTY : rate.toFixed(2) + '%',
@@ -614,34 +615,41 @@ export function toAccountSummaryRows(items: UsageLogSummaryItem[] | null | undef
 export function summaryHintText(payload: UsageLogSummaryPayload | null | undefined): string {
   if (!payload) return ''
   const parts = [
-    fmtInt(payload.account_count) + ' 个账号',
-    '成功 ' + fmtInt(payload.ok_requests) + ' / 错误 ' + fmtInt(payload.failed_requests),
-    fmtCredit(payload.total_credits) + ' 积分',
+    tx('page.logs.summaryHint.accounts', { n: fmtInt(payload.account_count) }),
+    tx('page.logs.summaryHint.okFail', { ok: fmtInt(payload.ok_requests), fail: fmtInt(payload.failed_requests) }),
+    tx('page.logs.summaryHint.credits', { n: fmtCredit(payload.total_credits) }),
   ]
-  if (payload.unattributed_requests) parts.push(fmtInt(payload.unattributed_requests) + ' 次未记录账号 / 未选号')
+  if (payload.unattributed_requests) {
+    parts.push(tx('page.logs.summaryHint.unattributed', { n: fmtInt(payload.unattributed_requests) }))
+  }
   return parts.join(' · ')
 }
 
 /** FilterBar 下方「已筛选」的统计文字。 */
 export function summaryStatText(payload: UsageLogSummaryPayload | null | undefined): string {
   if (!payload) return ''
-  return (
-    '当前筛选共 ' + fmtInt(payload.total_requests) + ' 次 · 成功 ' +
-    fmtInt(payload.ok_requests) + ' · 错误 ' + fmtInt(payload.failed_requests)
-  )
+  return tx('page.logs.summaryStat', {
+    total: fmtInt(payload.total_requests),
+    ok: fmtInt(payload.ok_requests),
+    fail: fmtInt(payload.failed_requests),
+  })
 }
 
 /** 请求详情记录卡的状态行（旧版 captureStatus 的同一口径）。 */
 export function captureStatusText(settings: CaptureSettings | null | undefined): string {
-  if (!settings) return '读取开关状态…'
-  const state = settings.enabled ? '已开启' : '已关闭'
+  if (!settings) return tx('page.logs.capture.loading')
+  const state = settings.enabled ? tx('page.logs.capture.on') : tx('page.logs.capture.off')
   const mib = (Number(settings.cache_bytes || 0) / 1024 / 1024).toFixed(1)
   const recordMib = Math.round(Number(settings.record_max_bytes || 0) / 1024 / 1024)
   const minutes = Math.round(Number(settings.ttl_seconds || 0) / 60)
-  return (
-    state + ' · 缓存 ' + fmtInt(settings.cached_requests) + '/' + fmtInt(settings.max_entries) +
-    ' 条 · ' + mib + ' MiB · 单条上限 ' + recordMib + ' MiB · ' + minutes + ' 分钟过期 · 重启清空'
-  )
+  return tx('page.logs.capture.status', {
+    state,
+    cached: fmtInt(settings.cached_requests),
+    max: fmtInt(settings.max_entries),
+    mib,
+    record: recordMib,
+    minutes,
+  })
 }
 
 /* ------------------------------------------------------------------ *
@@ -651,7 +659,7 @@ export function captureStatusText(settings: CaptureSettings | null | undefined):
 export interface LiveBar {
   /** 分钟起点（毫秒）。 */
   at: number
-  /** 北京时间 HH:mm。 */
+  /** 本地时区 HH:mm（图表横轴口径，见 utils/format.ts:localParts）。 */
   label: string
   requests: number
   errors: number
@@ -671,10 +679,9 @@ export function buildLiveBars(items: LiveRequest[] | null | undefined, now = Dat
   const buckets = new Map<number, LiveBar>()
   for (let index = span - 1; index >= 0; index -= 1) {
     const at = endMinute - index * 60000
-    const shifted = new Date(at + 8 * 3600 * 1000)
     buckets.set(at, {
       at,
-      label: pad2(shifted.getUTCHours()) + ':' + pad2(shifted.getUTCMinutes()),
+      label: fmtLocalHM(new Date(at)),
       requests: 0,
       errors: 0,
     })
@@ -693,10 +700,13 @@ export function buildLiveBars(items: LiveRequest[] | null | undefined, now = Dat
 
 /** 请求动态的状态文案：进行中 N 个 · 最近 15 分钟 M 条。 */
 export function liveHintText(payload: LiveRequestsPayload | null | undefined, minutes = 15): string {
-  if (!payload) return '正在读取请求动态…'
+  if (!payload) return tx('page.logs.live.loading')
   const total = (payload.recent || []).length
   const running = Number(payload.active_count || 0)
-  return (running > 0 ? '进行中 ' + running + ' 个 · ' : '') + '最近 ' + minutes + ' 分钟 ' + total + ' 条'
+  return (
+    (running > 0 ? tx('page.logs.live.running', { n: running }) + ' · ' : '') +
+    tx('page.logs.live.recent', { minutes, n: total })
+  )
 }
 
 export type LiveTone = 'ok' | 'warn' | 'danger' | 'brand' | 'neutral'
@@ -716,15 +726,15 @@ export function liveStatusLabel(item: LiveRequest | null | undefined): string {
   if (!item) return FMT_EMPTY
   if (String(item.outcome || '').toLowerCase() === 'running') {
     const stages: Record<string, string> = {
-      received: '已接收',
-      waiting: '排队选号',
-      upstream: '转发上游',
-      streaming: '回传中',
+      received: tx('page.logs.stage.received'),
+      waiting: tx('page.logs.stage.waiting'),
+      upstream: tx('page.logs.stage.upstream'),
+      streaming: tx('page.logs.stage.streaming'),
     }
-    return stages[String(item.phase || '')] || '进行中'
+    return stages[String(item.phase || '')] || tx('page.logs.stage.running')
   }
   const status = Number(item.status || 0)
-  if (String(item.outcome || '').toLowerCase() === 'timeout') return '超时'
+  if (String(item.outcome || '').toLowerCase() === 'timeout') return tx('page.logs.stage.timeout')
   if (status) return String(status)
   return item.outcome || FMT_EMPTY
 }
@@ -755,6 +765,237 @@ export function buildCurl(detail: UsageLogDetail | null | undefined, ingressText
     lines.push('  -H ' + shellQuote(name + ': ' + value))
   }
   if (ingressText) lines.push('  --data-raw ' + shellQuote(ingressText))
-  else lines.push('  # 正文未读取：在详情里展开「入站请求」后再复制，可带上 --data-raw')
+  else lines.push('  # ' + tx('page.logs.curl.noBody'))
   return lines.join(' \\\n')
+}
+
+
+/* ------------------------------------------------------------------ *
+ * v2.1 视觉精修：错误分类 / 诊断结构化 / KPI（纯函数，页面与单测共用）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 已知的错误分类：admin/request_metrics.py:mark_upstream_error 的 allowed 集合，
+ * 加上网关自己写入 error_kind 的几种（gateway_rejected / timeout / rate_limit / upstream_5xx）。
+ * 页面用 `page.logs.kind.<kind>` 翻译成管理员能看懂的话；不在表里的原样显示。
+ */
+export const KNOWN_ERROR_KINDS = [
+  'hard_credit',
+  'soft_rate',
+  'model_rate',
+  'model_block',
+  'account_fault',
+  'session_dead',
+  'waf',
+  'server',
+  'not_found',
+  'transport',
+  'client',
+  'no_account',
+  'model_queue',
+  'retry_exhausted',
+  'upstream_internal',
+  'model_behavior',
+  'upstream_auth_anomaly',
+  'unknown',
+  'timeout',
+  'rate_limit',
+  'upstream_5xx',
+  'gateway_rejected',
+] as const
+
+export type KnownErrorKind = (typeof KNOWN_ERROR_KINDS)[number]
+
+export function knownErrorKind(value: unknown): KnownErrorKind | null {
+  const key = String(value ?? '').trim().toLowerCase()
+  return (KNOWN_ERROR_KINDS as readonly string[]).includes(key) ? (key as KnownErrorKind) : null
+}
+
+/** HTTP 状态码徽章语气：2xx ok / 4xx warn / 5xx danger / 其它 neutral。 */
+export function httpStatusTone(status: unknown): 'ok' | 'warn' | 'danger' | 'neutral' {
+  const code = Number(status)
+  if (!Number.isFinite(code) || code < 100) return 'neutral'
+  if (code < 400) return 'ok'
+  if (code < 500) return 'warn'
+  return 'danger'
+}
+
+/** 诊断里的一次尝试：账号路由事件（account_policy_events）或网络错误（network_errors）。 */
+export interface DiagnosticAttempt {
+  index: number
+  source: 'account' | 'network'
+  accountId: number | null
+  /** 路由事件是 kind（soft_rate / hard_credit…），网络错误是异常类型（ReadTimeout…）。 */
+  kind: string
+  httpStatus: number | null
+  model: string
+  /** 上游错误码（upstream_code）。 */
+  code: string
+  /** 上游原文 / 网络错误说明（已脱敏）。 */
+  message: string
+  /** 网络错误发生的阶段。 */
+  phase: string
+  /** 冷却 / 熔断 / 降级截止时间（取最早的一个，ISO）。 */
+  until: string
+}
+
+export interface DiagnosticStage {
+  name: string
+  ms: number
+}
+
+export interface DiagnosticView {
+  gatewayStatus: number | null
+  upstreamStatus: number | null
+  upstreamError: string
+  gatewayError: string
+  networkError: string
+  attemptCount: number | null
+  lastAccountId: number | null
+  lastModel: string
+  recoveries: number
+  firstDeltaMs: number | null
+  elapsedMs: number | null
+  truncated: boolean
+  upstreamRequestIds: string[]
+  attempts: DiagnosticAttempt[]
+  stages: DiagnosticStage[]
+}
+
+function diagNum(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function diagStr(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function asRecordList(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+}
+
+/**
+ * 把诊断 JSON（admin/request_metrics.py:usage_evidence 的字段）拆成可读的结构。
+ *
+ * 形状随版本变化，所以每个字段都容错：缺字段 → null / 空串 / 空数组，不抛错。
+ * 原始 JSON 仍由页面折叠展示，这里只挑管理员排障需要的部分。
+ */
+export function diagnosticView(diagnostic: Record<string, unknown> | null | undefined): DiagnosticView | null {
+  if (!diagnostic || typeof diagnostic !== 'object') return null
+  const d = diagnostic
+  const attempts: DiagnosticAttempt[] = []
+  for (const event of asRecordList(d.account_policy_events)) {
+    const untils = ['cool_until', 'breaker_until', 'degrade_until']
+      .map((name) => diagStr(event[name]))
+      .filter(Boolean)
+      .sort()
+    attempts.push({
+      index: attempts.length + 1,
+      source: 'account',
+      accountId: diagNum(event.account_id),
+      kind: diagStr(event.kind),
+      httpStatus: diagNum(event.http_status),
+      model: diagStr(event.model),
+      code: diagStr(event.upstream_code),
+      message: diagStr(event.upstream_message),
+      phase: '',
+      until: untils[0] || '',
+    })
+  }
+  for (const event of asRecordList(d.network_errors)) {
+    attempts.push({
+      index: attempts.length + 1,
+      source: 'network',
+      accountId: diagNum(event.account_id),
+      kind: diagStr(event.type),
+      httpStatus: diagNum(event.http_status),
+      model: '',
+      code: '',
+      message: diagStr(event.message),
+      phase: diagStr(event.phase),
+      until: '',
+    })
+  }
+  const stages: DiagnosticStage[] = asRecordList(d.stages)
+    .map((stage) => ({ name: diagStr(stage.name), ms: diagNum(stage.ms) ?? 0 }))
+    .filter((stage) => stage.name && stage.ms > 0)
+    .slice(0, 16)
+  const ids = Array.isArray(d.upstream_request_ids)
+    ? d.upstream_request_ids.map((item) => diagStr(item)).filter(Boolean)
+    : []
+  return {
+    gatewayStatus: diagNum(d.gateway_result_status) ?? diagNum(d.status),
+    upstreamStatus: diagNum(d.upstream_status),
+    upstreamError: diagStr(d.upstream_error),
+    gatewayError: diagStr(d.gateway_error),
+    networkError: diagStr(d.network_error),
+    attemptCount: diagNum(d.upstream_attempts),
+    lastAccountId: diagNum(d.last_account_id),
+    lastModel: diagStr(d.last_model),
+    recoveries: diagNum(d.connection_recoveries) ?? 0,
+    firstDeltaMs: diagNum(d.first_delta_ms),
+    elapsedMs: diagNum(d.elapsed_ms),
+    truncated: d.diagnostic_truncated === true,
+    upstreamRequestIds: ids,
+    attempts,
+    stages,
+  }
+}
+
+/** 顶部 KPI（来自 /api/logs/summary，跟筛选走，与分页无关）。 */
+export interface LogKpis {
+  requests: number
+  ok: number
+  failed: number
+  /** 0–1；没有请求时为 null（显示「—」，不显示 0%）。 */
+  successRate: number | null
+  credits: number
+  tokens: number
+  accounts: number
+  unattributed: number
+}
+
+export function summaryKpis(payload: UsageLogSummaryPayload | null | undefined): LogKpis | null {
+  if (!payload) return null
+  const requests = Math.max(0, Number(payload.total_requests) || 0)
+  const ok = Math.max(0, Number(payload.ok_requests) || 0)
+  const failed = Math.max(0, Number(payload.failed_requests) || 0)
+  return {
+    requests,
+    ok,
+    failed,
+    successRate: requests > 0 ? Math.min(1, ok / requests) : null,
+    credits: Number(payload.total_credits) || 0,
+    tokens: Number(payload.total_tokens) || 0,
+    accounts: Math.max(0, Number(payload.account_count) || 0),
+    unattributed: Math.max(0, Number(payload.unattributed_requests) || 0),
+  }
+}
+
+/** 成功率语气：≥98% ok，≥90% warn，其余 danger；没有样本 neutral。 */
+export function successTone(rate: number | null | undefined): 'ok' | 'warn' | 'danger' | 'neutral' {
+  if (rate === null || rate === undefined || !Number.isFinite(rate)) return 'neutral'
+  if (rate >= 0.98) return 'ok'
+  if (rate >= 0.9) return 'warn'
+  return 'danger'
+}
+
+/** 小柱图纵轴刻度：取不小于最大值的「好看」整数（1 / 2 / 5 × 10^n）。 */
+export function niceCeil(value: number): number {
+  if (!Number.isFinite(value) || value <= 1) return 1
+  const exp = Math.pow(10, Math.floor(Math.log10(value)))
+  for (const step of [1, 2, 5, 10]) {
+    if (step * exp >= value) return step * exp
+  }
+  return 10 * exp
 }

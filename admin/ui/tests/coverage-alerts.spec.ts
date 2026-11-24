@@ -183,6 +183,17 @@ function headerActions(wrapper: VueWrapper): HTMLElement {
   return el
 }
 
+/** 底部保存条（SettingsLayout）：保存 / 放弃只在这里，没有改动时不渲染。 */
+function saveBarEl(wrapper: VueWrapper): HTMLElement | null {
+  return pageRoot(wrapper).querySelector('.mh-savebar') as HTMLElement | null
+}
+
+function saveBarOf(wrapper: VueWrapper): HTMLElement {
+  const el = saveBarEl(wrapper)
+  if (!el) throw new Error('save bar not found | body=' + bodyText().slice(0, 240))
+  return el
+}
+
 function card(id: string): HTMLElement {
   const el = document.getElementById(id)
   if (!el) throw new Error('card not found: ' + id + ' | body=' + bodyText().slice(0, 240))
@@ -300,9 +311,9 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     getAlertConfig.mockReturnValue(pending.promise)
     const { wrapper } = await mountPage()
 
-    // 加载中：三张卡片都渲染骨架，保存按钮仍可点（页面允许先改后加载？—— 实为禁用）
+    // 加载中：三张卡片都渲染骨架；没有改动，不出现保存条
     expect(pageRoot(wrapper).querySelectorAll('.skel').length).toBe(3)
-    expect(findButton(headerActions(wrapper), '保存配置').disabled).toBe(true)
+    expect(saveBarEl(wrapper)).toBeNull()
 
     pending.resolve(payload())
     await settle()
@@ -317,10 +328,12 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     // 邮件链路就绪
     expect(wrapper.text()).toContain('邮件链路就绪：me@qq.com → me@qq.com（smtp.qq.com:465 SSL）')
     // 规则总开关是打开状态
-    const master = pageRoot(wrapper).querySelector('.switch-row .n-switch') as HTMLElement
+    const master = pageRoot(wrapper).querySelector('#alerts-rules .n-switch') as HTMLElement
     expect(master.getAttribute('aria-checked')).toBe('true')
-    // 本页「保存配置」不受未保存状态控制（全量 PUT，恒可点）
-    expect(findButton(headerActions(wrapper), '保存配置').disabled).toBe(false)
+    // 保存统一走底部保存条：页头不再有「保存配置 / 取消修改」，干净时保存条不出现
+    expect(buttonsIn(headerActions(wrapper)).some((el) => (el.textContent || '').trim() === '保存配置')).toBe(false)
+    expect(buttonsIn(headerActions(wrapper)).some((el) => (el.textContent || '').trim() === '取消修改')).toBe(false)
+    expect(saveBarEl(wrapper)).toBeNull()
     expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 
@@ -331,14 +344,14 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     getAlertConfig.mockResolvedValueOnce(payload()).mockResolvedValue(next)
     const { wrapper } = await mountPage()
 
-    const master = pageRoot(wrapper).querySelector('.switch-row .n-switch') as HTMLElement
+    const master = pageRoot(wrapper).querySelector('#alerts-rules .n-switch') as HTMLElement
     master.click()
     await settle()
     expect(master.getAttribute('aria-checked')).toBe('false')
     expect(wrapper.text()).toContain('有未保存的修改')
     expect(wrapper.text()).toContain('未保存')
 
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
 
     expect(putAlertConfig).toHaveBeenCalledTimes(1)
@@ -375,7 +388,7 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     await settle()
     expect(wrapper.text()).toContain('当前 20 分钟')
 
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
     expect(putAlertConfig.mock.calls[0][0].cooldown).toBe(1200)
 
@@ -383,7 +396,7 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     putAlertConfig.mockClear()
     number.vm.$emit('update:value', 10)
     await settle()
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
     expect(putAlertConfig).not.toHaveBeenCalled()
     expect(bodyText()).toContain('保存失败：去重窗口需在 30–86400 秒之间')
@@ -401,7 +414,7 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
     expect(row.textContent).toContain('保存后该渠道会被移除')
     expect(wrapper.text()).toContain('有未保存的修改')
 
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
     // 停用的飞书渠道不写回；派生邮件渠道本来就不写回
     expect(putAlertConfig.mock.calls[0][0].channels).toEqual([])
@@ -411,17 +424,19 @@ describe('AlertsPage 覆盖率补测 · 首屏与规则开关', () => {
 describe('AlertsPage 覆盖率补测 · 事件确认', () => {
   it('删除渠道：确认框问句 + 后果，取消保留、确认后离开列表且未保存', async () => {
     const { wrapper } = await mountPage()
-    const deleteBtn = findButton(channelRow(wrapper, '飞书群机器人'), '删除')
+    // 删除收成 quiet 图标按钮（aria-label「删除 · 渠道名」），不再常驻红色文字按钮
+    const deleteSelector = 'button[aria-label="删除 · 飞书群机器人"]'
+    const deleteBtn = channelRow(wrapper, '飞书群机器人').querySelector(deleteSelector) as HTMLButtonElement
 
     deleteBtn.click()
     await settle()
     expect(dialogTitle()).toBe('删除「飞书群机器人」渠道？')
-    expect(lastDialog().textContent).toContain('删除后风控告警不再发送到该渠道；点「保存配置」后才写入后端。')
+    expect(lastDialog().textContent).toContain('删除后风控告警不再发送到该渠道；在页面底部点「保存」后才生效。')
     await answerDialog('取消')
     expect(channelRows(wrapper).length).toBe(2)
     expect(putAlertConfig).not.toHaveBeenCalled()
 
-    findButton(channelRow(wrapper, '飞书群机器人'), '删除').click()
+    ;(channelRow(wrapper, '飞书群机器人').querySelector(deleteSelector) as HTMLButtonElement).click()
     await settle()
     await answerDialog('删除')
     expect(channelRows(wrapper).some((el) => (el.textContent || '').includes('飞书群机器人'))).toBe(false)
@@ -429,7 +444,7 @@ describe('AlertsPage 覆盖率补测 · 事件确认', () => {
     expect(putAlertConfig).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('有未保存的修改')
 
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
     expect(putAlertConfig.mock.calls[0][0].channels).toEqual([])
   })
@@ -451,7 +466,7 @@ describe('AlertsPage 覆盖率补测 · 事件确认', () => {
     expect(wrapper.text()).toContain('待清除')
     expect(findButton(card('alerts-smtp'), '撤销')).toBeTruthy()
 
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
     expect(putAlertConfig.mock.calls[0][0].smtp).toBe(alertsApi.SMTP_CLEAR)
   })
@@ -469,25 +484,20 @@ describe('AlertsPage 覆盖率补测 · 事件确认', () => {
     expect(putAlertConfig).not.toHaveBeenCalled()
   })
 
-  it('取消修改：确认框「放弃未保存的修改？」；取消保留、确认后重载', async () => {
+  it('放弃：保存条「放弃」直接回到上次读到的配置，不弹框、不发请求', async () => {
     const { wrapper } = await mountPage()
-    const master = pageRoot(wrapper).querySelector('.switch-row .n-switch') as HTMLElement
+    const master = pageRoot(wrapper).querySelector('#alerts-rules .n-switch') as HTMLElement
     master.click()
     await settle()
     expect(wrapper.text()).toContain('有未保存的修改')
+    const before = getAlertConfig.mock.calls.length
 
-    findButton(headerActions(wrapper), '取消修改').click()
-    await settle()
-    expect(dialogTitle()).toBe('放弃未保存的修改？')
-    await answerDialog('取消')
-    expect(master.getAttribute('aria-checked')).toBe('false')
-
-    findButton(headerActions(wrapper), '取消修改').click()
-    await settle()
-    await answerDialog('放弃修改')
-    expect(getAlertConfig.mock.calls.length).toBeGreaterThanOrEqual(2)
-    const reloaded = pageRoot(wrapper).querySelector('.switch-row .n-switch') as HTMLElement
-    expect(reloaded.getAttribute('aria-checked')).toBe('true')
+    await clickButton(saveBarOf(wrapper), '放弃')
+    expect(document.querySelector('.n-dialog')).toBeNull()
+    const restored = pageRoot(wrapper).querySelector('#alerts-rules .n-switch') as HTMLElement
+    expect(restored.getAttribute('aria-checked')).toBe('true')
+    expect(getAlertConfig.mock.calls.length).toBe(before)
+    expect(saveBarEl(wrapper)).toBeNull()
     expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 })
@@ -521,7 +531,7 @@ describe('AlertsPage 覆盖率补测 · 添加渠道（类型选择 / 筛选规�
     await typeInto(inputByPlaceholder('收件邮箱，例如 me@qq.com（多个用英文逗号分隔）'), 'ops@example.com')
     findButton(drawerFooter(), '添加渠道').click()
     await settle()
-    expect(bodyText()).toContain('已添加渠道，保存配置后生效')
+    expect(bodyText()).toContain('已添加渠道，保存后生效')
     // 新增的 email 渠道与「默认收件邮箱」同名，按 target 找这一行
     expect(channelRows(wrapper).length).toBe(3)
     expect(channelRows(wrapper).some((el) => (el.textContent || '').includes('ops@example.com'))).toBe(true)
@@ -623,10 +633,10 @@ describe('AlertsPage 覆盖率补测 · 发送测试', () => {
     expect(pageRoot(wrapper).textContent).toContain('邮件链路还差：邮件服务器')
   })
 
-  it('渠道行「发送测试」同样调接口；页头「重新加载」重取配置', async () => {
+  it('「发送测试」只在页头（会发给全部渠道，渠道行不再重复）；页头「重新加载」重取配置', async () => {
     const { wrapper } = await mountPage()
-    findButton(channelRow(wrapper, '飞书群机器人'), '发送测试').click()
-    await settle()
+    expect(buttonsIn(channelRow(wrapper, '飞书群机器人')).some((el) => (el.textContent || '').trim() === '发送测试')).toBe(false)
+    await clickButton(headerActions(wrapper), '发送测试')
     expect(sendAlertTest).toHaveBeenCalledTimes(1)
 
     const before = getAlertConfig.mock.calls.length
@@ -672,16 +682,16 @@ describe('AlertsPage 覆盖率补测 · 错误态与空态', () => {
   it('保存失败：Toast 说原因，修改保留（未保存标记还在）', async () => {
     const { wrapper } = await mountPage()
     putAlertConfig.mockRejectedValue(new Error('数据库只读'))
-    const master = pageRoot(wrapper).querySelector('.switch-row .n-switch') as HTMLElement
+    const master = pageRoot(wrapper).querySelector('#alerts-rules .n-switch') as HTMLElement
     master.click()
     await settle()
-    await clickButton(headerActions(wrapper), '保存配置')
+    await clickButton(saveBarOf(wrapper), '保存')
     await settle()
 
     expect(bodyText()).toContain('保存预警配置失败：数据库只读')
     expect(wrapper.text()).toContain('有未保存的修改')
     expect(master.getAttribute('aria-checked')).toBe('false')
-    expect(findButton(headerActions(wrapper), '保存配置').disabled).toBe(false)
+    expect(findButton(saveBarOf(wrapper), '保存').disabled).toBe(false)
   })
 
   it('空态：没有渠道时给说明与添加入口，链路未就绪列出缺什么', async () => {
@@ -711,8 +721,8 @@ describe('AlertsPage 覆盖率补测 · 错误态与空态', () => {
 
     expect(channelRows(wrapper).length).toBe(0)
     expect(wrapper.text()).toContain('还没有配置通知渠道。风控告警只会记录在面板里。')
-    // 卡片头 + 空态各有一个添加入口
-    expect(buttonsIn(card('alerts-channels')).filter((el) => (el.textContent || '').trim() === '添加渠道').length).toBe(2)
+    // 添加入口只在卡片头放一个（第 2 轮审查 P1-6：不再与空态重复）
+    expect(buttonsIn(card('alerts-channels')).filter((el) => (el.textContent || '').trim() === '添加渠道').length).toBe(1)
     expect(wrapper.text()).toContain('邮件链路还差：邮件服务器（或 ADMIN_ALERT_SMTP=qqSMTP:授权码）、收件邮箱（默认收件人）')
   })
 })

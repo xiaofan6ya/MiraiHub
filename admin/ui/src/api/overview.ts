@@ -21,6 +21,7 @@
 import { http } from './http'
 import { fmtCompact, fmtCredit, fmtInt, fmtPct } from '@/utils/format'
 import { getStatsDashboard, statToneOf, type StatsDashboardPayload } from './stats'
+import { toLiveRows, type LiveRow, type TrafficPayload } from './sentinel'
 import { t as defaultTranslate, type Translate } from '@/i18n'
 
 export const OVERVIEW_DAYS = [1, 7, 30] as const
@@ -142,6 +143,23 @@ export interface OverviewPayload {
   cache: OverviewCache
   monitor: OverviewMonitor
   sections: string
+  /**
+   * 每段数字的时间窗（新后端，N5）：全部是北京时间自然日。旧后端没有这个字段。
+   */
+  windows?: {
+    kind?: string
+    tz?: string
+    today?: { start?: string; days?: number }
+    window?: { start?: string; days?: number }
+    month?: { start?: string; days?: number }
+  }
+  /**
+   * 每块数据的作用域（新后端，N5）：`platform` = 跟随 X-Platform；`gateway` = 全网关。
+   * 前端据此在卡片上标口径；旧后端没有时按「账号 / 用量跟随当前平台，流量带全网关」处理。
+   */
+  scopes?: Partial<
+    Record<'accounts' | 'usage' | 'cache' | 'monitor' | 'models' | 'keys' | 'traffic' | 'sentinel', string>
+  >
   now: string
 }
 
@@ -155,6 +173,8 @@ export interface SentinelStatusPayload {
   /** 平台 -> 暂停信息（router 追加）。 */
   pause?: Record<string, { until?: number; by?: string; reason?: string }>
   now?: number
+  /** router 合并下发的实时流量快照（含最近 1 小时请求明细），「最近请求」卡直接用它。 */
+  traffic?: TrafficPayload
 }
 
 export function getOverview(days: number, signal?: AbortSignal): Promise<OverviewPayload> {
@@ -165,10 +185,30 @@ export function getSentinelStatus(window = 300, signal?: AbortSignal): Promise<S
   return http<SentinelStatusPayload>('GET', '/api/sentinel/status', { query: { window }, signal })
 }
 
-/** 流量带的平台维度（与当前时间范围同窗口）。 */
+/**
+ * 流量带的平台维度（与当前时间范围同窗口）。
+ *
+ * `window: 'day'`：北京时间自然日，与 /api/overview 的「今日 / 近 N 天」同口径（N5）。
+ * 原来走默认滚动窗口，同一屏左边是自然日、右边是滚动 24 小时，两个数字永远对不上。
+ */
 export function getOverviewTraffic(days: number, signal?: AbortSignal): Promise<StatsDashboardPayload> {
   return getStatsDashboard(
-    { days, granularity: days > 7 ? 'day' : 'hour', top_models: 1 },
+    { days, granularity: days > 7 ? 'day' : 'hour', top_models: 1, window: 'day' },
+    signal,
+  )
+}
+
+/**
+ * KPI 迷你折线用的分时序列：**与 KPI 同口径**（当前平台，自然日）。
+ * 流量带是全网关，不能拿它的序列画「当前平台」的折线。拿不到时页面不画折线，不报错。
+ */
+export function getOverviewTrend(
+  days: number,
+  platform: string,
+  signal?: AbortSignal,
+): Promise<StatsDashboardPayload> {
+  return getStatsDashboard(
+    { days, granularity: days > 7 ? 'day' : 'hour', top_models: 1, window: 'day', platform },
     signal,
   )
 }
@@ -304,7 +344,12 @@ export function buildUsageItems(
   ]
 }
 
-/** 账号状态的 5 行固定顺序（与后端 _account_monitor 的优先级一致）。 */
+/**
+ * 账号状态的 5 行固定顺序（与后端 _account_monitor 的优先级一致）。
+ *
+ * 语气按 01-direction §3.3 的固定映射：熔断 = danger，已禁用 = 灰（neutral）。
+ * 旧值把「已禁用」画成朱色条、「熔断」画成琥珀（第 1 轮审查 P1-2：状态色当装饰）。
+ */
 export const MONITOR_ROWS: ReadonlyArray<{
   key: 'active' | 'cooling' | 'breaker' | 'no_balance' | 'disabled'
   label: string
@@ -312,9 +357,9 @@ export const MONITOR_ROWS: ReadonlyArray<{
 }> = [
   { key: 'active', label: '活跃', tone: 'ok' },
   { key: 'cooling', label: '冷却', tone: 'warn' },
-  { key: 'breaker', label: '熔断', tone: 'warn' },
-  { key: 'no_balance', label: '额度耗尽', tone: 'neutral' },
-  { key: 'disabled', label: '已禁用', tone: 'danger' },
+  { key: 'breaker', label: '熔断', tone: 'danger' },
+  { key: 'no_balance', label: '额度耗尽', tone: 'danger' },
+  { key: 'disabled', label: '已禁用', tone: 'neutral' },
 ]
 
 export interface MonitorRowData {
@@ -528,6 +573,8 @@ export interface OverviewPlatformSpec {
   icon?: string
   enabled?: boolean
   storage_platform?: string
+  account_count?: number | null
+  active_count?: number | null
 }
 
 export interface OverviewLane {
@@ -539,9 +586,55 @@ export interface OverviewLane {
   disabled: boolean
 }
 
+/** 落库平台 → 该平台的全部对外 spec（trae → trae-cn / trae-intl）。只取已启用的。 */
+function specGroups(specs: OverviewPlatformSpec[]): Map<string, OverviewPlatformSpec[]> {
+  const groups = new Map<string, OverviewPlatformSpec[]>()
+  for (const spec of specs) {
+    if (!spec || !spec.id || spec.enabled === false) continue
+    const key = String(spec.storage_platform || spec.id).toLowerCase()
+    const list = groups.get(key) || []
+    list.push(spec)
+    groups.set(key, list)
+  }
+  return groups
+}
+
+/** 多区平台的组名：取各区名称的公共前缀（「Trae 国内版」「Trae 国际版」→「Trae」）。 */
+export function groupLabel(labels: string[], fallback: string): string {
+  const list = labels.map((label) => String(label || '').trim()).filter(Boolean)
+  if (!list.length) return fallback
+  if (list.length === 1) return list[0]
+  let prefix = list[0]
+  for (const label of list.slice(1)) {
+    let i = 0
+    while (i < prefix.length && i < label.length && prefix[i] === label[i]) i += 1
+    prefix = prefix.slice(0, i)
+  }
+  // 公共前缀停在词中间（「Trae 国」）时退回到最后一个分隔符之前（「Trae」）。
+  let cut = prefix
+  if (!list.includes(prefix)) {
+    const match = /^(.*)[\s·\-(（]/u.exec(prefix)
+    if (match) cut = match[1]
+  }
+  const trimmed = cut.replace(/[\s·（(-]+$/u, '').trim()
+  return trimmed.length >= 2 ? trimmed : list[0]
+}
+
+function findSpec(list: OverviewPlatformSpec[], id: string): OverviewPlatformSpec | undefined {
+  const lower = id.toLowerCase()
+  return (
+    list.find((item) => String(item.id || '').toLowerCase() === lower) ||
+    list.find((item) => String(item.storage_platform || '').toLowerCase() === lower)
+  )
+}
+
 /**
  * 流量带线路：/api/stats/dashboard 的 platforms[]（按落库平台聚合）
  * + /api/platforms 的图标与禁用状态。按请求数降序。
+ *
+ * v2.1：**已启用但窗口内没有流量的平台也画出来**（count=0，RouteRibbon 画 1px 细灰线），
+ * 只有一个平台有流量时整体仍是扇形，不会退化成一根实心粗条（10-visual-refresh §1.8）。
+ * dashboard 按落库平台聚合（trae 覆盖 trae-cn/intl），补零流量线路时也按落库平台合并成一条。
  */
 export function buildLanes(
   traffic: StatsDashboardPayload | null | undefined,
@@ -550,25 +643,274 @@ export function buildLanes(
 ): OverviewLane[] {
   const list = specs || []
   const rows = traffic?.platforms || []
-  return rows
-    .map((row) => {
-      const id = String(row.value || '').trim()
-      const lower = id.toLowerCase()
-      const spec =
-        list.find((item) => String(item.id || '').toLowerCase() === lower) ||
-        list.find((item) => String(item.storage_platform || '').toLowerCase() === lower)
-      return {
-        id: id || String(row.label || ''),
-        name: String(row.label || id || tr(translate, 'overview.lane.unknownPlatform')),
-        logo: String(spec?.icon || id || ''),
-        count: Number(row.requests) || 0,
-        successRate: row.success_rate ?? null,
-        disabled: spec ? spec.enabled === false : false,
-      }
+  const covered = new Set<string>()
+  const lanes: OverviewLane[] = rows.map((row) => {
+    const id = String(row.value || '').trim()
+    const spec = findSpec(list, id)
+    covered.add(id.toLowerCase())
+    if (spec) covered.add(String(spec.storage_platform || spec.id).toLowerCase())
+    return {
+      id: id || String(row.label || ''),
+      name: String(row.label || id || tr(translate, 'overview.lane.unknownPlatform')),
+      logo: String(spec?.icon || id || ''),
+      count: Number(row.requests) || 0,
+      successRate: row.success_rate ?? null,
+      disabled: spec ? spec.enabled === false : false,
+    }
+  })
+  for (const [storage, group] of specGroups(list)) {
+    if (covered.has(storage) || group.some((spec) => covered.has(String(spec.id).toLowerCase()))) continue
+    lanes.push({
+      id: group.length === 1 ? group[0].id : storage,
+      name: groupLabel(group.map((spec) => spec.label), storage),
+      logo: String(group[0].icon || group[0].id || storage),
+      count: 0,
+      successRate: null,
+      disabled: false,
     })
-    .sort((a, b) => b.count - a.count)
+  }
+  return lanes.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'))
 }
 
 export function lanesTotal(lanes: OverviewLane[]): number {
   return lanes.reduce((sum, lane) => sum + (Number(lane.count) || 0), 0)
+}
+
+/* ------------------------------------------------------------------ *
+ * v2.1：平台健康列表 / 最近请求 / KPI 行 / 口径标签
+ * ------------------------------------------------------------------ */
+
+export interface OverviewHealthRow {
+  id: string
+  name: string
+  logo: string
+  requests: number
+  /** 0–1；无请求时 null。 */
+  successRate: number | null
+  rateText: string
+  /** 请求占比 0–100（Meter 入参）。 */
+  share: number
+  tokens: number
+  /** 账号数；/api/platforms 没给时 null。 */
+  accounts: number | null
+  /** 可用账号数；后端还没给这个字段时 null。 */
+  active: number | null
+  tone: 'ok' | 'warn' | 'danger' | 'neutral'
+  status: string
+}
+
+export interface OverviewHealth {
+  rows: OverviewHealthRow[]
+  /** 已启用、0 账号、窗口内也没有流量的平台：折叠成一行「未接入 N 个」。 */
+  idle: string[]
+}
+
+/**
+ * 平台健康：每个落库平台一行（流量 + 成功率 + 账号可用情况），状态只表达异常：
+ *   · 有请求且成功率 < 90%        → danger「成功率偏低」
+ *   · 有账号但 0 个可用           → warn「无可用账号」
+ *   · 有请求                      → ok「正常」
+ *   · 有账号、窗口内没请求         → neutral「空闲」
+ *   · 0 账号且没请求              → 收进 idle（「未接入」）
+ * 排序：有流量 > 有账号 > 其他（第 3 轮审查 A3 的同一排序原则）。
+ */
+export function buildPlatformHealth(
+  traffic: StatsDashboardPayload | null | undefined,
+  specs: OverviewPlatformSpec[] | null | undefined,
+  translate?: Translate,
+): OverviewHealth {
+  const list = specs || []
+  const groups = specGroups(list)
+  const rows = traffic?.platforms || []
+  const total = rows.reduce((sum, row) => sum + (Number(row.requests) || 0), 0)
+  const seen = new Set<string>()
+  const out: OverviewHealthRow[] = []
+  const idle: string[] = []
+
+  const accountsOf = (group: OverviewPlatformSpec[]): { accounts: number | null; active: number | null } => {
+    const counts = group.map((spec) => spec.account_count).filter((n) => n !== null && n !== undefined)
+    const actives = group.map((spec) => spec.active_count).filter((n) => n !== null && n !== undefined)
+    return {
+      accounts: counts.length ? counts.reduce((a, b) => a + (Number(b) || 0), 0) : null,
+      active: actives.length ? actives.reduce((a, b) => a + (Number(b) || 0), 0) : null,
+    }
+  }
+
+  const push = (
+    id: string,
+    name: string,
+    logo: string,
+    requests: number,
+    rate: number | null,
+    tokens: number,
+    group: OverviewPlatformSpec[],
+  ): void => {
+    const { accounts, active } = accountsOf(group)
+    let tone: OverviewHealthRow['tone'] = 'neutral'
+    let status = tr(translate, 'overview.health.idle')
+    if (requests > 0 && rate !== null && rate < 0.9) {
+      tone = 'danger'
+      status = tr(translate, 'overview.health.lowRate')
+    } else if (accounts !== null && accounts > 0 && active === 0) {
+      tone = 'warn'
+      status = tr(translate, 'overview.health.noActive')
+    } else if (requests > 0) {
+      tone = 'ok'
+      status = tr(translate, 'overview.health.ok')
+    }
+    if (requests <= 0 && (accounts === null || accounts <= 0) && tone === 'neutral') {
+      idle.push(name)
+      return
+    }
+    out.push({
+      id,
+      name,
+      logo,
+      requests,
+      successRate: rate,
+      rateText: rate === null ? '—' : fmtPct(rate, 1),
+      share: total > 0 ? (requests / total) * 100 : 0,
+      tokens,
+      accounts,
+      active,
+      tone,
+      status,
+    })
+  }
+
+  for (const row of rows) {
+    const id = String(row.value || '').trim()
+    const spec = findSpec(list, id)
+    const storage = String(spec?.storage_platform || spec?.id || id).toLowerCase()
+    seen.add(storage)
+    const group = groups.get(storage) || (spec ? [spec] : [])
+    const requests = Number(row.requests) || 0
+    const rate = row.success_rate === null || row.success_rate === undefined ? null : Number(row.success_rate)
+    push(
+      id,
+      String(row.label || groupLabel(group.map((item) => item.label), id)),
+      String(spec?.icon || id),
+      requests,
+      requests > 0 ? rate : null,
+      Number(row.tokens) || 0,
+      group,
+    )
+  }
+  for (const [storage, group] of groups) {
+    if (seen.has(storage)) continue
+    push(
+      group.length === 1 ? group[0].id : storage,
+      groupLabel(group.map((spec) => spec.label), storage),
+      String(group[0].icon || group[0].id),
+      0,
+      null,
+      0,
+      group,
+    )
+  }
+  const rank = (row: OverviewHealthRow): number =>
+    (row.requests > 0 ? 2 : 0) + (row.accounts !== null && row.accounts > 0 ? 1 : 0)
+  out.sort((a, b) => rank(b) - rank(a) || b.requests - a.requests || a.name.localeCompare(b.name, 'zh-CN'))
+  return { rows: out, idle }
+}
+
+/** 最近请求（/api/sentinel/status 合并下发的 traffic.recent，近 1 小时，全网关）。 */
+export function buildRecent(
+  sentinel: SentinelStatusPayload | null | undefined,
+  limit = 8,
+  translate?: Translate,
+): LiveRow[] {
+  if (!sentinel?.traffic) return []
+  return toLiveRows(sentinel.traffic, limit, translate)
+}
+
+export interface OverviewKpi {
+  key: string
+  label: string
+  value: string
+  hint?: string
+  tone?: 'brand' | 'ok' | 'warn' | 'danger' | 'neutral'
+  spark?: number[]
+}
+
+/**
+ * KPI 行（10-visual-refresh §1.4）：剩余额度 / 请求数 / 成功率 / Token 合计。
+ * 数字与 buildBalanceHero / buildUsageItems 同口径（当前平台、自然日窗口）；
+ * 迷你折线来自 getOverviewTrend（同平台同窗口），拿不到就不画。
+ */
+export function buildOverviewKpis(
+  payload: OverviewPayload | null | undefined,
+  trend: StatsDashboardPayload | null | undefined,
+  days: number,
+  translate?: Translate,
+): OverviewKpi[] {
+  const hero = buildBalanceHero(
+    payload?.accounts,
+    payload?.today,
+    payload?.window,
+    payload?.average_credits,
+    translate,
+  )
+  const usage = buildUsageItems(payload?.window, days, translate)
+  const spark = (trend?.trend?.total_requests ?? []).map((n) => Number(n) || 0)
+  const win = payload?.window
+  const toneOf = (tone: OverviewStatItem['tone']): OverviewKpi['tone'] =>
+    tone === 'ok' || tone === 'warn' || tone === 'danger' || tone === 'brand' ? tone : 'neutral'
+  return [
+    {
+      key: 'balance',
+      label: tr(translate, 'page.overview.balance.remaining'),
+      value: payload ? hero.remainText : '—',
+      hint: hero.caption,
+      tone: hero.tone,
+    },
+    {
+      key: 'requests',
+      label: usage[0].label,
+      value: usage[0].value,
+      hint: usage[0].foot,
+      tone: 'brand',
+      spark: spark.length > 1 ? spark : undefined,
+    },
+    {
+      key: 'success',
+      label: usage[1].label,
+      value: usage[1].value,
+      hint: win ? tr(translate, 'overview.kpi.successHint', { range: daysLabel(days, translate) }) : undefined,
+      tone: toneOf(usage[1].tone),
+    },
+    {
+      key: 'tokens',
+      label: usage[4].label,
+      value: usage[4].value,
+      hint: win
+        ? tr(translate, 'overview.kpi.tokenHint', {
+            input: fmtCompact(win.prompt_tokens),
+            output: fmtCompact(win.completion_tokens),
+            cached: fmtCompact(win.cached_tokens),
+          })
+        : undefined,
+      tone: 'brand',
+    },
+  ]
+}
+
+/**
+ * 口径标签（第 1 轮审查 P0-6 / N5）：KPI 与账号段跟随当前平台，流量带 / 最近请求是全网关。
+ * 新后端带 `scopes` 时以它为准；旧后端按「有 platform 就是该平台」推断。
+ */
+export function overviewScopeLabel(
+  payload: OverviewPayload | null | undefined,
+  section: 'usage' | 'accounts' | 'traffic',
+  translate?: Translate,
+): string {
+  const declared = payload?.scopes?.[section]
+  const gateway =
+    section === 'traffic'
+      ? declared !== 'platform'
+      : declared
+        ? declared === 'gateway'
+        : !payload?.platform
+  if (gateway) return tr(translate, 'overview.scope.gateway')
+  return String(payload?.platform_label || payload?.platform || tr(translate, 'overview.scope.gateway'))
 }

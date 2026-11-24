@@ -13,9 +13,9 @@ import { NCheckbox, NInput } from "naive-ui"
 import { ExternalLink } from "lucide-vue-next"
 import SettingsLayout from "@/layout/SettingsLayout.vue"
 import SettingsCard from "@/layout/SettingsCard.vue"
-import { Badge, Btn, CodeBlock, DataTable, Empty, ErrorBlock, KV, Section, Segmented } from "@/components"
+import { Badge, Btn, CodeBlock, DataTable, Empty, ErrorBlock, FormField, KV, Section, Segmented } from "@/components"
 import type { KvItem, TableColumn, TableRow } from "@/components"
-import { useConfirm, useTableQuery, useToast } from "@/composables"
+import { useConfirm, useRevisit, useTableQuery, useToast } from "@/composables"
 import { errorMessage, failureText } from "@/utils/error"
 import { useI18n } from "@/i18n"
 import {
@@ -26,7 +26,7 @@ import {
   commandTabs,
   combineUpdateState,
   detectDeployMethod,
-  downloadBackup,
+  backupWithConfirm,
   formatBytes,
   getReleasesInfo,
   getUpdateInfo,
@@ -128,6 +128,15 @@ const backupRows = computed<TableRow[]>(() => {
   return backups.value.slice(start, start + tableState.pageSize).map(toBackupRow)
 })
 
+/** 数据库类型的显示名（原来直接 toUpperCase()，显示成「SQLITE」，第 2 轮审查 P1-5）。 */
+function dbDisplayName(raw: unknown): string {
+  const key = String(raw || "").trim().toLowerCase()
+  if (key === "sqlite") return "SQLite"
+  if (key === "mysql") return "MySQL"
+  if (key === "postgresql" || key === "postgres") return "PostgreSQL"
+  return String(raw || "").trim() || "—"
+}
+
 function recordById(id: unknown): BackupRecord | undefined {
   return backups.value.find((item) => item.id === String(id))
 }
@@ -201,22 +210,41 @@ function onDeploy(value: string | number): void {
   saveDeployMethod(method)
 }
 
-async function onBackup(): Promise<void> {
+/**
+ * 整库备份（第 5 轮）：先弹危险确认（含全部凭证与 API Key）→ 带 X-Export-Confirm 请求；
+ * 新后端仍回 428 export_confirm_required 时再确认一次后重发（backupWithConfirm）。老后端忽略确认头。
+ */
+let backupRunning = false
+
+async function askBackup(retry: boolean): Promise<boolean> {
+  backupBusy.value = false
   const ok = await confirm({
     title: t("page.maintenance.confirm.backup.title"),
-    message: t("page.maintenance.confirm.backup.body"),
-    okText: t("page.maintenance.records.backupNow"),
+    message: retry ? t("page.maintenance.confirm.backup.retryBody") : t("page.maintenance.confirm.backup.secretsBody"),
+    okText: t("page.maintenance.confirm.backup.ok"),
+    danger: true,
   })
-  if (!ok) return
-  backupBusy.value = true
+  // 确认框打开期间按钮不转圈；确认后才进入 loading。
+  backupBusy.value = ok
+  return ok
+}
+
+async function onBackup(): Promise<void> {
+  if (backupRunning) return
+  backupRunning = true
   try {
-    const file = await downloadBackup()
+    const file = await backupWithConfirm(askBackup)
+    if (!file) {
+      toast.info(t("page.maintenance.toast.backupCancelled"))
+      return
+    }
     backups.value = [{ ...file, id: file.createdAt + "-" + backups.value.length }, ...backups.value]
     toast.success(t("page.maintenance.toast.backedUp", { name: file.filename, size: formatBytes(file.size) }))
   } catch (caught) {
     toast.error(failureText(t("page.maintenance.action.backup"), caught))
   } finally {
     backupBusy.value = false
+    backupRunning = false
   }
 }
 
@@ -404,6 +432,15 @@ async function onNativeApply(): Promise<void> {
   }
 }
 
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (!dirDirty.value) void load(false)
+  },
+  { minIntervalMs: 10_000 },
+)
+
 onMounted(() => {
   void load(true)
 })
@@ -417,17 +454,21 @@ onBeforeUnmount(stopNativePoll)
     :help="t('page.maintenance.help')"
     :sections="sections"
     :dirty="dirDirty"
+    :saving="dirBusy"
+    @save="onSaveDir"
+    @discard="onCancelDir"
   >
     <template #actions>
-      <Btn :loading="checking" @click="load(false)">{{ t('page.maintenance.action.checkUpdate') }}</Btn>
+      <Btn variant="default" :loading="checking" @click="load(false)">
+        {{ t('page.maintenance.action.checkUpdate') }}
+      </Btn>
     </template>
 
     <SettingsCard
       v-if="error && !update"
       id="maintenance-version"
       :title="t('page.maintenance.section.version')"
-      hide-save
-      hide-reset
+      plain
     >
       <ErrorBlock
         :title="t('page.maintenance.error.load', { error })"
@@ -441,22 +482,20 @@ onBeforeUnmount(stopNativePoll)
       id="maintenance-version"
       :title="t('page.maintenance.section.version')"
       :description="t('page.maintenance.version.description')"
-      :loading="checking"
-      hide-save
-      hide-reset
+      plain
     >
       <p v-if="loading && !update" class="hint">{{ t('page.maintenance.loadingVersion') }}</p>
 
       <div class="version-hero">
         <div class="version-main">
-          <span class="eyebrow">{{ t('page.maintenance.section.version') }}</span>
           <strong class="version-num tnum">{{ view.version ? "v" + view.version : "—" }}</strong>
         </div>
         <Badge :tone="view.statusTone" dot>{{ view.statusText }}</Badge>
       </div>
 
       <div class="version-meta">
-        <span>
+        <!-- 已是最新时不再重复「最新正式版 vX」（第 2 轮审查 P1-6：版本号三连）。 -->
+        <span v-if="view.available || !view.latestTag">
           {{ t('page.maintenance.latestRelease') }}
           <b class="tnum">{{ view.latestTag || t('page.maintenance.latestUnknown') }}</b>
         </span>
@@ -560,18 +599,11 @@ onBeforeUnmount(stopNativePoll)
       :title="t('page.maintenance.section.backup')"
       :description="t('page.maintenance.backup.description')"
       :dirty="dirDirty"
-      :loading="loading"
-      :save-disabled="dirBusy || !dirDirty"
-      :save-label="t('page.maintenance.backup.saveLabel')"
-      :hide-save="!canFsOps"
-      @save="onSaveDir"
-      @reset="onCancelDir"
     >
       <template v-if="update">
         <KV :items="dbItems" />
 
-        <div class="field">
-          <label class="field-label" for="backup-dir">{{ t('page.maintenance.kv.backupDir') }}</label>
+        <FormField :label="t('page.maintenance.kv.backupDir')" :hint="t('page.maintenance.backup.dirNote')">
           <NInput
             v-if="canFsOps"
             id="backup-dir"
@@ -580,7 +612,7 @@ onBeforeUnmount(stopNativePoll)
             :disabled="dirBusy"
           />
           <p v-else class="hint">{{ t('page.maintenance.backup.dirReadonly') }}</p>
-          <div class="action-row">
+          <div class="action-row action-row--tight">
             <Badge :tone="update.backup_dir_writable ? 'ok' : 'danger'">
               {{ update.backup_dir_writable ? t('page.maintenance.backup.writable') : t('page.maintenance.backup.notWritable') }}
             </Badge>
@@ -597,8 +629,7 @@ onBeforeUnmount(stopNativePoll)
               {{ t('page.maintenance.backup.resetDir') }}
             </Btn>
           </div>
-          <p class="hint">{{ t('page.maintenance.backup.dirNote') }}</p>
-        </div>
+        </FormField>
       </template>
       <p v-else class="hint">{{ t('page.maintenance.loadingBackup') }}</p>
     </SettingsCard>
@@ -607,8 +638,7 @@ onBeforeUnmount(stopNativePoll)
       id="maintenance-records"
       :title="t('page.maintenance.section.records')"
       :description="t('page.maintenance.records.description')"
-      hide-save
-      hide-reset
+      plain
     >
       <template v-if="update">
         <div class="action-row">
@@ -616,7 +646,7 @@ onBeforeUnmount(stopNativePoll)
             {{ t('page.maintenance.records.backupNow') }}
           </Btn>
           <span v-if="!canBackup" class="hint">
-            {{ t('page.maintenance.records.sqliteOnly', { db: (update.database || "").toUpperCase() }) }}
+            {{ t('page.maintenance.records.sqliteOnly', { db: dbDisplayName(update.database) }) }}
           </span>
         </div>
 
@@ -651,8 +681,7 @@ onBeforeUnmount(stopNativePoll)
       id="maintenance-recover"
       :title="t('page.maintenance.section.recover')"
       :description="t('page.maintenance.recover.description')"
-      hide-save
-      hide-reset
+      plain
     >
       <template v-if="update">
         <p v-if="!canFsOps" class="warn-text" role="status">{{ fsOffReason }}</p>
@@ -741,13 +770,14 @@ onBeforeUnmount(stopNativePoll)
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
-  max-width: 68ch;
+  max-width: 80ch;
+  text-wrap: pretty;
 }
 .warn-text {
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--warn);
-  max-width: 68ch;
+  max-width: 80ch;
 }
 .action-row {
   display: flex;
@@ -755,14 +785,8 @@ onBeforeUnmount(stopNativePoll)
   gap: var(--sp-2);
   flex-wrap: wrap;
 }
-.field {
-  display: grid;
-  gap: var(--sp-2);
-}
-.field-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--fg);
+.action-row--tight {
+  margin-top: var(--sp-2);
 }
 .hidden-input {
   display: none;

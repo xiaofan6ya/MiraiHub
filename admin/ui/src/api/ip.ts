@@ -12,7 +12,16 @@
  *     activityQueryFromState() 一次性算出；状态（已封禁/允许）后端无对应参数，只能过滤当前页。
  *   · 封禁名单 / 设备关联：后端一次返回全部（不分页），筛选/排序/分页在客户端完成。
  */
-import { http, type Query } from './http'
+import { ApiError, http, type Query } from './http'
+import { t, type MessageKey } from '@/i18n'
+
+/**
+ * 本文件里的界面文案统一走 i18n（r3：英文界面不得出现写死的中文）。
+ * 新键先放在 tmp/quick_round/i18n_pagesB.json，合并进字典前 MessageKey 里还没有，这里收窄一次类型。
+ */
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* ------------------------------------------------------------------ *
  * 接口类型（字段名与后端一致，snake_case 原样保留）
@@ -94,12 +103,21 @@ export interface BlockedIpItem {
   note: string
   created_at: string | null
   updated_at: string | null
-  /** 后端 _blocked_item 目前不返回（模型里存在，见契约 §七）。 */
+  /** 到期时间（UTC，带 Z）；null = 永久。r3 起后端返回。 */
   expires_at?: string | null
+  /** 已过到期时间（记录仍在，已不拦截）。 */
+  expired?: boolean
+  /** enabled 且未过期 = 正在拦截。 */
+  active?: boolean
+  /** auto = 风控自动写入；manual = 管理员手动。 */
+  source?: 'auto' | 'manual' | string
+  /** 后端支持定时封禁（duration_seconds / expires_at / permanent）。 */
+  expiry_supported?: boolean
 }
 
 export interface BlockedIpListPayload {
   items: BlockedIpItem[]
+  expiry_supported?: boolean
 }
 
 export type ClientIdentityKind = 'device_id' | 'fingerprint' | 'mac' | 'browser'
@@ -163,20 +181,33 @@ export function blockIp(input: {
   ip: string
   note: string
   expires_at?: string | null
+  /** 预设时长（秒，≤366 天）；优先于 expires_at，避免浏览器时钟偏差。 */
+  duration_seconds?: number | null
 }): Promise<{ item: BlockedIpItem }> {
   const body: Record<string, unknown> = { ip: input.ip, note: input.note }
-  if (input.expires_at) body.expires_at = input.expires_at
+  if (input.duration_seconds && input.duration_seconds > 0) body.duration_seconds = Math.trunc(input.duration_seconds)
+  else if (input.expires_at) body.expires_at = input.expires_at
   return http<{ item: BlockedIpItem }>('POST', '/api/ip/blocked', { body })
 }
 
 /** 解封 / 重新封禁 / 改备注。 */
 export function patchBlockedIp(
   id: number,
-  patch: { enabled?: boolean; note?: string },
+  patch: {
+    enabled?: boolean
+    note?: string
+    /** true = 去掉到期时间，改为永久封禁。 */
+    permanent?: boolean
+    duration_seconds?: number
+    expires_at?: string
+  },
 ): Promise<{ item: BlockedIpItem }> {
   const body: Record<string, unknown> = {}
   if (patch.enabled !== undefined) body.enabled = patch.enabled
   if (patch.note !== undefined) body.note = patch.note
+  if (patch.permanent) body.permanent = true
+  else if (patch.duration_seconds && patch.duration_seconds > 0) body.duration_seconds = Math.trunc(patch.duration_seconds)
+  else if (patch.expires_at) body.expires_at = patch.expires_at
   return http<{ item: BlockedIpItem }>('PATCH', '/api/ip/blocked/' + encodeURIComponent(String(id)), {
     body,
   })
@@ -230,23 +261,23 @@ export interface IpTableViewState {
 
 /** 时间范围选项（旧版 1/7/30/90 天，文案沿用旧版）。 */
 export const IP_DAYS_OPTIONS = [
-  { label: '近 24 小时', value: '1' },
-  { label: '近 7 天', value: '7' },
-  { label: '近 30 天', value: '30' },
-  { label: '近 90 天', value: '90' },
+  { get label() { return tx('page.ip.days.d1') }, value: '1' },
+  { get label() { return tx('page.ip.days.d7') }, value: '7' },
+  { get label() { return tx('page.ip.days.d30') }, value: '30' },
+  { get label() { return tx('page.ip.days.d90') }, value: '90' },
 ] as const
 
 /** 流量筛选（旧版「高频 · 低 Token / 高频 · 低积分」）。 */
 export const IP_USAGE_OPTIONS = [
-  { label: '全部流量', value: '' },
-  { label: '高频 · 低 Token', value: 'tokens' },
-  { label: '高频 · 低积分', value: 'credits' },
+  { get label() { return tx('page.ip.usageOpt.all') }, value: '' },
+  { get label() { return tx('page.ip.usageOpt.tokens') }, value: 'tokens' },
+  { get label() { return tx('page.ip.usageOpt.credits') }, value: 'credits' },
 ] as const
 
 export const IP_STATUS_OPTIONS = [
-  { label: '状态：全部', value: '' },
-  { label: '已封禁', value: 'blocked' },
-  { label: '允许', value: 'allowed' },
+  { get label() { return tx('page.ip.statusOpt.all') }, value: '' },
+  { get label() { return tx('page.ip.statusOpt.blocked') }, value: 'blocked' },
+  { get label() { return tx('page.ip.statusOpt.allowed') }, value: 'allowed' },
 ] as const
 
 function digits(value: unknown, fallback = 0): number {
@@ -305,25 +336,30 @@ export interface IpClientSummary {
   tooltip: string
 }
 
+/** label 以 `i18n:` 开头的走字典，其余是产品名原样显示。 */
 const CLIENT_UA_RULES: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /claude/i, label: 'Claude 客户端' },
-  { pattern: /codex/i, label: 'Codex 客户端' },
+  { pattern: /claude/i, label: 'i18n:page.ip.client.claude' },
+  { pattern: /codex/i, label: 'i18n:page.ip.client.codex' },
   { pattern: /openai/i, label: 'OpenAI SDK' },
   { pattern: /anthropic/i, label: 'Anthropic SDK' },
   { pattern: /curl/i, label: 'curl' },
   { pattern: /python-httpx/i, label: 'Python HTTPX' },
   { pattern: /python-requests/i, label: 'Python Requests' },
-  { pattern: /mozilla/i, label: '浏览器' },
+  { pattern: /mozilla/i, label: 'i18n:page.ip.client.browser' },
 ]
+
+function ruleLabel(label: string): string {
+  return label.startsWith('i18n:') ? tx(label.slice(5)) : label
+}
 
 /** UA → 客户端名（顺序与旧版一致，先匹配先生效）。 */
 export function classifyClient(userAgent: unknown): string {
   const ua = String(userAgent ?? '')
-  if (!ua.trim()) return '未知'
+  if (!ua.trim()) return tx('page.ip.client.unknown')
   for (const rule of CLIENT_UA_RULES) {
-    if (rule.pattern.test(ua)) return rule.label
+    if (rule.pattern.test(ua)) return ruleLabel(rule.label)
   }
-  return '未知'
+  return tx('page.ip.client.unknown')
 }
 
 function textList(values: unknown): string[] {
@@ -338,15 +374,15 @@ export function buildClientSummary(details?: IpClientDetails | null): IpClientSu
   const deviceIds = textList(info.device_ids)
   const fingerprints = textList(info.fingerprints)
   const macs = textList(info.macs)
-  const list = (values: string[]) => (values.length ? values.join(', ') : '未上报')
+  const list = (values: string[]) => (values.length ? values.join(', ') : tx('page.ip.client.notReported'))
   const tooltip = [
-    '客户端（按 UA 识别）：' + classifyClient(userAgent),
-    'UA：' + (userAgent || '未记录（更新后新请求开始采集）'),
-    '设备 ID：' + list(deviceIds),
-    '指纹：' + list(fingerprints),
-    'MAC：' + list(macs),
-    'UA 和设备标识由客户端上报，可被修改；服务端无法跨公网获取网卡 MAC。',
-    '最近已认证请求 · 每类设备标识最多显示 3 个 · 点击 IP 查看用量',
+    tx('page.ip.client.tipClient', { client: classifyClient(userAgent) }),
+    tx('page.ip.client.tipUa', { ua: userAgent || tx('page.ip.client.uaMissing') }),
+    tx('page.ip.client.tipDeviceIds', { list: list(deviceIds) }),
+    tx('page.ip.client.tipFingerprints', { list: list(fingerprints) }),
+    tx('page.ip.client.tipMacs', { list: list(macs) }),
+    tx('page.ip.client.tipDisclaimer'),
+    tx('page.ip.client.tipFoot'),
   ].join('\n')
   return { client: classifyClient(userAgent), userAgent, deviceIds, fingerprints, macs, tooltip }
 }
@@ -442,12 +478,26 @@ export interface BlockedIpRow extends Record<string, unknown> {
   expiresAt: string | null
   /** 'permanent' = expires_at 为空（后端语义：永久）。 */
   expiry: 'permanent' | 'timed'
+  /** 已过到期时间（后端 expired；老后端按 expiresAt 与当前时间推算）。 */
+  expired: boolean
+  /** 正在拦截 = enabled 且未过期。 */
+  active: boolean
+  /** 来源：后端 source 优先，缺失时按 auto: 备注前缀判断。 */
+  source: 'auto' | 'manual'
 }
 
 /** GET /api/ip/blocked → 表格行。 */
 export function toBlockedRows(items: BlockedIpItem[] | null | undefined): BlockedIpRow[] {
   return (items || []).map((item) => {
     const expiresAt = item.expires_at ? String(item.expires_at) : null
+    const expiredByClock = expiresAt ? Date.parse(expiresAt) <= Date.now() : false
+    const expired = typeof item.expired === 'boolean' ? item.expired : expiredByClock
+    const source: 'auto' | 'manual' =
+      item.source === 'auto' || item.source === 'manual'
+        ? item.source
+        : String(item.note || '').trim().toLowerCase().startsWith('auto:')
+          ? 'auto'
+          : 'manual'
     return {
       key: String(item.id),
       id: item.id,
@@ -458,6 +508,9 @@ export function toBlockedRows(items: BlockedIpItem[] | null | undefined): Blocke
       updatedAt: item.updated_at ?? null,
       expiresAt,
       expiry: expiresAt ? 'timed' : 'permanent',
+      expired,
+      active: typeof item.active === 'boolean' ? item.active : Boolean(item.enabled) && !expired,
+      source,
     }
   })
 }
@@ -502,10 +555,10 @@ export function sortBlockedRows(rows: BlockedIpRow[], sortBy: string, order: str
 }
 
 export const CLIENT_KIND_LABELS: Record<string, string> = {
-  device_id: '设备 ID',
-  fingerprint: '客户端指纹',
+  get device_id() { return tx('page.ip.kind.deviceId') },
+  get fingerprint() { return tx('page.ip.kind.fingerprint') },
   mac: 'MAC',
-  browser: '浏览器指纹',
+  get browser() { return tx('page.ip.kind.browser') },
 }
 
 export function clientKindLabel(kind: unknown): string {
@@ -611,7 +664,7 @@ export interface BlockTarget {
   kind: BlockTargetKind
   /** 去空白后的原值。 */
   value: string
-  /** 校验失败时的中文说明（空串 = 通过）。 */
+  /** 校验失败时的说明（跟随界面语言；空串 = 通过）。 */
   message: string
 }
 
@@ -651,7 +704,7 @@ function isIpv6(value: string): boolean {
  */
 export function parseBlockTarget(raw: unknown): BlockTarget {
   const value = String(raw ?? '').trim()
-  if (!value) return { kind: 'empty', value, message: '请填写要封禁的 IP 地址' }
+  if (!value) return { kind: 'empty', value, message: tx('page.ip.form.ipRequired') }
   if (value.includes('/')) {
     const [base, prefix] = value.split('/')
     const size = /^\d{1,3}$/.test(prefix || '') ? Number(prefix) : -1
@@ -660,39 +713,46 @@ export function parseBlockTarget(raw: unknown): BlockTarget {
       return {
         kind: 'cidr',
         value,
-        message: 'CIDR 网段封禁需要后端支持，当前接口只接受单个 IP 地址',
+        message: tx('page.ip.form.cidrUnsupported'),
       }
     }
-    return { kind: 'invalid', value, message: '请输入有效的 IPv4 或 IPv6 地址' }
+    return { kind: 'invalid', value, message: tx('page.ip.form.ipInvalid') }
   }
   if (isIpv4(value) || isIpv6(value)) return { kind: 'ip', value, message: '' }
-  return { kind: 'invalid', value, message: '请输入有效的 IPv4 或 IPv6 地址' }
+  return { kind: 'invalid', value, message: tx('page.ip.form.ipInvalid') }
 }
 
-export type BlockDuration = 'permanent' | '1h' | '1d' | '7d' | 'custom'
+export type BlockDuration = 'permanent' | '1h' | '1d' | '7d' | '30d' | 'custom'
 
-/** 时长选项（设计稿 P13）。 */
+/** 时长选项（设计稿 P13）。label 是 getter：每次读取都按当前语言取词（放进 computed 即可随语言刷新）。 */
 export const BLOCK_DURATION_OPTIONS = [
-  { label: '永久', value: 'permanent' },
-  { label: '1 小时', value: '1h' },
-  { label: '1 天', value: '1d' },
-  { label: '7 天', value: '7d' },
-  { label: '自定义', value: 'custom' },
+  { get label() { return tx('page.ip.duration.permanent') }, value: 'permanent' },
+  { get label() { return tx('page.ip.duration.h1') }, value: '1h' },
+  { get label() { return tx('page.ip.duration.d1') }, value: '1d' },
+  { get label() { return tx('page.ip.duration.d7') }, value: '7d' },
+  { get label() { return tx('page.ip.duration.d30') }, value: '30d' },
+  { get label() { return tx('page.ip.duration.custom') }, value: 'custom' },
 ] as const
+
+/** 后端 duration_seconds / expires_at 的上限：366 天。 */
+export const MAX_BLOCK_MS = 366 * 86400000
 
 const HOUR_MS = 3600000
 const DAY_MS = 86400000
 
-const DURATION_MS: Record<'1h' | '1d' | '7d', number> = {
+const DURATION_MS: Record<'1h' | '1d' | '7d' | '30d', number> = {
   '1h': HOUR_MS,
   '1d': DAY_MS,
   '7d': 7 * DAY_MS,
+  '30d': 30 * DAY_MS,
 }
 
 export interface ExpiryPlan {
   /** 提交给后端的 expires_at（ISO UTC）；null = 永久。 */
   expiresAt: string | null
-  /** 校验失败的中文说明（空串 = 通过）。 */
+  /** 预设时长对应的秒数（提交时优先用它）；永久 / 自定义为 null。 */
+  durationSeconds: number | null
+  /** 校验失败的说明（跟随界面语言；空串 = 通过）。 */
   error: string
 }
 
@@ -706,18 +766,180 @@ export function expiryFromDuration(
   now: number,
   customMs?: number | null,
 ): ExpiryPlan {
-  if (duration === 'permanent') return { expiresAt: null, error: '' }
+  if (duration === 'permanent') return { expiresAt: null, durationSeconds: null, error: '' }
   if (duration === 'custom') {
     const value = Number(customMs)
-    if (!Number.isFinite(value) || value <= 0) return { expiresAt: null, error: '请选择到期时间' }
-    if (value <= now) return { expiresAt: null, error: '到期时间必须晚于当前时间' }
-    return { expiresAt: new Date(value).toISOString(), error: '' }
+    if (!Number.isFinite(value) || value <= 0) return { expiresAt: null, durationSeconds: null, error: tx('page.ip.form.expiryRequired') }
+    if (value <= now) return { expiresAt: null, durationSeconds: null, error: tx('page.ip.form.expiryPast') }
+    if (value - now > MAX_BLOCK_MS) return { expiresAt: null, durationSeconds: null, error: tx('page.ip.form.expiryTooFar') }
+    return { expiresAt: new Date(value).toISOString(), durationSeconds: null, error: '' }
   }
   const span = DURATION_MS[duration]
-  return { expiresAt: new Date(now + span).toISOString(), error: '' }
+  return { expiresAt: new Date(now + span).toISOString(), durationSeconds: Math.round(span / 1000), error: '' }
 }
 
 /** 到期文案（expires_at 为空 = 永久）。 */
 export function durationLabel(duration: BlockDuration): string {
-  return BLOCK_DURATION_OPTIONS.find((option) => option.value === duration)?.label || '永久'
+  return BLOCK_DURATION_OPTIONS.find((option) => option.value === duration)?.label || tx('page.ip.duration.permanent')
+}
+
+
+/* ------------------------------------------------------------------ *
+ * v2.1 视觉精修：自动封禁识别 / 一键清理 / 能力探测
+ * ------------------------------------------------------------------ */
+
+/** 风控自动封禁写入的备注前缀（admin/abuse_guard.py:_ban → note = "auto: {reason}"）。 */
+export const AUTO_BLOCK_PREFIX = 'auto:'
+
+/** 自动封禁的原因（去掉 "auto:" 前缀）；手动封禁返回 null。 */
+export function autoBlockReason(note: string | null | undefined): string | null {
+  const text = String(note || '').trim()
+  if (!text.toLowerCase().startsWith(AUTO_BLOCK_PREFIX)) return null
+  return text.slice(AUTO_BLOCK_PREFIX.length).trim()
+}
+
+export function isAutoBlock(row: Pick<BlockedIpRow, 'note'>): boolean {
+  return autoBlockReason(row.note) !== null
+}
+
+export interface BlockedSourceStats {
+  total: number
+  enabled: number
+  auto: number
+  autoEnabled: number
+  manual: number
+}
+
+export function blockedSourceStats(rows: BlockedIpRow[] | null | undefined): BlockedSourceStats {
+  const list = rows || []
+  const auto = list.filter(isAutoBlock)
+  return {
+    total: list.length,
+    enabled: list.filter((row) => row.enabled).length,
+    auto: auto.length,
+    autoEnabled: auto.filter((row) => row.enabled).length,
+    manual: list.length - auto.length,
+  }
+}
+
+/** 按来源筛选：'' 全部 / 'auto' 自动 / 'manual' 手动。 */
+export function filterBlockedBySource(rows: BlockedIpRow[], source: string): BlockedIpRow[] {
+  if (source === 'auto') return rows.filter(isAutoBlock)
+  if (source === 'manual') return rows.filter((row) => !isAutoBlock(row))
+  return rows
+}
+
+/**
+ * 后端是否支持「定时封禁」：GET /api/ip/blocked 的条目里出现 expires_at 字段才算支持。
+ *
+ * 现状（admin/routers/ip_management.py）：BlockedIPIn 只有 ip / note，_blocked_item 不返回 expires_at ——
+ * 前端提交的 expires_at 会被静默丢弃，封禁实际是永久的。所以没探测到支持时，封禁抽屉只允许「永久」，
+ * 列表也不显示「到期」列，避免界面写着「1 小时」而后端永久封禁。
+ */
+export function blockedExpirySupported(
+  items: BlockedIpItem[] | null | undefined,
+  payloadFlag?: boolean | null,
+): boolean {
+  if (payloadFlag === true) return true
+  return (items || []).some(
+    (item) => item.expiry_supported === true || Object.prototype.hasOwnProperty.call(item, 'expires_at'),
+  )
+}
+
+/** POST /api/ip/blocked/batch-delete 的响应（r3 后端）。 */
+export interface BatchDeleteResponse {
+  deleted: number
+  deleted_ids: number[]
+  active_deleted?: number
+  not_found_ids?: number[]
+}
+
+/**
+ * 一次请求批量删除封禁记录：按 ids（≤2000）或按备注前缀（如 auto:）。
+ * 后端没有这个接口时抛 404 —— 调用方回落逐条 DELETE（见 cleanBlockedRecords）。
+ */
+export function batchDeleteBlocked(
+  input: { ids?: number[]; note_prefix?: string; only_inactive?: boolean },
+): Promise<BatchDeleteResponse> {
+  const body: Record<string, unknown> = {}
+  if (input.ids && input.ids.length) body.ids = input.ids.slice(0, 2000)
+  if (input.note_prefix) body.note_prefix = input.note_prefix
+  if (input.only_inactive) body.only_inactive = true
+  return http<BatchDeleteResponse>('POST', '/api/ip/blocked/batch-delete', { body })
+}
+
+export interface CleanBlockedResult extends BulkDeleteResult {
+  /** 'batch' = 一次 POST 完成；'each' = 后端无批量接口，逐条 DELETE。 */
+  via: 'batch' | 'each'
+}
+
+/**
+ * 清理封禁记录：先走一次批量接口；只有 404 / 405（老后端没有该路由）才回落逐条删除。
+ * ids 超过 2000 条时按 2000 一批顺序提交。
+ */
+export async function cleanBlockedRecords(
+  ids: number[],
+  options: {
+    notePrefix?: string
+    onProgress?: (done: number, total: number) => void
+    batch?: typeof batchDeleteBlocked
+    remove?: (id: number) => Promise<unknown>
+  } = {},
+): Promise<CleanBlockedResult> {
+  const total = ids.length
+  if (!total) return { deleted: [], failed: [], via: 'batch' }
+  const batch = options.batch || batchDeleteBlocked
+  const deleted: number[] = []
+  try {
+    for (let start = 0; start < total; start += 2000) {
+      const chunk = ids.slice(start, start + 2000)
+      const res = await batch({ ids: chunk })
+      const done = Array.isArray(res?.deleted_ids) ? res.deleted_ids.map(Number) : chunk
+      deleted.push(...done)
+      options.onProgress?.(Math.min(total, start + chunk.length), total)
+    }
+    // not_found 视为已删除（别处已删掉），不算失败
+    return { deleted, failed: [], via: 'batch' }
+  } catch (error) {
+    const routeMissing = error instanceof ApiError && (error.status === 404 || error.status === 405)
+    if (!routeMissing || deleted.length) throw error
+    const rest = await bulkDeleteBlocked(ids, { onProgress: options.onProgress, remove: options.remove })
+    return { ...rest, via: 'each' }
+  }
+}
+
+export interface BulkDeleteResult {
+  deleted: number[]
+  failed: Array<{ id: number; error: unknown }>
+}
+
+/**
+ * 逐条删除封禁记录（后端没有批量接口）。并发 4 条，单条失败不影响其他条。
+ * onProgress(done, total) 每完成一条回调一次。
+ */
+export async function bulkDeleteBlocked(
+  ids: number[],
+  options: { concurrency?: number; onProgress?: (done: number, total: number) => void; remove?: (id: number) => Promise<unknown> } = {},
+): Promise<BulkDeleteResult> {
+  const queue = ids.slice()
+  const total = queue.length
+  const remove = options.remove || deleteBlockedIp
+  const result: BulkDeleteResult = { deleted: [], failed: [] }
+  let done = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(options.concurrency ?? 4, total || 1)) }, async () => {
+    while (queue.length) {
+      const id = queue.shift() as number
+      try {
+        await remove(id)
+        result.deleted.push(id)
+      } catch (error) {
+        result.failed.push({ id, error })
+      } finally {
+        done += 1
+        options.onProgress?.(done, total)
+      }
+    }
+  })
+  await Promise.all(workers)
+  return result
 }

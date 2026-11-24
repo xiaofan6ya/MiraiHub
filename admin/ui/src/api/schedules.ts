@@ -18,6 +18,11 @@
  */
 import { http } from './http'
 import { FMT_EMPTY, beijingParts, fmtTime, toDate } from '@/utils/format'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* ------------------------------------------------------------------ *
  * 接口类型（字段名与后端一致，snake_case 原样保留）
@@ -307,27 +312,58 @@ function plain(textValue: string): string {
 /** 日历周期的时间口径（admin/schedule_timing.py 模块首行：日历周期用北京时间）。 */
 export const CALENDAR_ZONE_HINT = '北京时间 · UTC+8'
 
+/** 日历周期时区提示（跟随界面语言；CALENDAR_ZONE_HINT 是旧的中文常量，保留兼容）。 */
+export function calendarZoneHint(): string {
+  return tx('page.schedules.zoneHint')
+}
+
 export const MODE_LABELS: Record<ScheduleMode, string> = {
-  preset: '系统预设',
-  interval: '固定间隔',
-  daily: '每天',
-  weekly: '每周',
-  monthly: '每月',
+  get preset() { return tx('page.schedules.mode.preset') },
+  get interval() { return tx('page.schedules.mode.interval') },
+  get daily() { return tx('page.schedules.mode.daily') },
+  get weekly() { return tx('page.schedules.mode.weekly') },
+  get monthly() { return tx('page.schedules.mode.monthly') },
 }
 
 export const MODE_OPTIONS: Array<{ label: string; value: ScheduleMode }> = (
   ['preset', 'interval', 'daily', 'weekly', 'monthly'] as ScheduleMode[]
-).map((mode) => ({ label: MODE_LABELS[mode], value: mode }))
+).map((mode) => ({
+  get label() {
+    return MODE_LABELS[mode]
+  },
+  value: mode,
+}))
 
-export const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const WEEKDAY_KEYS = [
+  'page.schedules.weekday.mon',
+  'page.schedules.weekday.tue',
+  'page.schedules.weekday.wed',
+  'page.schedules.weekday.thu',
+  'page.schedules.weekday.fri',
+  'page.schedules.weekday.sat',
+  'page.schedules.weekday.sun',
+]
+/** 周一…周日（下标 0–6）。元素是 getter，读取时按当前语言取词。 */
+export const WEEKDAY_LABELS: readonly string[] = (() => {
+  const list: string[] = []
+  WEEKDAY_KEYS.forEach((key, index) => {
+    Object.defineProperty(list, index, { get: () => tx(key), enumerable: true })
+  })
+  return list
+})()
 
-export const WEEKDAY_OPTIONS = WEEKDAY_LABELS.map((label, value) => ({ label, value }))
+export const WEEKDAY_OPTIONS = WEEKDAY_KEYS.map((key, value) => ({
+  get label() {
+    return tx(key)
+  },
+  value,
+}))
 
 export const INTERVAL_UNIT_OPTIONS = [
-  { label: '分钟', value: 1 },
-  { label: '小时', value: 60 },
-  { label: '天', value: 1440 },
-  { label: '周', value: 10080 },
+  { get label() { return tx('page.schedules.unit.minute') }, value: 1 },
+  { get label() { return tx('page.schedules.unit.hour') }, value: 60 },
+  { get label() { return tx('page.schedules.unit.day') }, value: 1440 },
+  { get label() { return tx('page.schedules.unit.week') }, value: 10080 },
 ]
 
 /** 日历周期（按时刻执行）。 */
@@ -371,21 +407,21 @@ export function buildCycleLabel(timing: ScheduleTiming, intervalMinutes: number)
   if (safe.mode === 'preset' || safe.mode === 'interval') {
     const minutes = Math.max(1, int(intervalMinutes, 60))
     const units: Array<[number, string]> = [
-      [10080, '周'],
-      [1440, '天'],
-      [60, '小时'],
+      [10080, tx('page.schedules.unit.week')],
+      [1440, tx('page.schedules.unit.day')],
+      [60, tx('page.schedules.unit.hour')],
     ]
     for (const [size, unit] of units) {
-      if (minutes % size === 0) return '每 ' + minutes / size + ' ' + unit
+      if (minutes % size === 0) return tx('page.schedules.cycle.every', { n: minutes / size, unit })
     }
-    return '每 ' + minutes + ' 分钟'
+    return tx('page.schedules.cycle.every', { n: minutes, unit: tx('page.schedules.unit.minute') })
   }
-  if (safe.mode === 'daily') return '每天 ' + safe.time
+  if (safe.mode === 'daily') return tx('page.schedules.cycle.daily', { time: safe.time })
   if (safe.mode === 'weekly') {
-    const days = safe.weekdays.map((day) => WEEKDAY_LABELS[day]).join('、')
-    return '每' + days + ' ' + safe.time
+    const days = safe.weekdays.map((day) => WEEKDAY_LABELS[day]).join(tx('page.schedules.sep.list'))
+    return tx('page.schedules.cycle.weekly', { days, time: safe.time })
   }
-  return '每月 ' + safe.monthday + ' 日 ' + safe.time
+  return tx('page.schedules.cycle.monthly', { day: safe.monthday, time: safe.time })
 }
 
 /** 下次执行时间 → 「今天 09:00」/「明天 09:00」/「后天 09:00」/「10-30 09:00」/「2025-10-30 09:00」。 */
@@ -398,10 +434,10 @@ export function formatNextRun(value: unknown, now = Date.now()): string {
     Math.round(Date.UTC(parts.y, parts.mo - 1, parts.d) / 86400000)
   const diff = dayOf(p) - dayOf(q)
   const hm = pad2(p.h) + ':' + pad2(p.mi)
-  if (diff === 0) return '今天 ' + hm
-  if (diff === 1) return '明天 ' + hm
-  if (diff === 2) return '后天 ' + hm
-  if (diff === -1) return '昨天 ' + hm
+  if (diff === 0) return tx('page.schedules.next.today', { hm })
+  if (diff === 1) return tx('page.schedules.next.tomorrow', { hm })
+  if (diff === 2) return tx('page.schedules.next.dayAfter', { hm })
+  if (diff === -1) return tx('page.schedules.next.yesterday', { hm })
   if (p.y === q.y) return pad2(p.mo) + '-' + pad2(p.d) + ' ' + hm
   return p.y + '-' + pad2(p.mo) + '-' + pad2(p.d) + ' ' + hm
 }
@@ -430,13 +466,13 @@ function fallbackSummary(parsed: Record<string, unknown>, failed: number): strin
   const updated = int(parsed.updated, 0)
   const alive = int(parsed.alive, 0)
   const total = int(parsed.total, 0)
-  if (claimed) bits.push('领取 ' + claimed + ' 个')
-  if (Number.isFinite(credit) && credit) bits.push('+' + credit + ' 积分')
-  if (already) bits.push(already + ' 个今日已领过')
-  if (refreshed) bits.push('刷新 ' + refreshed + ' 个')
-  if (added || updated) bits.push('新增 ' + added + ' · 更新 ' + updated)
-  if (alive || total) bits.push('成功 ' + alive + ' / ' + total)
-  if (failed) bits.push('失败 ' + failed)
+  if (claimed) bits.push(tx('page.schedules.fb.claimed', { n: claimed }))
+  if (Number.isFinite(credit) && credit) bits.push(tx('page.schedules.fb.credit', { n: credit }))
+  if (already) bits.push(tx('page.schedules.fb.already', { n: already }))
+  if (refreshed) bits.push(tx('page.schedules.fb.refreshed', { n: refreshed }))
+  if (added || updated) bits.push(tx('page.schedules.fb.addedUpdated', { added, updated }))
+  if (alive || total) bits.push(tx('page.schedules.fb.alive', { alive, total }))
+  if (failed) bits.push(tx('page.schedules.fb.failed', { n: failed }))
   return bits.join(' · ')
 }
 
@@ -452,7 +488,7 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (!rawText.trim()) {
     return {
       tone: 'neutral',
-      label: '尚未运行',
+      label: tx('page.schedules.result.never'),
       summary: '',
       running: false,
       raw: '',
@@ -469,8 +505,8 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (!isRecord(parsed)) {
     return {
       tone: 'warn',
-      label: '旧格式',
-      summary: '历史结果无法解析，点「结果详情」查看原文',
+      label: tx('page.schedules.result.legacy'),
+      summary: tx('page.schedules.result.legacySummary'),
       running: false,
       raw: rawText,
       parsed: null,
@@ -489,8 +525,8 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (parsed.running === true) {
     return {
       tone: 'brand',
-      label: '执行中',
-      summary: summaryText || '后台执行中，完成后自动刷新',
+      label: tx('page.schedules.result.running'),
+      summary: summaryText || tx('page.schedules.result.runningSummary'),
       running: true,
       raw: rawText,
       parsed,
@@ -500,8 +536,8 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (parsed.deferred === true) {
     return {
       tone: 'warn',
-      label: '已顺延',
-      summary: summaryText || text(parsed.error) || '出口保护期间顺延，稍后自动重试',
+      label: tx('page.schedules.result.deferred'),
+      summary: summaryText || text(parsed.error) || tx('page.schedules.result.deferredSummary'),
       running: false,
       raw: rawText,
       parsed,
@@ -511,7 +547,7 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (parsed.error) {
     return {
       tone: 'danger',
-      label: '失败',
+      label: tx('page.schedules.result.failed'),
       summary: withElapsed(plain(text(parsed.error))),
       running: false,
       raw: rawText,
@@ -522,7 +558,7 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (parsed.skipped && parsed.ok !== false) {
     return {
       tone: 'neutral',
-      label: '已跳过',
+      label: tx('page.schedules.result.skipped'),
       summary: plain(text(parsed.skipped)),
       running: false,
       raw: rawText,
@@ -533,8 +569,8 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (parsed.ok === false) {
     return {
       tone: 'danger',
-      label: '失败',
-      summary: withElapsed(summaryText || fallbackSummary(parsed, failed) || '任务返回失败'),
+      label: tx('page.schedules.result.failed'),
+      summary: withElapsed(summaryText || fallbackSummary(parsed, failed) || tx('page.schedules.result.failedSummary')),
       running: false,
       raw: rawText,
       parsed,
@@ -544,7 +580,7 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   if (failed > 0) {
     return {
       tone: 'warn',
-      label: '部分失败',
+      label: tx('page.schedules.result.partial'),
       summary: withElapsed(summaryText || fallbackSummary(parsed, failed)),
       running: false,
       raw: rawText,
@@ -554,8 +590,8 @@ export function parseScheduleResult(raw: unknown): ScheduleResultView {
   }
   return {
     tone: RESULT_TONE_OK,
-    label: '成功',
-    summary: withElapsed(summaryText || fallbackSummary(parsed, 0) || '运行完成'),
+    label: tx('page.schedules.result.ok'),
+    summary: withElapsed(summaryText || fallbackSummary(parsed, 0) || tx('page.schedules.result.okSummary')),
     running: false,
     raw: rawText,
     parsed,
@@ -586,16 +622,16 @@ export function toScheduleRows(
     const globalPool = text(global?.proxy_pool)
     const globalConcurrency = int(global?.concurrency, 0)
     const proxyText = proxyPool
-      ? '代理组 ' + proxyPool
+      ? tx('page.schedules.proxy.pool', { pool: proxyPool })
       : globalPool
-        ? '跟随全局（代理组 ' + globalPool + '）'
+        ? tx('page.schedules.proxy.followPool', { pool: globalPool })
         : globalConcurrency > 0
-          ? '跟随全局（并发 ' + globalConcurrency + '）'
-          : '直连'
+          ? tx('page.schedules.proxy.followConcurrency', { n: globalConcurrency })
+          : tx('page.schedules.proxy.direct')
     const nextText = !enabled
-      ? '已停用'
+      ? tx('page.schedules.next.disabled')
       : result.running
-        ? '执行中'
+        ? tx('page.schedules.result.running')
         : formatNextRun(item.next_run_at, now)
     return {
       key: String(item.id),
@@ -607,7 +643,7 @@ export function toScheduleRows(
       platform: text(item.platform),
       platformLabel: text(item.platform_label) || text(item.platform) || 'WorkBuddy',
       cycleText: text(item.cycle_label) || buildCycleLabel(timing, intervalMinutes),
-      zoneHint: isCalendarMode(timing.mode) ? CALENDAR_ZONE_HINT : '',
+      zoneHint: isCalendarMode(timing.mode) ? calendarZoneHint() : '',
       intervalMinutes,
       timing,
       nextRunAt: item.next_run_at ?? null,
@@ -858,31 +894,31 @@ export function scheduleFormOf(item: ScheduleItem | ScheduleRow): ScheduleForm {
 /** 前端校验（错误 key 与 FormField 一一对应）；通过返回空对象。 */
 export function validateScheduleForm(form: ScheduleForm): Record<string, string> {
   const errors: Record<string, string> = {}
-  if (text(form.name).length > 64) errors.name = '任务名称最多 64 个字符'
-  if (!text(form.task)) errors.task = '请选择任务类型'
+  if (text(form.name).length > 64) errors.name = tx('page.schedules.v.name')
+  if (!text(form.task)) errors.task = tx('page.schedules.v.task')
   if (isCalendarMode(form.mode)) {
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(text(form.time))) {
-      errors.time = '执行时间格式必须为 HH:MM（例如 09:00）'
+      errors.time = tx('page.schedules.v.time')
     }
   } else {
     const minutes = intervalOf(form.intervalValue, form.intervalUnit)
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 5256000) {
-      errors.interval = '执行间隔必须在 1 分钟到 10 年之间'
+      errors.interval = tx('page.schedules.v.interval')
     }
   }
-  if (form.mode === 'weekly' && !form.weekdays.length) errors.weekdays = '请至少选择一天'
+  if (form.mode === 'weekly' && !form.weekdays.length) errors.weekdays = tx('page.schedules.v.weekdays')
   if (form.mode === 'monthly' && (form.monthday < 1 || form.monthday > 31)) {
-    errors.monthday = '每月执行日必须在 1–31 之间'
+    errors.monthday = tx('page.schedules.v.monthday')
   }
   if (form.stopAfter && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(form.stopAfter)) {
-    errors.stopAfter = '停止时间格式不对，请重新选择'
+    errors.stopAfter = tx('page.schedules.v.stopAfter')
   }
   const concurrency = int(form.concurrency, 0)
-  if (concurrency < 0 || concurrency > 64) errors.concurrency = '并发数必须在 0–64 之间'
+  if (concurrency < 0 || concurrency > 64) errors.concurrency = tx('page.schedules.v.concurrency')
   const budget = int(form.budgetMinutes, 0)
-  if (budget < 0 || budget > 720) errors.budget = '单轮时间预算必须在 0–720 分钟之间'
+  if (budget < 0 || budget > 720) errors.budget = tx('page.schedules.v.budget')
   const stale = int(form.staleMinutes, 0)
-  if (stale < 0 || stale > 10080) errors.stale = 'stale 阈值必须在 0–10080 分钟之间'
+  if (stale < 0 || stale > 10080) errors.stale = tx('page.schedules.v.stale')
   return errors
 }
 
@@ -963,50 +999,55 @@ export function buildProxyPoolOptions(
   const globalPool = text(global?.proxy_pool)
   const options: ProxyPoolOption[] = [
     {
-      label: globalPool ? '跟随全局（当前：代理组 ' + globalPool + '）' : '跟随全局（当前：直连）',
+      label: globalPool
+        ? tx('page.schedules.proxyOpt.followPool', { pool: globalPool })
+        : tx('page.schedules.proxyOpt.followDirect'),
       value: '',
     },
   ]
   for (const pool of pools) {
     const stat = counts.get(pool) || { total: 0, ready: 0 }
-    options.push({ label: '代理组 ' + pool + ' · ' + stat.ready + '/' + stat.total + ' 可用', value: pool })
+    options.push({
+      label: tx('page.schedules.proxyOpt.pool', { pool, ready: stat.ready, total: stat.total }),
+      value: pool,
+    })
   }
   const currentPool = text(current)
   if (currentPool && !pools.includes(currentPool)) {
-    options.push({ label: '代理组 ' + currentPool + ' · 节点已不存在', value: currentPool })
+    options.push({ label: tx('page.schedules.proxyOpt.missing', { pool: currentPool }), value: currentPool })
   }
   if (!pools.length) {
-    options.push({ label: '还没有配置代理节点', value: '', disabled: true })
+    options.push({ label: tx('page.schedules.proxyOpt.none'), value: '', disabled: true })
   }
   return options
 }
 
 /** 结果详情抽屉的键值：把后端字段名翻成中文（旧版 FIELD_LABELS 的口径）。 */
 export const RESULT_FIELD_LABELS: Record<string, string> = {
-  task: '任务',
-  ok: '结果',
-  platform: '平台',
-  realm: '区域',
-  total: '账号数',
-  claimed: '新领取',
-  granted: '新领取',
-  skipped_already: '今日已领',
-  failed: '失败',
-  failed_count: '失败',
-  fail: '失败',
-  credit: '获得积分',
-  quota_total: '今日权益合计',
-  refreshed: '刷新成功',
-  added: '新增模型',
-  updated: '更新模型',
-  total_in_db: '库内模型',
-  alive: '保活成功',
-  disabled: '已禁用',
-  elapsed_s: '耗时（秒）',
-  summary: '摘要',
-  skipped: '跳过原因',
-  error: '错误',
-  deferred: '顺延',
-  running: '执行中',
-  detail_truncated: '明细已截断',
+  get task() { return tx('page.schedules.field.task') },
+  get ok() { return tx('page.schedules.field.ok') },
+  get platform() { return tx('page.schedules.field.platform') },
+  get realm() { return tx('page.schedules.field.realm') },
+  get total() { return tx('page.schedules.field.total') },
+  get claimed() { return tx('page.schedules.field.claimed') },
+  get granted() { return tx('page.schedules.field.claimed') },
+  get skipped_already() { return tx('page.schedules.field.skippedAlready') },
+  get failed() { return tx('page.schedules.field.failed') },
+  get failed_count() { return tx('page.schedules.field.failed') },
+  get fail() { return tx('page.schedules.field.failed') },
+  get credit() { return tx('page.schedules.field.credit') },
+  get quota_total() { return tx('page.schedules.field.quotaTotal') },
+  get refreshed() { return tx('page.schedules.field.refreshed') },
+  get added() { return tx('page.schedules.field.added') },
+  get updated() { return tx('page.schedules.field.updated') },
+  get total_in_db() { return tx('page.schedules.field.totalInDb') },
+  get alive() { return tx('page.schedules.field.alive') },
+  get disabled() { return tx('page.schedules.field.disabled') },
+  get elapsed_s() { return tx('page.schedules.field.elapsed') },
+  get summary() { return tx('page.schedules.field.summary') },
+  get skipped() { return tx('page.schedules.field.skipped') },
+  get error() { return tx('page.schedules.field.error') },
+  get deferred() { return tx('page.schedules.field.deferred') },
+  get running() { return tx('page.schedules.field.running') },
+  get detail_truncated() { return tx('page.schedules.field.detailTruncated') },
 }

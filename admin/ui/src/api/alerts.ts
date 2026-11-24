@@ -17,6 +17,11 @@
  *      「停用」只能靠保存时把它从数组里剔除（见契约 §八.2）。
  */
 import { http } from './http'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* -------------------------------------------------------------------------- */
 /* 后端形状                                                                    */
@@ -33,6 +38,10 @@ export interface AlertChannelSummary {
   type: string
   label: string
   target: string
+  /** r3：列表展示用的打码串（webhook token / 邮箱用户名中段打码）。编辑仍用 target。 */
+  target_masked?: string
+  /** r3：target 本身是否已经被后端打码（ALERT_MASK_TARGETS=1 时）。 */
+  masked?: boolean
   /** 后端只按「target 非空」判断，没有真正的停用位。 */
   enabled: boolean
 }
@@ -153,9 +162,9 @@ export const SMTP_CLEAR = '__clear__'
 
 /** 后端 CHANNEL_LABELS 的兜底副本（labels 缺失时下拉也要能显示中文）。 */
 export const FALLBACK_CHANNEL_LABELS: Record<string, string> = {
-  email: '邮件（SMTP）',
-  feishu: '飞书群机器人',
-  qqbot: 'QQ 机器人',
+  get email() { return tx('page.alerts.type.email') },
+  get feishu() { return tx('page.alerts.type.feishu') },
+  get qqbot() { return tx('page.alerts.type.qqbot') },
 }
 
 /** 渠道类型下拉顺序，与旧版 ui-select 的 options 一致。 */
@@ -187,8 +196,8 @@ export function alertChannelMeta(type: string, labels: Record<string, string> = 
       type,
       label,
       kind: 'email',
-      placeholder: '收件邮箱，例如 me@qq.com（多个用英文逗号分隔）',
-      hint: '邮件渠道需要两步：这里填收件邮箱；下方「SMTP（邮件渠道）」里填服务器与授权码（QQ 邮箱可用一条式 qqSMTP:授权码）。',
+      placeholder: tx('page.alerts.meta.emailPlaceholder'),
+      hint: tx('page.alerts.meta.emailHint'),
       rule: 'email',
     }
   }
@@ -198,7 +207,7 @@ export function alertChannelMeta(type: string, labels: Record<string, string> = 
       label,
       kind: 'webhook',
       placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/…',
-      hint: '填写飞书群「自定义机器人」的 Webhook 地址；多个渠道会同时发送。',
+      hint: tx('page.alerts.meta.feishuHint'),
       rule: 'url',
     }
   }
@@ -207,8 +216,8 @@ export function alertChannelMeta(type: string, labels: Record<string, string> = 
       type,
       label,
       kind: 'webhook',
-      placeholder: 'http://127.0.0.1:5700/send_group_msg?group=群号',
-      hint: 'QQ 群机器人（go-cqhttp / OneBot）地址，末尾必须带 ?group=群号。',
+      placeholder: tx('page.alerts.meta.qqbotPlaceholder'),
+      hint: tx('page.alerts.meta.qqbotHint'),
       rule: 'qqbot',
     }
   }
@@ -216,8 +225,8 @@ export function alertChannelMeta(type: string, labels: Record<string, string> = 
     type,
     label,
     kind: 'unknown',
-    placeholder: '渠道地址',
-    hint: '后端不认识这个渠道类型，发送时会报「未知渠道类型」。',
+    placeholder: tx('page.alerts.meta.unknownPlaceholder'),
+    hint: tx('page.alerts.meta.unknownHint'),
     rule: 'text',
   }
 }
@@ -225,23 +234,23 @@ export function alertChannelMeta(type: string, labels: Record<string, string> = 
 /** 目标输入的校验：返回空串表示通过（规则与旧版 alertsAddChannel + 后端一致）。 */
 export function validateChannelTarget(type: string, target: string): string {
   const value = String(target ?? '').trim()
-  if (!value) return '请填写地址'
+  if (!value) return tx('page.alerts.validate.required')
   const meta = alertChannelMeta(type)
   if (meta.rule === 'email') {
     const parts = value.split(',').map((part) => part.trim()).filter(Boolean)
-    if (!parts.length) return '请填写收件邮箱'
+    if (!parts.length) return tx('page.alerts.validate.emailRequired')
     for (const part of parts) {
       if (!/^[^@\s,]+@[^@\s,]+\.[^@\s,]+$/.test(part)) {
-        return '收件邮箱格式不对，例如 me@qq.com（多个用英文逗号分隔）'
+        return tx('page.alerts.validate.emailInvalid')
       }
     }
     return ''
   }
   if (meta.rule === 'url' || meta.rule === 'qqbot') {
-    if (!/^https?:\/\//i.test(value)) return 'Webhook 地址需以 http(s):// 开头'
+    if (!/^https?:\/\//i.test(value)) return tx('page.alerts.validate.httpPrefix')
   }
   if (meta.rule === 'qqbot' && !/[?&]group=/.test(value)) {
-    return 'QQ 机器人地址需带 ?group=群号'
+    return tx('page.alerts.validate.qqbotGroup')
   }
   return ''
 }
@@ -257,6 +266,8 @@ export interface AlertChannelView {
   type: string
   label: string
   target: string
+  /** 列表展示用（后端 target_masked；缺失时等于 target）。不参与保存。 */
+  targetMasked: string
   /** 编辑态开关（关闭 → 保存时剔除，见契约 §八.2）。 */
   enabled: boolean
   /** 由 config.mail_to 自动补出来的邮件渠道：只读，删不掉。 */
@@ -284,6 +295,11 @@ export function channelKey(type: string, target: string): string {
   return type + '::' + target
 }
 
+/** 后端打码串（含 `***`）：只能原样回传，不能当作唯一键或去重依据。 */
+export function isMaskedTarget(target: string): boolean {
+  return String(target ?? '').includes('***')
+}
+
 /** GET → 渠道列表（含「默认收件邮箱派生」标记）。 */
 export function toChannelViews(payload: AlertConfigPayload | null | undefined): AlertChannelView[] {
   if (!payload) return []
@@ -302,6 +318,7 @@ export function toChannelViews(payload: AlertConfigPayload | null | undefined): 
         target: String(item?.target || ''),
         enabled: true,
       }))
+  const usedKeys = new Set<string>()
   return source
     .filter((item) => String(item?.type || '').trim())
     .map((item) => {
@@ -312,11 +329,16 @@ export function toChannelViews(payload: AlertConfigPayload | null | undefined): 
         !hasExplicitEmail &&
         type.toLowerCase() === 'email' &&
         target === mailTo
+      // 打码撞串时 type::target 会重复：v-for key 冲突、删除一条会连带删掉另一条，追加序号唯一化。
+      let key = channelKey(type, target)
+      for (let n = 2; usedKeys.has(key); n += 1) key = channelKey(type, target) + '#' + n
+      usedKeys.add(key)
       return {
-        key: channelKey(type, target),
+        key,
         type,
         label: labels[type] || String(item.label || '') || type,
         target,
+        targetMasked: String(item.target_masked || '').trim() || target,
         enabled: item.enabled !== false,
         auto,
       }
@@ -379,9 +401,14 @@ export function buildAlertConfigBody(form: AlertConfigForm): AlertConfigSave {
     const type = trimText(channel.type)
     const target = trimText(channel.target)
     if (!type || !target) continue
-    const key = channelKey(type, target)
-    if (seen.has(key)) continue
-    seen.add(key)
+    // r4：后端默认打码（ALERT_MASK_TARGETS=1），两条不同 webhook 打码后可能撞串
+    // （同 host、末 4 位相同）。打码值由后端按保存顺序逐条还原，前端不能拿它判重，
+    // 否则第二条会被当成重复项静默删掉；只对明文 target 去重。
+    if (!isMaskedTarget(target)) {
+      const key = channelKey(type, target)
+      if (seen.has(key)) continue
+      seen.add(key)
+    }
     channels.push({ type, target })
   }
   return {
@@ -411,10 +438,10 @@ export function isConfigDirty(current: AlertConfigForm, saved: AlertConfigForm):
 /** 秒 → 人话（600 → 「10 分钟」），用于去重窗口的说明。 */
 export function describeCooldown(seconds: unknown): string {
   const n = clampCooldown(seconds)
-  if (n % 3600 === 0) return n / 3600 + ' 小时'
-  if (n % 60 === 0) return n / 60 + ' 分钟'
-  if (n >= 60) return Math.floor(n / 60) + ' 分 ' + (n % 60) + ' 秒'
-  return n + ' 秒'
+  if (n % 3600 === 0) return tx('page.alerts.cooldown.hours', { n: n / 3600 })
+  if (n % 60 === 0) return tx('page.alerts.cooldown.minutes', { n: n / 60 })
+  if (n >= 60) return tx('page.alerts.cooldown.minSec', { m: Math.floor(n / 60), s: n % 60 })
+  return tx('page.alerts.cooldown.seconds', { n })
 }
 
 export interface SmtpHealthView {
@@ -424,19 +451,28 @@ export interface SmtpHealthView {
 
 /** 邮件链路体检（旧版 renderSmtpHealth 的移植）。 */
 export function describeSmtpHealth(smtp: AlertSmtpHealth | null | undefined): SmtpHealthView {
-  if (!smtp) return { tone: 'warn', text: '没有拿到邮件链路状态，点「重新加载」再试。' }
-  const server = smtp.host ? smtp.host + ':' + smtp.port + (smtp.ssl ? ' SSL' : '') : '服务器未配置'
+  if (!smtp) return { tone: 'warn', text: tx('page.alerts.health.unknown') }
+  const server = smtp.host
+    ? smtp.host + ':' + smtp.port + (smtp.ssl ? ' SSL' : '')
+    : tx('page.alerts.health.noServer')
   if (smtp.ready) {
-    const sender = smtp.from || smtp.user || '未配置发件人'
+    const sender = smtp.from || smtp.user || tx('page.alerts.health.noSender')
     return {
       tone: 'ok',
-      text: '邮件链路就绪：' + sender + ' → ' + (smtp.mail_to || '渠道收件人') + '（' + server + '）',
+      text: tx('page.alerts.health.ready', {
+        sender,
+        to: smtp.mail_to || tx('page.alerts.health.channelRecipients'),
+        server,
+      }),
     }
   }
+  // missing 是后端给的缺项名（运行数据，原样透传）
   const missing = (smtp.missing || []).filter(Boolean)
   return {
     tone: 'warn',
-    text: missing.length ? '邮件链路还差：' + missing.join('、') : '邮件链路未就绪',
+    text: missing.length
+      ? tx('page.alerts.health.missing', { list: missing.join(tx('page.alerts.sep.list')) })
+      : tx('page.alerts.health.notReady'),
   }
 }
 
@@ -452,20 +488,26 @@ export function summarizeTestResult(
 ): TestSummary {
   const results = Array.isArray(result?.results) ? result.results : []
   if (!results.length) {
-    return { tone: 'error', text: '发送测试通知失败：没有配置任何渠道，先添加渠道并保存' }
+    return { tone: 'error', text: tx('page.alerts.testSummary.none') }
   }
-  const nameOf = (type: string): string => labels[type] || FALLBACK_CHANNEL_LABELS[type] || type || '未知渠道'
+  const nameOf = (type: string): string =>
+    labels[type] || FALLBACK_CHANNEL_LABELS[type] || type || tx('page.alerts.testSummary.unknownChannel')
   const failed = results.filter((item) => !item.ok)
   if (!failed.length) {
-    return { tone: 'success', text: '测试通知已发送：' + results.length + ' 个渠道全部成功' }
+    return { tone: 'success', text: tx('page.alerts.testSummary.allOk', { n: results.length }) }
   }
   const detail =
     failed
       .slice(0, 2)
-      .map((item) => nameOf(item.type) + '：' + (item.error || '未知原因'))
-      .join('；') + (failed.length > 2 ? '…' : '')
-  const body = failed.length + '/' + results.length + ' 个渠道（' + detail + '）'
+      .map((item) =>
+        tx('page.alerts.testSummary.item', {
+          name: nameOf(item.type),
+          error: item.error || tx('page.alerts.test.unknownReason'),
+        }),
+      )
+      .join(tx('page.alerts.sep.detail')) + (failed.length > 2 ? '…' : '')
+  const body = tx('page.alerts.testSummary.body', { failed: failed.length, total: results.length, detail })
   return failed.length === results.length
-    ? { tone: 'error', text: '发送测试通知失败：' + body }
-    : { tone: 'warning', text: '测试通知部分失败：' + body }
+    ? { tone: 'error', text: tx('page.alerts.testSummary.allFail', { body }) }
+    : { tone: 'warning', text: tx('page.alerts.testSummary.partFail', { body }) }
 }

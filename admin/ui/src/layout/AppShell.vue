@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useDialog } from 'naive-ui'
+import { NSpin, useDialog } from 'naive-ui'
 import SideNav from './SideNav.vue'
 import TopBar from './TopBar.vue'
 import MobileDrawer from './MobileDrawer.vue'
 import CommandPalette from './CommandPalette.vue'
-import SessionsDrawer from './SessionsDrawer.vue'
 import {
   closeMobileNav,
   commandPaletteOpen,
@@ -23,11 +22,14 @@ import { PAGES_BY_KEY, isPageKey, rememberLastTab } from '@/router/pages'
 import { usePlatformStore } from '@/stores/platform'
 import { useHeartbeatStore } from '@/stores/heartbeat'
 import { useAppInfo } from '@/platform/version'
-import { refreshShellBadges } from '@/platform/shellBadges'
+import { refreshShellBadges, startShellBadgePolling, stopShellBadgePolling } from '@/platform/shellBadges'
 import { consumeNextHash } from '@/api/auth'
 import { logout } from '@/api/session'
 import { initDesktop } from '@/platform/desktop'
 import { pageTitle, useI18n } from '@/i18n'
+import { prefetchGroupIdle } from '@/router/pageLoaders'
+import { silentRefreshing } from '@/composables/useRevisit'
+import { useDelayedFlag } from '@/composables/useDelayedFlag'
 
 /**
  * 应用外壳（03-shell §2）：侧栏 + 顶栏 + 内容区，以及三个全局浮层
@@ -54,6 +56,16 @@ const paletteOpen = computed({
   set: (value: boolean) => {
     commandPaletteOpen.value = value
   },
+})
+/**
+ * 登录设备抽屉按需加载（第 5 轮首屏瘦身）：它是唯一把 NDrawer / NDrawerContent 和会话列表逻辑
+ * 带进入口 chunk 的外壳组件，而绝大多数会话从不打开它。第一次打开时才下载并挂载，之后常驻
+ * （保证关闭动画、再次打开不再等待）。
+ */
+const SessionsDrawer = defineAsyncComponent(() => import('./SessionsDrawer.vue'))
+const sessionsMounted = ref(sessionsOpen.value)
+watch(sessionsOpen, (open) => {
+  if (open) sessionsMounted.value = true
 })
 const sessionsOpenModel = computed({
   get: () => sessionsOpen.value,
@@ -113,6 +125,8 @@ onMounted(async () => {
   void initDesktop()
   await platformStore.load()
   void refreshShellBadges()
+  // 侧栏提示点（积分到期 warn / 哨兵批次封控 danger）60 秒刷新一次，页面不可见时跳过。
+  startShellBadgePolling()
   offPlatformChange = platformStore.onChange(() => {
     void refreshShellBadges()
     guardPlatformOnlyPage()
@@ -128,6 +142,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   heartbeat.stop()
+  stopShellBadgePolling()
   offPlatformChange?.()
   offPlatformChange = null
 })
@@ -144,6 +159,57 @@ watch(
     }
     const title = route.meta.title
     document.title = t('app.documentTitle', { title: title ? String(title) : t('shell.brandSub') })
+  },
+  { immediate: true },
+)
+
+/**
+ * 路由切换（11-polish-motion §1）：新页面 opacity 0→1 + translateY(4px→0)，--dur-2；
+ * 离开**不做动画**、立即移除（JS 钩子直接 done），不会两页叠加。
+ * 用 Web Animations 而不是 CSS 类：KeepAlive 缓存的页面每次回来都能重新播放，且不依赖页面根节点的样式。
+ * 减少动效、不支持 element.animate（jsdom）、页面根不是元素（Fragment）时直接放行。
+ */
+const ROUTE_ENTER_MS = 180
+const ROUTE_EASE = 'cubic-bezier(.16, 1, .3, 1)'
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch {
+    return false
+  }
+}
+
+function onRouteEnter(el: Element, done: () => void): void {
+  const node = el as HTMLElement
+  if (!(node instanceof HTMLElement) || typeof node.animate !== 'function' || prefersReducedMotion()) {
+    done()
+    return
+  }
+  const animation = node.animate(
+    [
+      { opacity: 0, transform: 'translateY(4px)' },
+      { opacity: 1, transform: 'none' },
+    ],
+    { duration: ROUTE_ENTER_MS, easing: ROUTE_EASE },
+  )
+  animation.onfinish = () => done()
+  animation.oncancel = () => done()
+}
+
+function onRouteLeave(_el: Element, done: () => void): void {
+  done()
+}
+
+/** 回到缓存页时的后台静默刷新：右上角 14px 小转圈，>300ms 才出现。 */
+const showSilentSpinner = useDelayedFlag(() => silentRefreshing.value, 300)
+
+/** 空闲时预取当前分组其余页面的 chunk（11-polish-motion §2）。 */
+watch(
+  () => route.name,
+  (name) => {
+    if (isPageKey(name)) prefetchGroupIdle(PAGES_BY_KEY[name].groupKey, name)
   },
   { immediate: true },
 )
@@ -175,8 +241,24 @@ function confirmLogout(): void {
     <div class="shell-main">
       <TopBar @open-mobile-nav="toggleMobileNav" />
       <main class="shell-content">
-        <router-view />
+        <!-- KeepAlive :max=6：二次进入不出骨架；页面用 useRevisit 在回来时静默刷新 -->
+        <router-view v-slot="{ Component, route: viewRoute }">
+          <transition :css="false" @enter="onRouteEnter" @leave="onRouteLeave">
+            <keep-alive :max="6">
+              <component :is="Component" v-if="Component" :key="String(viewRoute.name ?? viewRoute.path)" />
+            </keep-alive>
+          </transition>
+        </router-view>
       </main>
+      <div
+        v-if="showSilentSpinner"
+        class="shell-refreshing"
+        role="status"
+        :aria-label="t('common.loading')"
+        data-testid="shell-silent-refresh"
+      >
+        <n-spin :size="14" />
+      </div>
     </div>
 
     <MobileDrawer
@@ -185,7 +267,7 @@ function confirmLogout(): void {
       @logout="confirmLogout"
     />
     <CommandPalette v-model:open="paletteOpen" @logout="confirmLogout" />
-    <SessionsDrawer v-model:open="sessionsOpenModel" />
+    <SessionsDrawer v-if="sessionsMounted" v-model:open="sessionsOpenModel" />
   </div>
 </template>
 
@@ -198,31 +280,59 @@ function confirmLogout(): void {
   background: var(--bg);
 }
 
+/* 主列：内容区顶部 240px 叠一层极淡的品牌光晕（只在这里出现，10-visual-refresh §1.1） */
 .shell-main {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  background-image: var(--bg-glow);
+  background-repeat: no-repeat;
+  background-size: 100% 280px;
 }
 
+/* 内容区：1600 居中；表格页（页面根节点 .mh-page--wide）放宽到 1920 */
 .shell-content {
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
-  max-width: var(--content-max);
-  margin-right: auto;
-  padding: var(--sp-6) var(--sp-8) var(--sp-12);
+  max-width: calc(var(--content-max) + var(--content-pad) * 2);
+  margin: 0 auto;
+  padding: var(--sp-6) var(--content-pad) var(--sp-12);
 }
 
-@media (max-width: 1279px) {
+/* 回到缓存页时的静默刷新：内容区右上角小转圈，不遮挡、不占位 */
+.shell-refreshing {
+  position: fixed;
+  top: calc(var(--topbar-h) + var(--sp-2));
+  right: var(--sp-4);
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
+  pointer-events: none;
+}
+
+/* 表格页放宽到 1920 的规则在 styles/base.css（:has 写在 scoped 样式里会被加上作用域属性，匹配不到页面根节点） */
+
+@media (max-width: 1280px) {
   .shell-content {
-    padding: var(--sp-6) var(--sp-6) var(--sp-10);
+    --content-pad: 24px;
+    padding-bottom: var(--sp-10);
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 767px) {
   .shell-content {
-    padding: var(--sp-4) var(--sp-4) var(--sp-8);
+    --content-pad: 16px;
+    padding-top: var(--sp-4);
+    padding-bottom: var(--sp-8);
   }
 }
 </style>

@@ -56,14 +56,15 @@ const listItems: GroupItem[] = [
 describe('toGroupRows：接口 items → 表格行', () => {
   const rows = toGroupRows(listItems)
 
-  it('行键是字符串 id，chips 最多 5 个 +N，停用数按 effective_count 算', () => {
+  it('行键是字符串 id，chips 最多 4 个 +N，停用数按 effective_count 算', () => {
     expect(rows).toHaveLength(3)
     expect(rows[0].key).toBe('7')
     expect(rows[0].id).toBe(7)
     expect(rows[0].models).toHaveLength(6)
     expect(rows[0].modelPreview).toEqual(listItems[0].models.slice(0, GROUP_MODEL_PREVIEW))
-    expect(rows[0].modelPreview).toHaveLength(5)
-    expect(rows[0].modelOverflow).toBe(1)
+    expect(GROUP_MODEL_PREVIEW).toBe(4)
+    expect(rows[0].modelPreview).toHaveLength(4)
+    expect(rows[0].modelOverflow).toBe(2)
     expect(rows[0].modelCount).toBe(6)
     expect(rows[0].effectiveCount).toBe(4)
     expect(rows[0].staleCount).toBe(2)

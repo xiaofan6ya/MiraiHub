@@ -333,8 +333,9 @@ function drawerText(): string {
   return drawerEl()?.textContent || ''
 }
 
+/** v2.1：页头只留一个主按钮，「导入」「扫描本机」收进「添加账号 ▾」下拉。 */
 async function openDrawerByHeader(text: string): Promise<void> {
-  await clickBodyButton(text)
+  await pickAddMode(text === '导入' ? '导入账号' : text)
   await waitFor(() => Boolean(drawerEl()?.querySelector('.n-drawer-header__main')), '抽屉打开：' + text)
 }
 
@@ -462,10 +463,11 @@ describe('AccountsPage · 批量选择与工具条', () => {
     await clickBulk(wrapper, '删除')
     await waitFor(() => Boolean(dialogEl()), '批量删除确认框')
     expect(dialogEl()!.textContent).toContain('删除 2 个账号？')
-    expect(dialogEl()!.textContent).toContain('请输入「删除」以确认')
+    // 第 5 轮：useConfirm 的提示改走 i18n（confirm.typeToConfirm = '请输入 {text} 以确认'），不再是硬编码的「」包裹。
+    expect(dialogEl()!.textContent).toMatch(/请输入\s*删除\s*以确认/)
 
     await clickDialogButton('删除')
-    expect(dialogEl()!.textContent).toContain('输入的内容不匹配，请重新输入')
+    expect(dialogEl()!.textContent).toContain('输入的文字不一致，请重新输入')
     expect(bulkAccounts).not.toHaveBeenCalled()
 
     await fill(document.querySelector('.n-dialog input'), '删除')
@@ -494,7 +496,12 @@ describe('AccountsPage · 批量选择与工具条', () => {
 
     await checkCard(wrapper, 0)
     await clickBulk(wrapper, '导出选中')
-    expect(exportAccountsAsync).toHaveBeenCalledWith({ ids: [2] })
+    // r4：与平台页一致，JSONL 含凭证 → 先确认再请求，确认后带 X-Export-Confirm
+    await waitFor(() => Boolean(dialogEl()), '导出凭证确认框')
+    expect(exportAccountsAsync).not.toHaveBeenCalled()
+    await clickDialogButton('确认导出')
+    await waitFor(() => exportAccountsAsync.mock.calls.length > 0, '导出请求')
+    expect(exportAccountsAsync).toHaveBeenCalledWith({ ids: [2] }, true)
     await waitFor(() => Boolean(wrapper.find('.acc-jobbar').exists()), '导出任务条')
   })
 })
@@ -505,8 +512,11 @@ describe('AccountsPage · 批量选择与工具条', () => {
 
 describe('AccountsPage · 添加抽屉', () => {
   it('导入 / 扫描本机 / 手动添加三种模式在同一抽屉里切换', async () => {
-    const { wrapper } = await mountPage()
-    expect(wrapper.text()).toContain('扫描本机')
+    await mountPage()
+    await clickBodyButton('添加账号')
+    await waitFor(() => dropdownOptions().length > 0, '添加账号下拉')
+    expect(dropdownOptions().map((el) => (el.textContent || '').trim())).toEqual(['手动添加', '导入账号', '扫描本机'])
+    await clickBodyButton('添加账号')
 
     await openDrawerByHeader('导入')
     expect(document.querySelector('.n-drawer-header__main')!.textContent).toContain('导入账号 · WorkBuddy')

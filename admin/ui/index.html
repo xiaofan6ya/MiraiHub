@@ -4,8 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
+    <!-- 应用自带深色主题：声明给 Dark Reader 等反色插件，别再二次反色（第 1 轮审查 P0-1）。 -->
+    <meta name="darkreader-lock" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>MiraiHub 管理后台</title>
+    <!--
+      字体（11-polish-motion §2）：IBM Plex Sans 拉丁子集 400 / 500 预加载，构建时由 vite.config.ts 的
+      mh-preload-fonts 把下面的占位换成带哈希的 <link rel="preload" as="font" crossorigin>。
+      @font-face 来自 @fontsource（main.ts 引入），已是 font-display: swap：字体没到之前先用系统字体，不白屏不阻塞。
+      首屏占位里的「正在加载…」是中文，不依赖 Plex。
+    -->
+    <!-- mh:font-preload -->
     <!--
       首屏占位（第五阶段「性能」项）。
 
@@ -16,7 +25,8 @@
         1) 只用 tokens.css 里的同值常量。内联样式在外部样式表之前解析，用不了 var()，
            所以这里把 --bg / --surface / --border / --fg-muted / --topbar-h 等抄成字面量；
            改令牌时这段也要跟着改（值必须一致，否则会看到换色闪烁）。
-        2) 不引入任何新视觉元素：只有顶栏底色、两条灰条、一行提示文字。提示文字是
+        2) 不引入任何新视觉元素：只有深墨蓝侧栏（≥768）、顶栏底色、两条灰条、一行提示文字
+           （v2.1 外壳：10-visual-refresh §1.2；侧栏颜色两种主题都是深色）。提示文字是
            FCP 的必要条件 —— 纯色块不算一次内容绘制，浏览器不会因此上报 FCP。
         3) 不需要拆除脚本：Vue 挂载时会清空 #app 的子节点，这段骨架自然消失。
     -->
@@ -38,29 +48,42 @@
         min-height: 100vh;
       }
       .mh-boot {
+        display: flex;
         min-height: 100vh;
         background: #f3f5f8;
+      }
+      .mh-boot__side {
+        flex: 0 0 auto;
+        width: 232px;
+        background: #121829;
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .mh-boot__col {
+        flex: 1 1 auto;
+        min-width: 0;
       }
       .mh-boot__top {
         display: flex;
         align-items: center;
         gap: 16px;
         height: 56px;
-        padding: 0 16px;
-        background: #ffffff;
-        border-bottom: 1px solid #e3e6ec;
+        padding: 0 24px;
+        background: #f4f6fa;
+        border-bottom: 1px solid #edeff3;
       }
       .mh-boot__bar {
         display: block;
-        border-radius: 5px;
-        background: #edeff3;
+        border-radius: 6px;
+        background: #e9ecf1;
       }
       .mh-boot__bar--title {
         width: 120px;
         height: 14px;
       }
       .mh-boot__main {
-        padding: 16px;
+        max-width: 1600px;
+        margin: 0 auto;
+        padding: 24px 32px;
       }
       .mh-boot__hint {
         margin: 0;
@@ -71,14 +94,33 @@
       .mh-boot__lines {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 16px;
         margin-top: 12px;
       }
       .mh-boot__line {
-        height: 64px;
-        border: 1px solid #edeff3;
-        border-radius: 10px;
+        height: 96px;
+        border: 1px solid #e3e6ec;
+        border-radius: 12px;
         background: #ffffff;
+      }
+      @media (max-width: 1279px) {
+        .mh-boot__side {
+          width: 64px;
+        }
+        .mh-boot__main {
+          padding: 24px;
+        }
+      }
+      @media (max-width: 767px) {
+        .mh-boot__side {
+          display: none;
+        }
+        .mh-boot__top {
+          padding: 0 16px;
+        }
+        .mh-boot__main {
+          padding: 16px;
+        }
       }
       @media (prefers-color-scheme: dark) {
         html {
@@ -88,19 +130,22 @@
         .mh-boot {
           background: #12151b;
         }
+        .mh-boot__side {
+          background: #0c0f16;
+        }
         .mh-boot__top {
-          background: #1a1e26;
-          border-bottom-color: #2b303b;
+          background: #13161c;
+          border-bottom-color: #292e39;
         }
         .mh-boot__bar {
-          background: #20242d;
+          background: #21252f;
         }
         .mh-boot__hint {
           color: #8d95a3;
         }
         .mh-boot__line {
-          border-color: #242833;
-          background: #1a1e26;
+          border-color: #323846;
+          background: #1c2029;
         }
       }
       html[data-theme="light"] {
@@ -110,18 +155,21 @@
       html[data-theme="light"] .mh-boot {
         background: #f3f5f8;
       }
+      html[data-theme="light"] .mh-boot__side {
+        background: #121829;
+      }
       html[data-theme="light"] .mh-boot__top {
-        background: #ffffff;
-        border-bottom-color: #e3e6ec;
+        background: #f4f6fa;
+        border-bottom-color: #edeff3;
       }
       html[data-theme="light"] .mh-boot__bar {
-        background: #edeff3;
+        background: #e9ecf1;
       }
       html[data-theme="light"] .mh-boot__hint {
         color: #6b7280;
       }
       html[data-theme="light"] .mh-boot__line {
-        border-color: #edeff3;
+        border-color: #e3e6ec;
         background: #ffffff;
       }
       html[data-theme="dark"] {
@@ -131,31 +179,37 @@
       html[data-theme="dark"] .mh-boot {
         background: #12151b;
       }
+      html[data-theme="dark"] .mh-boot__side {
+        background: #0c0f16;
+      }
       html[data-theme="dark"] .mh-boot__top {
-        background: #1a1e26;
-        border-bottom-color: #2b303b;
+        background: #13161c;
+        border-bottom-color: #292e39;
       }
       html[data-theme="dark"] .mh-boot__bar {
-        background: #20242d;
+        background: #21252f;
       }
       html[data-theme="dark"] .mh-boot__hint {
         color: #8d95a3;
       }
       html[data-theme="dark"] .mh-boot__line {
-        border-color: #242833;
-        background: #1a1e26;
+        border-color: #323846;
+        background: #1c2029;
       }
     </style>
   </head>
   <body>
     <div id="app">
       <div class="mh-boot">
-        <div class="mh-boot__top"><span class="mh-boot__bar mh-boot__bar--title"></span></div>
-        <div class="mh-boot__main">
-          <p class="mh-boot__hint" role="status">正在加载…</p>
-          <div class="mh-boot__lines">
-            <span class="mh-boot__line"></span>
-            <span class="mh-boot__line"></span>
+        <div class="mh-boot__side"></div>
+        <div class="mh-boot__col">
+          <div class="mh-boot__top"><span class="mh-boot__bar mh-boot__bar--title"></span></div>
+          <div class="mh-boot__main">
+            <p class="mh-boot__hint" role="status">正在加载…</p>
+            <div class="mh-boot__lines">
+              <span class="mh-boot__line"></span>
+              <span class="mh-boot__line"></span>
+            </div>
           </div>
         </div>
       </div>

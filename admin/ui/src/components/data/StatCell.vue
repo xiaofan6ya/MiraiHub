@@ -9,6 +9,11 @@ const props = defineProps<{ item: StatItem; compact?: boolean }>()
 const { t } = useI18n()
 
 const color = computed(() => statToneColor(props.item.tone))
+/** 空值「—」：降一级字号、--fg-faint（第 1 轮审查 P1-8：大号「—」像一根横线）。 */
+const isEmpty = computed(() => {
+  const value = props.item.value
+  return value === null || value === undefined || String(value).trim() === '' || String(value).trim() === '—'
+})
 </script>
 
 <template>
@@ -22,7 +27,7 @@ const color = computed(() => statToneColor(props.item.tone))
       />
     </div>
     <div class="mh-stat__value" :style="{ color }">
-      <span class="mh-stat__num">{{ item.value }}</span>
+      <span class="mh-stat__num" :class="{ 'is-empty': isEmpty }">{{ item.value }}</span>
       <span v-if="item.unit" class="mh-stat__unit">{{ item.unit }}</span>
     </div>
     <div v-if="item.foot" class="mh-stat__foot">{{ item.foot }}</div>
@@ -42,6 +47,7 @@ const color = computed(() => statToneColor(props.item.tone))
   gap: var(--sp-1);
   font-size: var(--fs-small);
   line-height: var(--lh-small);
+  font-weight: 500;
   color: var(--fg-muted);
   min-width: 0;
 }
@@ -80,6 +86,15 @@ const color = computed(() => statToneColor(props.item.tone))
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mh-stat__num.is-empty {
+  font-size: var(--fs-h1);
+  font-weight: 500;
+  color: var(--fg-faint);
 }
 
 .mh-stat--compact .mh-stat__num {

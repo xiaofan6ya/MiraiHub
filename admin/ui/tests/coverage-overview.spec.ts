@@ -12,6 +12,7 @@ import { RouterView, createMemoryHistory, createRouter, type Router } from 'vue-
 import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import OverviewPage from '@/pages/OverviewPage.vue'
 import RouteRibbon from '@/components/charts/RouteRibbon.vue'
+import { KpiCard } from '@/components'
 import { ApiError } from '@/api/http'
 import { usePlatformStore } from '@/stores/platform'
 import * as overviewApi from '@/api/overview'
@@ -27,6 +28,7 @@ vi.mock('@/api/overview', async (importOriginal) => {
     getOverview: vi.fn(),
     getOverviewTraffic: vi.fn(),
     getSentinelStatus: vi.fn(),
+    getOverviewTrend: vi.fn(),
   }
 })
 
@@ -43,6 +45,7 @@ vi.mock('@/api/platforms', async (importOriginal) => {
 const getOverview = vi.mocked(overviewApi.getOverview)
 const getOverviewTraffic = vi.mocked(overviewApi.getOverviewTraffic)
 const getSentinelStatus = vi.mocked(overviewApi.getSentinelStatus)
+const getOverviewTrend = vi.mocked(overviewApi.getOverviewTrend)
 
 /* ------------------------------------------------------------------ *
  * 后端真实响应形状
@@ -245,6 +248,7 @@ async function mountPage(
       { path: '/credits', name: 'credits', component: PageStub },
       { path: '/sentinel', name: 'sentinel', component: PageStub },
       { path: '/platforms', name: 'platforms', component: PageStub },
+      { path: '/logs', name: 'logs', component: PageStub },
     ],
   })
   await router.push(options.path ?? '/overview')
@@ -256,6 +260,11 @@ async function mountPage(
 
   mounted = { wrapper, router, pinia }
   return mounted
+}
+
+/** v2.1：KPI 行是 KpiCard（F1 组件），按 props 断言，不依赖它的内部类名。 */
+function kpi(wrapper: VueWrapper, index: number, prop: 'label' | 'value' | 'hint' | 'tone' | 'spark'): unknown {
+  return wrapper.findAllComponents(KpiCard)[index]?.props(prop)
 }
 
 function bodyText(): string {
@@ -270,6 +279,7 @@ beforeEach(() => {
   getOverview.mockReset().mockResolvedValue(payload())
   getOverviewTraffic.mockReset().mockResolvedValue(traffic())
   getSentinelStatus.mockReset().mockResolvedValue(sentinel())
+  getOverviewTrend.mockReset().mockResolvedValue(traffic({ trend: { buckets: ['a', 'b'], total_requests: [3, 5], series: [] } }))
   vi.mocked(platformsApi.listPlatforms).mockReset().mockResolvedValue({ items: [] } as never)
   vi.mocked(platformsApi.getCurrentPlatform)
     .mockReset()
@@ -288,23 +298,28 @@ describe('OverviewPage 覆盖率补测', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.find('h1').text()).toContain('概览')
-    // 状态行：运行状态 / Base URL / 平台与模型数 / 当前平台 / 更新时间
+    // 页头 meta：运行状态 / 平台与模型数 / 更新时间；英雄卡卡脚：Base URL
     expect(wrapper.text()).toContain('服务运行中')
     expect(wrapper.find('.ov-status__url').text()).toContain('/v1')
     expect(wrapper.text()).toContain('2 个平台 · 41 个模型')
-    expect(wrapper.text()).toContain('当前：全部平台')
     expect(wrapper.text()).toContain('更新于')
+    // 口径：KPI 行写明「全网关 · 今日（北京时间自然日）」，英雄卡徽章「全网关」
+    expect(wrapper.text()).toContain('全网关 · 今日（北京时间自然日）')
 
-    // 英雄卡：剩余额度 + 总额度说明 + 今日 / N 天 / 户均
-    expect(wrapper.find('.ov-balance__value').text()).toBe('12,954')
-    expect(wrapper.text()).toContain('总额度 17,583 · 3 个账号')
+    // KPI 1：剩余额度 + 总额度说明 + 今日 / N 天 / 户均（extra 插槽）
+    expect(kpi(wrapper, 0, 'value')).toBe('12,954')
+    expect(kpi(wrapper, 0, 'hint')).toBe('总额度 17,583 · 3 个账号')
     expect(wrapper.text()).toContain('今日 9.55')
     expect(wrapper.text()).toContain('户均 66.3')
 
-    // 用量条五格（请求 / 成功率 / 输入 / 输出 / 合计）
-    expect(wrapper.text()).toContain('成功 1,200 · 失败 50')
-    expect(wrapper.text()).toContain('96.0%')
-    expect(wrapper.text()).toContain('缓存命中 5,000')
+    // KPI 2–4：请求（带迷你折线）/ 成功率 / Token 合计
+    expect(wrapper.findAllComponents(KpiCard)).toHaveLength(4)
+    expect(kpi(wrapper, 1, 'hint')).toBe('成功 1,200 · 失败 50')
+    // 全网关口径：折线复用流量带那份序列（这里为空 → 不画）
+    expect(kpi(wrapper, 1, 'spark')).toBeUndefined()
+    expect(getOverviewTrend).not.toHaveBeenCalled()
+    expect(kpi(wrapper, 2, 'value')).toBe('96.0%')
+    expect(String(kpi(wrapper, 3, 'hint'))).toContain('缓存命中 5,000')
 
     // 流量带：线路名 + 副标题
     expect(wrapper.findComponent(RouteRibbon).exists()).toBe(true)
@@ -385,7 +400,7 @@ describe('OverviewPage 覆盖率补测', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.findAll('.ov-alert')).toHaveLength(0)
-    expect(wrapper.find('.ov-balance__value').text()).toBe('12,954')
+    expect(kpi(wrapper, 0, 'value')).toBe('12,954')
   })
 
   it('缓存命中：有样本给百分比，无样本显示 — 并沿用后端说明', async () => {
@@ -457,13 +472,73 @@ describe('OverviewPage 覆盖率补测', () => {
     expect(conclusion.find('a').attributes('href')).toBe('/accounts?status=cooldown')
   })
 
-  it('流量带没有数据时显示空提示，不发线路', async () => {
+  it('流量带没有数据时：已启用平台仍画灰线（不再只剩居中文字），并提示暂无流量', async () => {
     getOverviewTraffic.mockResolvedValue(traffic({ platforms: [] }))
     const { wrapper } = await mountPage()
 
-    expect(wrapper.text()).toContain('当前窗口没有平台流量。发起一次调用后这里会出现分流线路。')
     expect(wrapper.text()).toContain('暂无流量')
+    expect(wrapper.findAll('.mh-ribbon__lane-name').map((item) => item.text())).toEqual(['Trae', 'WorkBuddy'])
+  })
+
+  it('平台和窗口都为空时才出空提示', async () => {
+    getOverviewTraffic.mockResolvedValue(traffic({ platforms: [] }))
+    const { wrapper } = await mountPage({ platforms: [] })
+
+    expect(wrapper.text()).toContain('当前窗口没有平台流量。发起一次调用后这里会出现分流线路。')
     expect(wrapper.findAll('.mh-ribbon__lane')).toHaveLength(0)
+  })
+
+  it('只有一个平台有流量：主线 + 其余平台细灰线（idle），不是一根粗条', async () => {
+    getOverviewTraffic.mockResolvedValue(
+      traffic({
+        platforms: [
+          { value: 'workbuddy', label: 'WorkBuddy', requests: 500, success_rate: 1, tokens: 1, credits: 1 },
+        ],
+      }),
+    )
+    const { wrapper } = await mountPage({
+      platforms: [spec('workbuddy', 'WorkBuddy'), spec('trae', 'Trae'), spec('loomy', 'Loomy')],
+    })
+
+    const lanes = wrapper.findAll('.mh-ribbon__lane')
+    expect(lanes).toHaveLength(3)
+    expect(lanes[0].classes()).not.toContain('is-idle')
+    expect(lanes[1].classes()).toContain('is-idle')
+    expect(lanes[2].classes()).toContain('is-idle')
+  })
+
+  it('当前平台口径：KPI 折线单独按该平台取（window=day），标签写平台名', async () => {
+    getOverview.mockResolvedValue(payload({ platform: 'workbuddy', platform_label: 'WorkBuddy' }))
+    const { wrapper } = await mountPage()
+
+    expect(getOverviewTrend).toHaveBeenCalledWith(1, 'workbuddy', expect.anything())
+    expect(kpi(wrapper, 1, 'spark')).toEqual([3, 5])
+    expect(wrapper.text()).toContain('WorkBuddy · 今日（北京时间自然日）')
+  })
+
+  it('平台健康列出有流量 / 有账号的平台，0 账号的折叠成一行；最近请求取哨兵合并下发的明细', async () => {
+    getSentinelStatus.mockResolvedValue(
+      sentinel({
+        traffic: {
+          platforms: [{ platform: 'workbuddy', label: 'WorkBuddy', requests: 1, ok: 1, error: 0, timeout: 0, interrupted: 0, last_at: 0, last_status: 200 }],
+          totals: { requests: 1, ok: 1, error: 0, timeout: 0, interrupted: 0 },
+          recent: [{ rid: 'r1', ts: 1_800_000_000, model: 'gpt-4o', platform: 'workbuddy', status: 200 }],
+        },
+      }),
+    )
+    const { wrapper } = await mountPage({
+      platforms: [
+        spec('workbuddy', 'WorkBuddy', { account_count: 3 }),
+        spec('trae', 'Trae', { account_count: 0 }),
+        spec('loomy', 'Loomy', { account_count: 0 }),
+      ],
+    })
+
+    const names = wrapper.findAll('.ov-health__name b').map((item) => item.text())
+    expect(names).toEqual(['WorkBuddy', 'Trae'])
+    expect(wrapper.text()).toContain('另有 1 个平台还没有接入账号')
+    expect(wrapper.findAll('.ov-recent__row')).toHaveLength(1)
+    expect(wrapper.find('.ov-recent__model').text()).toBe('gpt-4o')
   })
 
   it('点击流量带线路切平台并跳到平台管理', async () => {
@@ -515,7 +590,7 @@ describe('OverviewPage 覆盖率补测', () => {
     await flush()
     await flush()
 
-    expect(wrapper.find('.ov-balance__value').text()).toBe('12,954')
+    expect(kpi(wrapper, 0, 'value')).toBe('12,954')
     expect(wrapper.findAll('.mh-error')).toHaveLength(0)
     expect(bodyText()).toContain('刷新概览失败：refresh boom')
   })
@@ -541,7 +616,7 @@ describe('OverviewPage 覆盖率补测', () => {
     await flush()
 
     expect(wrapper.findAll('.mh-error')).toHaveLength(0)
-    expect(wrapper.find('.ov-balance__value').text()).toBe('12,954')
+    expect(kpi(wrapper, 0, 'value')).toBe('12,954')
   })
 
   it('复制 Base URL 写入剪贴板并提示', async () => {

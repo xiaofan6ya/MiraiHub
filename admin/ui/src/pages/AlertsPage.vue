@@ -36,7 +36,7 @@ import HelpTip from '@/components/base/HelpTip.vue'
 import IconBtn from '@/components/base/IconBtn.vue'
 import Section from '@/components/base/Section.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
-import { useConfirm, useToast } from '@/composables'
+import { useConfirm, useRevisit, useToast } from '@/composables'
 import { failureText } from '@/utils/error'
 import { useI18n } from '@/i18n'
 import { fmtTime } from '@/utils/format'
@@ -148,7 +148,10 @@ const testRows = computed(() =>
     key: item.type + '::' + item.target + '::' + index,
     ok: item.ok,
     label: channelLabelMap.value[item.type] || item.type,
-    target: item.target,
+    // 测试结果里的 target 是原值：能对上渠道就展示它的打码串
+    target:
+      form.channels.find((channel) => channel.type === item.type && channel.target === item.target)?.targetMasked ||
+      item.target,
     error: item.error,
   })),
 )
@@ -173,8 +176,17 @@ function errorDetail(error: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * 第 5 轮（r4 3.11）：读取进行中再次调用（例如回访刷新还在路上时点了保存）不再直接丢弃，
+ * 而是排队，等这次结束后再读一次——保证保存后看到的是保存之后的快照，保存条不会残留。
+ */
+let reloadQueued: { silent?: boolean } | null = null
+
 async function load(options: { silent?: boolean } = {}): Promise<void> {
-  if (loading.value) return
+  if (loading.value) {
+    reloadQueued = { silent: Boolean(options.silent) || Boolean(reloadQueued?.silent) }
+    return
+  }
   loading.value = true
   try {
     const payload = await getAlertConfig()
@@ -193,6 +205,11 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
     if (options.silent) toast.error(message)
   } finally {
     loading.value = false
+    if (reloadQueued) {
+      const next = reloadQueued
+      reloadQueued = null
+      void load(next)
+    }
   }
 }
 
@@ -200,15 +217,10 @@ function reload(): void {
   void load({ silent: true })
 }
 
-async function discard(): Promise<void> {
+/** 保存条「放弃」：表单回到上次读到的配置（不发请求；保存条本身就是明确的放弃动作，不再二次确认）。 */
+function discard(): void {
   if (!dirty.value) return
-  const ok = await confirm({
-    title: t('page.alerts.confirmDiscard.title'),
-    message: t('page.alerts.confirmDiscard.body'),
-    okText: t('page.alerts.confirmDiscard.ok'),
-  })
-  if (!ok) return
-  await load({ silent: true })
+  Object.assign(form, cloneAlertForm(saved.value))
 }
 
 async function save(): Promise<void> {
@@ -291,6 +303,7 @@ function submitAdd(): void {
       type: draft.type,
       label: draftMeta.value.label,
       target,
+      targetMasked: target,
       enabled: true,
       auto: false,
     },
@@ -331,6 +344,15 @@ function undoClear(): void {
   form.clearCompact = false
 }
 
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (!dirty.value && !saving.value) void load({ silent: true })
+  },
+  { minIntervalMs: 10_000 },
+)
+
 onMounted(() => {
   void load()
 })
@@ -342,17 +364,12 @@ onMounted(() => {
     :help="pageHelp"
     :sections="sections"
     :dirty="dirty"
+    :saving="saving"
+    :save-disabled="loading"
+    @save="save"
+    @discard="discard"
   >
     <template #actions>
-      <Btn
-        variant="default"
-        :icon="Send"
-        :loading="testing"
-        :disabled="saving || loading"
-        @click="testSend"
-      >
-        {{ t('page.alerts.action.test') }}
-      </Btn>
       <IconBtn
         :label="t('page.alerts.action.reload')"
         :icon="RefreshCw"
@@ -360,11 +377,15 @@ onMounted(() => {
         :disabled="saving"
         @click="reload"
       />
-      <Btn variant="quiet" :disabled="!dirty || saving || loading" @click="discard">
-        {{ t('page.alerts.action.discard') }}
-      </Btn>
-      <Btn variant="primary" :loading="saving" :disabled="loading" @click="save">
-        {{ t('page.alerts.action.saveConfig') }}
+      <Btn
+        variant="default"
+        :icon="Send"
+        :loading="testing"
+        :disabled="saving || loading"
+        :title="dirty ? t('page.alerts.test.savedOnly') : undefined"
+        @click="testSend"
+      >
+        {{ t('page.alerts.action.test') }}
       </Btn>
     </template>
 
@@ -379,52 +400,41 @@ onMounted(() => {
     <SettingsCard
       id="alerts-rules"
       :title="t('page.alerts.section.rules')"
-      :description="t('page.alerts.rules.description')"
-      hide-save
-      hide-reset
+      :dirty="dirty"
     >
       <div v-if="!loaded && !loadError" class="skel" aria-hidden="true">
         <div class="skel-row" />
         <div class="skel-row skel-row--short" />
       </div>
       <template v-else-if="loaded">
-        <Section first>
-          <div class="switch-row">
-            <div class="switch-text">
-              <span class="row-label">{{ t('page.alerts.rules.enabled') }}</span>
-              <p class="row-hint">{{ t('page.alerts.rules.enabledHint') }}</p>
-            </div>
-            <n-switch
-              v-model:value="form.enabled"
-              :disabled="saving"
-              :aria-label="t('page.alerts.rules.enabled')"
-            />
-          </div>
-        </Section>
+        <!-- 卡头不再重复「关闭后不再发送」：说明只在开关这一行写一次（第 2 轮审查 P1-6）。 -->
+        <FormField :label="t('page.alerts.rules.enabled')" :hint="t('page.alerts.rules.enabledHint')">
+          <n-switch
+            v-model:value="form.enabled"
+            :disabled="saving"
+            :aria-label="t('page.alerts.rules.enabled')"
+          />
+        </FormField>
 
-        <Section :title="t('page.alerts.cooldown.title')">
-          <FormField
-            :label="t('page.alerts.cooldown.label')"
-            :hint="
-              t('page.alerts.cooldown.hint', {
-                value: describeCooldown(form.cooldown),
-                min: ALERT_COOLDOWN_MIN,
-                max: ALERT_COOLDOWN_MAX,
-              })
-            "
-          >
+        <FormField
+          :label="t('page.alerts.cooldown.label')"
+          :hint="t('page.alerts.cooldown.hint', { value: describeCooldown(form.cooldown), min: ALERT_COOLDOWN_MIN, max: ALERT_COOLDOWN_MAX })"
+        >
+          <!-- 单位放到输入框外侧、去掉步进按钮（第 2 轮审查 P2：「600 秒 −＋」挤在一起）。 -->
+          <div class="num-unit">
             <n-input-number
               v-model:value="cooldownValue"
               :min="ALERT_COOLDOWN_MIN"
               :max="ALERT_COOLDOWN_MAX"
               :step="30"
+              :show-button="false"
               :disabled="saving"
-              style="width: 180px"
-            >
-              <template #suffix>{{ t('page.alerts.unit.second') }}</template>
-            </n-input-number>
-          </FormField>
-        </Section>
+              :aria-label="t('page.alerts.cooldown.label')"
+              class="num-unit__input"
+            />
+            <span class="num-unit__unit">{{ t('page.alerts.unit.second') }}</span>
+          </div>
+        </FormField>
       </template>
     </SettingsCard>
 
@@ -433,8 +443,7 @@ onMounted(() => {
       id="alerts-channels"
       :title="t('page.alerts.section.channels')"
       :description="t('page.alerts.channels.description')"
-      hide-save
-      hide-reset
+      plain
     >
       <template #actions>
         <Btn
@@ -454,11 +463,8 @@ onMounted(() => {
         <div class="skel-row skel-row--short" />
       </div>
       <template v-else-if="loaded">
-        <Empty v-if="!form.channels.length" :description="t('page.alerts.channels.empty')">
-          <Btn variant="default" :icon="Plus" :disabled="saving" @click="openAddDrawer">
-            {{ t('page.alerts.channels.add') }}
-          </Btn>
-        </Empty>
+        <!-- 「添加渠道」只在卡头放一个（第 2 轮审查 P1-6）。 -->
+        <Empty v-if="!form.channels.length" :description="t('page.alerts.channels.empty')" />
 
         <ul v-else class="channel-list">
           <li v-for="channel in form.channels" :key="channel.key" class="channel-row">
@@ -469,11 +475,12 @@ onMounted(() => {
               <div class="channel-head">
                 <span class="channel-label">{{ channel.label }}</span>
                 <Badge v-if="channel.auto" tone="neutral">{{ t('page.alerts.channels.auto') }}</Badge>
-                <Badge v-else-if="!channel.enabled" tone="warn">
+                <Badge v-else-if="!channel.enabled" tone="neutral">
                   {{ t('page.alerts.channels.disabled') }}
                 </Badge>
               </div>
-              <span class="channel-target mono" :title="channel.target">{{ channel.target }}</span>
+              <!-- r3：列表只展示打码串（target_masked），完整地址不进 DOM title；编辑仍用 target。 -->
+              <span class="channel-target mono">{{ channel.targetMasked || channel.target }}</span>
               <p v-if="channel.auto" class="channel-hint">
                 {{ t('page.alerts.channels.autoHint') }}
               </p>
@@ -488,26 +495,15 @@ onMounted(() => {
                 :disabled="saving || channel.auto"
                 :aria-label="t('page.alerts.channels.switchAria')"
               />
-              <Btn
-                size="sm"
-                variant="quiet"
-                :icon="Send"
-                :disabled="testing || saving || loading"
-                :title="t('page.alerts.channels.testTitle')"
-                @click="testSend"
-              >
-                {{ t('page.alerts.action.test') }}
-              </Btn>
-              <Btn
+              <!-- 「发送测试」会发给全部渠道，只在页头放一个；删除收成 quiet 图标按钮，不常驻红色（第 2 轮审查 P1-9）。 -->
+              <IconBtn
                 v-if="!channel.auto"
-                size="sm"
-                variant="danger"
+                tone="danger"
                 :icon="Trash2"
+                :label="t('common.delete') + ' · ' + channel.label"
                 :disabled="saving"
                 @click="removeChannel(channel)"
-              >
-                {{ t('common.delete') }}
-              </Btn>
+              />
             </div>
           </li>
         </ul>
@@ -535,16 +531,9 @@ onMounted(() => {
       id="alerts-smtp"
       :title="t('page.alerts.section.smtp')"
       :description="t('page.alerts.smtp.description')"
-      hide-save
-      hide-reset
     >
-      <template #actions>
-        <Btn
-          size="sm"
-          variant="danger"
-          :disabled="!canClearCompact || saving"
-          @click="clearCompactCode"
-        >
+      <template v-if="canClearCompact" #actions>
+        <Btn size="sm" variant="quiet" :disabled="saving" @click="clearCompactCode">
           {{ t('page.alerts.smtp.clear') }}
         </Btn>
       </template>
@@ -560,8 +549,8 @@ onMounted(() => {
           <span>{{ healthView.text }}</span>
         </div>
 
-        <Section :title="t('page.alerts.smtp.qqTitle')">
-          <FormField
+        <h3 class="group-title">{{ t('page.alerts.smtp.qqTitle') }}</h3>
+        <FormField
             :label="t('page.alerts.smtp.qqLabel')"
             :hint="t('page.alerts.smtp.qqHint')"
           >
@@ -595,10 +584,8 @@ onMounted(() => {
           >
             <n-input v-model:value="form.mailTo" placeholder="me@qq.com" :disabled="saving" />
           </FormField>
-        </Section>
 
-        <Section :title="t('page.alerts.smtp.otherTitle')">
-          <div class="smtp-grid">
+        <h3 class="group-title">{{ t('page.alerts.smtp.otherTitle') }}</h3>
             <FormField :label="t('page.alerts.smtp.host')">
               <n-input v-model:value="form.smtpHost" placeholder="smtp.example.com" :disabled="saving" />
             </FormField>
@@ -636,9 +623,7 @@ onMounted(() => {
                 <span class="switch-inline__text">{{ t('page.alerts.smtp.starttls') }}</span>
               </div>
             </FormField>
-          </div>
-          <p class="card-note">{{ t('page.alerts.smtp.priorityNote') }}</p>
-        </Section>
+        <p class="card-note">{{ t('page.alerts.smtp.priorityNote') }}</p>
       </template>
     </SettingsCard>
 
@@ -687,36 +672,37 @@ onMounted(() => {
   width: 55%;
 }
 
-.switch-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
+.num-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
 }
 
-.switch-text {
-  min-width: 0;
+.num-unit__input {
+  width: 140px;
 }
 
-.row-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--fg);
+.num-unit__unit {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--fg-2);
 }
 
-.row-hint {
-  margin-top: var(--sp-1);
-  max-width: 56ch;
+.group-title {
+  margin: var(--sp-2) 0 0;
   font-size: var(--fs-small);
   line-height: var(--lh-small);
-  color: var(--fg-muted);
+  font-weight: 600;
+  color: var(--fg-2);
 }
 
 .card-note {
+  margin: 0;
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
-  max-width: 68ch;
+  max-width: 80ch;
+  text-wrap: pretty;
 }
 
 /* 渠道列表：卡片内一行一条，用 1px --border-soft 分隔，不嵌套卡片。 */
@@ -778,9 +764,10 @@ onMounted(() => {
 }
 
 .channel-hint {
+  margin: 0;
   font-size: var(--fs-small);
   line-height: var(--lh-small);
-  color: var(--warn);
+  color: var(--fg-muted);
 }
 
 .channel-actions {
@@ -869,12 +856,6 @@ onMounted(() => {
   color: var(--fg-2);
 }
 
-.smtp-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-4);
-}
-
 .switch-inline {
   display: flex;
   align-items: center;
@@ -888,9 +869,6 @@ onMounted(() => {
 }
 
 @media (max-width: 720px) {
-  .smtp-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .channel-row {
     flex-wrap: wrap;
   }

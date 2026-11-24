@@ -10,6 +10,11 @@
  */
 import { http } from './http'
 import { FMT_EMPTY, fmtCredit, fmtTime, maskSecret } from '@/utils/format'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* ------------------------------------------------------------------ *
  * 类型
@@ -374,30 +379,44 @@ export function toKeyRow(item: ApiKeyItem): KeyRow {
   const masked = item.masked || (item.key_prefix ? maskSecret(item.key_prefix) : FMT_EMPTY)
   return {
     id: item.id,
-    name: item.name || '未命名',
+    name: item.name || tx('page.keys.row.unnamed'),
     masked,
     keyPrefix: item.key_prefix || '',
     limitText: unlimited ? '∞' : fmtCredit(limit),
     usedText: fmtCredit(used),
     usageRatio: ratio,
     usageTone,
-    usageText: unlimited ? '不限额度' : pctText(ratio),
+    usageText: unlimited ? tx('page.keys.row.unlimitedCredit') : pctText(ratio),
     unlimited,
-    concurrencyText: maxConcurrent === 0 ? '不限' : maxConcurrent == null ? '全局' : String(maxConcurrent),
-    rateText: ratePerMinute === 0 ? '不限频率' : ratePerMinute == null ? '频率随全局' : ratePerMinute + ' 次/分',
-    ipText: (Number(summary.unique_ips) || 0) + ' 个 / 24h',
+    concurrencyText:
+      maxConcurrent === 0
+        ? tx('page.keys.row.noLimit')
+        : maxConcurrent == null
+          ? tx('page.keys.row.global')
+          : String(maxConcurrent),
+    rateText:
+      ratePerMinute === 0
+        ? tx('page.keys.row.noRateLimit')
+        : ratePerMinute == null
+          ? tx('page.keys.row.rateGlobal')
+          : tx('page.keys.row.ratePerMin', { n: ratePerMinute }),
+    ipText: tx('page.keys.row.ipCount', { n: Number(summary.unique_ips) || 0 }),
     ipBadges: (summary.top_ips || []).slice(0, 3).map((entry) => ({
       ip: entry.ip,
-      text: entry.ip + ' · ' + (Number(entry.active_requests) || 0) + ' 并发 · ' + (Number(entry.requests) || 0) + ' 次',
+      text: tx('page.keys.row.ipBadge', {
+        ip: entry.ip,
+        active: Number(entry.active_requests) || 0,
+        requests: Number(entry.requests) || 0,
+      }),
     })),
-    groupLabel: item.group_name || '全部模型',
-    statusLabel: item.status === 'active' ? '正常' : '已停用',
+    groupLabel: item.group_name || tx('page.keys.row.allModels'),
+    statusLabel: item.status === 'active' ? tx('page.keys.row.statusActive') : tx('page.keys.row.statusDisabled'),
     statusTone: item.status === 'active' ? 'ok' : 'neutral',
     accountLabel: accountIds.length
-      ? '独占 ' + accountIds.length + ' 个账号'
+      ? tx('page.keys.row.exclusiveN', { n: accountIds.length })
       : item.account_id
-        ? '独占账号：' + (item.account_name || '#' + item.account_id)
-        : '公共账号池',
+        ? tx('page.keys.row.exclusiveOne', { name: item.account_name || '#' + item.account_id })
+        : tx('page.keys.row.sharedPool'),
     expireText: FMT_EMPTY,
     note: item.note || '',
     platform: item.platform || '',
@@ -531,7 +550,7 @@ export function modelChips(payload: AggregateModelsPayload | null, limit = 12): 
             return (p.platform_label || p.platform) + ' · ' + id + ' · ' + mult
           })
           .join('\n')
-      : '暂无平台明细') + '\n点击复制调用名（带平台后缀）'
+      : tx('page.keys.chip.noPlatforms')) + '\n' + tx('page.keys.chip.copyHint')
     return {
       key: item.key || String(item.name),
       name: item.name,
@@ -581,12 +600,17 @@ export function searchModelChips(payload: AggregateModelsPayload | null, term: s
 /** 连接地址候选：当前访问 + 本机 + 内网 IPv4（旧版 loadShareInfo 的 choices）。 */
 export function originOptions(network: NetworkPayload | null, current: { origin: string; hostname: string; port: string }): Array<{ value: string; label: string }> {
   const choices = new Map<string, string>()
-  if (current.origin) choices.set(current.origin, '当前访问 · ' + (current.origin.replace(/^https?:\/\//, '') || '当前域名'))
+  if (current.origin) choices.set(
+      current.origin,
+      tx('page.keys.origin.current', {
+        host: current.origin.replace(/^https?:\/\//, '') || tx('page.keys.origin.currentDomain'),
+      }),
+    )
   const local = ['localhost', '127.0.0.1'].includes(current.hostname)
   const port = current.port || (local && network?.port ? String(network.port) : '')
   const suffix = port ? ':' + port : ''
-  choices.set('http://127.0.0.1' + suffix, '本机 · 127.0.0.1' + suffix)
-  for (const ip of network?.lan_ips || []) choices.set('http://' + ip + suffix, '局域网 · ' + ip + suffix)
+  choices.set('http://127.0.0.1' + suffix, tx('page.keys.origin.local', { host: '127.0.0.1' + suffix }))
+  for (const ip of network?.lan_ips || []) choices.set('http://' + ip + suffix, tx('page.keys.origin.lan', { host: ip + suffix }))
   return [...choices].map(([value, label]) => ({ value, label }))
 }
 
@@ -610,62 +634,67 @@ export function buildCurlExamples(origin: string, firstModel?: string): CurlExam
   const base = (origin || '').replace(/\/+$/, '') + '/v1'
   const root = (origin || '').replace(/\/+$/, '')
   const textModel = firstModel || 'auto'
+  // 示例里的占位符 / 提示词跟随界面语言（代码本身不翻译）
+  const KEY = tx('page.keys.curl.keyPh')
+  const HELLO = tx('page.keys.curl.hello')
+  const VIDEO_ID = tx('page.keys.curl.videoIdPh')
+  const CAT_PROMPT = tx('page.keys.curl.videoPrompt')
   return {
     openai: [
       'curl ' + base + '/chat/completions \\',
-      '  -H "Authorization: Bearer <你的 Key>" \\',
+      '  -H "Authorization: Bearer ' + KEY + '" \\',
       '  -H "Content-Type: application/json" \\',
-      '  -d \'{"model":"' + textModel + '","messages":[{"role":"user","content":"你好"}]}\'',
+      '  -d \'{"model":"' + textModel + '","messages":[{"role":"user","content":"' + HELLO + '"}]}\'',
     ].join('\n'),
     claude: [
       'curl ' + root + '/v1/messages \\',
-      '  -H "x-api-key: <你的 Key>" \\',
+      '  -H "x-api-key: ' + KEY + '" \\',
       '  -H "anthropic-version: 2023-06-01" \\',
       '  -H "Content-Type: application/json" \\',
-      '  -d \'{"model":"claude-sonnet-4-5-20250929","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}\'',
+      '  -d \'{"model":"claude-sonnet-4-5-20250929","max_tokens":1024,"messages":[{"role":"user","content":"' + HELLO + '"}]}\'',
     ].join('\n'),
     audioCurl: [
       'curl "' + base + '/audio/transcriptions" \\',
-      '  -H "Authorization: Bearer <你的 Key>" \\',
+      '  -H "Authorization: Bearer ' + KEY + '" \\',
       '  -F "file=@recording.webm" \\',
       '  -F "model=workbuddy-asr" \\',
       '  -F "response_format=json"',
     ].join('\n'),
     audioPython: [
       'from openai import OpenAI',
-      'client = OpenAI(api_key="<你的 Key>", base_url="' + base + '")',
+      'client = OpenAI(api_key="' + KEY + '", base_url="' + base + '")',
       'with open("recording.webm", "rb") as audio:',
       '    result = client.audio.transcriptions.create(model="workbuddy-asr", file=audio)',
       'print(result.text)',
     ].join('\n'),
     imagesPython: [
       'from openai import OpenAI',
-      'client = OpenAI(api_key="<你的 Key>", base_url="' + base + '")',
-      'result = client.images.generate(model="hunyuan-image-alpha", prompt="白色背景上的蓝色圆形", n=1)',
+      'client = OpenAI(api_key="' + KEY + '", base_url="' + base + '")',
+      'result = client.images.generate(model="hunyuan-image-alpha", prompt="' + tx('page.keys.curl.imagePrompt') + '", n=1)',
       'print(result.data[0].url)',
       'with open("input.png", "rb") as image:',
-      '    edited = client.images.edit(model="hunyuan-image-alpha", image=image, prompt="把圆形改成绿色")',
+      '    edited = client.images.edit(model="hunyuan-image-alpha", image=image, prompt="' + tx('page.keys.curl.imageEditPrompt') + '")',
       'print(edited.data[0].url)',
     ].join('\n'),
     videoCurl: [
-      '# 1) 创建任务：立即返回 queued，不阻塞等待生成',
+      '# ' + tx('page.keys.curl.videoStep1'),
       'curl "' + base + '/videos" \\',
-      '  -H "Authorization: Bearer <你的 Key>" \\',
+      '  -H "Authorization: Bearer ' + KEY + '" \\',
       '  -H "Content-Type: application/json" \\',
-      '  -d \'{"model":"kling-video-v3","prompt":"一只猫在弹钢琴","seconds":"4","size":"1280x720"}\'',
+      '  -d \'{"model":"kling-video-v3","prompt":"' + CAT_PROMPT + '","seconds":"4","size":"1280x720"}\'',
       '',
-      '# 2) 轮询（用上一步返回的 id），直到 status=completed',
-      'curl "' + base + '/videos/<视频 ID>" -H "Authorization: Bearer <你的 Key>"',
+      '# ' + tx('page.keys.curl.videoStep2'),
+      'curl "' + base + '/videos/' + VIDEO_ID + '" -H "Authorization: Bearer ' + KEY + '"',
       '',
-      '# 3) 下载 MP4',
-      'curl "' + base + '/videos/<视频 ID>/content" -H "Authorization: Bearer <你的 Key>" -o output.mp4',
+      '# ' + tx('page.keys.curl.videoStep3'),
+      'curl "' + base + '/videos/' + VIDEO_ID + '/content" -H "Authorization: Bearer ' + KEY + '" -o output.mp4',
     ].join('\n'),
     videoPython: [
       'import time',
       'from openai import OpenAI',
-      'client = OpenAI(api_key="<你的 Key>", base_url="' + base + '")',
+      'client = OpenAI(api_key="' + KEY + '", base_url="' + base + '")',
       '',
-      'video = client.videos.create(model="kling-video-v3", prompt="一只猫在弹钢琴", seconds="4", size="1280x720")',
+      'video = client.videos.create(model="kling-video-v3", prompt="' + CAT_PROMPT + '", seconds="4", size="1280x720")',
       'print(video.id, video.status)          # queued',
       '',
       'while video.status not in ("completed", "failed"):',
@@ -704,26 +733,26 @@ function numberError(raw: string, label: string): string | undefined {
   const text = String(raw || '').trim()
   if (!text) return undefined
   const value = Number(text)
-  if (!Number.isFinite(value)) return label + '必须是数字'
-  if (value < 0) return label + '不能小于 0'
-  if (!Number.isInteger(value)) return label + '必须是整数'
+  if (!Number.isFinite(value)) return tx('page.keys.form.mustNumber', { label })
+  if (value < 0) return tx('page.keys.form.nonNegative', { label })
+  if (!Number.isInteger(value)) return tx('page.keys.form.mustInteger', { label })
   return undefined
 }
 
 /** 表单校验：编辑时名称必填（旧版 submitEditKey 的行为）；数字项非负整数；额度非负数。 */
 export function validateKeyForm(draft: KeyFormDraft, editing: boolean): KeyFormErrors {
   const errors: KeyFormErrors = {}
-  if (editing && !String(draft.name || '').trim()) errors.name = '名称不能为空'
+  if (editing && !String(draft.name || '').trim()) errors.name = tx('page.keys.form.nameRequired')
   if (!draft.unlimited) {
     const text = String(draft.creditLimit || '').trim()
     if (text) {
       const value = Number(text)
-      if (!Number.isFinite(value)) errors.creditLimit = '额度必须是数字'
-      else if (value < 0) errors.creditLimit = '额度不能小于 0'
+      if (!Number.isFinite(value)) errors.creditLimit = tx('page.keys.form.creditNumber')
+      else if (value < 0) errors.creditLimit = tx('page.keys.form.creditNonNegative')
     }
   }
-  errors.maxConcurrent = numberError(draft.maxConcurrent, '并发上限')
-  errors.ratePerMinute = numberError(draft.ratePerMinute, '每分钟请求数')
+  errors.maxConcurrent = numberError(draft.maxConcurrent, tx('page.keys.form.concurrencyLabel'))
+  errors.ratePerMinute = numberError(draft.ratePerMinute, tx('page.keys.form.rateLabel'))
   return errors
 }
 
@@ -769,7 +798,7 @@ export function toUsageView(payload: KeyUsagePayload): UsageView {
   const percent = payload.usage_percent
   const ratio = unlimited || percent == null ? 0 : Math.min(1, Math.max(0, percent / 100))
   return {
-    limitText: unlimited ? '∞（无限制）' : fmtCredit(payload.credit_limit),
+    limitText: unlimited ? tx('page.keys.usage.unlimited') : fmtCredit(payload.credit_limit),
     usedText: fmtCredit(payload.credit_used),
     remainingText: unlimited || payload.credit_remaining == null ? '∞' : fmtCredit(payload.credit_remaining),
     percentText: percent == null ? 'N/A' : percent.toFixed(1) + '%',
@@ -842,4 +871,33 @@ export function emptyIpOverview(): IpOverviewView {
     active: [],
     items: [],
   })
+}
+
+
+/* ------------------------------------------------------------------ *
+ * v2.1 视觉精修
+ * ------------------------------------------------------------------ */
+
+/**
+ * 额度进度条语气（10-visual-refresh：额度条用中性色）。
+ *
+ * 平常一律 neutral（额度是数量，不是状态）；只有接近或已经用完时才用状态色：
+ * ≥90% warn，≥100% danger。不限额没有进度条，返回 neutral。
+ * 注意：KeyRow.usageTone 是旧口径（≥60% 就 warn），保留给单测与旧调用方，页面不再用它着色。
+ */
+export function quotaMeterTone(row: Pick<KeyRow, 'unlimited' | 'usageRatio'>): 'neutral' | 'warn' | 'danger' {
+  if (row.unlimited) return 'neutral'
+  const ratio = Number(row.usageRatio) || 0
+  if (ratio >= 1) return 'danger'
+  if (ratio >= 0.9) return 'warn'
+  return 'neutral'
+}
+
+/** 并发 / 频率两个限制的分类（页面按语言拼成「并发不限 · 频率随全局」，第 1 轮审查 P0-7）。 */
+export type LimitKind = 'unlimited' | 'global' | 'value'
+
+export function limitKind(value: number | null | undefined): LimitKind {
+  if (value === 0) return 'unlimited'
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'global'
+  return 'value'
 }

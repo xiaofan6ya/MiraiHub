@@ -15,12 +15,17 @@
  *   · 展示名是 `note`（PATCH 的 note 就是它），不是 `name`；
  *   · 可读调用名 `model_id`、完整调用名 `client_id`（总带平台后缀）、
  *     上游原始 id `upstream_id` 三者含义不同，别混用；
- *   · 倍率 `credit_multiplier` 原样输出：>0 收费 / =0 免费 / <0 无量纲 / null 未同步；
+ *   · 倍率 `credit_multiplier` 原样输出：>0 收费 / =0 免费 / <0 按量 / null 未同步；
  *   · 能力在 `caps`（context_window / max_output_tokens / supports_* / reasoning_efforts）。
  *
  * 页面只消费这里导出的行数据与筛选/排序/分页纯函数，单测直接覆盖它们。
  */
 import { http } from './http'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* ------------------------------------------------------------------ *
  * 接口类型
@@ -284,11 +289,11 @@ export function listModelHealth(hours = 24, signal?: AbortSignal): Promise<Model
 export type CapabilityKey = 'image' | 'tools' | 'reasoning' | 'video' | 'image-out'
 
 export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
-  image: '图片输入',
-  tools: '工具调用',
-  reasoning: '推理',
-  video: '视频',
-  'image-out': '生图',
+  get image() { return tx('page.models.cap.image') },
+  get tools() { return tx('page.models.cap.tools') },
+  get reasoning() { return tx('page.models.cap.reasoning') },
+  get video() { return tx('page.models.cap.video') },
+  get 'image-out'() { return tx('page.models.cap.imageOut') },
 }
 
 export type CapabilityTone = 'neutral' | 'brand' | 'warn'
@@ -298,17 +303,17 @@ export const VENDOR_LABELS: Record<string, string> = {
   openai: 'OpenAI',
   claude: 'Anthropic',
   gemini: 'Google',
-  deepseek: '深度求索',
-  qwen: '通义千问',
-  glm: '智谱',
-  kimi: '月之暗面',
-  doubao: '豆包',
-  hunyuan: '混元',
+  get deepseek() { return tx('page.models.vendor.deepseek') },
+  get qwen() { return tx('page.models.vendor.qwen') },
+  get glm() { return tx('page.models.vendor.glm') },
+  get kimi() { return tx('page.models.vendor.kimi') },
+  get doubao() { return tx('page.models.vendor.doubao') },
+  get hunyuan() { return tx('page.models.vendor.hunyuan') },
   minimax: 'MiniMax',
-  kling: '可灵',
-  stepfun: '阶跃',
+  get kling() { return tx('page.models.vendor.kling') },
+  get stepfun() { return tx('page.models.vendor.stepfun') },
   grok: 'xAI',
-  default: '其他',
+  get default() { return tx('page.models.vendor.other') },
 }
 
 /**
@@ -347,13 +352,16 @@ export function vendorOf(...texts: Array<string | null | undefined>): VendorInfo
   return { key: 'default', label: VENDOR_LABELS.default }
 }
 
-/** 倍率文本：1.50x / 0.80x / 免费 / 无量纲 / —。 */
+/**
+ * 倍率文本：1.50x / 0.80x / 免费 / 按量 / —。
+ * 负数 = 平台按实际 token 计量、没有倍率概念；与模型广场统一叫「按量」（第 3 轮审查 A2）。
+ */
 export function fmtMultiplier(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—'
   const n = Number(value)
   if (!Number.isFinite(n)) return '—'
-  if (n < 0) return '无量纲'
-  if (n === 0) return '免费'
+  if (n < 0) return tx('page.models.multiplier.metered')
+  if (n === 0) return tx('page.models.multiplier.free')
   return n.toFixed(2) + 'x'
 }
 
@@ -459,8 +467,125 @@ export interface ModelRow extends Record<string, unknown> {
   speedTestable: boolean
 }
 
-/** 别名 chips 最多显示几个（多出来的折叠成 +N）。 */
-export const MODEL_ALIAS_LIMIT = 3
+/** 别名 chips 最多显示几个（多出来的折叠成 +N；第 1 轮审查 P2：最多 2 个）。 */
+export const MODEL_ALIAS_LIMIT = 2
+
+/** 平台列最多直接显示几个 logo（多出来的折叠成 +N）。 */
+export const MODEL_PLATFORM_LIMIT = 5
+
+/** 平台列的一个 logo：同一平台的多条配置（多区 / 多 model_id）合成一个。 */
+export interface ModelPlatformBadge {
+  /** 合并键：去掉区域后缀的平台 id（trae-cn / trae-intl → trae）。 */
+  platform: string
+  /** 给 PlatformLogo 用的 id（组里第一条配置的原始平台 id）。 */
+  icon: string
+  label: string
+  /** 涉及的区域（trae 的 cn / intl）；单区平台为空数组。 */
+  realms: string[]
+  /** 任一配置启用即为启用。 */
+  enabled: boolean
+  /** 合并了几条配置。 */
+  count: number
+  /** 近 24 小时请求数（按各配置的上游 id 从模型健康里取，取不到为 0）。 */
+  requests: number
+  /** 可用账号数（平台列表的 active_count / account_count 之和）；不知道时为 null。 */
+  accounts: number | null
+}
+
+/** platformBadges 的可选数据源（都不传时只按「启用」排序，与旧行为一致）。 */
+export interface PlatformBadgeOptions {
+  /** 一条配置的近期请求数。 */
+  requestsOf?: (ref: ModelPlatformRef) => number
+  /** 一个（区级）平台 id 的可用账号数；不知道返回 null。 */
+  accountsOf?: (platformId: string) => number | null
+}
+
+const REALM_SUFFIX = /-(cn|intl|global|overseas)$/i
+const REALM_LABEL_SUFFIX = /\s*[（(]?\s*(国内版|国际版|国内|国际|海外版|CN|Intl|International|Global)\s*[)）]?\s*$/i
+
+/** 区级平台 id → 合并键：`trae-cn` / `trae-intl` → `trae`，`qoder-intl` → `qoder`。 */
+export function platformBaseId(id: string): string {
+  return String(id || '').trim().replace(REALM_SUFFIX, '')
+}
+
+/** 区级平台名 → 合并后的名字：「Trae 国内版」→「Trae」。去掉后为空时保留原名。 */
+export function platformBaseLabel(label: string): string {
+  const raw = String(label || '').trim()
+  return raw.replace(REALM_LABEL_SUFFIX, '').trim() || raw
+}
+
+/**
+ * 平台列的 logo 列表（第 3 轮审查 A3）：
+ *   · 按平台去重 —— 同一平台的多区（trae-cn / trae-intl）、多个 model_id（hy3-workbuddy / hy3-x-workbuddy）
+ *     原来各画一个，看起来像「WorkBuddy ×2」「Trae ×2」，还会产生重复的 vnode key；
+ *   · 排序：在跑流量的 > 有可用账号（或不知道）> 已启用但 0 账号 > 全部禁用；同档按请求数、再按原顺序。
+ *     原来按配置顺序只显示前 4 个，真正在跑的 Marvis 被收进了「+1」。
+ */
+export function platformBadges(
+  refs: ModelPlatformRef[] | null | undefined,
+  options: PlatformBadgeOptions = {},
+): ModelPlatformBadge[] {
+  const map = new Map<string, ModelPlatformBadge>()
+  const order: string[] = []
+  const accountsSeen = new Map<string, Set<string>>()
+  for (const ref of refs || []) {
+    const id = String(ref?.platform || '').trim()
+    if (!id) continue
+    const base = platformBaseId(id)
+    let badge = map.get(base)
+    if (!badge) {
+      badge = {
+        platform: base,
+        icon: id,
+        label: base === id ? ref.platformLabel || id : platformBaseLabel(ref.platformLabel || id),
+        realms: [],
+        enabled: false,
+        count: 0,
+        requests: 0,
+        accounts: null,
+      }
+      map.set(base, badge)
+      order.push(base)
+      accountsSeen.set(base, new Set())
+    }
+    badge.count += 1
+    if (ref.enabled) badge.enabled = true
+    const suffix = REALM_SUFFIX.exec(id)?.[1]?.toLowerCase() || ''
+    const realm = String(ref.realm || '').trim() || suffix
+    if (realm && !badge.realms.includes(realm)) badge.realms.push(realm)
+    if (options.requestsOf) {
+      const value = Number(options.requestsOf(ref))
+      if (Number.isFinite(value) && value > 0) badge.requests += value
+    }
+    // 账号数按区级平台 id 只算一次（同一区的多个 model_id 共用一个账号池）。
+    const seen = accountsSeen.get(base)!
+    if (options.accountsOf && !seen.has(id)) {
+      seen.add(id)
+      const value = options.accountsOf(id)
+      if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+        badge.accounts = (badge.accounts ?? 0) + Math.max(0, Number(value))
+      }
+    }
+  }
+  const tier = (badge: ModelPlatformBadge): number => {
+    if (!badge.enabled) return 3
+    if (badge.requests > 0) return 0
+    if (badge.accounts === null || badge.accounts > 0) return 1
+    return 2
+  }
+  return order
+    .map((id, index) => ({ badge: map.get(id)!, index }))
+    .sort(
+      (a, b) =>
+        tier(a.badge) - tier(b.badge) || b.badge.requests - a.badge.requests || a.index - b.index,
+    )
+    .map((entry) => entry.badge)
+}
+
+/** 这个平台 logo 是否该降到 40% 透明度：配置全部禁用，或确定没有可用账号。 */
+export function isBadgeDimmed(badge: ModelPlatformBadge): boolean {
+  return !badge.enabled || badge.accounts === 0
+}
 
 function text(value: unknown): string {
   if (value === null || value === undefined) return ''
@@ -824,13 +949,13 @@ export function platformOptions(
   platforms: ModelPlatformSummary[] | null | undefined,
 ): Array<{ label: string; value: string }> {
   const seen = new Set<string>()
-  const options: Array<{ label: string; value: string }> = [{ label: '平台：全部', value: '' }]
+  const options: Array<{ label: string; value: string }> = [{ label: tx('page.models.filter.platformAll'), value: '' }]
   for (const item of platforms || []) {
     const value = text(item.platform)
     if (!value || seen.has(value)) continue
     seen.add(value)
     options.push({
-      label: (text(item.label) || value) + '（' + (Number(item.count) || 0) + '）',
+      label: tx('page.models.filter.platformCount', { label: text(item.label) || value, n: Number(item.count) || 0 }),
       value,
     })
   }
@@ -847,7 +972,7 @@ export function vendorOptions(rows: ModelRow[]): Array<{ label: string; value: s
   const list = Array.from(map.entries())
     .map(([value, label]) => ({ value, label }))
     .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
-  return [{ label: '厂商：全部', value: '' }, ...list]
+  return [{ label: tx('page.models.filter.vendorAll'), value: '' }, ...list]
 }
 
 /* ------------------------------------------------------------------ *
@@ -917,7 +1042,7 @@ export function buildModelEditPlan(row: ModelRow, form: ModelEditForm): ModelEdi
   }
 
   if (row.platforms.length > 0 && !anyEnabled) {
-    return { updates: [], changed: false, error: '至少要保留一个平台处于启用状态' }
+    return { updates: [], changed: false, error: tx('page.models.edit.keepOneEnabled') }
   }
   return { updates, changed: updates.length > 0, error: '' }
 }
@@ -939,30 +1064,32 @@ export function modelEditForm(row: ModelRow): ModelEditForm {
 
 /** 同步结果 → 一句人话（成功/部分失败共用）。 */
 export function describeSyncResult(payload: ModelSyncPayload | null | undefined): string {
-  if (!payload) return '同步完成'
+  if (!payload) return tx('page.models.sync.done')
   const parts = [
-    '+' + (Number(payload.added) || 0) + ' 新增',
-    '~' + (Number(payload.updated) || 0) + ' 更新',
-    '共 ' + (Number(payload.total_in_db) || 0) + ' 个',
+    tx('page.models.sync.added', { n: Number(payload.added) || 0 }),
+    tx('page.models.sync.updated', { n: Number(payload.updated) || 0 }),
+    tx('page.models.sync.total', { n: Number(payload.total_in_db) || 0 }),
   ]
   const problems = Object.keys(payload.problems || {})
-  const tail = problems.length ? '；未取到：' + problems.join('、') : ''
-  return parts.join('，') + tail
+  const tail = problems.length
+    ? tx('page.models.sync.missing', { list: problems.join(tx('page.models.sep.list')) })
+    : ''
+  return parts.join(tx('page.models.sep.parts')) + tail
 }
 
 /** 测速结果 → 一句人话（Toast 用）。 */
 export function describeSpeedTest(payload: ModelSpeedTestPayload | null | undefined): string {
-  if (!payload) return '测速完成'
+  if (!payload) return tx('page.models.speed.done')
   const parts: string[] = []
   if (payload.ttft_ms !== null && payload.ttft_ms !== undefined) {
-    parts.push('首字 ' + Math.round(payload.ttft_ms) + 'ms')
+    parts.push(tx('page.models.speed.ttft', { ms: Math.round(payload.ttft_ms) }))
   }
   if (payload.speed_tps !== null && payload.speed_tps !== undefined) {
     parts.push(payload.speed_tps + ' t/s')
   }
   if (payload.prompt_tokens !== null && payload.prompt_tokens !== undefined) {
-    parts.push('提示 ' + payload.prompt_tokens + ' / 补全 ' + (payload.completion_tokens ?? 0) + ' tok')
+    parts.push(tx('page.models.speed.tokens', { prompt: payload.prompt_tokens, completion: payload.completion_tokens ?? 0 }))
   }
-  if (payload.account) parts.push('账号 ' + payload.account)
-  return parts.length ? parts.join(' · ') : '测速完成'
+  if (payload.account) parts.push(tx('page.models.speed.account', { name: payload.account }))
+  return parts.length ? parts.join(' · ') : tx('page.models.speed.done')
 }

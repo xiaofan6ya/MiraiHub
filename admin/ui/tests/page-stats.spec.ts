@@ -26,6 +26,12 @@ import {
   type StatsUsagePayload,
 } from '@/api/stats'
 
+/** 后端 UTC 小时桶 → 本地时区 HH:mm（图表横轴口径；断言与运行测试的机器时区无关）。 */
+function localHM(utcBucket: string): string {
+  const date = new Date(utcBucket.replace(' ', 'T') + 'Z')
+  return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
+}
+
 /** /api/stats/dashboard 的真实响应形状（summary 口径见后端 _dashboard_from_rollup）。 */
 const dashboard: StatsDashboardPayload = {
   window: {
@@ -212,11 +218,20 @@ describe('normalizeDays / normalizeGranularity：视图状态收敛', () => {
   })
 })
 
-describe('bucketLabel：小时桶 HH:mm / 天桶 MM/DD', () => {
+describe('bucketLabel：小时桶 HH:mm（本地时区）/ 天桶 MM/DD', () => {
   it('两种桶格式都能出标签', () => {
-    expect(bucketLabel('2026-11-23 15:00')).toBe('15:00')
+    expect(bucketLabel('2026-11-23 15:00')).toBe(localHM('2026-11-23 15:00'))
     expect(bucketLabel('2026-11-23')).toBe('11/23')
     expect(bucketLabel('')).toBe('')
+  })
+
+  it('小时桶按 UTC 解析再换成本地时间（不再直接截 UTC 字符串）', () => {
+    const date = new Date(Date.UTC(2026, 10, 23, 15, 0))
+    const expected = String(date.getHours()).padStart(2, '0') + ':00'
+    expect(bucketLabel('2026-11-23 15:00')).toBe(expected)
+    // 带偏移的 ISO 按偏移解析：+08:00 的 23:00 = UTC 15:00
+    expect(bucketLabel('2026-11-23T23:00:00+08:00')).toBe(expected)
+    expect(bucketLabel('2026-11-23T15:00:00Z')).toBe(expected)
   })
 })
 
@@ -275,7 +290,7 @@ describe('toSummaryItems：StatStrip 五格', () => {
 describe('buildRequestTrend / requestTrendOption：请求趋势折线', () => {
   it('全部请求 + 各模型序列，桶标签按时/日格式化', () => {
     const trend = buildRequestTrend(dashboard)
-    expect(trend.labels).toEqual(['09:00', '10:00'])
+    expect(trend.labels).toEqual([localHM('2026-11-23 09:00'), localHM('2026-11-23 10:00')])
     expect(trend.total).toEqual([40, 60])
     expect(trend.series).toEqual([
       { name: 'DeepSeek-V4.1-Flash', values: [25, 40] },
@@ -288,11 +303,11 @@ describe('buildRequestTrend / requestTrendOption：请求趋势折线', () => {
       xAxis: { data: string[] }
       series: Array<{ name: string; data: number[]; lineStyle?: { width: number } }>
     }
-    expect(option.xAxis.data).toEqual(['09:00', '10:00'])
+    expect(option.xAxis.data).toEqual([localHM('2026-11-23 09:00'), localHM('2026-11-23 10:00')])
     expect(option.series).toHaveLength(3)
     expect(option.series[0].name).toBe('全部请求')
     expect(option.series[0].data).toEqual([40, 60])
-    expect(option.series[0].lineStyle?.width).toBe(2.4)
+    expect(option.series[0].lineStyle?.width).toBe(2.5)
     expect(option.series[1].name).toBe('DeepSeek-V4.1-Flash')
   })
 
@@ -307,7 +322,7 @@ describe('buildRequestTrend / requestTrendOption：请求趋势折线', () => {
 describe('buildTokenTrend / tokenTrendOption：输入/输出/缓存命中堆叠柱', () => {
   it('输入已扣除缓存命中，堆叠合计 = Token 总量；缓存率按窗口汇总', () => {
     const trend = buildTokenTrend(usage)
-    expect(trend.labels).toEqual(['09:00', '10:00'])
+    expect(trend.labels).toEqual([localHM('2026-11-23 09:00'), localHM('2026-11-23 10:00')])
     // 1000-200 / 2000-500
     expect(trend.prompt).toEqual([800, 1500])
     expect(trend.output).toEqual([500, 600])
@@ -326,13 +341,32 @@ describe('buildTokenTrend / tokenTrendOption：输入/输出/缓存命中堆叠�
     expect(trend.cached).toEqual([100])
   })
 
-  it('option 是三根同 stack 的柱', () => {
+  it('option：输入（未命中 + 缓存命中）两段堆叠柱 + 输出折线；量级接近时共用左轴', () => {
     const option = tokenTrendOption(usage) as {
-      series: Array<{ name: string; stack: string; data: number[] }>
+      yAxis: unknown
+      series: Array<{ name: string; type: string; stack?: string; yAxisIndex?: number; data: number[] }>
     }
-    expect(option.series.map((item) => item.name)).toEqual(['输入', '输出', '缓存命中'])
-    expect(new Set(option.series.map((item) => item.stack))).toEqual(new Set(['tokens']))
-    expect(option.series[2].data).toEqual([200, 500])
+    expect(option.series.map((item) => item.name)).toEqual(['输入（未命中缓存）', '缓存命中', '输出'])
+    expect(option.series.map((item) => item.type)).toEqual(['bar', 'bar', 'line'])
+    expect(option.series[0].stack).toBe('tokens')
+    expect(option.series[1].stack).toBe('tokens')
+    expect(option.series[2].stack).toBeUndefined()
+    expect(option.series[1].data).toEqual([200, 500])
+    expect(option.series[2].data).toEqual([500, 600])
+    // 输入峰值 2000 / 输出峰值 600 < 8 倍 → 单轴
+    expect(Array.isArray(option.yAxis)).toBe(false)
+    expect(option.series[2].yAxisIndex).toBe(0)
+  })
+
+  it('option：输入是输出 8 倍以上时输出走右轴', () => {
+    const option = tokenTrendOption({
+      ...usage,
+      trend: [
+        { bucket: '2026-11-23 09:00', prompt_tokens: 100000, completion_tokens: 100, cached_tokens: 0, credits: 0, requests: 1 },
+      ],
+    }) as { yAxis: unknown[]; series: Array<{ yAxisIndex?: number }> }
+    expect(option.yAxis).toHaveLength(2)
+    expect(option.series[2].yAxisIndex).toBe(1)
   })
 
   it('空 payload：无桶、无缓存率', () => {

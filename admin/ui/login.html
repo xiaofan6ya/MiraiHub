@@ -2,9 +2,17 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="darkreader-lock" />
     <title>登录 · MiraiHub</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- 首帧底色与 tokens.css 的 --bg 同值，避免 JS 到位前闪白（深色系统下尤其明显）。 -->
+    <style>
+      html { background: #f3f5f8; }
+      body { margin: 0; }
+      @media (prefers-color-scheme: dark) { html { background: #12151b; } }
+    </style>
   </head>
   <body>
     <div id="login-app"></div>

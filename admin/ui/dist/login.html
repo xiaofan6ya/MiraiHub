@@ -2,16 +2,24 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="darkreader-lock" />
     <title>登录 · MiraiHub</title>
-    <script type="module" crossorigin src="/admin/v2/assets/login-B8RjSgKZ.js"></script>
-    <link rel="modulepreload" crossorigin href="/admin/v2/assets/vendor-vue-01Qz8dz3.js">
-    <link rel="modulepreload" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-ND5k2sci.js">
-    <link rel="stylesheet" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-Mue2mPt5.css">
-    <link rel="stylesheet" crossorigin href="/admin/v2/assets/login-BfLiMjUv.css">
+    <link rel="icon" type="image/svg+xml" href="/admin/v2/favicon.svg" />
+    <!-- 首帧底色与 tokens.css 的 --bg 同值，避免 JS 到位前闪白（深色系统下尤其明显）。 -->
+    <style>
+      html { background: #f3f5f8; }
+      body { margin: 0; }
+      @media (prefers-color-scheme: dark) { html { background: #12151b; } }
+    </style>
+    <script type="module" crossorigin src="/admin/v2/assets/login-CMxtDwpC.js"></script>
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/vendor-vue-DkcyLO0F.js">
+    <link rel="modulepreload" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-B9i8STb2.js">
+    <link rel="stylesheet" crossorigin href="/admin/v2/assets/_plugin-vue_export-helper-CEu2YNWP.css">
+    <link rel="stylesheet" crossorigin href="/admin/v2/assets/login-DG6_VSJC.css">
   </head>
   <body>
-    <div id="login-app"></div>
+    <div id="login-app"></div>
   </body>
 </html>

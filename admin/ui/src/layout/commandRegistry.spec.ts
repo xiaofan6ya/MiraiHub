@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { registerCommand, resetCommands, unregisterCommand, useCommands } from './commandRegistry'
+import {
+  SHELL_SHORTCUTS,
+  findCommand,
+  registerCommand,
+  resetCommands,
+  unregisterCommand,
+  useCommands,
+  waitForCommand,
+} from './commandRegistry'
 
 describe('命令面板注册表', () => {
   beforeEach(() => {
@@ -29,3 +37,24 @@ describe('命令面板注册表', () => {
     expect(useCommands().commands.value).toHaveLength(0)
   })
 })
+
+describe('全局快捷操作（03-shell §2.4）', () => {
+  beforeEach(() => {
+    resetCommands()
+  })
+
+  it('添加账号 / 导入账号 / 创建 Key 三条都在', () => {
+    expect(SHELL_SHORTCUTS.map((item) => item.id)).toEqual(['accounts.add', 'accounts.import', 'keys.create'])
+    expect(SHELL_SHORTCUTS.find((item) => item.id === 'keys.create')?.path).toBe('/keys')
+  })
+
+  it('waitForCommand：页面稍后注册时拿到它；超时返回 null', async () => {
+    const run = vi.fn()
+    setTimeout(() => registerCommand({ id: 'keys.create', title: '创建 Key', run }), 20)
+    const found = await waitForCommand('keys.create', 1000, 5)
+    expect(found?.title).toBe('创建 Key')
+    expect(findCommand('keys.create')).not.toBeNull()
+    expect(await waitForCommand('nope', 30, 5)).toBeNull()
+  })
+})
+

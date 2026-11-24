@@ -148,8 +148,8 @@ export interface GroupRow extends Record<string, unknown> {
   createdAt: string | null
 }
 
-/** chips 最多显示几个（设计稿 P16：最多 5 个 +N）。 */
-export const GROUP_MODEL_PREVIEW = 5
+/** chips 最多显示几个（设计稿 P16 原为 5；第 2 轮审查 P2 改成 4 个 + 「+N」，保证一行放得下不换行）。 */
+export const GROUP_MODEL_PREVIEW = 4
 
 function text(value: unknown): string {
   if (value === null || value === undefined) return ''

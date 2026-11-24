@@ -1,5 +1,8 @@
 <script setup lang="ts">
-/** 32×32 纯图标按钮：必须有 aria-label 与 tooltip（05-patterns §7）。 */
+/**
+ * 32×32 纯图标按钮：必须有 aria-label 与 tooltip（05-patterns §7）。
+ * 可以用 Tab 聚焦（以前 focusable=false，键盘用户点不到表格工具栏的图标按钮）。
+ */
 import { type Component } from 'vue'
 import { NButton, NTooltip } from 'naive-ui'
 
@@ -31,7 +34,6 @@ defineEmits<{ (event: 'click', payload: MouseEvent): void }>()
           'mh-icon-btn--active': active,
         }"
         quaternary
-        :focusable="false"
         :loading="loading"
         :disabled="disabled"
         :aria-label="label"
@@ -49,27 +51,45 @@ defineEmits<{ (event: 'click', payload: MouseEvent): void }>()
   width: 32px;
   height: 32px;
   padding: 0;
-  --n-border-radius: var(--r-ctl);
-  --n-text-color: var(--fg-2);
-  --n-text-color-hover: var(--fg);
-  --n-text-color-pressed: var(--fg);
-  --n-text-color-focus: var(--fg);
-  --n-color-hover: var(--surface-hover);
-  --n-color-pressed: var(--surface-2);
-  --n-color-focus: var(--surface-hover);
-  --n-ripple-color: transparent;
+  --n-border-radius: var(--r-ctl) !important;
+  --n-text-color: var(--fg-2) !important;
+  --n-text-color-hover: var(--fg) !important;
+  --n-text-color-pressed: var(--fg) !important;
+  --n-text-color-focus: var(--fg) !important;
+  --n-color-hover: var(--surface-hover) !important;
+  --n-color-pressed: var(--surface-2) !important;
+  --n-color-focus: var(--surface-hover) !important;
+  --n-ripple-color: transparent !important;
+}
+
+.mh-icon-btn {
+  transition:
+    transform var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
+}
+
+/* 按压反馈（11-polish-motion §1）；减少动效时不缩放 */
+.mh-icon-btn:not(.n-button--disabled):active {
+  transform: scale(.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mh-icon-btn:not(.n-button--disabled):active {
+    transform: none;
+  }
 }
 
 .mh-icon-btn--danger {
-  --n-text-color: var(--danger);
-  --n-text-color-hover: var(--danger);
-  --n-text-color-pressed: var(--danger);
-  --n-color-hover: var(--danger-soft);
+  --n-text-color: var(--danger) !important;
+  --n-text-color-hover: var(--danger) !important;
+  --n-text-color-pressed: var(--danger) !important;
+  --n-color-hover: var(--danger-soft) !important;
 }
 
 .mh-icon-btn--active {
-  --n-color-hover: var(--surface-2);
-  --n-color-focus: var(--surface-2);
+  --n-color-hover: var(--surface-2) !important;
+  --n-color-focus: var(--surface-2) !important;
   background: var(--surface-2);
   color: var(--fg);
 }

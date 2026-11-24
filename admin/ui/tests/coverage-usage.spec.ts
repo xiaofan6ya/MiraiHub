@@ -149,8 +149,8 @@ describe('UsagePage 时间范围口径', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.find('h1').text()).toContain('使用记录')
-    // 6 格统计照旧
-    const labels = wrapper.findAll('.mh-stat__label > span').map((item) => item.text())
+    // 6 张 KPI 卡（v2.1 由 StatStrip 换成 KpiCard）
+    const labels = wrapper.findAll('.mh-kpi__label').map((item) => item.text())
     expect(labels).toEqual(['请求数', '成功', '失败', 'Token 输入', 'Token 输出', '积分'])
     expect(wrapper.text()).toContain('共 862 次 · 成功 850 · 失败 12 · 积分 729.31')
 
@@ -209,7 +209,7 @@ describe('UsagePage 中英切换', () => {
     await flush()
 
     expect(wrapper.find('h1').text()).toContain('Usage')
-    const labels = wrapper.findAll('.mh-stat__label > span').map((item) => item.text())
+    const labels = wrapper.findAll('.mh-kpi__label').map((item) => item.text())
     expect(labels).toEqual(['Requests', 'Success', 'Failed', 'Input tokens', 'Output tokens', 'Credits'])
     expect(wrapper.text()).toContain('862 requests · 850 OK · 12 failed · 729.31 credits')
     expect(wrapper.find('.mh-filter__chips').text()).toContain('Today (calendar day)')

@@ -6,6 +6,22 @@ export const RIBBON_MIN_WIDTH = 2
 export const RIBBON_MAX_EXTRA = 18
 /** 每条线路的行高。 */
 export const RIBBON_LANE_HEIGHT = 36
+/** 压缩后的最小行高（再小行内 logo + 文字就挤了）。 */
+export const RIBBON_LANE_MIN_HEIGHT = 22
+
+/**
+ * 行高：不给 maxHeight 时固定 36px（旧行为）；给了就按线路数压缩到能放下，
+ * 下限 22px —— 超过 maxHeight 时宁可略高，也不让文字重叠。
+ */
+export function ribbonLaneHeight(count: number, maxHeight?: number | null): number {
+  const n = Math.max(1, Math.floor(Number(count) || 0))
+  const max = Number(maxHeight)
+  if (!Number.isFinite(max) || max <= 0) return RIBBON_LANE_HEIGHT
+  return Math.max(
+    RIBBON_LANE_MIN_HEIGHT,
+    Math.min(RIBBON_LANE_HEIGHT, Math.floor(max / n)),
+  )
+}
 
 export type RibbonHealth = 'ok' | 'warn' | 'danger' | 'disabled'
 

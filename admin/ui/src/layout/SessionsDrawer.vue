@@ -72,6 +72,8 @@ watch(
   (open) => {
     if (open) void load()
   },
+  // 外壳第一次打开时才挂载本组件（按需加载），挂载那一刻 open 已经是 true。
+  { immediate: true },
 )
 
 async function kick(sid: string): Promise<void> {

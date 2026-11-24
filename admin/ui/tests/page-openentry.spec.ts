@@ -68,7 +68,7 @@ describe('入口状态 / 元信息 / 平台摘要', () => {
     expect(gateStateOf(gate())).toEqual({ label: '已开放', tone: 'ok' })
     expect(gateStateOf(gate({ open: false }))).toEqual({ label: '已关闭', tone: 'neutral' })
     expect(gateStateOf(null)).toEqual({ label: '已关闭', tone: 'neutral' })
-    expect(gateMetaText(gate())).toBe('代次 7 · 可用票据 3 · 有效邀请码 1')
+    expect(gateMetaText(gate())).toBe('第 7 轮 · 有效链接 3 条 · 有效邀请码 1 个')
     expect(gateMetaText(null)).toBe('')
   })
 

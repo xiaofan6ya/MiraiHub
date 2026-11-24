@@ -2,13 +2,16 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '@/layout/PageHeader.vue'
+import { useI18n, type MessageKey } from '@/i18n'
 
 /**
  * 占位页：24 个路由在第一阶段全部可点（S04 验收），
  * 显示页面名、「建设中」与旧版位置，后续页面任务逐个替换。
  */
 const route = useRoute()
-const title = computed(() => String(route.meta.title ?? '页面'))
+const { t } = useI18n()
+const tx = (key: string): string => t(key as MessageKey)
+const title = computed(() => String(route.meta.title ?? tx('page.placeholder.page')))
 const key = computed(() => String(route.name ?? ''))
 </script>
 
@@ -17,10 +20,10 @@ const key = computed(() => String(route.name ?? ''))
     <PageHeader :title="title" />
 
     <section class="ph-card">
-      <p class="ph-status">建设中</p>
-      <p class="ph-desc">该页面将在后续步骤实现，功能与旧版保持一致。</p>
+      <p class="ph-status">{{ tx('page.placeholder.status') }}</p>
+      <p class="ph-desc">{{ tx('page.placeholder.desc') }}</p>
       <p class="ph-old">
-        旧版位置：<code class="mono">/admin?tab={{ key }}</code>
+        {{ tx('page.placeholder.legacy') }}<code class="mono">/admin?tab={{ key }}</code>
       </p>
     </section>
   </div>

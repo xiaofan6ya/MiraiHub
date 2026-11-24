@@ -183,8 +183,10 @@ describe('平台速度表（/api/platform/speed?hours=24）', () => {
     expect(speedPayloadText(null)).toBe('')
   })
 
-  it('额度用千分位（不缩写）', () => {
-    expect(formatBalance(12954)).toBe('12,954')
+  it('额度用量级缩写（64.6M；1 万以下千分位）', () => {
+    expect(formatBalance(64620435)).toBe('64.6M')
+    expect(formatBalance(12954)).toBe('13K')
+    expect(formatBalance(9876)).toBe('9,876')
     expect(formatBalance(null)).toBe('—')
   })
 })

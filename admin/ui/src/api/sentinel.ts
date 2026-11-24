@@ -11,7 +11,7 @@
  * status 里也会带一份 traffic（后端合并下发），实时列表优先用它，缺失时再退回 /traffic。
  */
 import { http } from './http'
-import { FMT_EMPTY, fmtInt, fmtRelative } from '@/utils/format'
+import { FMT_EMPTY, fmtFullTime, fmtInt, fmtRelative } from '@/utils/format'
 import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /* ------------------------------------------------------------------ *
@@ -176,7 +176,17 @@ export function pausePlatform(input: PauseInput = {}): Promise<{ ok: boolean; pl
   })
 }
 
-export function resumePlatform(platform = ''): Promise<{ ok: boolean; resumed: string }> {
+export interface ResumeResult {
+  ok: boolean
+  resumed: string
+  /**
+   * 恢复的是单个平台、但「全部平台」的暂停仍在生效（data-scoping D4）。
+   * 旧后端会顺手解除全局暂停、也没有这个字段 —— 缺省按 false。
+   */
+  still_paused_by_all?: boolean
+}
+
+export function resumePlatform(platform = ''): Promise<ResumeResult> {
   return http('POST', '/api/sentinel/resume', { query: { platform } })
 }
 
@@ -339,15 +349,18 @@ export function toStats(
   const paused = pausedKeys(status)
   return [
     {
+      // traffic_stats 的 platforms/totals 按**服务器日期**分键累计（_day()），window 只影响 recent 明细；
+      // 所以这一格是「今日累计」，不是「近 1 小时」（本轮审计纠正上一轮的改名）。
       label: tr('page.sentinel.stat.today'),
       value: fmtInt(requests),
       foot: tr('page.sentinel.stat.requestsFoot', { active: activePlatforms, total: platforms.length }),
+      help: tr('page.sentinel.stat.todayHelp'),
     },
     {
       label: tr('page.sentinel.stat.rate'),
       value: requests ? rate.toFixed(1) + '%' : FMT_EMPTY,
       foot: tr('page.sentinel.stat.rateFoot', { count: fmtInt(ok) }),
-      tone: rateTone(requests ? rate : 100),
+      tone: requests ? rateTone(rate) : 'muted',
     },
     {
       label: tr('page.sentinel.stat.failed'),
@@ -397,8 +410,9 @@ export interface RibbonView {
 /** RouteRibbon 数据：线宽=请求占比、颜色=成功率（设计稿要求按成功率着色）。 */
 export function toRibbon(traffic: TrafficPayload | null, translate?: Translate): RibbonView {
   const tr = translate ?? defaultTranslate
+  // 0 请求的平台也画（细灰线），保证始终是扇形、单平台有流量时不会退化成一根粗条（10-visual-refresh §1.8）。
   const platforms = [...(traffic?.platforms || [])]
-    .filter((row) => Number(row.requests) > 0)
+    .filter((row) => row && row.platform)
     .sort((a, b) => Number(b.requests) - Number(a.requests))
   return {
     source: { label: tr('page.sentinel.ribbonSource'), total: Number(traffic?.totals?.requests || 0) },
@@ -411,6 +425,66 @@ export function toRibbon(traffic: TrafficPayload | null, translate?: Translate):
       status: row.last_status ? 'HTTP ' + row.last_status : '',
     })),
   }
+}
+
+/** 哨兵页 KPI（KpiCard 形状）：今日请求 / 成功率 / 失败·超时 / 风控信号。 */
+export interface SentinelKpi {
+  key: string
+  label: string
+  value: string
+  hint?: string
+  tone?: 'brand' | 'ok' | 'warn' | 'danger' | 'neutral'
+}
+
+/**
+ * 状态总览的四个数（第 1 轮审查 P2：原来 6 格排成 5+1）。
+ * 「涉及账号」「暂停中的平台」并进状态横幅，不再单独占格。
+ */
+export function toSentinelKpis(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): SentinelKpi[] {
+  const stats = toStats(status, traffic, translate)
+  const toneOf = (tone: SentinelStat['tone']): SentinelKpi['tone'] =>
+    tone === 'ok' || tone === 'warn' || tone === 'danger' || tone === 'brand' ? tone : 'neutral'
+  const keys = ['today', 'rate', 'failed', 'signals']
+  return stats.slice(0, 4).map((item, index) => ({
+    key: keys[index],
+    label: item.label,
+    value: item.value,
+    hint: item.foot,
+    tone: index === 0 ? 'brand' : toneOf(item.tone),
+  }))
+}
+
+export interface SentinelStatusLine {
+  /** danger = 批次封控；warn = 有暂停或有风控账号；ok = 常态。 */
+  tone: 'ok' | 'warn' | 'danger'
+  /** 涉及账号 · 原因种类 · 暂停中的平台，一行灰字。 */
+  facts: string[]
+}
+
+/** 状态总览：常态一行小字，异常时才升级成横幅（第 1 轮审查 P2）。 */
+export function toStatusLine(
+  status: SentinelStatus | null,
+  traffic: TrafficPayload | null,
+  translate?: Translate,
+): SentinelStatusLine {
+  const tr = translate ?? defaultTranslate
+  const affected = Number(status?.accounts_affected || 0)
+  const paused = pausedKeys(status)
+  const tone: SentinelStatusLine['tone'] = status?.tripped ? 'danger' : affected > 0 || paused.length ? 'warn' : 'ok'
+  const facts = [
+    tr('page.sentinel.status.accounts', { count: fmtInt(affected) }),
+    tr('page.sentinel.status.codes', { count: Object.keys(status?.by_code || {}).length }),
+    paused.length
+      ? tr('page.sentinel.status.paused', {
+          names: paused.map((key) => pausedLabel(key, traffic, translate)).join(tr('page.sentinel.listSeparator')),
+        })
+      : tr('page.sentinel.stat.pausedFoot'),
+  ]
+  return { tone, facts }
 }
 
 export interface PlatformHealthRow {
@@ -461,6 +535,8 @@ export type LiveTone = 'ok' | 'warn' | 'danger' | 'brand'
 export interface LiveRow {
   rid: string
   time: string
+  /** 悬停显示的绝对时间（本地时区）。 */
+  at: string
   model: string
   platform: string
   platformLabel: string
@@ -509,6 +585,7 @@ export function toLiveRows(
     return {
       rid: String(item.rid || item.ts || 'row-' + index),
       time: item.ts ? fmtRelative(Number(item.ts) * 1000, Date.now()) : FMT_EMPTY,
+      at: item.ts ? fmtFullTime(Number(item.ts) * 1000) : '',
       model: item.model || item.path || FMT_EMPTY,
       platform: item.platform || '',
       platformLabel: (item.platform && labelMap.get(item.platform)) || item.platform || FMT_EMPTY,

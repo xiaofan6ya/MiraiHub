@@ -153,8 +153,8 @@ describe('到期风险分布（StackMeter）', () => {
   it('≤30 天取 days=30 档；30 天以外 = 总量 − ≤30 天 − 长期有效', () => {
     const view = riskView(EXPIRY)
     expect(view.items).toEqual([
-      { label: '≤30 天（124 个包）', value: 11514, tone: 'danger' },
-      { label: '30 天以外', value: 1442, tone: 'warn' },
+      { label: '≤30 天（124 个包）', value: 11514, tone: 'warn' },
+      { label: '30 天以外', value: 1442, tone: 'neutral' },
       { label: '长期有效', value: 0, tone: 'ok' },
     ])
     expect(view.total).toBe(12956)
@@ -225,9 +225,10 @@ describe('账号消耗构成（BarList）', () => {
 
   it('过滤 0 消耗、label 带次数、hint 带合计', () => {
     const view = usageBars(usage, 12)
+    // v2.1：消耗构成是分类条，统一用品牌色（不着色表达状态）
     expect(view.items).toEqual([
-      { label: '137****8653 · 43 次', value: 154, tone: 'warn' },
-      { label: '193****2486 · 595 次', value: 44, tone: 'warn' },
+      { label: '137****8653 · 43 次', value: 154, tone: 'brand' },
+      { label: '193****2486 · 595 次', value: 44, tone: 'brand' },
     ])
     expect(view.hint).toBe('近 7 天 · 合计 1,234.5 积分')
     expect(view.empty).toBe(false)

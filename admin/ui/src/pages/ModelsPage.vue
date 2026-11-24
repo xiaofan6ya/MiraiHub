@@ -9,27 +9,17 @@
  *   1. 一「行」= 同一模型跨平台合成（后端 model_alias 的归一方向：上游展示名优先）。
  *      平台映射放在行内折叠，抽屉里逐平台列清楚；
  *   2. 展示名是 `note`，可读调用名是 `model_id`，复制给客户端的是 `client_id`；
- *   3. 倍率 `credit_multiplier` 原样展示：>0 收费 / 0 免费 / <0 无量纲 / null 未同步。
+ *   3. 倍率 `credit_multiplier` 原样展示：>0 收费 / 0 免费 / <0 按量 / null 未同步。
  *      PATCH /api/models/{id} 不接受倍率字段，所以抽屉里倍率只读（由「同步目录」写入）。
  */
-import { computed, h, onBeforeUnmount, onMounted, ref, watch, type VNodeChild } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NDropdown, NInput, NInputNumber, NSelect, NSkeleton, NSwitch } from 'naive-ui'
-import {
-  Brain,
-  Image as ImageIcon,
-  ListChecks,
-  Plus,
-  RefreshCw,
-  Sparkles,
-  Video,
-  Wrench,
-} from 'lucide-vue-next'
+import { ListChecks, Plus, RefreshCw } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
   Badge,
   Btn,
   Card,
-  Chip,
   Copyable,
   DataTable,
   Empty,
@@ -40,21 +30,16 @@ import {
   HelpTip,
   ModelIcon,
   PlatformLogo,
-  RowActions,
-  type FilterChip,
-  type SorterPayload,
-  type TableColumn,
   type TableRow,
 } from '@/components'
-import { useConfirm, useTableQuery, useToast } from '@/composables'
+import { useConfirm, useRevisit, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
-import { FMT_EMPTY, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
 import { errorMessage, failureText } from '@/utils/error'
 import { useI18n } from '@/i18n'
+import { useModelColumns } from './models/columns'
+import { useModelFilters } from './models/filters'
 import { ApiError, isAbortError } from '@/api/http'
 import {
-  CAPABILITY_LABELS,
-  MODEL_ALIAS_LIMIT,
   batchToggleModels,
   buildModelEditPlan,
   deleteModelConfig,
@@ -62,25 +47,19 @@ import {
   describeSyncResult,
   filterModelRows,
   fmtMultiplier,
-  fmtTokensShort,
   listModelConfigs,
   listModelHealth,
   modelEditForm,
   modelStats,
-  multiplierTone,
   paginateModelRows,
-  platformOptions,
   sortModelRows,
   speedTestModel,
   syncModels,
   toModelRows,
   updateModelConfig,
-  vendorOptions,
-  type CapabilityKey,
   type ModelConfigItem,
   type ModelEditForm,
   type ModelHealthItem,
-  type ModelPlatformRef,
   type ModelPlatformSummary,
   type ModelRow,
   type ModelSpeedTestPayload,
@@ -173,423 +152,23 @@ watch(
   },
 )
 
-const vendorSelectOptions = computed(() => vendorOptions(allRows.value))
-const platformSelectOptions = computed(() => platformOptions(platforms.value))
+const {
+  vendorSelectOptions,
+  platformSelectOptions,
+  CAPABILITY_OPTIONS,
+  STATUS_OPTIONS,
+  chips,
+  onFilterChange,
+  applyFilter,
+  removeChip,
+  resetFilters,
+  sortOrderOf,
+  onSorter,
+} = useModelFilters({ table, allRows, platforms, search })
 
-const CAP_LABELS = computed<Record<string, string>>(() => ({
-  image: t('page.models.cap.image'),
-  tools: t('page.models.cap.tools'),
-  reasoning: t('page.models.cap.reasoning'),
-  video: t('page.models.cap.video'),
-  'image-out': t('page.models.cap.imageOut'),
-}))
+/* ------------------------------ 单元格（src/pages/models/columns.ts） ------------------------------ */
 
-const CAPABILITY_OPTIONS = computed(() => [
-  { label: t('page.models.filter.capAll'), value: '' },
-  ...Object.entries(CAP_LABELS.value).map(([value, label]) => ({ label, value })),
-])
-
-const STATUS_OPTIONS = computed(() => [
-  { label: t('page.models.filter.statusAll'), value: '' },
-  { label: t('page.models.filter.statusEnabled'), value: 'enabled' },
-  { label: t('page.models.filter.statusMixed'), value: 'disabled' },
-])
-
-const STATUS_LABELS = computed<Record<string, string>>(() => ({
-  enabled: t('page.models.filter.statusEnabled'),
-  disabled: t('page.models.filter.statusMixed'),
-}))
-
-function labelOf(
-  options: Array<{ label: string; value: string }>,
-  value: string,
-): string {
-  const hit = options.find((option) => option.value === value)
-  if (!hit) return value
-  // 选择项的标签带「（N 个模型）」或「：全部」后缀，chip 里只留主体。
-  return hit.label.replace(/\uFF08.*\uFF09$/, '').replace(/\uFF1A\u5168\u90E8$/, '')
-}
-
-const chips = computed<FilterChip[]>(() => {
-  const filters = table.state.filters
-  const list: FilterChip[] = []
-  if (filters.q) list.push({ key: 'q', label: t('page.models.filter.chipSearch'), value: filters.q })
-  if (filters.vendor) {
-    list.push({
-      key: 'vendor',
-      label: t('page.models.filter.chipVendor'),
-      value: labelOf(vendorSelectOptions.value, filters.vendor),
-    })
-  }
-  if (filters.platform) {
-    list.push({
-      key: 'platform',
-      label: t('page.models.filter.chipPlatform'),
-      value: labelOf(platformSelectOptions.value, filters.platform),
-    })
-  }
-  if (filters.cap) {
-    list.push({
-      key: 'cap',
-      label: t('page.models.filter.chipCap'),
-      value: CAP_LABELS.value[filters.cap] || filters.cap,
-    })
-  }
-  if (filters.status) {
-    list.push({
-      key: 'status',
-      label: t('page.models.filter.chipStatus'),
-      value: STATUS_LABELS.value[filters.status] || filters.status,
-    })
-  }
-  return list
-})
-
-function onFilterChange(values: Record<string, unknown>): void {
-  const next: Record<string, string> = {}
-  for (const [name, value] of Object.entries(values)) next[name] = String(value ?? '')
-  table.setFilters(next)
-}
-
-function applyFilter(name: string, value: string | number | null): void {
-  table.setFilter(name, value === null || value === undefined ? '' : String(value))
-}
-
-function removeChip(key: string): void {
-  if (key === 'q') search.value = ''
-  table.setFilter(key, '')
-}
-
-function resetFilters(): void {
-  search.value = ''
-  table.reset()
-}
-
-/* ------------------------------ 排序 ------------------------------ */
-
-const SORT_KEY_MAP: Record<string, string> = {
-  name: 'name',
-  multiplier: 'multiplier',
-  platforms: 'platforms',
-}
-
-function sortOrderOf(stateKey: string): 'ascend' | 'descend' | false {
-  if (table.state.sortBy !== stateKey) return false
-  if (table.state.sortOrder === 'asc') return 'ascend'
-  if (table.state.sortOrder === 'desc') return 'descend'
-  return false
-}
-
-/** 三态：升序 → 降序 → 默认（naive 的 cancel 对应 order=false）。 */
-function onSorter(sorter: SorterPayload | null): void {
-  if (!sorter || !sorter.order) {
-    table.setSort('', '')
-    return
-  }
-  const stateKey = SORT_KEY_MAP[sorter.columnKey]
-  if (!stateKey) {
-    table.setSort('', '')
-    return
-  }
-  table.setSort(stateKey, sorter.order === 'ascend' ? 'asc' : 'desc')
-}
-
-/* ------------------------------ 单元格 ------------------------------ */
-
-const CAP_ICONS: Record<CapabilityKey, typeof Brain> = {
-  image: ImageIcon,
-  tools: Wrench,
-  reasoning: Brain,
-  video: Video,
-  'image-out': Sparkles,
-}
-
-const CAP_TONES: Record<CapabilityKey, string> = {
-  image: 'models-cap--image',
-  tools: 'models-cap--tools',
-  reasoning: 'models-cap--reasoning',
-  video: 'models-cap--video',
-  'image-out': 'models-cap--image',
-}
-
-function platformTooltip(row: ModelRow): string {
-  return row.platforms
-    .map(
-      (ref: ModelPlatformRef) =>
-        ref.platformLabel +
-        ' · ' +
-        ref.clientId +
-        ' · ' +
-        fmtMultiplier(ref.multiplier) +
-        (ref.enabled ? '' : t('page.models.cell.disabledSuffix')),
-    )
-    .join('\n')
-}
-
-function renderModelCell(row: ModelRow): VNodeChild {
-  const caps = row.capabilityKeys.map((key) =>
-    h(
-      'span',
-      {
-        key: 'cap-' + key,
-        class: ['models-cap', CAP_TONES[key]],
-        title: CAPABILITY_LABELS[key],
-        'aria-label': CAPABILITY_LABELS[key],
-      },
-      [h(CAP_ICONS[key], { size: 12 })],
-    ),
-  )
-  const aliasChips = row.aliases.slice(0, MODEL_ALIAS_LIMIT).map((alias) =>
-    h(
-      Chip,
-      { key: 'alias-' + alias, mono: true, copy: true, value: alias, title: t('page.models.cell.aliasCopy') },
-      {
-      default: () => alias,
-    }),
-  )
-  if (row.aliasOverflow > 0) {
-    const rest = row.aliases.slice(MODEL_ALIAS_LIMIT)
-    aliasChips.push(
-      h(
-        Chip,
-        {
-          key: 'alias-more',
-          title: t('page.models.cell.aliasMore', { count: row.aliasOverflow, list: rest.join('、') }),
-        },
-        { default: () => '+' + row.aliasOverflow },
-      ),
-    )
-  }
-
-  return h(
-    'div',
-    {
-      class: 'models-name',
-      role: 'button',
-      tabindex: 0,
-      title: t('page.models.cell.editTitle', { name: row.name }),
-      onClick: () => void openEdit(row),
-      onKeydown: (event: KeyboardEvent) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          void openEdit(row)
-        }
-      },
-    },
-    [
-      h(ModelIcon, { vendor: row.vendor, size: 20, label: row.vendorLabel }),
-      h('div', { class: 'models-name__main' }, [
-        h('div', { class: 'models-name__title' }, [
-          h('span', { class: 'models-name__text' }, row.name),
-          row.free
-            ? h(Badge, { tone: 'ok' }, { default: () => t('page.models.cell.free') })
-            : null,
-          row.officialVisible
-            ? null
-            : h(Badge, { tone: 'neutral' }, { default: () => t('page.models.cell.legacy') }),
-          row.partiallyEnabled
-            ? h(Badge, { tone: 'warn' }, {
-                default: () => t('page.models.cell.platformsDisabled', { count: row.disabledCount }),
-              })
-            : null,
-        ]),
-        h(Copyable, { value: row.callId, muted: true }),
-        aliasChips.length ? h('div', { class: 'models-name__aliases' }, aliasChips) : null,
-        caps.length
-          ? h('div', { class: 'models-name__caps', 'aria-label': t('page.models.cell.capsAria') }, caps)
-          : null,
-      ]),
-    ],
-  )
-}
-
-function renderPlatforms(row: ModelRow): VNodeChild {
-  const shown = row.platforms.slice(0, 4)
-  const nodes: VNodeChild[] = shown.map((ref) =>
-    h(
-      'span',
-      { key: 'logo-' + ref.platform, class: 'models-platform', title: ref.platformLabel },
-      [h(PlatformLogo, { id: ref.platform, size: 18, label: ref.platformLabel })],
-    ),
-  )
-  if (row.platforms.length > shown.length) {
-    nodes.push(
-      h('span', { key: 'logo-more', class: 'models-platform is-more' }, [
-        '+' + (row.platforms.length - shown.length),
-      ]),
-    )
-  }
-  return h('div', { class: 'models-platforms', title: platformTooltip(row) }, nodes)
-}
-
-function renderMultiplier(row: ModelRow): VNodeChild {
-  const tone = multiplierTone(row.multiplier)
-  const hint =
-    row.multiplier === null
-      ? t('page.models.cell.multiplierPending')
-      : row.multiplier < 0
-        ? t('page.models.cell.multiplierTokenBilled')
-        : row.multiplier === 0
-          ? t('page.models.cell.multiplierFree')
-          : t('page.models.cell.multiplierRelative')
-  return h('span', { class: ['models-mult', 'is-' + tone], title: hint }, row.multiplierText)
-}
-
-function renderLimits(row: ModelRow): VNodeChild {
-  const lines: VNodeChild[] = [
-    h('span', { class: 'models-limits__line' }, [
-      h('span', { class: 'models-limits__label' }, t('page.models.cell.context')),
-      h('span', { class: 'tnum' }, fmtTokensShort(row.contextWindow)),
-    ]),
-    h('span', { class: 'models-limits__line' }, [
-      h('span', { class: 'models-limits__label' }, t('page.models.cell.output')),
-      h('span', { class: 'tnum' }, fmtTokensShort(row.maxOutputTokens)),
-    ]),
-  ]
-  if (row.availableAccounts !== null) {
-    lines.push(
-      h(
-        'span',
-        {
-          class: 'models-limits__line',
-          title: t('page.models.cell.accountsTitle'),
-        },
-        [
-          h('span', { class: 'models-limits__label' }, t('page.models.cell.accounts')),
-          h('span', { class: 'tnum' }, row.availableAccounts + '/' + (row.eligibleAccounts ?? 0)),
-        ],
-      ),
-    )
-  }
-  return h('div', { class: 'models-limits' }, lines)
-}
-
-function renderHealth(row: ModelRow): VNodeChild {
-  if (!row.health) return h('span', { class: 'models-dash' }, FMT_EMPTY)
-  const successRate = row.successRate
-  const tone = successRate === null ? 'neutral' : successRate >= 0.95 ? 'ok' : successRate >= 0.8 ? 'warn' : 'danger'
-  return h('div', { class: 'models-health' }, [
-    h('span', { class: 'models-health__line' }, [
-      h('span', { class: 'models-health__label' }, 'TTFT'),
-      h('span', { class: 'tnum' }, fmtDuration(row.ttftP50)),
-    ]),
-    h('span', { class: 'models-health__line' }, [
-      h(Badge, { tone }, {
-        default: () => (successRate === null ? t('page.models.cell.noSamples') : fmtPct(successRate)),
-      }),
-      h(
-        'span',
-        { class: 'models-health__sub tnum' },
-        t('page.models.cell.requests', { count: fmtInt(row.requests) }),
-      ),
-    ]),
-    row.availableAccounts === 0 && (row.eligibleAccounts || 0) > 0
-      ? h(Badge, { tone: 'danger' }, { default: () => t('page.models.cell.noAccounts') })
-      : null,
-  ])
-}
-
-function renderStatus(row: ModelRow): VNodeChild {
-  const tone = row.enabled ? 'ok' : row.partiallyEnabled ? 'warn' : 'neutral'
-  const text = row.enabled
-    ? t('page.models.status.enabled')
-    : row.partiallyEnabled
-      ? t('page.models.status.partial')
-      : t('page.models.status.disabled')
-  return h('div', { class: 'models-status' }, [
-    h(Badge, { tone, dot: true }, { default: () => text }),
-    h(
-      'span',
-      { class: 'models-status__sub' },
-      t('page.models.status.platforms', { enabled: row.enabledCount, total: row.platformCount }),
-    ),
-  ])
-}
-
-function renderActions(row: ModelRow): VNodeChild {
-  return h(
-    'div',
-    { class: 'models-actions', onClick: (event: Event) => event.stopPropagation() },
-    [
-      h(RowActions, {
-        actions: [
-          { key: 'edit', label: t('common.edit') },
-          {
-            key: 'toggle',
-            label: row.enabled ? t('page.models.action.disableAll') : t('page.models.action.enableAll'),
-          },
-          { key: 'speed', label: t('page.models.action.speed'), disabled: !row.speedTestable },
-          { key: 'delete', label: t('common.delete'), danger: true },
-        ],
-        max: 1,
-        onSelect: (key: string) => {
-          void onRowAction(row, key)
-        },
-      }),
-    ],
-  )
-}
-
-const columns = computed<TableColumn[]>(() => [
-  {
-    key: 'name',
-    title: t('page.models.col.name'),
-    mobile: 'title',
-    minWidth: 320,
-    sortable: true,
-    sortOrder: sortOrderOf('name'),
-    render: (row: TableRow) => renderModelCell(row as ModelRow),
-  },
-  {
-    key: 'platforms',
-    title: t('page.models.col.platforms'),
-    mobile: 'meta',
-    width: 140,
-    sortable: true,
-    sortOrder: sortOrderOf('platforms'),
-    render: (row: TableRow) => renderPlatforms(row as ModelRow),
-  },
-  {
-    key: 'multiplier',
-    title: t('page.models.col.multiplier'),
-    mobile: 'meta',
-    width: 100,
-    numeric: true,
-    sortable: true,
-    sortOrder: sortOrderOf('multiplier'),
-    render: (row: TableRow) => renderMultiplier(row as ModelRow),
-  },
-  {
-    key: 'limits',
-    title: t('page.models.col.limits'),
-    mobile: 'meta',
-    width: 156,
-    render: (row: TableRow) => renderLimits(row as ModelRow),
-  },
-  {
-    key: 'health',
-    title: t('page.models.col.health'),
-    mobile: 'title',
-    width: 186,
-    render: (row: TableRow) => renderHealth(row as ModelRow),
-  },
-  {
-    key: 'status',
-    title: t('page.models.col.status'),
-    mobile: 'meta',
-    width: 116,
-    render: (row: TableRow) => renderStatus(row as ModelRow),
-  },
-  {
-    key: 'actions',
-    title: t('page.models.col.actions'),
-    mobile: 'actions',
-    width: 132,
-    hideable: false,
-    fixed: 'right',
-    render: (row: TableRow) => renderActions(row as ModelRow),
-  },
-])
+const columns = useModelColumns({ health, sortOrderOf, openEdit, onRowAction })
 
 /* ------------------------------------------------------------------ *
  * 取数
@@ -928,6 +507,24 @@ async function submitEdit(): Promise<void> {
 
 let offPlatform: (() => void) | null = null
 
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
+useRevisit(() => silently(() => loadAll()), { minIntervalMs: 10_000 })
+
 onMounted(() => {
   void loadAll()
   offPlatform = platformStore.onChange(() => {
@@ -1047,7 +644,8 @@ onBeforeUnmount(() => {
             row-key="key"
             remote
             clickable-rows
-            :loading="loading"
+            :loading="loading && !silentRefresh"
+            :refreshing="loading && silentRefresh"
             :page="table.state.page"
             :page-size="table.state.pageSize"
             :item-count="pageData.total"
@@ -1253,392 +851,4 @@ onBeforeUnmount(() => {
   </div>
 </template>
 
-<style scoped>
-.models-page {
-  display: grid;
-  gap: var(--sp-4);
-  min-width: 0;
-}
-
-.models-card {
-  min-width: 0;
-}
-
-.models-filter {
-  padding: var(--sp-4) var(--sp-5) var(--sp-3);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.models-filter__search {
-  width: 260px;
-  max-width: 100%;
-}
-
-.models-filter__select {
-  width: 168px;
-}
-
-.models-filter__select.is-narrow {
-  width: 132px;
-}
-
-.models-body {
-  padding: var(--sp-3) var(--sp-5) var(--sp-5);
-  min-width: 0;
-}
-
-.models-skeleton {
-  display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-3) 0;
-}
-
-.models-health-error {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-2);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.models-footnote {
-  margin: var(--sp-3) 0 0;
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-faint);
-}
-
-.models-name {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  min-width: 0;
-  cursor: pointer;
-  border-radius: var(--r-sm);
-}
-
-.models-name:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
-}
-
-.models-name__main {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.models-name__title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-.models-name__text {
-  font-weight: 500;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.models-name__aliases {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-1);
-  margin-top: 2px;
-}
-
-.models-name__caps {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  margin-top: 2px;
-}
-
-.models-cap {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: var(--r-chip);
-  background: var(--surface-2);
-  color: var(--fg-muted);
-}
-
-.models-cap--reasoning {
-  color: var(--brand);
-}
-
-.models-cap--video {
-  color: var(--warn);
-}
-
-.models-platforms {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.models-platform {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-}
-
-.models-platform + .models-platform {
-  margin-left: -8px;
-}
-
-.models-platform.is-more {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-}
-
-.models-mult {
-  font-variant-numeric: tabular-nums;
-  color: var(--fg-2);
-}
-
-.models-mult.is-warn {
-  color: var(--warn);
-}
-
-.models-mult.is-ok {
-  color: var(--ok);
-}
-
-.models-mult.is-muted {
-  color: var(--fg-faint);
-}
-
-.models-limits {
-  display: grid;
-  gap: 1px;
-}
-
-.models-limits__line {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-1);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-}
-
-.models-limits__label {
-  color: var(--fg-faint);
-}
-
-.models-health {
-  display: grid;
-  gap: 2px;
-}
-
-.models-health__line {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-}
-
-.models-health__label {
-  color: var(--fg-faint);
-}
-
-.models-health__sub {
-  color: var(--fg-faint);
-}
-
-.models-status {
-  display: grid;
-  gap: 2px;
-}
-
-.models-status__sub {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-faint);
-}
-
-.models-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.models-dash {
-  color: var(--fg-faint);
-}
-
-/* 编辑抽屉 */
-.models-edit-head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding-bottom: var(--sp-3);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.models-edit-head__main {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.models-edit-head__name {
-  font-size: var(--fs-h2);
-  line-height: var(--lh-h2);
-  font-weight: 600;
-  color: var(--fg);
-}
-
-.models-edit-head__meta {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.models-edit-platforms,
-.models-edit-multipliers,
-.models-edit-map {
-  display: grid;
-  gap: var(--sp-1);
-}
-
-.models-edit-platform,
-.models-edit-multiplier {
-  display: grid;
-  grid-template-columns: 18px 1fr auto auto;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 4px 0;
-}
-
-.models-edit-platform__name,
-.models-edit-multiplier__name {
-  color: var(--fg);
-}
-
-.models-edit-platform__mult,
-.models-edit-multiplier__value {
-  color: var(--fg-2);
-  font-variant-numeric: tabular-nums;
-}
-
-.models-edit-multiplier__raw {
-  grid-column: 2 / -1;
-  color: var(--fg-faint);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.models-edit-caps {
-  display: grid;
-  gap: var(--sp-2);
-}
-
-.models-edit-caps__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-}
-
-.models-edit-caps__label {
-  color: var(--fg-2);
-}
-
-.models-edit-caps__number {
-  width: 160px;
-}
-
-.models-edit-caps__hint {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.models-edit-map__row {
-  display: grid;
-  grid-template-columns: 128px minmax(0, 1fr) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 4px 0;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.models-edit-map__platform {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  color: var(--fg-2);
-}
-
-.models-edit-map__upstream {
-  color: var(--fg-faint);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.models-edit-desc {
-  margin: 0;
-  font-size: var(--fs-small);
-  line-height: 1.6;
-  color: var(--fg-muted);
-}
-
-.models-edit-hint {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  font-size: var(--fs-small);
-  color: var(--fg-faint);
-}
-
-@media (max-width: 640px) {
-  .models-filter {
-    padding: var(--sp-3) var(--sp-4);
-  }
-
-  .models-body {
-    padding: var(--sp-2) var(--sp-4) var(--sp-4);
-  }
-
-  .models-filter__search,
-  .models-filter__select,
-  .models-filter__select.is-narrow {
-    width: 100%;
-  }
-
-  .models-edit-map__row {
-    grid-template-columns: 1fr auto;
-  }
-
-  .models-edit-map__upstream {
-    grid-column: 1 / -1;
-  }
-}
-</style>
+<style scoped src="./models/ModelsPage.css"></style>

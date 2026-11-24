@@ -1,5 +1,6 @@
 /**
- * 平台管理（/platforms）的数据层：卡片合并、动作声明、tier、批量扫描/导入/导出。
+ * 平台管理（/platforms）的数据层：卡片合并、动作声明、批量扫描/导入/导出。
+ * r4：平台分级（夯 / 人上人 / npc / 拉完了）功能已从前端删除；后端 /api/platforms 若仍返回 rating.tier，前端直接忽略。
  *
  * 契约：docs/ui-v2/contracts/platforms.md（末尾「## 实现对照」是本页的验收表）
  * 设计稿：docs/ui-v2/06-pages-a.md P4
@@ -23,6 +24,12 @@
  */
 import { http } from './http'
 import type { PlatformSpec } from './platforms'
+import { t, type MessageKey } from '@/i18n'
+
+/** 新键合并进字典前 MessageKey 里还没有，这里收窄一次类型（r3，键见 tmp/quick_round/i18n_pagesB.json）。 */
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* -------------------------------------------------------------------------- */
 /* 后端形状                                                                    */
@@ -110,75 +117,37 @@ export function getAccountsSnapshot(signal?: AbortSignal): Promise<{ items: Acco
   })
 }
 
+/** 导出完整凭证的二次确认请求头（后端 export_guard，r3）。 */
+export const EXPORT_CONFIRM_HEADER = 'X-Export-Confirm'
+export const EXPORT_CONFIRM_VALUE = 'include-secrets'
+
+/**
+ * 导出全部平台账号。
+ *   · plain：脱敏，仅用于核对；
+ *   · backup：含可直接登录的完整凭证，必须先在界面上确认，再带 `X-Export-Confirm: include-secrets`；
+ *     没带确认头时后端回 428 `export_confirm_required`（见 isExportConfirmRequired）。
+ */
 export function exportPlatformsAll(
-  mode: 'backup' | 'plain' = 'backup',
+  mode: 'backup' | 'plain' = 'plain',
   platform = '',
+  confirmed = false,
 ): Promise<Record<string, unknown>> {
   return http<Record<string, unknown>>('GET', '/api/platforms/export-all', {
     query: { mode, platform: platform || '' },
+    headers: confirmed ? { [EXPORT_CONFIRM_HEADER]: EXPORT_CONFIRM_VALUE } : undefined,
   })
 }
 
-/* -------------------------------------------------------------------------- */
-/* tier（platform-tiers.js 的移植 + 后端 rating 优先）                          */
-/* -------------------------------------------------------------------------- */
-
-export type PlatformTierKey = 'hang' | 'elite' | 'npc' | 'bad'
-
-export interface PlatformTier {
-  key: PlatformTierKey
-  label: string
-  rank: number
-  reason: string
-  source: string
-}
-
-export const TIER_ORDER: Array<{ key: PlatformTierKey; label: string; rank: number }> = [
-  { key: 'hang', label: '夯', rank: 4 },
-  { key: 'elite', label: '人上人', rank: 3 },
-  { key: 'npc', label: 'npc', rank: 2 },
-  { key: 'bad', label: '拉完了', rank: 1 },
-]
-
-/** 平台没自报 rating 时的兜底表（键是**落库平台名**，trae-cn/intl 共用）。 */
-export const TIER_FALLBACK: Record<string, { tier: PlatformTierKey; reason: string }> = {
-  workbuddy: {
-    tier: 'hang',
-    reason: '模型调用稳定、免排队，调用速度快；每月都有免费模型与低倍率模型，新用户最高可免费领 4000 积分。',
-  },
-  trae: { tier: 'npc', reason: '可能需要排队，额度给得不多，速度较慢。' },
-  qoder: { tier: 'bad', reason: '需要排队，额度不多，而且巨慢。' },
-  loomy: {
-    tier: 'hang',
-    reason: '稳定模型速度最快，新用户给的积分很足，每天签到还能领 5000 积分；美中不足是积分用得偏快。',
-  },
-  raccoon: { tier: 'elite', reason: '不算很稳定，时快时慢，但给的量还行、够用。' },
-  codearts: { tier: 'npc', reason: '保活续签比较麻烦，额度不算多但够用，速度不快。' },
-  minimax: { tier: 'elite', reason: '只有自家模型，额度消耗不快，速度还行。' },
-  'wps-lingxi': { tier: 'npc', reason: '模型给得多，但每个量的额度不大。' },
-}
-
-function tierMeta(key: string): { key: PlatformTierKey; label: string; rank: number } | null {
-  const found = TIER_ORDER.find((item) => item.key === String(key || '').toLowerCase())
-  return found ? { ...found } : null
-}
-
-/** 平台等级：平台自报（rating）优先，其次前端兜底表，都没有就不显示。 */
-export function tierOf(spec: PlatformSpec | null | undefined, storage?: string): PlatformTier | null {
-  if (!spec) return null
-  const self = spec.rating || {}
-  const declared = tierMeta(String(self.tier || ''))
-  if (declared) {
-    return { ...declared, reason: String(self.reason || ''), source: String(self.source || 'platform') }
-  }
-  const key = String(storage || spec.storage_platform || spec.id || '')
-    .toLowerCase()
-    .replace(/-(cn|intl)$/, '')
-  const fallback = TIER_FALLBACK[key]
-  if (!fallback) return null
-  const meta = tierMeta(fallback.tier)
-  if (!meta) return null
-  return { ...meta, reason: fallback.reason, source: 'fallback' }
+/** 后端要求确认才肯导出完整凭证（428 + detail.code = export_confirm_required）。 */
+export function isExportConfirmRequired(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const status = (error as { status?: unknown }).status
+  if (status !== 428) return false
+  const detail = (error as { detail?: unknown }).detail
+  if (!detail || typeof detail !== 'object') return true
+  const inner = (detail as { detail?: unknown }).detail
+  const code = (detail as { code?: unknown }).code ?? (inner && typeof inner === 'object' ? (inner as { code?: unknown }).code : undefined)
+  return code === undefined || code === 'export_confirm_required'
 }
 
 /* -------------------------------------------------------------------------- */
@@ -192,23 +161,23 @@ export interface PlatformActionItem {
   primary: boolean
 }
 
-/** 动作 → 中文名（只有展示信息，能力由后端 actions 决定）。 */
+/** 动作 → 显示名（只有展示信息，能力由后端 actions 决定）。getter：每次读取按当前语言取词。 */
 export const ACTION_LABELS: Record<string, string> = {
-  scan: '扫描本机',
-  import: '导入账号',
-  'import-file': '导入账号',
-  export: '导出',
-  'refresh-quota': '刷新额度',
-  usage: '用量明细',
-  'web-cookie': '用量 Cookie',
-  checkin: '签到领取',
-  activity: '活跃对话',
-  onboarding: '新手任务',
-  invite: '邀请码',
-  'ban-recheck': '失效复检',
-  'begin-auth': '授权登录',
-  inject: '注入客户端',
-  keepalive: '保活校验',
+  get scan() { return tx('page.platforms.actionName.scan') },
+  get import() { return tx('page.platforms.actionName.import') },
+  get 'import-file'() { return tx('page.platforms.actionName.importFile') },
+  get export() { return tx('page.platforms.actionName.export') },
+  get 'refresh-quota'() { return tx('page.platforms.actionName.refreshQuota') },
+  get usage() { return tx('page.platforms.actionName.usage') },
+  get 'web-cookie'() { return tx('page.platforms.actionName.webCookie') },
+  get checkin() { return tx('page.platforms.actionName.checkin') },
+  get activity() { return tx('page.platforms.actionName.activity') },
+  get onboarding() { return tx('page.platforms.actionName.onboarding') },
+  get invite() { return tx('page.platforms.actionName.invite') },
+  get 'ban-recheck'() { return tx('page.platforms.actionName.banRecheck') },
+  get 'begin-auth'() { return tx('page.platforms.actionName.beginAuth') },
+  get inject() { return tx('page.platforms.actionName.inject') },
+  get keepalive() { return tx('page.platforms.actionName.keepalive') },
 }
 
 const PRIMARY_ACTIONS = new Set(['import', 'import-file', 'begin-auth'])
@@ -270,7 +239,6 @@ export interface PlatformCard {
   ttfbMs: number | null
   tps: number | null
   lowSample: boolean
-  tier: PlatformTier | null
   actions: PlatformActionItem[]
   managed: boolean
   notes: string
@@ -352,7 +320,6 @@ export function toPlatformCards(input: PlatformCardsInput): PlatformCard[] {
       ttfbMs: speedRow && speedRow.ttfb_avg ? Number(speedRow.ttfb_avg) : null,
       tps: speedRow && speedRow.tps_avg ? Number(speedRow.tps_avg) : null,
       lowSample: Boolean(speedRow?.low_sample),
-      tier: tierOf(spec, storage),
       actions: platformActionsOf(spec),
       managed: Boolean(spec.managed),
       notes: spec.notes || '',
@@ -464,8 +431,8 @@ export async function runPlatformScan(
       )
       result.imported = Number(data?.added || 0)
       result.skipped = Number(data?.skipped || 0)
-      if (data?.exists === false) result.note = '本机没有登录目录'
-      else if (!result.imported && !result.skipped) result.note = '本机没有新凭证'
+      if (data?.exists === false) result.note = tx('page.platforms.scanNote.noDir')
+      else if (!result.imported && !result.skipped) result.note = tx('page.platforms.scanNote.noNew')
       return result
     }
     const scanned = await http<{ items?: Array<Record<string, unknown>> }>(
@@ -476,11 +443,11 @@ export async function runPlatformScan(
     const items = Array.isArray(scanned?.items) ? scanned.items : []
     result.scanned = items.length
     if (!items.length) {
-      result.note = plan.kind === 'scan-only' ? '本机没有该平台的登录' : '本机没有可读凭证'
+      result.note = plan.kind === 'scan-only' ? tx('page.platforms.scanNote.noLogin') : tx('page.platforms.scanNote.noReadable')
       return result
     }
     if (plan.kind === 'scan-only') {
-      result.note = '发现 ' + result.scanned + ' 个本机登录，请用「授权登录」逐个导入'
+      result.note = tx('page.platforms.scanNote.foundScanOnly', { n: result.scanned })
       return result
     }
     const uids = items
@@ -497,11 +464,11 @@ export async function runPlatformScan(
     result.imported = Number(imported?.imported || 0)
     result.skipped = Number(imported?.skipped || 0)
     if (!result.imported && !result.skipped) {
-      result.note = String(imported?.hint || imported?.reason || '没有可导入凭证')
+      result.note = String(imported?.hint || imported?.reason || tx('page.platforms.scanNote.nothing'))
     }
     return result
   } catch (error) {
-    result.note = '失败：' + ((error as Error)?.message || String(error))
+    result.note = tx('page.platforms.scanNote.failed', { reason: (error as Error)?.message || String(error) })
     return result
   }
 }
@@ -531,18 +498,18 @@ export function parsePlatformBackup(texts: Array<{ name: string; text: string }>
   for (const file of texts) {
     const raw = String(file.text || '').replace(/^\uFEFF/, '').trim()
     if (!raw) {
-      notes.push(file.name + '：空文件，已跳过')
+      notes.push(tx('page.platforms.importNote.empty', { name: file.name }))
       continue
     }
     let parsed: PlatformBackupFile
     try {
       parsed = JSON.parse(raw) as PlatformBackupFile
     } catch (error) {
-      notes.push(file.name + '：不是合法 JSON，已跳过')
+      notes.push(tx('page.platforms.importNote.badJson', { name: file.name }))
       continue
     }
     if (!parsed || typeof parsed !== 'object' || !parsed.platforms) {
-      notes.push(file.name + '：不是「导出全部平台」的格式（缺 platforms 字段），已跳过')
+      notes.push(tx('page.platforms.importNote.badFormat', { name: file.name }))
       continue
     }
     for (const [storage, pack] of Object.entries(parsed.platforms)) {
@@ -579,7 +546,7 @@ export async function submitPlatformImport(
   const data = await http<{ job_id?: string }>('POST', '/api/accounts/import-async', {
     body: importPayloadFor(storage, accounts),
   })
-  if (!data?.job_id) throw new Error('后端没有返回 job_id')
+  if (!data?.job_id) throw new Error(tx('page.platforms.importNote.noJob'))
   return data.job_id
 }
 

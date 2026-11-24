@@ -48,8 +48,8 @@ withDefaults(
 }
 
 .mh-section__title {
-  font-size: 13px;
-  line-height: var(--lh-small);
+  font-size: var(--fs-h3);
+  line-height: var(--lh-h3);
   font-weight: 600;
   color: var(--fg);
 }

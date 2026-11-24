@@ -41,6 +41,72 @@ export function useCommands() {
   }
 }
 
+/**
+ * 全局快捷操作（03-shell §2.4：「添加账号、导入账号、创建 Key」必须在任何页面都搜得到）。
+ *
+ * 真正的动作仍由页面注册（同 id）：页面在场时面板直接用页面注册的那条；
+ * 页面不在场时面板用这里的条目 —— 先跳到对应页面，等页面注册好同 id 的命令再执行。
+ * 这样动作只有一份实现（页面里的抽屉），外壳不复制业务逻辑。
+ */
+export interface ShellShortcut {
+  /** 与页面 registerCommand 的 id 一致。 */
+  id: string
+  /** 目标页面路径。 */
+  path: string
+  /** i18n key（标题 / 副标题 / 搜索词），由面板翻译。 */
+  titleKey: string
+  hintKey: string
+  keywordsKey: string
+}
+
+export const SHELL_SHORTCUTS: readonly ShellShortcut[] = [
+  {
+    id: 'accounts.add',
+    path: '/accounts',
+    titleKey: 'page.accounts.commandAdd',
+    hintKey: 'page.accounts.commandHint',
+    keywordsKey: 'page.accounts.commandAddKeywords',
+  },
+  {
+    id: 'accounts.import',
+    path: '/accounts',
+    titleKey: 'page.accounts.commandImport',
+    hintKey: 'page.accounts.commandHint',
+    keywordsKey: 'page.accounts.commandImportKeywords',
+  },
+  {
+    id: 'keys.create',
+    path: '/keys',
+    titleKey: 'cmdk.createKey',
+    hintKey: 'cmdk.createKeyHint',
+    keywordsKey: 'cmdk.keywordsCreateKey',
+  },
+]
+
+/** 当前注册表里的某条命令（没有则 null）。 */
+export function findCommand(id: string): ShellCommand | null {
+  return registry.value.find((item) => item.id === id) ?? null
+}
+
+/**
+ * 等页面注册某个命令（跳转后页面异步挂载）。超时返回 null，不抛错。
+ * 轮询而不是 watch：注册表是模块级 ref，这里不依赖组件实例，测试里也能直接用。
+ */
+export function waitForCommand(id: string, timeoutMs = 5000, intervalMs = 50): Promise<ShellCommand | null> {
+  const hit = findCommand(id)
+  if (hit) return Promise.resolve(hit)
+  return new Promise((resolve) => {
+    const started = Date.now()
+    const timer = setInterval(() => {
+      const found = findCommand(id)
+      if (found || Date.now() - started >= timeoutMs) {
+        clearInterval(timer)
+        resolve(found)
+      }
+    }, intervalMs)
+  })
+}
+
 /** 仅测试用：清空注册表。 */
 export function resetCommands(): void {
   registry.value = []
