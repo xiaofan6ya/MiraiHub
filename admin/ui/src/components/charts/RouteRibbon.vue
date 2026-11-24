@@ -251,7 +251,7 @@ function select(lane: RibbonLane): void {
 .mh-ribbon__source-unit {
   font-size: var(--fs-tiny);
   line-height: var(--lh-tiny);
-  color: var(--fg-faint);
+  color: var(--fg-muted);
 }
 
 .mh-ribbon__canvas {
