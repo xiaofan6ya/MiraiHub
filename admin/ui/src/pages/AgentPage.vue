@@ -11,6 +11,9 @@
  *   · Markdown 一律经 marked + DOMPurify 后再 v-html；
  *   · 附件只作为文本标注随消息发送（后端 /chat 没有附件字段，不做假上传）；
  *   · 右栏 ≤1280px 收起为浮层，用顶栏「参数」按钮开关；卸载时断开 matchMedia 与流。
+ *
+ * 文案全部走 useI18n().t（page.agent.*）：模板里的 t() 在 render 里读 locale，
+ * 切语言立即重算；api/agent.ts 的纯函数给的是数据与状态，标签由本页按 key 取。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NInput, NSelect, NSkeleton } from 'naive-ui'
@@ -43,11 +46,11 @@ import { fmtRelative } from '@/utils/format'
 import { failureText } from '@/utils/error'
 import { isAbortError } from '@/api/http'
 import { copyText } from '@/platform/clipboard'
+import { useI18n, type MessageKey } from '@/i18n'
 import {
   applyChatEvent,
   assetUrl,
   chatStream,
-  conversationTitle,
   deleteConversation,
   emptyAssistantMessage,
   estimateCredits,
@@ -70,9 +73,9 @@ import {
   type ChatRequestBody,
 } from '@/api/agent'
 
-const HELP_TEXT =
-  '内置创作助手：对话、生图、生视频。回答会边生成边显示（SSE）；' +
-  '生成图片/视频会消耗积分，右侧可预估。会话保存在服务端，刷新后仍在。'
+const { t } = useI18n()
+/** 页头说明（语种跟随 useI18n）。 */
+const helpText = computed(() => t('page.agent.help'))
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -168,7 +171,24 @@ const convError = ref('')
 const search = ref('')
 const activeConvId = ref('')
 
-const groups = computed(() => groupConversations(filterConversations(conversations.value, search.value)))
+/** 左栏分组标题跟随语言（分组口径仍由 api/agent.ts:groupConversations 决定）。 */
+const GROUP_LABEL_KEYS: Record<string, MessageKey> = {
+  pinned: 'page.agent.group.pinned',
+  today: 'page.agent.group.today',
+  earlier: 'page.agent.group.earlier',
+}
+
+const groups = computed(() =>
+  groupConversations(filterConversations(conversations.value, search.value)).map((group) => ({
+    ...group,
+    label: t(GROUP_LABEL_KEYS[group.key] ?? 'page.agent.group.earlier'),
+  })),
+)
+
+/** 会话标题：空标题回「新会话」（按当前语言）。 */
+function displayTitle(item: AgentConversation): string {
+  return String(item.title || '').trim() || t('page.agent.newChat')
+}
 
 const modelOptions = computed(() => {
   const models = bootstrap.value?.models
@@ -176,25 +196,25 @@ const modelOptions = computed(() => {
   return list.map((value) => ({ label: value, value }))
 })
 
-const reasoningOptions = [
-  { label: '思考档位：默认', value: '' },
-  { label: '低', value: 'low' },
-  { label: '中', value: 'medium' },
-  { label: '高', value: 'high' },
-  { label: '极高', value: 'max' },
-]
+const reasoningOptions = computed(() => [
+  { label: t('page.agent.reasoningOption.default'), value: '' },
+  { label: t('page.agent.reasoningOption.low'), value: 'low' },
+  { label: t('page.agent.reasoningOption.medium'), value: 'medium' },
+  { label: t('page.agent.reasoningOption.high'), value: 'high' },
+  { label: t('page.agent.reasoningOption.max'), value: 'max' },
+])
 
-const thinkingOptions = [
-  { label: '思考：默认', value: 'default' },
-  { label: '思考：开启', value: 'on' },
-  { label: '思考：关闭', value: 'off' },
-]
+const thinkingOptions = computed(() => [
+  { label: t('page.agent.thinkingOption.default'), value: 'default' },
+  { label: t('page.agent.thinkingOption.on'), value: 'on' },
+  { label: t('page.agent.thinkingOption.off'), value: 'off' },
+])
 
-const modeOptions: Array<SegmentedOption<string>> = [
-  { label: '对话', value: 'chat' },
-  { label: '生图', value: 'image' },
-  { label: '生视频', value: 'video' },
-]
+const modeOptions = computed<Array<SegmentedOption<string>>>(() => [
+  { label: t('page.agent.mode.chat'), value: 'chat' },
+  { label: t('page.agent.mode.image'), value: 'image' },
+  { label: t('page.agent.mode.video'), value: 'video' },
+])
 
 const keyMissing = computed(() => Boolean(bootstrap.value) && !bootstrap.value?.key)
 
@@ -206,7 +226,7 @@ async function loadBootstrap(): Promise<void> {
     bootstrap.value = data
     ensureModel()
   } catch (error) {
-    bootError.value = { message: failureText('加载智能体配置', error), detail: '' }
+    bootError.value = { message: failureText(t('page.agent.action.loadBootstrap'), error), detail: '' }
   } finally {
     bootLoading.value = false
   }
@@ -227,7 +247,7 @@ async function loadConversations(): Promise<void> {
     const payload = await listConversations(60)
     conversations.value = Array.isArray(payload?.items) ? payload.items : []
   } catch (error) {
-    convError.value = failureText('加载会话', error)
+    convError.value = failureText(t('page.agent.action.loadChats'), error)
   } finally {
     convLoading.value = false
   }
@@ -266,7 +286,7 @@ async function openConversation(item: AgentConversation): Promise<void> {
     if (data.reasoning !== undefined) reasoning.value = String(data.reasoning || '')
     await scrollToEnd()
   } catch (error) {
-    messagesError.value = failureText('打开会话', error)
+    messagesError.value = failureText(t('page.agent.action.openChat'), error)
   } finally {
     messagesLoading.value = false
   }
@@ -288,19 +308,19 @@ function newConversation(): void {
 
 async function removeConversation(item: AgentConversation): Promise<void> {
   const ok = await confirm({
-    title: '删除会话「' + conversationTitle(item) + '」？',
-    message: '删除后无法恢复；该会话的历史消息不会再出现在列表里。',
-    okText: '删除',
+    title: t('page.agent.confirm.deleteTitle', { title: displayTitle(item) }),
+    message: t('page.agent.confirm.deleteBody'),
+    okText: t('page.agent.confirm.deleteOk'),
     danger: true,
   })
   if (!ok) return
   try {
     await deleteConversation(item.conversation_id)
-    toast.success('已删除会话')
+    toast.success(t('page.agent.deleted'))
     if (activeConvId.value === item.conversation_id) newConversation()
     await loadConversations()
   } catch (error) {
-    toast.error(failureText('删除会话', error))
+    toast.error(failureText(t('page.agent.deleteChat'), error))
   }
 }
 
@@ -309,7 +329,7 @@ async function togglePin(item: AgentConversation): Promise<void> {
     await patchConversation(item.conversation_id, { pinned: !item.pinned })
     await loadConversations()
   } catch (error) {
-    toast.error(failureText('置顶会话', error))
+    toast.error(failureText(t('page.agent.action.pinChat'), error))
   }
 }
 
@@ -318,18 +338,18 @@ const editingTitle = ref('')
 
 function startRename(item: AgentConversation): void {
   editingId.value = item.conversation_id
-  editingTitle.value = conversationTitle(item)
+  editingTitle.value = displayTitle(item)
 }
 
 async function saveRename(item: AgentConversation): Promise<void> {
   const title = editingTitle.value.trim()
   editingId.value = ''
-  if (!title || title === conversationTitle(item)) return
+  if (!title || title === displayTitle(item)) return
   try {
     await patchConversation(item.conversation_id, { title })
     await loadConversations()
   } catch (error) {
-    toast.error(failureText('重命名会话', error))
+    toast.error(failureText(t('page.agent.action.renameChat'), error))
   }
 }
 
@@ -346,15 +366,17 @@ async function send(): Promise<void> {
   }
   const text = input.value.trim()
   if (!text) {
-    toast.warning('先输入内容再发送')
+    toast.warning(t('page.agent.toast.emptyInput'))
     return
   }
   if (keyMissing.value) {
-    toast.error('还没有可用的 API Key，请先在「API Keys」创建')
+    toast.error(t('page.agent.keyMissingToast'))
     return
   }
   const names = attachments.value.map((item) => item.name)
-  const note = names.length ? '\n\n（附件：' + names.join('、') + '）' : ''
+  const note = names.length
+    ? '\n\n' + t('page.agent.attachmentsNote', { names: names.join(t('page.agent.listSeparator')) })
+    : ''
   const userMessage = userChatMessage(text, names)
   messages.value.push(userMessage)
   messages.value.push(emptyAssistantMessage())
@@ -399,7 +421,12 @@ async function send(): Promise<void> {
           void loadAssets()
         }
         if (event.type === 'error') {
-          toast.error(failureText('模型回复', event.message || '未知错误'))
+          // 上游没给原因时 applyChatEvent 会填中文兜底，这里按当前语言覆盖。
+          if (!event.message) {
+            const failed = messages.value[index]
+            if (failed) messages.value[index] = { ...failed, error: t('page.agent.modelFailed') }
+          }
+          toast.error(failureText(t('page.agent.action.modelReply'), event.message || t('page.agent.unknownError')))
         }
       },
       controller.signal,
@@ -410,10 +437,10 @@ async function send(): Promise<void> {
       messages.value[index] = {
         ...current,
         streaming: false,
-        error: isAbortError(error) ? '' : failureText('发送消息', error),
+        error: isAbortError(error) ? '' : failureText(t('page.agent.action.sendMessage'), error),
       }
     }
-    if (!isAbortError(error)) toast.error(failureText('发送消息', error))
+    if (!isAbortError(error)) toast.error(failureText(t('page.agent.action.sendMessage'), error))
   } finally {
     if (abort === controller) abort = null
     streaming.value = false
@@ -466,8 +493,8 @@ async function onMessageClick(event: MouseEvent): Promise<void> {
   const text = pre.textContent || ''
   if (!text.trim()) return
   const ok = await copyText(text)
-  if (ok) toast.success('已复制代码')
-  else toast.error('复制失败：浏览器拒绝了剪贴板访问')
+  if (ok) toast.success(t('page.agent.copied'))
+  else toast.error(t('page.agent.copyFailed'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -503,12 +530,12 @@ async function mergeSelected(): Promise<void> {
   merging.value = true
   try {
     const result = await mergeAssets(selectedAssets.value)
-    toast.success(String(result.summary || '已合并所选视频'))
+    toast.success(String(result.summary || t('page.agent.merged')))
     selectedAssets.value = []
     await loadAssets()
     await loadConversations()
   } catch (error) {
-    toast.error(failureText('合并视频', error))
+    toast.error(failureText(t('page.agent.action.mergeVideos'), error))
   } finally {
     merging.value = false
   }
@@ -543,7 +570,9 @@ watch([mode, model, imageSize, videoSeconds, videoResolution], scheduleEstimate)
 const imageSizeOptions = ['1024x1024', '1024x1536', '1280x720', '1536x1024'].map((value) => ({ label: value, value }))
 const resolutionOptions = ['720P', '1080P'].map((value) => ({ label: value, value }))
 const aspectOptions = ['16:9', '9:16', '1:1'].map((value) => ({ label: value, value }))
-const secondsOptions = [5, 6, 8, 10].map((value) => ({ label: value + ' 秒', value: String(value) }))
+const secondsOptions = computed(() =>
+  [5, 6, 8, 10].map((value) => ({ label: t('page.agent.seconds', { seconds: value }), value: String(value) })),
+)
 
 /* ------------------------------------------------------------------ *
  * 右栏折叠（≤1280 收起为浮层）
@@ -580,14 +609,23 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="agent-page">
-    <PageHeader title="智能体" :help="HELP_TEXT">
+    <PageHeader :title="t('page.agent.title')" :help="helpText">
       <template #actions>
-        <Segmented :options="modeOptions" :model-value="mode" aria-label="创作模式" @update:model-value="(value: string | number) => (mode = value === 'image' || value === 'video' ? value : 'chat')" />
+        <Segmented
+          :options="modeOptions"
+          :model-value="mode"
+          :aria-label="t('page.agent.modeAria')"
+          @update:model-value="(value: string | number) => (mode = value === 'image' || value === 'video' ? value : 'chat')"
+        />
         <span v-if="context" class="agent-context">
-          上下文 {{ context.percent }}%
-          <Meter :value="context.percent" tone="brand" :aria-label="'上下文占用 ' + context.percent + '%'" />
+          {{ t('page.agent.context', { percent: context.percent }) }}
+          <Meter
+            :value="context.percent"
+            tone="brand"
+            :aria-label="t('page.agent.contextAria', { percent: context.percent })"
+          />
         </span>
-        <IconBtn label="参数与产物" :icon="Settings2" :active="asideOpen" @click="asideOpen = !asideOpen" />
+        <IconBtn :label="t('page.agent.asideToggle')" :icon="Settings2" :active="asideOpen" @click="asideOpen = !asideOpen" />
       </template>
     </PageHeader>
 
@@ -601,13 +639,17 @@ onBeforeUnmount(() => {
       <!-- 左栏：会话 -->
       <aside class="agent-conv">
         <div class="agent-conv__head">
-          <Btn variant="primary" size="sm" :icon="Plus" block @click="newConversation">新会话</Btn>
+          <Btn variant="primary" size="sm" :icon="Plus" block @click="newConversation">
+            {{ t('page.agent.newChat') }}
+          </Btn>
         </div>
-        <n-input v-model:value="search" size="small" placeholder="搜索会话" clearable />
+        <n-input v-model:value="search" size="small" :placeholder="t('page.agent.searchPlaceholder')" clearable />
         <div class="agent-conv__list">
-          <p v-if="convLoading && !conversations.length" class="agent-muted">正在加载会话…</p>
+          <p v-if="convLoading && !conversations.length" class="agent-muted">{{ t('page.agent.loadingChats') }}</p>
           <ErrorBlock v-else-if="convError" :title="convError" compact @retry="loadConversations" />
-          <p v-else-if="!groups.length" class="agent-muted">{{ conversations.length ? '没有匹配的会话' : '还没有会话，开始创作吧' }}</p>
+          <p v-else-if="!groups.length" class="agent-muted">
+            {{ conversations.length ? t('page.agent.noMatch') : t('page.agent.noChats') }}
+          </p>
           <div v-for="group in groups" v-else :key="group.key" class="agent-conv__group">
             <p class="agent-conv__label">{{ group.label }}</p>
             <div
@@ -629,13 +671,18 @@ onBeforeUnmount(() => {
                 @blur="saveRename(item)"
               />
               <template v-else>
-                <span class="agent-conv__title" :title="conversationTitle(item)">{{ conversationTitle(item) }}</span>
+                <span class="agent-conv__title" :title="displayTitle(item)">{{ displayTitle(item) }}</span>
                 <span class="agent-conv__time">{{ fmtRelative(item.updated_at || item.created_at) }}</span>
               </template>
               <span class="agent-conv__ops" @click.stop>
-                <IconBtn label="重命名" :icon="Pencil" @click="startRename(item)" />
-                <IconBtn :label="item.pinned ? '取消置顶' : '置顶'" :icon="Pin" :active="item.pinned" @click="togglePin(item)" />
-                <IconBtn label="删除会话" :icon="Trash2" @click="removeConversation(item)" />
+                <IconBtn :label="t('page.agent.rename')" :icon="Pencil" @click="startRename(item)" />
+                <IconBtn
+                  :label="item.pinned ? t('page.agent.unpin') : t('page.agent.pin')"
+                  :icon="Pin"
+                  :active="item.pinned"
+                  @click="togglePin(item)"
+                />
+                <IconBtn :label="t('page.agent.deleteChat')" :icon="Trash2" @click="removeConversation(item)" />
               </span>
             </div>
           </div>
@@ -645,26 +692,31 @@ onBeforeUnmount(() => {
       <!-- 中栏：对话 -->
       <section class="agent-chat">
         <p v-if="keyMissing" class="agent-banner is-warn">
-          还没有可用的 API Key。请先在「API Keys」创建，智能体会复用它的配额与分组。
+          {{ t('page.agent.keyMissing') }}
         </p>
 
         <div ref="messagesEl" class="agent-messages" @click="onMessageClick">
-          <p v-if="messagesLoading" class="agent-muted">正在加载会话…</p>
-          <ErrorBlock v-else-if="messagesError" :title="messagesError" compact @retry="activeConvId && openConversation({ conversation_id: activeConvId } as AgentConversation)" />
+          <p v-if="messagesLoading" class="agent-muted">{{ t('page.agent.loadingChats') }}</p>
+          <ErrorBlock
+            v-else-if="messagesError"
+            :title="messagesError"
+            compact
+            @retry="activeConvId && openConversation({ conversation_id: activeConvId } as AgentConversation)"
+          />
           <div v-else-if="!messages.length" class="agent-start">
-            <p class="agent-start__title">开始创作</p>
+            <p class="agent-start__title">{{ t('page.agent.startTitle') }}</p>
             <div class="agent-start__cards">
               <button type="button" class="agent-start__card" @click="mode = 'chat'">
-                <strong>对话</strong>
-                <span>问问题、查用法、让它调用工具</span>
+                <strong>{{ t('page.agent.mode.chat') }}</strong>
+                <span>{{ t('page.agent.start.chatDesc') }}</span>
               </button>
               <button type="button" class="agent-start__card" @click="mode = 'image'">
-                <strong>生图</strong>
-                <span>封面、插图、海报、产品图</span>
+                <strong>{{ t('page.agent.mode.image') }}</strong>
+                <span>{{ t('page.agent.start.imageDesc') }}</span>
               </button>
               <button type="button" class="agent-start__card" @click="mode = 'video'">
-                <strong>生视频</strong>
-                <span>分镜、长视频分段生成与合并</span>
+                <strong>{{ t('page.agent.mode.video') }}</strong>
+                <span>{{ t('page.agent.start.videoDesc') }}</span>
               </button>
             </div>
           </div>
@@ -678,11 +730,13 @@ onBeforeUnmount(() => {
             <div class="agent-bubble">
               <template v-if="message.role === 'user'">
                 <p class="agent-text">{{ message.content }}</p>
-                <p v-if="message.attachments.length" class="agent-muted">附件：{{ message.attachments.join('、') }}</p>
+                <p v-if="message.attachments.length" class="agent-muted">
+                  {{ t('page.agent.attachments', { names: message.attachments.join(t('page.agent.listSeparator')) }) }}
+                </p>
               </template>
               <template v-else>
                 <details v-if="message.reasoning" class="agent-think">
-                  <summary>思考过程</summary>
+                  <summary>{{ t('page.agent.reasoning') }}</summary>
                   <pre>{{ message.reasoning }}</pre>
                 </details>
                 <div v-if="message.tools.length" class="agent-tools">
@@ -696,14 +750,26 @@ onBeforeUnmount(() => {
                 <div v-if="message.content" class="agent-md" v-html="renderMarkdown(message.content)" />
                 <div v-if="message.assets.length" class="agent-assets">
                   <figure v-for="asset in message.assets" :key="asset.asset_id" class="agent-asset">
-                    <img v-if="asset.kind === 'image'" :src="assetUrl(asset.asset_id)" :alt="asset.prompt || '生成图片'" loading="lazy" />
+                    <img
+                      v-if="asset.kind === 'image'"
+                      :src="assetUrl(asset.asset_id)"
+                      :alt="asset.prompt || t('page.agent.imageAlt')"
+                      loading="lazy"
+                    />
                     <video v-else :src="assetUrl(asset.asset_id)" controls preload="metadata" />
-                    <figcaption>{{ asset.kind === 'image' ? '图片' : '视频' }} · {{ asset.model }}<template v-if="asset.credits"> · {{ asset.credits }} 积分</template></figcaption>
+                    <figcaption>
+                      {{ t('page.agent.assetCaption', {
+                        kind: asset.kind === 'image' ? t('page.agent.kind.image') : t('page.agent.kind.video'),
+                        model: asset.model,
+                      }) }}<template v-if="asset.credits">{{ t('page.agent.assetCredits', { credits: asset.credits }) }}</template>
+                    </figcaption>
                   </figure>
                 </div>
                 <p v-if="message.error" class="agent-error">{{ message.error }}</p>
-                <p v-if="message.streaming" class="agent-typing">生成中…</p>
-                <p v-if="message.credits" class="agent-muted">本轮消耗 {{ message.credits }} 积分</p>
+                <p v-if="message.streaming" class="agent-typing">{{ t('page.agent.generating') }}</p>
+                <p v-if="message.credits" class="agent-muted">
+                  {{ t('page.agent.creditsUsed', { credits: message.credits }) }}
+                </p>
               </template>
             </div>
           </article>
@@ -713,22 +779,24 @@ onBeforeUnmount(() => {
           <div v-if="attachments.length" class="agent-attachments">
             <span v-for="(file, index) in attachments" :key="file.name + index" class="agent-attachment">
               {{ file.name }}
-              <button type="button" aria-label="移除附件" @click="removeAttachment(index)"><X :size="12" /></button>
+              <button type="button" :aria-label="t('page.agent.removeAttachment')" @click="removeAttachment(index)">
+                <X :size="12" />
+              </button>
             </span>
           </div>
           <n-input
             v-model:value="input"
             type="textarea"
             :autosize="{ minRows: 1, maxRows: 8 }"
-            :placeholder="mode === 'image' ? '描述你想生成的画面…' : mode === 'video' ? '描述分镜、镜头与光线…' : '输入消息，Enter 发送，Shift+Enter 换行'"
+            :placeholder="mode === 'image' ? t('page.agent.placeholder.image') : mode === 'video' ? t('page.agent.placeholder.video') : t('page.agent.placeholder.chat')"
             @keydown="onKeydown"
           />
           <div class="agent-composer__bar">
-            <IconBtn label="添加附件" :icon="Paperclip" @click="fileInput?.click()" />
+            <IconBtn :label="t('page.agent.addAttachment')" :icon="Paperclip" @click="fileInput?.click()" />
             <input ref="fileInput" class="agent-file" type="file" multiple @change="onFiles" />
-            <span class="agent-muted">Enter 发送 · Shift+Enter 换行</span>
+            <span class="agent-muted">{{ t('page.agent.sendHint') }}</span>
             <Btn :variant="sending ? 'danger' : 'primary'" :icon="sending ? Square : Send" @click="send">
-              {{ sending ? '停止' : '发送' }}
+              {{ sending ? t('page.agent.stop') : t('page.agent.send') }}
             </Btn>
           </div>
         </div>
@@ -736,46 +804,88 @@ onBeforeUnmount(() => {
 
       <!-- 右栏：设置与产物 -->
       <aside class="agent-aside" :class="{ 'is-overlay': narrow, 'is-open': asideOpen }">
-        <Card title="模型与参数">
+        <Card :title="t('page.agent.card.model')">
           <div class="agent-field">
-            <span class="agent-label">模型</span>
-            <n-select :value="model" :options="modelOptions" size="small" placeholder="选择模型" @update:value="(value: string | number | null) => (model = String(value || ''))" />
+            <span class="agent-label">{{ t('page.agent.field.model') }}</span>
+            <n-select
+              :value="model"
+              :options="modelOptions"
+              size="small"
+              :placeholder="t('page.agent.selectModel')"
+              @update:value="(value: string | number | null) => (model = String(value || ''))"
+            />
           </div>
           <div class="agent-field">
-            <span class="agent-label">思考</span>
-            <n-select :value="thinking" :options="thinkingOptions" size="small" @update:value="(value: string | number | null) => (thinking = value === 'on' || value === 'off' ? value : 'default')" />
+            <span class="agent-label">{{ t('page.agent.field.thinking') }}</span>
+            <n-select
+              :value="thinking"
+              :options="thinkingOptions"
+              size="small"
+              @update:value="(value: string | number | null) => (thinking = value === 'on' || value === 'off' ? value : 'default')"
+            />
           </div>
           <div class="agent-field">
-            <span class="agent-label">思考档位</span>
-            <n-select :value="reasoning" :options="reasoningOptions" size="small" @update:value="(value: string | number | null) => (reasoning = String(value || ''))" />
+            <span class="agent-label">{{ t('page.agent.field.reasoning') }}</span>
+            <n-select
+              :value="reasoning"
+              :options="reasoningOptions"
+              size="small"
+              @update:value="(value: string | number | null) => (reasoning = String(value || ''))"
+            />
           </div>
           <div v-if="mode === 'image'" class="agent-field">
-            <span class="agent-label">尺寸</span>
-            <n-select :value="imageSize" :options="imageSizeOptions" size="small" @update:value="(value: string | number | null) => (imageSize = String(value || ''))" />
+            <span class="agent-label">{{ t('page.agent.field.size') }}</span>
+            <n-select
+              :value="imageSize"
+              :options="imageSizeOptions"
+              size="small"
+              @update:value="(value: string | number | null) => (imageSize = String(value || ''))"
+            />
           </div>
           <template v-if="mode === 'video'">
             <div class="agent-field">
-              <span class="agent-label">时长</span>
-              <n-select :value="videoSeconds" :options="secondsOptions" size="small" @update:value="(value: string | number | null) => (videoSeconds = String(value || '5'))" />
+              <span class="agent-label">{{ t('page.agent.field.seconds') }}</span>
+              <n-select
+                :value="videoSeconds"
+                :options="secondsOptions"
+                size="small"
+                @update:value="(value: string | number | null) => (videoSeconds = String(value || '5'))"
+              />
             </div>
             <div class="agent-field">
-              <span class="agent-label">分辨率</span>
-              <n-select :value="videoResolution" :options="resolutionOptions" size="small" @update:value="(value: string | number | null) => (videoResolution = String(value || ''))" />
+              <span class="agent-label">{{ t('page.agent.field.resolution') }}</span>
+              <n-select
+                :value="videoResolution"
+                :options="resolutionOptions"
+                size="small"
+                @update:value="(value: string | number | null) => (videoResolution = String(value || ''))"
+              />
             </div>
             <div class="agent-field">
-              <span class="agent-label">画面比例</span>
-              <n-select :value="videoAspect" :options="aspectOptions" size="small" @update:value="(value: string | number | null) => (videoAspect = String(value || ''))" />
+              <span class="agent-label">{{ t('page.agent.field.aspect') }}</span>
+              <n-select
+                :value="videoAspect"
+                :options="aspectOptions"
+                size="small"
+                @update:value="(value: string | number | null) => (videoAspect = String(value || ''))"
+              />
             </div>
           </template>
           <p class="agent-muted">
-            <template v-if="mode === 'chat'">对话按 Token 计费，模型会自动选用当前分组内可用的账号。</template>
-            <template v-else>预计消耗 {{ estimate === null ? '—' : estimate + ' 积分' }}（仅提示，以实际为准）。</template>
+            <template v-if="mode === 'chat'">{{ t('page.agent.chatBilling') }}</template>
+            <template v-else>
+              {{ t('page.agent.estimateNote', {
+                value: estimate === null ? t('page.agent.estimateNone') : t('page.agent.credits', { credits: estimate }),
+              }) }}
+            </template>
           </p>
         </Card>
 
-        <Card title="产物" :loading="assetsLoading">
+        <Card :title="t('page.agent.card.assets')" :loading="assetsLoading">
           <template #extra>
-            <Badge v-if="selectedAssets.length" tone="brand">{{ selectedAssets.length }} 已选</Badge>
+            <Badge v-if="selectedAssets.length" tone="brand">
+              {{ t('page.agent.selected', { count: selectedAssets.length }) }}
+            </Badge>
           </template>
           <div v-if="assets.length" class="agent-gallery">
             <button
@@ -789,12 +899,16 @@ onBeforeUnmount(() => {
             >
               <img v-if="asset.kind === 'image'" :src="assetUrl(asset.asset_id)" alt="" loading="lazy" />
               <video v-else :src="assetUrl(asset.asset_id)" preload="metadata" mute />
-              <span class="agent-gallery__kind">{{ asset.kind === 'image' ? '图' : '视频' }}</span>
+              <span class="agent-gallery__kind">
+                {{ asset.kind === 'image' ? t('page.agent.kindShort.image') : t('page.agent.kindShort.video') }}
+              </span>
             </button>
           </div>
-          <Empty v-else description="还没有生成任何图片或视频。" compact />
+          <Empty v-else :description="t('page.agent.assetsEmpty')" compact />
           <template #footer>
-            <Btn variant="quiet" size="sm" :icon="RefreshCw" :loading="assetsLoading" @click="loadAssets">刷新</Btn>
+            <Btn variant="quiet" size="sm" :icon="RefreshCw" :loading="assetsLoading" @click="loadAssets">
+              {{ t('page.agent.refresh') }}
+            </Btn>
             <Btn
               variant="default"
               size="sm"
@@ -802,7 +916,7 @@ onBeforeUnmount(() => {
               :loading="merging"
               @click="mergeSelected"
             >
-              合并所选视频
+              {{ t('page.agent.mergeSelected') }}
             </Btn>
           </template>
         </Card>

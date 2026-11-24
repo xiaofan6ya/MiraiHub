@@ -199,6 +199,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // UI mount + i18n 切换在满载并行时会超过默认 5s；20s 只放宽上限，不放宽断言。
+    testTimeout: 20000,
     setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.spec.ts', 'src/**/*.spec.ts'],
     css: false,
