@@ -46,6 +46,15 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+#: 总开关。ABUSE_GUARD_ENABLED=0 时完全不统计、不封禁。
+ENABLED = os.getenv("ABUSE_GUARD_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+
+#: 带后台会话 Cookie 且成功（<400）的请求不计入频率：管理员自己用控制台
+#: （v2 首屏并发、成长计划逐账号拉取、轮询）很容易一分钟超过 300 次，
+#: 旧逻辑会把管理员自己的 IP 自动封掉，连 /v1 网关一起被拉黑。
+#: 401/403/404 仍然照常计数，扫描与爆破的判定不受影响。
+ADMIN_COOKIE = "admin_session"
+
 #: 统计窗口（秒）。60 秒足够区分「扫描」与「正常浏览」。
 WINDOW_SECONDS = _env_int("ABUSE_WINDOW_SECONDS", 60)
 
@@ -164,12 +173,15 @@ def _ban(ip: str, reason: str) -> None:
         _logger.warning("abuse-guard: 写入封禁表失败 ip=%s err=%s", ip, exc)
 
 
-def observe(ip: str, status: int) -> None:
+def observe(ip: str, status: int, *, trusted: bool = False) -> None:
     """记录一次请求结果，必要时触发封禁。
 
     在响应开始阶段调用。**不做任何阻塞操作**，判定与写库都很轻。
+    `trusted=True`（带后台会话且请求成功）时不计数。
     """
-    if _is_never_ban(ip):
+    if not ENABLED or _is_never_ban(ip):
+        return
+    if trusted and status < 400:
         return
     # 已处于封禁中的 IP 不再累加。
     #
@@ -258,16 +270,23 @@ class AbuseGuardMiddleware:
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
             return await self.app(scope, receive, send)
+        if not ENABLED:
+            return await self.app(scope, receive, send)
 
         from fastapi import Request
         from fastapi.responses import JSONResponse
         from starlette.concurrency import run_in_threadpool
         from admin.client_ip import request_ip
 
+        request = Request(scope)
         try:
-            ip = request_ip(Request(scope))
+            ip = request_ip(request)
         except Exception:
             ip = ""
+        try:
+            trusted = bool(request.cookies.get(ADMIN_COOKIE))
+        except Exception:
+            trusted = False
 
         banned, left = is_banned(ip)
         if banned:
@@ -290,7 +309,7 @@ class AbuseGuardMiddleware:
             # 统计放到线程池：写封禁表可能落盘，不能阻塞事件循环。
             # 失败一律吞掉——风控模块自身绝不能影响业务响应。
             try:
-                await run_in_threadpool(observe, ip, status_code["v"])
+                await run_in_threadpool(observe, ip, status_code["v"], trusted=trusted)
             except Exception:
                 pass
 

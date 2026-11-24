@@ -1651,6 +1651,15 @@ def _prepare_body(body: dict, slot: str) -> dict:
         messages, roles_changed = _normalize_roles(messages)
         if roles_changed:
             logger.debug("Marvis 消息归一 | developer->system / content 压平")
+        # 工具调用序列修复：并行调用被拆成多条 assistant、调用与结果之间插进
+        # 别的消息、孤儿 / 悬空结果 —— 上游一律回 400 3000101，且换号、摘字段
+        # 都救不回来（降级表只动顶层字段）。见 protocol_bridge.repair_tool_pairing。
+        from admin.platform import protocol_bridge as _bridge
+        repaired = _bridge.repair_tool_pairing(messages)
+        if repaired is not messages:
+            logger.info("Marvis 工具调用序列修复 | 消息 %d -> %d 条",
+                        len(messages), len(repaired))
+            messages = repaired
         out["messages"], hits = _sanitize_messages(messages)
         if hits:
             # 只记命中条数，**不记原文**：system 里可能带用户的 prompt / 路径 / 密钥。
