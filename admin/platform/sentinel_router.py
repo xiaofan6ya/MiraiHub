@@ -118,6 +118,21 @@ def sentinel_status(platform: str = Query(default=""),
     return data
 
 
+@router.get("/tripped")
+def sentinel_tripped(platform: str = Query(default=""),
+                     window: int = Query(default=300, ge=30, le=3600),
+                     _: bool = Depends(require_admin)):
+    """轻量角标接口：只回 `tripped` / `accounts_affected`。
+
+    侧栏每 60s 轮询一次「有没有批次封控」，用 `/status` 太重（要算 by_code、
+    recent 明细，还会顺带触发预警通知）。这里只跑核心判定，不发预警、不带
+    traffic —— 预警仍然由 `/status` 负责，语义不变。
+    """
+    data = sentinel.status(str(platform or ""), window)
+    return {"tripped": bool(data.get("tripped")),
+            "accounts_affected": int(data.get("accounts_affected") or 0)}
+
+
 @router.get("/events")
 def sentinel_events(platform: str = Query(default=""),
                     window: int = Query(default=600, ge=30, le=3600),
