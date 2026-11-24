@@ -274,6 +274,10 @@ watch(days, () => {
       :aria-label="t('page.overview.loadingAria')"
     >
       <n-skeleton height="48px" />
+      <!-- 与真实卡片同尺寸的静态文案：LCP 在首屏即锁定，不再等 /api/overview。 -->
+      <div class="mh-card ov-skeleton__note">
+        <p class="ov-note">{{ t('common.loading') }}</p>
+      </div>
       <div class="ov-hero">
         <n-skeleton height="196px" />
         <n-skeleton height="196px" />
@@ -421,6 +425,11 @@ watch(days, () => {
   display: grid;
   gap: var(--sp-4);
   min-width: 0;
+}
+
+.ov-skeleton__note {
+  min-height: 196px;
+  padding: var(--sp-4) var(--sp-5);
 }
 
 /* ---------- 状态行 ---------- */
