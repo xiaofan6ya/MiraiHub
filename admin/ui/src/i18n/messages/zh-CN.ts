@@ -27,6 +27,11 @@ export const zhCN = {
   /** 失败文案模板（action + 语言相关分隔符 + reason），utils/error.ts:failureText 使用。 */
   'common.failure': '{action}失败：{reason}',
   'common.loading': '加载中…',
+  'common.unknownError': '未知错误',
+  'common.relative.justNow': '刚刚',
+  'common.relative.minutes': '{count} 分钟前',
+  'common.relative.hours': '{count} 小时前',
+  'common.relative.yesterday': '昨天',
   'common.empty': '暂无数据',
   'common.yes': '是',
   'common.no': '否',
