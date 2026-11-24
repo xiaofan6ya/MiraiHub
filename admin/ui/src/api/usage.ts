@@ -16,7 +16,9 @@
  * 全部是纯函数，可直接单测。
  */
 import { http, type Query } from './http'
-import { beijingParts, fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { beijingParts, bucketLocalParts, fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { TOOLTIP_TITLES_KEY, bucketTooltipTitle } from '@/components/charts/options'
+import { avgDurationText, durationState } from './stats'
 import { t as defaultTranslate, type MessageKey, type Translate } from '@/i18n'
 
 /** 文案取当前语言；页面传入 useI18n().t 后随语言切换重算，不传时用默认字典（中文）。 */
@@ -432,8 +434,8 @@ export function toStatItems(
     {
       label: tr(translate, 'usage.stat.requests'),
       value: fmtInt(requests),
-      foot: o.avg_latency_ms
-        ? tr(translate, 'usage.stat.requestsFoot', { value: fmtDuration(o.avg_latency_ms) })
+      foot: durationState(o.avg_latency_ms) !== 'none'
+        ? tr(translate, 'usage.stat.requestsFoot', { value: avgDurationText(o.avg_latency_ms, translate) })
         : tr(translate, 'usage.stat.requestsFootNone'),
       help: tr(translate, 'usage.stat.requestsHelp'),
     },
@@ -472,15 +474,91 @@ export function toStatItems(
   ]
 }
 
-/** 趋势 x 轴标签：2026-11-23 10:00 → 11-23 10:00；2026-11-23 → 11-23。 */
+/** KpiCard 的输入（与 10-visual-refresh §3 同形，不 import 组件）。 */
+export interface UsageKpi {
+  key: string
+  label: string
+  value: string
+  hint?: string
+  help?: string
+  tone?: 'brand' | 'ok' | 'warn' | 'danger' | 'neutral'
+  spark?: number[]
+}
+
+/**
+ * 6 格统计 → KpiCard（与 toStatItems 同口径），并按趋势桶带上迷你折线：
+ * 请求 / 成功用每桶成功请求数（后端 trend 只统计成功请求）、输入 / 输出用每桶 token、积分用每桶积分。
+ */
+export function toUsageKpis(
+  overview: UsageOverview | null | undefined,
+  trend: UsageTrendPoint[] | null | undefined,
+  translate?: Translate,
+): UsageKpi[] {
+  const items = toStatItems(overview, translate)
+  const rows = trend || []
+  const pick = (fn: (row: UsageTrendPoint) => number): number[] | undefined =>
+    rows.length > 1 ? rows.map((row) => Number(fn(row)) || 0) : undefined
+  const keys = ['requests', 'success', 'failed', 'tokenIn', 'tokenOut', 'credits'] as const
+  const sparks: Record<string, number[] | undefined> = {
+    requests: pick((row) => row.requests),
+    tokenIn: pick((row) => row.prompt_tokens),
+    tokenOut: pick((row) => row.completion_tokens),
+    credits: pick((row) => row.credits),
+  }
+  return items.map((item, index) => {
+    const key = keys[index] || String(index)
+    const tone: UsageKpi['tone'] =
+      item.tone === 'ok' || item.tone === 'danger' || item.tone === 'warn' || item.tone === 'brand'
+        ? item.tone
+        : item.tone === 'muted'
+          ? 'neutral'
+          : 'brand'
+    return {
+      key,
+      label: item.label,
+      value: String(item.value),
+      hint: item.foot,
+      help: item.help,
+      tone,
+      spark: sparks[key],
+    }
+  })
+}
+
+/** 页头口径徽章：没选平台 = 全网关；选了 = 该平台名（后端只认显式 ?platform=）。 */
+export function usageScopeLabel(
+  filters: Pick<UsageFilters, 'platform'>,
+  options: UsageOptionsPayload | null | undefined,
+  translate?: Translate,
+): string {
+  if (!filters.platform) return tr(translate, 'usage.scope.gateway')
+  const hit = (options?.platforms || []).find((item) => String(item.value) === filters.platform)
+  return hit?.label || filters.platform
+}
+
+/**
+ * 趋势 x 轴标签：小时桶按**本地时区**显示（后端桶键是 UTC，"2026-11-23 10:00" 在 UTC+8 下是
+ * "11-23 18:00"）；天桶 "2026-11-23" → "11-23"（没有时刻，无法换算）。
+ *
+ * 第 2 轮审查 P0-13：筛选是今天 00:00–23:26，横轴却是 16:00 → 18:00，就是把 UTC 当本地。
+ */
 export function chartBucketLabel(bucket: string, grain: UsageGrain): string {
   const text = String(bucket || '')
   if (!/^\d{4}-/.test(text)) return text
   const cut = text.slice(5)
-  return grain === 'day' ? cut.slice(0, 5) : cut
+  if (grain === 'day') return cut.slice(0, 5)
+  const parts = bucketLocalParts(text)
+  if (!parts) return cut
+  return pad2(parts.mo) + '-' + pad2(parts.d) + ' ' + pad2(parts.h) + ':' + pad2(parts.mi)
 }
 
-/** Token 趋势 → ECharts option（堆叠面积，输入/输出两条）。 */
+/**
+ * Token 趋势 → ECharts option（输入 / 输出两条折线，**不堆叠**）。
+ *
+ * 第 2 轮审查 P0-13：原来两条线 stack 在一起，最上面那条（输出色）的高度其实是「输入 + 输出」，
+ * 看上去就是「青色线却是输入的量级」—— 系列颜色和图例对不上；输出又比输入小 100 倍，
+ * 贴着零看不见。现在：不堆叠；量级相差 ≥8 倍时输出走右轴（needsDualAxis）。
+ */
 export function toTrendOption(
   trend: UsageTrendPoint[] | null | undefined,
   grain: UsageGrain,
@@ -488,40 +566,48 @@ export function toTrendOption(
 ): Record<string, unknown> {
   const rows = trend || []
   const labels = rows.map((row) => chartBucketLabel(row.bucket, grain))
-  const series = (name: string, pick: (row: UsageTrendPoint) => number) => ({
-    name,
-    type: 'line',
-    stack: 'tokens',
-    showSymbol: false,
-    areaStyle: {},
-    emphasis: { focus: 'series' },
-    data: rows.map((row) => Number(pick(row)) || 0),
-  })
+  const input = rows.map((row) => Number(row.prompt_tokens) || 0)
+  const output = rows.map((row) => Number(row.completion_tokens) || 0)
+  const dual = needsDualAxis(input, output)
+  const inputName = tr(translate, 'usage.legend.input')
+  const outputName = tr(translate, 'usage.legend.output')
+  const axisLabel = { formatter: (value: number) => fmtCompact(value) }
   return {
     tooltip: { trigger: 'axis' },
     legend: {
-      data: [tr(translate, 'usage.legend.input'), tr(translate, 'usage.legend.output')],
+      data: [inputName, outputName],
       top: 0,
       right: 0,
-      itemHeight: 8,
-      itemWidth: 12,
     },
-    grid: { left: 8, right: 8, top: 30, bottom: 4, containLabel: true },
+    grid: { left: 8, right: 8, top: 36, bottom: 4, containLabel: true },
     xAxis: {
       type: 'category',
       data: labels,
       boundaryGap: false,
       axisLabel: { hideOverlap: true },
     },
-    yAxis: {
-      type: 'value',
-      axisLabel: { formatter: (value: number) => fmtCompact(value) },
-    },
+    yAxis: dual
+      ? [
+          { type: 'value', name: inputName, axisLabel },
+          { type: 'value', name: outputName, axisLabel, splitLine: { show: false } },
+        ]
+      : { type: 'value', axisLabel },
     series: [
-      series(tr(translate, 'usage.legend.input'), (row) => row.prompt_tokens),
-      series(tr(translate, 'usage.legend.output'), (row) => row.completion_tokens),
+      { name: inputName, type: 'line', yAxisIndex: 0, data: input },
+      { name: outputName, type: 'line', yAxisIndex: dual ? 1 : 0, data: output, areaStyle: null },
     ],
+    // tooltip 标题：完整本地时间（小时桶）/ 原样日期（天桶）。
+    [TOOLTIP_TITLES_KEY]: rows.map((row) => bucketTooltipTitle(row.bucket)),
   }
+}
+
+/** 与 api/stats.ts:needsDualAxis 同口径（这里复制一份，避免 usage → stats 的依赖）。 */
+export function needsDualAxis(a: number[], b: number[], ratio = 8): boolean {
+  const peak = (values: number[]): number => values.reduce((max, value) => Math.max(max, Number(value) || 0), 0)
+  const pa = peak(a)
+  const pb = peak(b)
+  if (pa <= 0 || pb <= 0) return false
+  return Math.max(pa, pb) / Math.min(pa, pb) >= ratio
 }
 
 /** FilterBar 的汇总文字（与旧版「已筛选」那行同口径）。 */
@@ -627,7 +713,9 @@ export function logsQueryFor(
     if (!account.label) return null
     query.account = String(account.label)
   } else {
-    query.result = String(row.label || '') === '成功' ? 'success' : 'error'
+    // 后端 by_result 的 label 是中文原值（成功 / 失败…），也兼容英文 / 状态码键，切英文界面不误判。
+    const label = String(row.label || '').trim().toLowerCase()
+    query.result = ['成功', 'success', 'ok', 'succeeded'].includes(label) ? 'success' : 'error'
   }
   const win = resolveUsageWindow(filters, now)
   query.start = win.startIso

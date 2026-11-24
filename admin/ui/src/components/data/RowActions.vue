@@ -7,7 +7,7 @@
  * 菜单项 select 之后它不会自己收起来 —— 真实浏览器里浮层会一直挂在页面上，
  * 盖住页面随后弹出的确认框。所以菜单点选、Esc、外点（naive 的 clickoutside）都收敛到 close()。
  */
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import { NPopover } from 'naive-ui'
 import { MoreHorizontal } from 'lucide-vue-next'
 import Btn from '../base/Btn.vue'
@@ -59,6 +59,11 @@ watch(show, (open) => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown, true)
+})
+
+/** 页面被 KeepAlive 缓存：浮层 Teleport 在 body 上不会跟着离开，直接收起（第 4 轮）。 */
+onDeactivated(() => {
+  void close()
 })
 
 // 可操作项缩到只剩直接按钮时，浮层已经不可达，状态跟着收敛（避免之后再冒出个开着的空菜单）。

@@ -3,7 +3,8 @@ import { computed, readonly, ref } from 'vue'
 /**
  * 外壳自己的 UI 状态（与业务无关，所以不进 Pinia store）：
  * 侧栏收起、移动端抽屉、登录设备抽屉、命令面板。
- * 断点按 03-shell §3：≥1280 完整 / 1024–1279 收起 / 641–1023 抽屉 / ≤640 手机。
+ * 断点按 10-visual-refresh §1.2（覆盖 03-shell §3）：
+ *   ≥1280 完整侧栏 / 768–1279 自动收起成 64px 图标栏 / <768 抽屉；≤640 手机细节（抽屉铺满等）。
  */
 
 const COLLAPSE_KEY = 'mh.sideCollapsed'
@@ -32,9 +33,14 @@ function viewportWidth(): number {
   return window.innerWidth || 1280
 }
 
-/** 1024–1279 默认收起；其余断点默认展开。用户手动切换过就永远听用户的。 */
+/** 抽屉断点：<768 侧栏变成抽屉（10-visual-refresh §1.2）。 */
+export const DRAWER_MAX = 767
+/** 完整侧栏的最小宽度：<1280 自动收起成图标栏。 */
+export const FULL_SIDE_MIN = 1280
+
+/** 768–1279 默认收起；≥1280 默认展开。用户手动切换过就永远听用户的。 */
 export function defaultCollapsed(width = viewportWidth()): boolean {
-  return width >= 1024 && width < 1280
+  return width > DRAWER_MAX && width < FULL_SIDE_MIN
 }
 
 const storedCollapse = readStoredCollapse()
@@ -49,7 +55,7 @@ export const commandPaletteOpen = ref(false)
 
 export const viewport = ref(viewportWidth())
 
-export const isMobile = computed(() => viewport.value <= 1023)
+export const isMobile = computed(() => viewport.value <= DRAWER_MAX)
 export const isPhone = computed(() => viewport.value <= 640)
 export const isNarrow = computed(() => viewport.value <= 1279)
 
@@ -61,7 +67,7 @@ export function initShellViewport(): void {
   listening = true
   const onResize = (): void => {
     viewport.value = viewportWidth()
-    // 没手动切换过的用户跟随断点：1024–1279 自动收起，≥1280 自动展开。
+    // 没手动切换过的用户跟随断点：768–1279 自动收起，≥1280 自动展开。
     if (!sideCollapsePinned.value && !isMobile.value) {
       sideCollapsed.value = defaultCollapsed(viewport.value)
     }

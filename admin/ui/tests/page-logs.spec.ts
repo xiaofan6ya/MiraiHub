@@ -291,7 +291,16 @@ describe('请求动态聚合 buildLiveBars', () => {
   it('按分钟分桶（含空分钟），错误单独计数', () => {
     const bars = buildLiveBars(recent, Date.parse('2026-03-10T04:00:30Z'), 3)
     expect(bars).toHaveLength(3)
-    expect(bars.map((bar) => bar.label)).toEqual(['11:58', '11:59', '12:00'])
+    // 标签按本地时区（图表口径）；断言与运行测试的机器时区无关
+    const hm = (iso: string) => {
+      const date = new Date(iso)
+      return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0')
+    }
+    expect(bars.map((bar) => bar.label)).toEqual([
+      hm('2026-03-10T03:58:00Z'),
+      hm('2026-03-10T03:59:00Z'),
+      hm('2026-03-10T04:00:00Z'),
+    ])
     expect(bars[1]).toMatchObject({ requests: 2, errors: 1 })
     expect(bars[2]).toMatchObject({ requests: 1, errors: 0 })
     expect(bars[0]).toMatchObject({ requests: 0, errors: 0 })

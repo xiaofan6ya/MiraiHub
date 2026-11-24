@@ -4,7 +4,7 @@
  *
  * 契约：docs/ui-v2/contracts/platforms.md（末尾「## 实现对照」）
  * 设计稿：docs/ui-v2/06-pages-a.md P4
- * 旧版：#panel-platforms + platform-switch.js / platform-actions.js / platform-tiers.js / traffic.js
+ * 旧版：#panel-platforms + platform-switch.js / platform-actions.js / traffic.js（platform-tiers 分级已于 r4 删除）
  *
  * 三条口径：
  *   1. 平台与能力全部来自 /api/platforms（actions / supports_local_scan / auth_mode），页面不写 if (id === 'trae')；
@@ -12,41 +12,33 @@
  *   3. 卡片上的「今日请求 / 成功率 / TTFT / TPS」来自 /api/platform/speed（成功率为 0–100），
  *      「可用账号 / 剩余额度」来自 /api/accounts 快照（拿不到就只显示账号数，不猜）。
  */
-import { computed, effectScope, h, markRaw, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NDropdown, NInput, NSelect, NSkeleton, type DropdownOption } from 'naive-ui'
-import {
-  Download,
-  MoreHorizontal,
-  RefreshCw,
-  ScanSearch,
-  Upload,
-} from 'lucide-vue-next'
+import { NInput, type DropdownOption } from 'naive-ui'
+import { Download, RefreshCw, ScanSearch, Upload } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
-  Badge,
   Btn,
   Card,
   DataTable,
   Empty,
   ErrorBlock,
   FilterBar,
-  FormDrawer,
+  IconBtn,
   JobProgress,
-  Meter,
-  PlatformLogo,
   Segmented,
   type FilterChip,
-  type JobItem,
   type SegmentedOption,
-  type TableColumn,
   type TableRow,
 } from '@/components'
-import { useConfirm, useJob, useTableQuery, useToast, type JobSnapshot } from '@/composables'
+import PlatformCardItem from './platforms/PlatformCardItem.vue'
+import PlatformTransferDrawer from './platforms/PlatformTransferDrawer.vue'
+import { usePlatformBenchColumns } from './platforms/benchColumns'
+import { usePlatformImport } from './platforms/usePlatformImport'
+import { useConfirm, useRevisit, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
 import { failureText } from '@/utils/error'
-import { fmtCredit, fmtCompact, fmtDuration, fmtInt } from '@/utils/format'
 import { listPlatforms, type PlatformSpec } from '@/api/platforms'
 import { useI18n } from '@/i18n'
 import {
@@ -58,13 +50,11 @@ import {
   getAccountsSnapshot,
   getGatewayConfig,
   getPlatformSpeed,
-  parsePlatformBackup,
+  isExportConfirmRequired,
   runPlatformScan,
   saveJson,
   scanPlanFor,
   setPlatformEnabled,
-  submitPlatformImport,
-  successTone,
   toPlatformCards,
   type GatewayConfigPayload,
   type PlatformCard,
@@ -123,18 +113,21 @@ async function load(): Promise<void> {
   loadError.value = null
   try {
     const [list, bench, cfg, snapshot] = await Promise.all([
-      listPlatforms(),
+      listPlatforms(current.signal),
       getPlatformSpeed(hours.value, current.signal).catch(() => null),
       getGatewayConfig(current.signal).catch(() => null),
       // 账号快照只用于「可用账号 / 剩余额度」：拿不到就降级，不阻塞整页
       getAccountsSnapshot(current.signal).catch(() => null),
     ])
+    // r4（P1）：listPlatforms 不带 signal、副接口把 AbortError 吞成 null —— 被新请求中止的旧请求
+    // 仍会 resolve，并把速度表 / 调度配置 / 账号快照覆盖成空。只认最后一次请求。
+    if (controller !== current) return
     platforms.value = Array.isArray(list?.items) ? list.items : []
     speed.value = bench
     gateway.value = cfg
     accounts.value = aggregateAccounts(snapshot?.items || [])
   } catch (error) {
-    if (isAbortError(error)) return
+    if (isAbortError(error) || controller !== current) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     loadError.value = { message: failureText(t('page.platforms.action.load'), error), detail }
     toast.error(failureText(t('page.platforms.action.load'), error))
@@ -243,27 +236,6 @@ const hoursOptions = computed<Array<SegmentedOption<string>>>(() => [
   { label: t('page.platforms.hours.168'), value: '168' },
 ])
 
-const tierTone = (key: string): 'ok' | 'brand' | 'warn' | 'danger' =>
-  key === 'hang' ? 'ok' : key === 'elite' ? 'brand' : key === 'npc' ? 'warn' : 'danger'
-
-/** MetricTone（含 muted）→ Badge 的语气。 */
-function badgeToneOf(tone: string): 'ok' | 'warn' | 'danger' | 'neutral' {
-  if (tone === 'ok' || tone === 'warn' || tone === 'danger') return tone
-  return 'neutral'
-}
-
-function quotaText(card: PlatformCard): string {
-  if (card.credits === null) return '—'
-  const unit = card.quotaUnitLabel || ''
-  const value = card.quotaUnit === 'token' ? fmtCompact(card.credits) : fmtCredit(card.credits)
-  return unit ? value + ' ' + unit : value
-}
-
-function rateText(card: PlatformCard): string {
-  if (card.successRate === null) return '—'
-  return card.successRate.toFixed(1) + '%'
-}
-
 function isCurrent(card: PlatformCard): boolean {
   return platformStore.platform === card.id && (platformStore.realm || '') === (card.realm || '')
 }
@@ -327,7 +299,7 @@ async function scanOne(card: PlatformCard): Promise<void> {
   toast.info(t('page.platforms.scan.starting', { name: card.label }))
   const result = await runPlatformScan(spec, plan)
   if (result.note && !result.imported && !result.scanned) {
-    toast.error(card.label + '：' + result.note)
+    toast.error(card.label + ' · ' + result.note)
   } else {
     toast.success(
       t('page.platforms.scan.done', {
@@ -345,10 +317,40 @@ async function exportOne(card: PlatformCard): Promise<void> {
   await runExport('backup', card.storage)
 }
 
+/** 完整凭证导出前的确认（后端 export_guard 要求带 X-Export-Confirm 头）。 */
+function confirmSecrets(): Promise<boolean> {
+  return confirm({
+    title: t('page.platforms.export.secretsTitle'),
+    message: t('page.platforms.export.secretsMessage'),
+    okText: t('page.platforms.export.secretsOk'),
+    danger: true,
+  })
+}
+
+async function fetchExport(mode: 'backup' | 'plain', platform: string): Promise<Record<string, unknown> | null> {
+  let confirmed = false
+  if (mode === 'backup') {
+    if (!(await confirmSecrets())) return null
+    confirmed = true
+  }
+  try {
+    return await exportPlatformsAll(mode, platform, confirmed)
+  } catch (error) {
+    // 老前端缓存 / 后端开关变化：收到 428 时补一次确认再重发
+    if (!confirmed && isExportConfirmRequired(error)) {
+      if (!(await confirmSecrets())) return null
+      return exportPlatformsAll(mode, platform, true)
+    }
+    throw error
+  }
+}
+
 async function runExport(mode: 'backup' | 'plain', platform = ''): Promise<void> {
+  if (exporting.value) return
   exporting.value = true
   try {
-    const data = await exportPlatformsAll(mode, platform)
+    const data = await fetchExport(mode, platform)
+    if (!data) return
     const platformsMap = (data?.platforms || {}) as Record<string, { count?: number }>
     const count = Object.values(platformsMap).reduce((sum, item) => sum + Number(item?.count || 0), 0)
     if (!count) {
@@ -375,6 +377,12 @@ async function runExport(mode: 'backup' | 'plain', platform = ''): Promise<void>
 function menuOptions(card: PlatformCard): DropdownOption[] {
   const options: DropdownOption[] = [
     {
+      label: isCurrent(card) ? t('page.platforms.card.current') : t('page.platforms.card.setCurrent'),
+      key: 'current',
+      disabled: isCurrent(card),
+    },
+    { type: 'divider', key: 'divider-0' },
+    {
       label: card.enabled ? t('page.platforms.action.disable') : t('page.platforms.action.enable'),
       key: 'toggle',
     },
@@ -398,15 +406,15 @@ function menuOptions(card: PlatformCard): DropdownOption[] {
       })
     }
   }
-  if (card.tier) {
-    options.push({ type: 'divider', key: 'divider-2' })
-    options.push({ label: t('page.platforms.menu.tier', { tier: card.tier.label }), key: 'tier', disabled: true })
-  }
   return options
 }
 
 function onMenuSelect(card: PlatformCard, key: string | number): void {
   const name = String(key)
+  if (name === 'current') {
+    makeCurrent(card)
+    return
+  }
   if (name === 'toggle') {
     void toggleEnabled(card)
     return
@@ -419,7 +427,6 @@ function onMenuSelect(card: PlatformCard, key: string | number): void {
     void exportOne(card)
     return
   }
-  if (name === 'tier') return
   if (name.startsWith('action:')) {
     const action = name.slice(7)
     if (action === 'import' || action === 'import-file') {
@@ -467,143 +474,27 @@ async function scanAll(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ *
- * 导入全部（FormDrawer + 后台任务 JobProgress）
+ * 导入全部（状态与任务跟踪见 platforms/usePlatformImport.ts）
  * ------------------------------------------------------------------ */
 
-const importOpen = ref(false)
-const importFiles = ref<Array<{ name: string; text: string }>>([])
-const importNotes = ref<string[]>([])
-const importPreview = ref<Array<{ storage: string; count: number }>>([])
-const submitting = ref(false)
-
-function openImport(preset?: string): void {
-  importFiles.value = []
-  importNotes.value = []
-  importPreview.value = []
-  importOpen.value = true
-  if (preset) importNotes.value.push(t('page.platforms.import.preset', { name: preset }))
-}
-
-async function onImportFiles(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement | null
-  const files = Array.from(input?.files || [])
-  if (!files.length) return
-  const loaded: Array<{ name: string; text: string }> = []
-  for (const file of files) {
-    try {
-      loaded.push({ name: file.name, text: await file.text() })
-    } catch (error) {
-      importNotes.value.push(
-        t('page.platforms.import.readFailed', {
-          name: file.name,
-          reason: (error as Error)?.message || String(error),
-        }),
-      )
-    }
-  }
-  importFiles.value = loaded
-  const parsed = parsePlatformBackup(loaded)
-  importNotes.value = parsed.notes.slice()
-  importPreview.value = Object.entries(parsed.byPlatform).map(([storage, list]) => ({
-    storage,
-    count: list.length,
-  }))
-}
-
-/** useJob 的最小结构（只要 snapshot / percent 两个 ref）。 */
-interface TrackedJobHandle {
-  snapshot: { value: JobSnapshot | null }
-  percent: { value: number }
-}
-
-const jobHandles = ref<Array<{ id: string; name: string; handle: TrackedJobHandle }>>([])
-const jobScopes: Array<ReturnType<typeof effectScope>> = []
-
-function trackJob(id: string, name: string): void {
-  const scope = effectScope()
-  const handle = scope.run(() =>
-    useJob(id, {
-      pollUrl: '/api/accounts/job/',
-      onFinish: (snapshot: JobSnapshot) => {
-        const result = (snapshot.result || {}) as { added?: number }
-        if (snapshot.status === 'failed') {
-          toast.error(
-            t('page.platforms.import.failed', {
-              name,
-              reason: snapshot.error || t('page.platforms.import.unknownError'),
-            }),
-          )
-        } else {
-          toast.success(
-            t('page.platforms.import.done', { name, count: Number(result.added || 0) }),
-          )
-        }
-        void load()
-        void platformStore.refreshCounts()
-      },
-    }),
-  )
-  if (!handle) return
-  jobScopes.push(scope)
-  // useJob 返回 ref 句柄；不 markRaw 会被 ref 深响应式解包，jobItems 再读 .value 会崩。
-  jobHandles.value.push({ id, name, handle: markRaw(handle) as unknown as TrackedJobHandle })
-}
-
-const jobItems = computed<JobItem[]>(() =>
-  jobHandles.value
-    .filter((entry) => entry.handle.snapshot.value !== null)
-    .map((entry) => {
-      const snapshot = entry.handle.snapshot.value as JobSnapshot
-      const result = (snapshot.result || {}) as { added?: number; failed?: number }
-      return {
-        id: entry.id,
-        name: entry.name,
-        status: snapshot.status === 'running' ? 'running' : snapshot.status === 'failed' ? 'failed' : 'done',
-        percent: entry.handle.percent.value,
-        succeeded: Number(result.added || 0),
-        failed: Number(result.failed || 0),
-        message: snapshot.current || snapshot.error || '',
-      } as JobItem
-    }),
-)
-
-function hideJob(id: string): void {
-  jobHandles.value = jobHandles.value.filter((entry) => entry.id !== id)
-}
-
-async function submitImport(): Promise<void> {
-  if (submitting.value) return
-  const parsed = parsePlatformBackup(importFiles.value)
-  const entries = Object.entries(parsed.byPlatform).filter(([, list]) => list.length)
-  if (!entries.length) {
-    toast.error(t('page.platforms.import.noAccounts'))
-    return
-  }
-  submitting.value = true
-  let submitted = 0
-  try {
-    for (const [storage, list] of entries) {
-      try {
-        const jobId = await submitPlatformImport(storage, list)
-        trackJob(jobId, t('page.platforms.import.jobName', { storage }))
-        submitted += 1
-      } catch (error) {
-        toast.error(
-          t('page.platforms.import.submitFailed', {
-            storage,
-            reason: (error as Error)?.message || String(error),
-          }),
-        )
-      }
-    }
-    if (submitted) {
-      toast.success(t('page.platforms.import.submitted', { count: submitted }))
-      importOpen.value = false
-    }
-  } finally {
-    submitting.value = false
-  }
-}
+const {
+  importOpen,
+  importNotes,
+  importPreview,
+  submitting,
+  openImport,
+  onImportFiles,
+  jobItems,
+  hideJob,
+  submitImport,
+} = usePlatformImport({
+  t,
+  toast,
+  onJobFinished: () => {
+    void load()
+    void platformStore.refreshCounts()
+  },
+})
 
 /* ------------------------------------------------------------------ *
  * 导出全部（FormDrawer）
@@ -613,11 +504,6 @@ const exportOpen = ref(false)
 const exporting = ref(false)
 const exportMode = ref<'backup' | 'plain'>('backup')
 const exportScope = ref('')
-
-const exportModeOptions = computed<Array<SegmentedOption<string>>>(() => [
-  { label: t('page.platforms.export.backup'), value: 'backup' },
-  { label: t('page.platforms.export.plain'), value: 'plain' },
-])
 
 const exportScopeOptions = computed(() => {
   const seen = new Set<string>()
@@ -644,47 +530,7 @@ const benchRows = computed<TableRow[]>(() =>
   ((speed.value?.items || []) as PlatformSpeedRow[]).map((row) => ({ ...row })),
 )
 
-function benchCell(row: TableRow, key: keyof PlatformSpeedRow): string {
-  const item = row as unknown as PlatformSpeedRow
-  if (key === 'success_rate') return Number(item.success_rate).toFixed(1) + '%'
-  if (key === 'ttfb_avg' || key === 'latency_avg') return item[key] ? fmtDuration(item[key]) : '—'
-  if (key === 'tps_avg') return item.tps_avg ? item.tps_avg.toFixed(1) + ' tok/s' : '—'
-  if (key === 'jitter') return item.jitter ? fmtDuration(item.jitter) : '—'
-  return String(item[key] ?? '—')
-}
-
-const benchColumns = computed<TableColumn[]>(() => [
-  { key: 'rank', title: '#', width: 48, mobile: 'meta' },
-  { key: 'label', title: t('page.platforms.bench.platform'), minWidth: 140, mobile: 'title' },
-  {
-    key: 'success_rate',
-    title: t('page.platforms.bench.successRate'),
-    width: 96,
-    mobile: 'subtitle',
-    render: (row: TableRow) => {
-      const item = row as unknown as PlatformSpeedRow
-      return h(Badge, { tone: badgeToneOf(successTone(item.success_rate)) }, { default: () => benchCell(row, 'success_rate') })
-    },
-  },
-  { key: 'ttfb_avg', title: t('page.platforms.bench.ttfb'), width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'ttfb_avg') },
-  { key: 'tps_avg', title: t('page.platforms.bench.tps'), width: 110, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'tps_avg') },
-  { key: 'latency_avg', title: t('page.platforms.bench.latency'), width: 120, mobile: 'meta', render: (row: TableRow) => benchCell(row, 'latency_avg') },
-  { key: 'jitter', title: t('page.platforms.bench.jitter'), width: 90, mobile: 'hidden', render: (row: TableRow) => benchCell(row, 'jitter') },
-  {
-    key: 'samples',
-    title: t('page.platforms.bench.samples'),
-    width: 96,
-    mobile: 'hidden',
-    render: (row: TableRow) => {
-      const item = row as unknown as PlatformSpeedRow
-      return h(
-        'span',
-        { class: item.low_sample ? 'pf-low' : '' },
-        fmtInt(item.samples) + (item.low_sample ? t('page.platforms.bench.lowSample') : ''),
-      )
-    },
-  },
-])
+const benchColumns = usePlatformBenchColumns(t)
 
 /* ------------------------------------------------------------------ *
  * 生命周期
@@ -703,13 +549,37 @@ onMounted(() => {
   })
 })
 
+/**
+ * 二次进入（KeepAlive 缓存命中）不重新出骨架：保留旧数据，后台静默刷新（11-polish-motion §2）。
+ * 骨架只在「加载中且还没有任何平台」时出现，所以这里直接 load() 即可，只会转右上角刷新圈。
+ */
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
+useRevisit(
+  () => {
+    if (!scanningAll.value) void silently(() => load())
+  },
+  { minIntervalMs: 10_000, onLeave: () => controller?.abort() },
+)
+
 onBeforeUnmount(() => {
   offPlatform?.()
   offPlatform = null
   controller?.abort()
   controller = null
-  for (const scope of jobScopes) scope.stop()
-  jobScopes.length = 0
 })
 
 watch(
@@ -727,14 +597,12 @@ watch(
         <Btn variant="default" :icon="ScanSearch" :loading="scanningAll" :disabled="loading" @click="scanAll">
           {{ t('page.platforms.action.scanAll') }}
         </Btn>
-        <Btn variant="default" :icon="Upload" :disabled="loading" @click="openImport()">
-          {{ t('page.platforms.action.import') }}
-        </Btn>
         <Btn variant="default" :icon="Download" :disabled="loading" @click="exportOpen = true">
           {{ t('page.platforms.action.export') }}
         </Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="loading" @click="refresh">
-          {{ t('common.refresh') }}
+        <IconBtn :label="t('common.refresh')" :icon="RefreshCw" :loading="loading" @click="refresh" />
+        <Btn variant="primary" :icon="Upload" :disabled="loading" @click="openImport()">
+          {{ t('page.platforms.action.import') }}
         </Btn>
       </template>
     </PageHeader>
@@ -752,11 +620,16 @@ watch(
       aria-busy="true"
       :aria-label="t('page.platforms.loadingAria')"
     >
-      <div v-for="index in 6" :key="index" class="pf-skeleton__card"><n-skeleton text :repeat="4" /></div>
+      <div v-for="index in 6" :key="index" class="pf-skeleton__card">
+        <span class="mh-skeleton pf-sk pf-sk--head" />
+        <span class="mh-skeleton pf-sk pf-sk--stats" />
+        <span class="mh-skeleton pf-sk pf-sk--line" />
+      </div>
     </div>
 
     <template v-else>
-      <Card>
+      <!-- 不再「卡片套卡片」：筛选条直接贴在页头下方（第 1 轮审查 P2）。 -->
+      <section class="pf-list">
         <FilterBar
           :chips="chips"
           :summary="summary"
@@ -783,91 +656,16 @@ watch(
         </FilterBar>
 
         <div v-if="visibleCards.length" class="pf-grid">
-          <article
+          <PlatformCardItem
             v-for="card in visibleCards"
             :key="card.id"
-            class="pf-card"
-            :class="{ 'is-disabled': !card.enabled }"
-            :aria-label="card.label"
-          >
-            <header class="pf-card__head">
-              <PlatformLogo :id="card.id" :size="28" :label="card.label" />
-              <div class="pf-card__title">
-                <h3 :title="card.notes || card.label">{{ card.label }}</h3>
-                <p>
-                  {{ card.realmLabel || t('page.platforms.card.singleRealm') }} ·
-                  {{ t('page.platforms.card.priority', { value: card.priority === null ? '—' : card.priority }) }}
-                </p>
-              </div>
-              <div class="pf-card__badges">
-                <Badge :tone="card.enabled ? 'ok' : 'neutral'">
-                  {{ card.enabled ? t('page.platforms.badge.enabled') : t('page.platforms.badge.disabled') }}
-                </Badge>
-                <Badge v-if="card.tier" :tone="tierTone(card.tier.key)" :title="card.tier.reason">{{ card.tier.label }}</Badge>
-              </div>
-            </header>
-
-            <div class="pf-card__metrics">
-              <span class="tnum">
-                {{ t('page.platforms.card.accounts') }}
-                {{
-                  card.activeAccounts === null
-                    ? t('page.platforms.card.accountCount', { count: card.accountCount })
-                    : t('page.platforms.card.accountsAvailable', {
-                        active: card.activeAccounts,
-                        total: card.accountCount,
-                      })
-                }}
-              </span>
-              <span class="tnum">
-                {{ t('page.platforms.card.today', { count: fmtInt(card.requests) }) }}
-                <template v-if="card.successRate !== null"> · <b :class="'pf-tone-' + successTone(card.successRate)">{{ rateText(card) }}</b></template>
-              </span>
-              <span class="tnum">
-                TTFT {{ card.ttfbMs ? fmtDuration(card.ttfbMs) : '—' }} · TPS {{ card.tps ? card.tps.toFixed(1) : '—' }}
-              </span>
-            </div>
-
-            <div class="pf-card__quota">
-              <span>{{ t('page.platforms.card.quota', { value: quotaText(card) }) }}</span>
-              <Meter
-                :value="card.credits ?? 0"
-                :max="maxCredits || 1"
-                tone="brand"
-                :aria-label="t('page.platforms.card.quotaAria', { name: card.label })"
-              />
-            </div>
-
-            <p v-if="!card.enabled" class="pf-card__note">
-              {{ t('page.platforms.card.disabledNote') }}{{
-                card.disabledReason ? t('page.platforms.card.disabledReason', { reason: card.disabledReason }) : ''
-              }}
-            </p>
-
-            <footer class="pf-card__actions">
-              <Btn size="sm" variant="default" @click="openAccounts(card)">
-                {{ t('page.platforms.card.accountsBtn') }}
-              </Btn>
-              <Btn size="sm" variant="quiet" :disabled="isCurrent(card)" @click="makeCurrent(card)">
-                {{ isCurrent(card) ? t('page.platforms.card.current') : t('page.platforms.card.setCurrent') }}
-              </Btn>
-              <n-dropdown
-                trigger="click"
-                placement="bottom-end"
-                :options="menuOptions(card)"
-                @select="(key: string | number) => onMenuSelect(card, key)"
-              >
-                <Btn
-                  size="sm"
-                  variant="quiet"
-                  :icon="MoreHorizontal"
-                  :aria-label="t('page.platforms.card.moreAria')"
-                >
-                  {{ t('page.platforms.card.more') }}
-                </Btn>
-              </n-dropdown>
-            </footer>
-          </article>
+            :card="card"
+            :current="isCurrent(card)"
+            :max-credits="maxCredits"
+            :menu-options="menuOptions(card)"
+            @accounts="openAccounts"
+            @select="onMenuSelect"
+          />
         </div>
 
         <Empty
@@ -885,7 +683,7 @@ watch(
             {{ t('common.refresh') }}
           </Btn>
         </Empty>
-      </Card>
+      </section>
 
       <Card :title="t('page.platforms.speed.title')" :loading="loading && !!speed">
         <template #extra>
@@ -901,7 +699,8 @@ watch(
           :columns="benchColumns"
           :data="benchRows"
           row-key="platform"
-          :loading="loading"
+          :loading="loading && !silentRefresh"
+          :refreshing="loading && silentRefresh"
           :empty-description="t('page.platforms.speed.empty')"
         >
           <template #empty>
@@ -923,52 +722,25 @@ watch(
       </Card>
     </template>
 
-    <FormDrawer
+    <PlatformTransferDrawer
       v-model:show="importOpen"
-      :title="t('page.platforms.import.title')"
-      :submit-text="t('page.platforms.import.submit')"
-      :submit-disabled="!importPreview.length || submitting"
-      :submit-loading="submitting"
+      kind="import"
+      :preview="importPreview"
+      :notes="importNotes"
+      :submitting="submitting"
+      @files="onImportFiles"
       @submit="submitImport"
-    >
-      <p class="pf-hint">{{ t('page.platforms.import.hint') }}</p>
-      <input
-        class="pf-file"
-        type="file"
-        accept=".json,application/json"
-        multiple
-        :aria-label="t('page.platforms.import.fileAria')"
-        @change="onImportFiles"
-      />
-      <ul v-if="importPreview.length" class="pf-preview">
-        <li v-for="item in importPreview" :key="item.storage">
-          {{ item.storage }} · {{ t('page.platforms.import.previewCount', { count: item.count }) }}
-        </li>
-      </ul>
-      <p v-for="(note, index) in importNotes" :key="index" class="pf-hint">{{ note }}</p>
-    </FormDrawer>
+    />
 
-    <FormDrawer
+    <PlatformTransferDrawer
       v-model:show="exportOpen"
-      :title="t('page.platforms.export.title')"
-      :submit-text="t('page.platforms.export.start')"
-      :submit-loading="exporting"
+      v-model:mode="exportMode"
+      v-model:scope="exportScope"
+      kind="export"
+      :exporting="exporting"
+      :scope-options="exportScopeOptions"
       @submit="runExport(exportMode, exportScope)"
-    >
-      <p class="pf-hint">{{ t('page.platforms.export.hint') }}</p>
-      <Segmented
-        :options="exportModeOptions"
-        :model-value="exportMode"
-        :aria-label="t('page.platforms.export.modeAria')"
-        @update:model-value="(value: string | number) => (exportMode = String(value) === 'plain' ? 'plain' : 'backup')"
-      />
-      <n-select
-        v-model:value="exportScope"
-        :options="exportScopeOptions"
-        :aria-label="t('page.platforms.export.scopeAria')"
-        :placeholder="t('page.platforms.export.scopeAria')"
-      />
-    </FormDrawer>
+    />
 
     <JobProgress :jobs="jobItems" :title="t('page.platforms.job.title')" @hide="hideJob" />
   </div>
@@ -986,104 +758,51 @@ watch(
   max-width: 100%;
 }
 
+.pf-list {
+  display: grid;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
 .pf-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: var(--sp-4);
-  margin-top: var(--sp-4);
 }
 
-.pf-card {
+/* 骨架：只用 .mh-skeleton 一种样式（10 §1.7），形状与真卡片一致，数据到来不跳动。 */
+.pf-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--sp-4);
+}
+
+.pf-skeleton__card {
   display: grid;
   gap: var(--sp-3);
+  min-height: 212px;
   padding: var(--sp-4);
   border: 1px solid var(--border);
   border-radius: var(--r-card);
   background: var(--surface);
-  min-width: 0;
 }
 
-.pf-card.is-disabled {
-  opacity: 0.6;
+.pf-sk {
+  display: block;
+  border-radius: var(--r-ctl);
 }
 
-.pf-card__head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  min-width: 0;
-}
+.pf-sk--head { height: 40px; width: 70%; }
+.pf-sk--stats { height: 64px; }
+.pf-sk--line { height: 28px; width: 50%; }
 
-.pf-card__title {
-  flex: 1;
-  min-width: 0;
-}
-
-.pf-card__title h3 {
-  margin: 0;
-  font-size: var(--fs-h2);
-  line-height: var(--lh-h2);
-  font-weight: 600;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pf-card__title p {
-  margin-top: 2px;
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.pf-card__badges {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--sp-1);
-  flex: none;
-}
-
-.pf-card__metrics {
-  display: grid;
-  gap: 2px;
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-2);
-}
-
-.pf-card__quota {
-  display: grid;
-  gap: var(--sp-1);
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.pf-card__note {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--warn);
-}
-
-.pf-card__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-}
-
-.pf-tone-ok { color: var(--ok); }
-.pf-tone-warn { color: var(--warn); }
-.pf-tone-danger { color: var(--danger); }
-.pf-tone-muted { color: var(--fg-muted); }
-
-.pf-low { color: var(--warn); }
+/* 速度表单元格（DataTable 渲染，需 :deep） */
+:deep(.pf-low) { color: var(--warn); }
+:deep(.pf-rank) { color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 
 .pf-scan {
   display: grid;
-  gap: var(--sp-2);
+  gap: 0;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1092,53 +811,29 @@ watch(
 }
 
 .pf-scan__row {
-  display: flex;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(96px, 160px) repeat(3, max-content) minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: baseline;
+  padding: var(--sp-2) 0;
   color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.pf-scan__row + .pf-scan__row {
+  border-top: 1px solid var(--border-soft);
 }
 
 .pf-scan__name {
   font-weight: 500;
   color: var(--fg);
-  min-width: 96px;
 }
 
 .pf-scan__note {
   color: var(--fg-muted);
-}
-
-.pf-hint {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.pf-file {
-  font-size: var(--fs-small);
-  color: var(--fg-2);
-}
-
-.pf-preview {
-  display: grid;
-  gap: var(--sp-1);
-  margin: 0;
-  padding-left: var(--sp-5);
-  font-size: var(--fs-small);
-  color: var(--fg-2);
-}
-
-.pf-skeleton {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: var(--sp-4);
-}
-
-.pf-skeleton__card {
-  padding: var(--sp-5);
-  border: 1px solid var(--border);
-  border-radius: var(--r-card);
-  background: var(--surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 640px) {
@@ -1149,6 +844,11 @@ watch(
 
   .pf-search {
     width: 100%;
+  }
+
+  .pf-scan__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 }
 </style>

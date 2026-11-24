@@ -6,8 +6,8 @@
  * @/api/sync 的纯函数（normalizeRemoteUrl / summarizePushResult / describeSyncConfig …）走真实实现，
  * 断言既证明 DOM 变化，也真的跑到页面分支。契约见 docs/ui-v2/contracts/sync.md。
  *
- * 覆盖点：首屏骨架 → 表单/只读状态行 · 未保存徽章 · 保存（请求体归一 / 成功重载 / 失败 Toast）·
- *        取消 · 同步到线上（确认框文案、取消确认、进行中、成功计数、失败记录、缺 URL 前置校验）·
+ * 覆盖点：首屏骨架 → 表单/只读状态行 · 底部保存条 · 保存（请求体归一 / 后台密码 / 成功重载 / 失败 Toast）·
+ *        放弃 · 同步到线上（确认框文案、取消确认、进行中、成功计数、失败记录、缺 URL 前置校验）·
  *        刷新失败保留旧值 + 重试 · 首次加载错误 + 重试 · 重新生成密钥（确认 / 取消）·
  *        显示 / 隐藏 / 复制密钥 · URL 失焦归一与非 http 提示 · 平台切换重取（有/无未保存修改）·
  *        GET 回传 last_push_* 时优先于本机记录。
@@ -22,12 +22,19 @@ import SyncPage from '@/pages/SyncPage.vue'
 import { usePlatformStore } from '@/stores/platform'
 import * as syncApi from '@/api/sync'
 import * as platformApi from '@/api/platforms'
+import { ApiError } from '@/api/http'
 import type { SyncConfigPayload, SyncPushResult } from '@/api/sync'
 import type { PlatformSpec } from '@/api/platforms'
 
 vi.mock('@/api/sync', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/sync')>()
-  return { ...actual, getSyncConfig: vi.fn(), saveSyncConfig: vi.fn(), pushToOnline: vi.fn() }
+  return {
+    ...actual,
+    getSyncConfig: vi.fn(),
+    saveSyncConfig: vi.fn(),
+    pushToOnline: vi.fn(),
+    revealSyncSecret: vi.fn(),
+  }
 })
 
 vi.mock('@/api/platforms', async (importOriginal) => {
@@ -52,6 +59,7 @@ vi.mock('@/composables/useCopy', async (importOriginal) => {
 const getSyncConfig = vi.mocked(syncApi.getSyncConfig)
 const saveSyncConfig = vi.mocked(syncApi.saveSyncConfig)
 const pushToOnline = vi.mocked(syncApi.pushToOnline)
+const revealSyncSecret = vi.mocked(syncApi.revealSyncSecret)
 const listPlatforms = vi.mocked(platformApi.listPlatforms)
 const putCurrentPlatform = vi.mocked(platformApi.putCurrentPlatform)
 
@@ -221,6 +229,11 @@ async function typeInto(el: HTMLInputElement, value: string): Promise<void> {
   await settle()
 }
 
+/** 底部保存条（SettingsLayout）：没有改动时不渲染。 */
+function saveBar(wrapper: VueWrapper): HTMLElement | null {
+  return pageRoot(wrapper).querySelector('.mh-savebar') as HTMLElement | null
+}
+
 function kvText(wrapper: VueWrapper): string {
   const rows = Array.from(pageRoot(wrapper).querySelectorAll('.mh-kv__row')) as HTMLElement[]
   return rows.map((row) => (row.textContent || '').trim()).join(' | ')
@@ -310,8 +323,8 @@ describe('SyncPage 覆盖率补测 · 首屏与状态行', () => {
     // 没有本机记录、后端也没回 last_push_*：显示「尚未同步」
     expect(wrapper.text()).toContain('尚未同步')
 
-    // 干净表单：保存禁用、页头没有未保存徽章
-    expect(findButton(pageRoot(wrapper), '保存配置').disabled).toBe(true)
+    // 干净表单：底部保存条不出现（保存只有这一种方式）
+    expect(saveBar(wrapper)).toBeNull()
     expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 
@@ -321,7 +334,7 @@ describe('SyncPage 覆盖率补测 · 首屏与状态行', () => {
     const { wrapper } = await mountPage()
 
     expect(pageRoot(wrapper).querySelector('[aria-busy="true"]')).toBeTruthy()
-    expect(findButton(pageRoot(wrapper), '保存配置').disabled).toBe(true)
+    expect(saveBar(wrapper)).toBeNull()
     expect(findButton(pageRoot(wrapper), '同步到线上').disabled).toBe(true)
 
     pending.resolve(config())
@@ -358,23 +371,28 @@ describe('SyncPage 覆盖率补测 · 首屏与状态行', () => {
 })
 
 describe('SyncPage 覆盖率补测 · 保存与取消', () => {
-  it('改 URL/密钥后出现未保存徽章，保存发送归一后的请求体并重载表单', async () => {
+  it('改 URL/密钥后出现保存条；改已有地址要先填后台密码，保存发送归一后的请求体并重载表单', async () => {
     const { wrapper } = await mountPage()
     await typeInto(inputByPlaceholder(wrapper, 'https://online.example.com'), '  https://new.example.com/  ')
     await typeInto(inputByPlaceholder(wrapper, '与线上实例一致的密钥'), '  new-secret  ')
 
     expect(wrapper.text()).toContain('有未保存的修改')
     expect(wrapper.text()).toContain('未保存')
-    expect(findButton(pageRoot(wrapper), '保存配置').disabled).toBe(false)
+    expect(saveBar(wrapper)).toBeTruthy()
+    // 修改已有地址：出现「后台登录密码」，没填之前不能保存
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(true)
+    await typeInto(inputByPlaceholder(wrapper, '当前后台登录密码'), 'admin-pw')
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(false)
 
     getSyncConfig.mockResolvedValue(config({ remote_url: 'https://new.example.com', secret: 'new-secret' }))
-    await clickButton(wrapper, '保存配置')
+    await clickButton(wrapper, '保存')
     await settle()
 
     expect(saveSyncConfig).toHaveBeenCalledTimes(1)
     expect(saveSyncConfig.mock.calls[0][0]).toEqual({
       remote_url: 'https://new.example.com',
       secret: 'new-secret',
+      admin_password: 'admin-pw',
     })
     expect(bodyText()).toContain('已保存同步配置')
     // 保存后以库里实际值为准重新 GET 并覆盖表单
@@ -385,14 +403,18 @@ describe('SyncPage 覆盖率补测 · 保存与取消', () => {
 
   it('保存中按钮进入 loading/禁用（进度），失败弹「保存配置失败」且保留修改', async () => {
     const { wrapper } = await mountPage()
-    await typeInto(inputByPlaceholder(wrapper, 'https://online.example.com'), 'https://new.example.com')
+    // 只改密钥：不涉及地址变更，不需要后台密码
+    await typeInto(inputByPlaceholder(wrapper, '与线上实例一致的密钥'), 'another-secret')
     const pending = deferred<{ ok: boolean; secret_set: boolean }>()
     saveSyncConfig.mockReturnValue(pending.promise)
-    findButton(pageRoot(wrapper), '保存配置').click()
+    findButton(saveBar(wrapper)!, '保存').click()
     await settle()
 
-    const saveBtn = findButton(pageRoot(wrapper), '保存配置')
+    // 保存中：SaveBar 主按钮文案切成「保存中…」（Btn loading → 原生 disabled），
+    // 旧断言按静态文案找按钮会找不到。
+    const saveBtn = findButton(saveBar(wrapper)!, '保存中…')
     expect(saveBtn.disabled).toBe(true)
+    expect(saveBtn.getAttribute('aria-busy')).toBe('true')
     // 保存中不允许并发推送
     expect(findButton(pageRoot(wrapper), '同步到线上').disabled).toBe(true)
 
@@ -402,21 +424,41 @@ describe('SyncPage 覆盖率补测 · 保存与取消', () => {
 
     expect(bodyText()).toContain('保存配置失败：磁盘只读')
     expect(wrapper.text()).toContain('有未保存的修改')
-    expect(saveBtn.disabled).toBe(false)
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(false)
     expect(saveSyncConfig).toHaveBeenCalledTimes(1)
   })
 
-  it('取消：恢复为上次保存的配置并提示', async () => {
+  it('后台密码错误（403）：提示密码不正确，清空密码框，修改保留', async () => {
+    const { wrapper } = await mountPage()
+    await typeInto(inputByPlaceholder(wrapper, 'https://online.example.com'), 'https://new.example.com')
+    await typeInto(inputByPlaceholder(wrapper, '当前后台登录密码'), 'wrong')
+    saveSyncConfig.mockRejectedValueOnce(new ApiError(403, '修改同步地址需要输入当前后台登录密码'))
+    await clickButton(wrapper, '保存')
+    await settle()
+    expect(bodyText()).toContain('后台登录密码不正确，同步地址未修改')
+    expect(inputByPlaceholder(wrapper, '当前后台登录密码').value).toBe('')
+    expect(wrapper.text()).toContain('有未保存的修改')
+  })
+
+  it('首次填写地址（库里没有）不需要后台密码', async () => {
+    getSyncConfig.mockResolvedValue(config({ remote_url: '' }))
+    const { wrapper } = await mountPage()
+    await typeInto(inputByPlaceholder(wrapper, 'https://online.example.com'), 'https://first.example.com')
+    expect(pageRoot(wrapper).querySelector('input[placeholder="当前后台登录密码"]')).toBeNull()
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(false)
+  })
+
+  it('放弃：恢复为上次保存的配置并提示', async () => {
     const { wrapper } = await mountPage()
     const url = inputByPlaceholder(wrapper, 'https://online.example.com')
     await typeInto(url, 'https://other.example.com')
-    await clickButton(wrapper, '取消')
+    await clickButton(wrapper, '放弃')
     expect(inputByPlaceholder(wrapper, 'https://online.example.com').value).toBe('https://online.example.com')
     expect(bodyText()).toContain('已恢复为上次保存的配置')
     expect(wrapper.text()).not.toContain('有未保存的修改')
   })
 
-  it('URL 失焦去掉末尾斜杠；非 http(s) 只提示不拦截', async () => {
+  it('URL 失焦去掉末尾斜杠；非 http(s) 提示并禁止保存（后端会 400）', async () => {
     const { wrapper } = await mountPage()
     const input = inputByPlaceholder(wrapper, 'https://online.example.com')
     await typeInto(input, '  ftp://mirror.example.com/  ')
@@ -425,8 +467,16 @@ describe('SyncPage 覆盖率补测 · 保存与取消', () => {
     await settle()
     const next = inputByPlaceholder(wrapper, 'https://online.example.com')
     expect(next.value).toBe('ftp://mirror.example.com')
-    // 保存按钮仍可点（后端不校验格式）
-    expect(findButton(pageRoot(wrapper), '保存配置').disabled).toBe(false)
+    // 后端会校验地址，前端直接禁止保存
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(true)
+  })
+
+  it('后端要求 https（https_only）：http 地址提示并禁止保存', async () => {
+    getSyncConfig.mockResolvedValue(config({ remote_url: '', https_only: true }))
+    const { wrapper } = await mountPage()
+    await typeInto(inputByPlaceholder(wrapper, 'https://online.example.com'), 'http://plain.example.com')
+    expect(wrapper.text()).toContain('线上实例只接受 https 地址')
+    expect(findButton(saveBar(wrapper)!, '保存').disabled).toBe(true)
   })
 })
 
@@ -448,10 +498,8 @@ describe('SyncPage 覆盖率补测 · 同步到线上', () => {
     await answerDialog('同步到线上')
 
     expect(pushToOnline).toHaveBeenCalledTimes(1)
-    expect(pushToOnline.mock.calls[0][0]).toEqual({
-      remote_url: 'https://online.example.com',
-      secret: SECRET,
-    })
+    // 后端只推往已保存的地址：请求不再带地址 / 密钥
+    expect(pushToOnline.mock.calls[0][0]).toBeUndefined()
     expect(bodyText()).toContain('已同步到线上')
 
     const detail = wrapper.find('.last-push').text()
@@ -505,6 +553,36 @@ describe('SyncPage 覆盖率补测 · 同步到线上', () => {
 
     const stored = JSON.parse(String(localStorage.getItem(syncApi.SYNC_RECORD_KEY)))
     expect(stored).toMatchObject({ ok: false, error: 'HMAC 签名校验失败' })
+  })
+
+  it('有未保存修改时先提示保存，不弹确认、不发请求', async () => {
+    const { wrapper } = await mountPage()
+    await typeInto(inputByPlaceholder(wrapper, '与线上实例一致的密钥'), 'unsaved-secret')
+    findButton(pageRoot(wrapper), '同步到线上').click()
+    await settle()
+    expect(bodyText()).toContain('请先保存，再同步到线上')
+    expect(pushToOnline).not.toHaveBeenCalled()
+    expect(document.querySelector('.n-dialog')).toBeNull()
+  })
+
+  it('线上返回 skipped_not_newer：结果里显示「N 个线上更新、未覆盖」', async () => {
+    pushToOnline.mockResolvedValue(
+      pushPayload({
+        remote_result: {
+          ok: true,
+          accounts: { added: 1, updated: 2, skipped_not_newer: 5 },
+          models: { added: 0, updated: 3 },
+          client_profile: { applied: true, fields: ['user_agent'], errors: [] },
+        },
+      }),
+    )
+    const { wrapper } = await mountPage()
+    findButton(pageRoot(wrapper), '同步到线上').click()
+    await settle()
+    await answerDialog('同步到线上')
+    expect(wrapper.find('.last-push').text()).toContain('+1 / ~2 · 5 个线上更新、未覆盖')
+    const stored = JSON.parse(String(localStorage.getItem(syncApi.SYNC_RECORD_KEY)))
+    expect(stored.accounts).toEqual({ added: 1, updated: 2, skipped: 5 })
   })
 
   it('远程 URL 为空时前置拦截：只提示，不发请求', async () => {
@@ -568,7 +646,7 @@ describe('SyncPage 覆盖率补测 · 刷新、重试与密钥工具', () => {
     const secret = inputByPlaceholder(wrapper, '与线上实例一致的密钥')
     expect(secret.value).toMatch(/^[0-9a-f]{64}$/)
     expect(secret.getAttribute('type')).toBe('text')
-    expect(bodyText()).toContain('已生成新密钥，记得点「保存配置」')
+    expect(bodyText()).toContain('已生成新密钥，记得保存')
     expect(wrapper.text()).toContain('有未保存的修改')
   })
 
@@ -666,3 +744,57 @@ describe('SyncPage 覆盖率补测 · 平台切换', () => {
 // Naive message 的 auto-hide 定时器会在 jsdom 销毁后触发；用可自动推进的假时钟并在收尾清空。
 beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }) })
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+
+/* -------------------------------------------------------------------------- */
+/* 掩码形状（fix_plan S5）：新后端只下发掩码，显示 / 复制走单独的 reveal 接口      */
+/* -------------------------------------------------------------------------- */
+
+describe('SyncPage · 密钥只下发掩码（新后端）', () => {
+  // 真实后端（admin/routers/sync.py:get_config）：secret 字段本身就是掩码 + secret_set。
+  const maskedConfig = (): SyncConfigPayload => ({
+    remote_url: 'https://online.example.com',
+    secret: '********3b4c',
+    secret_masked: '********3b4c',
+    secret_set: true,
+    secret_revealable: true,
+    https_only: true,
+    is_auto_generated: false,
+  })
+
+  it('输入框不回填掩码；占位文字说明「留空保持不变」；保存不会把掩码当新密钥', async () => {
+    getSyncConfig.mockResolvedValue(maskedConfig())
+    const { wrapper } = await mountPage()
+    const input = inputByPlaceholder(wrapper, '已设置（********3b4c），留空则保持不变')
+    expect(input.value).toBe('')
+    // 干净表单（基线也是空串）：不出现保存条
+    expect(saveBar(wrapper)).toBeNull()
+    expect(kvText(wrapper)).toContain('********3b4c')
+    expect(revealSyncSecret).not.toHaveBeenCalled()
+  })
+
+  it('点「显示密钥」才调 reveal，拿到明文后显示且不算未保存修改', async () => {
+    getSyncConfig.mockResolvedValue(maskedConfig())
+    revealSyncSecret.mockResolvedValue({ secret: SECRET })
+    const { wrapper } = await mountPage()
+    const eye = pageRoot(wrapper).querySelector('button[aria-label="显示密钥"]') as HTMLButtonElement
+    eye.click()
+    await settle()
+    expect(revealSyncSecret).toHaveBeenCalledTimes(1)
+    const input = inputByPlaceholder(wrapper, '与线上实例一致的密钥')
+    expect(input.value).toBe(SECRET)
+    expect(input.getAttribute('type')).toBe('text')
+    expect(wrapper.text()).not.toContain('有未保存的修改')
+  })
+
+  it('旧后端没有 reveal 接口（404）：提示不支持，不崩', async () => {
+    getSyncConfig.mockResolvedValue(maskedConfig())
+    revealSyncSecret.mockRejectedValue(new ApiError(404, 'Not Found'))
+    const { wrapper } = await mountPage()
+    const eye = pageRoot(wrapper).querySelector('button[aria-label="显示密钥"]') as HTMLButtonElement
+    eye.click()
+    await settle()
+    expect(bodyText()).toContain('当前后端不支持显示密钥')
+    expect(inputByPlaceholder(wrapper, '已设置（********3b4c），留空则保持不变').getAttribute('type')).toBe('password')
+  })
+})
+

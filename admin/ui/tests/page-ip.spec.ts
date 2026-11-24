@@ -490,18 +490,26 @@ describe('expiryFromDuration：时长 → expires_at', () => {
   const now = Date.UTC(2026, 10, 23, 3, 0, 0)
 
   it('永久不提交 expires_at', () => {
-    expect(expiryFromDuration('permanent', now)).toEqual({ expiresAt: null, error: '' })
+    expect(expiryFromDuration('permanent', now)).toEqual({ expiresAt: null, durationSeconds: null, error: '' })
   })
 
   it('1 小时 / 1 天 / 7 天换算成 ISO', () => {
     expect(expiryFromDuration('1h', now).expiresAt).toBe('2026-11-23T04:00:00.000Z')
     expect(expiryFromDuration('1d', now).expiresAt).toBe('2026-11-24T03:00:00.000Z')
     expect(expiryFromDuration('7d', now).expiresAt).toBe('2026-11-30T03:00:00.000Z')
+    // r3：预设时长同时给出 duration_seconds（提交时优先用它，避免浏览器时钟偏差）
+    expect(expiryFromDuration('1h', now).durationSeconds).toBe(3600)
+    expect(expiryFromDuration('30d', now).durationSeconds).toBe(30 * 86400)
+  })
+
+  it('自定义超过 366 天被拦下（后端上限）', () => {
+    expect(expiryFromDuration('custom', now, now + 367 * 86400000).error).toBe('到期时间不能超过 366 天')
   })
 
   it('自定义：未选 / 早于当前 报错，晚于当前通过', () => {
     expect(expiryFromDuration('custom', now, null)).toEqual({
       expiresAt: null,
+      durationSeconds: null,
       error: '请选择到期时间',
     })
     expect(expiryFromDuration('custom', now, now - 1000).error).toBe('到期时间必须晚于当前时间')

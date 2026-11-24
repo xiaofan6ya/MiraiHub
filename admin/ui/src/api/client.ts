@@ -9,6 +9,11 @@
  * 由「内置兜底 ← 现场探测/已保存 ← 环境变量」合成；UA 始终由版本号现拼。
  */
 import { http } from './http'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 export type ProfileSource = 'auto' | 'saved'
 
@@ -22,31 +27,31 @@ export interface ClientFieldDef {
 
 /** 版本与归属（旧版 _CP_FIELDS，标签与说明原样保留）。 */
 export const VERSION_FIELDS: ClientFieldDef[] = [
-  { key: 'desktop_version', label: '桌面端版本', type: 'text', hint: 'X-IDE-Version 与 UA 都用它' },
-  { key: 'cli_version', label: '内嵌 CLI 版本', type: 'text', hint: 'UA 第三段' },
-  { key: 'ide_name', label: 'IDE 名称', type: 'text', hint: 'X-IDE-Name' },
-  { key: 'ide_type', label: 'IDE 类型', type: 'text', hint: 'X-IDE-Type' },
-  { key: 'product', label: '产品头(X-Product)', type: 'text', hint: '官方取部署形态 deploymentType（WorkBuddy 为 SaaS），不是产品名' },
-  { key: 'application_name', label: 'UA 产品名', type: 'text', hint: 'UA 前后两段（官方取 applicationName）' },
-  { key: 'turing_channel_id', label: '风控 channelId', type: 'int', hint: '天御 SDK 渠道号' },
-  { key: 'turing_product_name', label: '风控产品名', type: 'text', hint: '天御 SDK productName' },
-  { key: 'commit', label: 'commit', type: 'text', hint: '安装包提交号' },
-  { key: 'release_date_ms', label: '发布日期(ms)', type: 'int', hint: '安装包构建时间戳' },
-  { key: 'node_version', label: '内嵌 Node 版本', type: 'text', hint: 'X-Stainless-Runtime-Version（装了客户端会自动探测精确值）' },
-  { key: 'stainless_package_version', label: 'SDK 版本', type: 'text', hint: 'X-Stainless-Package-Version（官方内嵌 stainless SDK）' },
+  { key: 'desktop_version', get label() { return tx('page.client.field.desktopVersion') }, type: 'text', get hint() { return tx('page.client.hint.desktopVersion') } },
+  { key: 'cli_version', get label() { return tx('page.client.field.cliVersion') }, type: 'text', get hint() { return tx('page.client.hint.cliVersion') } },
+  { key: 'ide_name', get label() { return tx('page.client.field.ideName') }, type: 'text', hint: 'X-IDE-Name' },
+  { key: 'ide_type', get label() { return tx('page.client.field.ideType') }, type: 'text', hint: 'X-IDE-Type' },
+  { key: 'product', get label() { return tx('page.client.field.product') }, type: 'text', get hint() { return tx('page.client.hint.product') } },
+  { key: 'application_name', get label() { return tx('page.client.field.applicationName') }, type: 'text', get hint() { return tx('page.client.hint.applicationName') } },
+  { key: 'turing_channel_id', get label() { return tx('page.client.field.turingChannelId') }, type: 'int', get hint() { return tx('page.client.hint.turingChannelId') } },
+  { key: 'turing_product_name', get label() { return tx('page.client.field.turingProductName') }, type: 'text', get hint() { return tx('page.client.hint.turingProductName') } },
+  { key: 'commit', label: 'commit', type: 'text', get hint() { return tx('page.client.hint.commit') } },
+  { key: 'release_date_ms', get label() { return tx('page.client.field.releaseDateMs') }, type: 'int', get hint() { return tx('page.client.hint.releaseDateMs') } },
+  { key: 'node_version', get label() { return tx('page.client.field.nodeVersion') }, type: 'text', get hint() { return tx('page.client.hint.nodeVersion') } },
+  { key: 'stainless_package_version', get label() { return tx('page.client.field.stainlessPackageVersion') }, type: 'text', get hint() { return tx('page.client.hint.stainlessPackageVersion') } },
 ]
 
 /** 桌面事件指纹（旧版 _CP_FP_FIELDS）。 */
 export const FINGERPRINT_FIELDS: ClientFieldDef[] = [
-  { key: 'fp_product', label: '指纹 product', type: 'text', hint: '遥测里的产品形态（官方为 SaaS），与请求头 X-Product 不同' },
-  { key: 'ext_name', label: '扩展名', type: 'text', hint: 'extName' },
-  { key: 'os', label: '操作系统', type: 'text', hint: '官方 Windows 端为 win32' },
-  { key: 'arch', label: '架构', type: 'text', hint: 'x64 / arm64' },
-  { key: 'os_version', label: '系统版本', type: 'text', hint: 'osVersion' },
-  { key: 'cpu_cores', label: 'CPU 核数', type: 'int' },
-  { key: 'memory_size', label: '内存(GB)', type: 'int' },
-  { key: 'timezone', label: '时区', type: 'text' },
-  { key: 'report_delay', label: '上报延迟(ms)', type: 'int' },
+  { key: 'fp_product', get label() { return tx('page.client.field.fpProduct') }, type: 'text', get hint() { return tx('page.client.hint.fpProduct') } },
+  { key: 'ext_name', get label() { return tx('page.client.field.extName') }, type: 'text', hint: 'extName' },
+  { key: 'os', get label() { return tx('page.client.field.os') }, type: 'text', get hint() { return tx('page.client.hint.os') } },
+  { key: 'arch', get label() { return tx('page.client.field.arch') }, type: 'text', hint: 'x64 / arm64' },
+  { key: 'os_version', get label() { return tx('page.client.field.osVersion') }, type: 'text', hint: 'osVersion' },
+  { key: 'cpu_cores', get label() { return tx('page.client.field.cpuCores') }, type: 'int' },
+  { key: 'memory_size', get label() { return tx('page.client.field.memorySize') }, type: 'int' },
+  { key: 'timezone', get label() { return tx('page.client.field.timezone') }, type: 'text' },
+  { key: 'report_delay', get label() { return tx('page.client.field.reportDelay') }, type: 'int' },
 ]
 
 export interface DeviceTokenStatus {
@@ -192,14 +197,14 @@ export function buildProfilePayload(form: Record<string, string>, fields: Client
     if (field.type === 'int') {
       const number = Number(raw)
       if (!Number.isInteger(number) || number < 0) {
-        errors.push(field.label + ' 必须是 ≥0 的整数')
+        errors.push(tx('page.client.v.nonNegInt', { label: field.label }))
         continue
       }
       profile[field.key] = number
       continue
     }
     if (raw.length > 512) {
-      errors.push(field.label + ' 不能超过 512 个字符')
+      errors.push(tx('page.client.v.maxLen', { label: field.label }))
       continue
     }
     profile[field.key] = raw
@@ -230,13 +235,14 @@ export function sourceTone(source: string | null | undefined): 'ok' | 'warn' | '
 /** 来源的短标签（完整来源放 title）。 */
 export function sourceLabel(source: string | null | undefined): string {
   const text = String(source || '')
-  if (text.startsWith('环境变量')) return '环境变量'
-  if (text.includes('安装包')) return '安装包实测'
-  if (text.includes('本机系统')) return '本机系统'
-  if (text === '现场探测') return '现场探测'
-  if (text === '已保存') return '已保存'
-  if (text === '内置兜底') return '兜底默认'
-  if (text.startsWith('合并')) return '合并'
+  // 入参是后端下发的中文来源串（只做匹配），输出走字典
+  if (text.startsWith('环境变量')) return tx('page.client.src.env')
+  if (text.includes('安装包')) return tx('page.client.src.installer')
+  if (text.includes('本机系统')) return tx('page.client.src.system')
+  if (text === '现场探测') return tx('page.client.src.probe')
+  if (text === '已保存') return tx('page.client.src.saved')
+  if (text === '内置兜底') return tx('page.client.src.fallback')
+  if (text.startsWith('合并')) return tx('page.client.src.merged')
   return text || '—'
 }
 
@@ -259,10 +265,10 @@ export interface RuntimeView {
 }
 
 const GROUP_ORIGIN: Record<string, string> = {
-  client_profile: '档案值（探测/保存/兜底）',
-  sdk_stainless: 'SDK 资料（仅在明确使用该 SDK 的业务中适用）',
-  account_session: '账号凭据 / 会话字段',
-  request_trace: '调用方明确提供的关联字段',
+  get client_profile() { return tx('page.client.origin.profile') },
+  get sdk_stainless() { return tx('page.client.origin.sdk') },
+  get account_session() { return tx('page.client.origin.session') },
+  get request_trace() { return tx('page.client.origin.trace') },
 }
 
 /** 运行时诊断 → KV 行 + 请求头字段组 + 是否异常。 */
@@ -271,23 +277,23 @@ export function runtimeView(diag: RuntimeDiagnostics | null | undefined): Runtim
   const token = data.device_token || {}
   const tokenOk = token.available === true
   const tokenText = tokenOk
-    ? '原生 SDK 令牌可用（本机实测）'
+    ? tx('page.client.rt.tokenOk')
     : !token.checked
-      ? '尚无 SDK 令牌缓存'
+      ? tx('page.client.rt.tokenNone')
       : token.cached_failure
-        ? '暂不可用（已有失败缓存）'
-        : '不可用'
+        ? tx('page.client.rt.tokenCachedFail')
+        : tx('page.client.rt.unavailable')
   const rows: RuntimeRow[] = [
-    { label: '运行平台', value: data.platform || '—', tone: 'neutral' },
-    { label: '设备令牌', value: tokenText, tone: tokenOk ? 'ok' : 'warn', detail: token.source || '' },
+    { label: tx('page.client.rt.platform'), value: data.platform || '—', tone: 'neutral' },
+    { label: tx('page.client.rt.deviceToken'), value: tokenText, tone: tokenOk ? 'ok' : 'warn', detail: token.source || '' },
     {
-      label: 'Node 运行时',
-      value: token.node_available ? '可用' : '不可用',
+      label: tx('page.client.rt.node'),
+      value: token.node_available ? tx('page.client.rt.available') : tx('page.client.rt.unavailable'),
       tone: token.node_available ? 'ok' : 'warn',
     },
     {
       label: 'Native helper',
-      value: token.helper_available ? '可用' : '不可用',
+      value: token.helper_available ? tx('page.client.rt.available') : tx('page.client.rt.unavailable'),
       tone: token.helper_available ? 'ok' : 'warn',
     },
   ]
@@ -301,7 +307,7 @@ export function runtimeView(diag: RuntimeDiagnostics | null | undefined): Runtim
     rows,
     groups,
     warning: !tokenOk || !token.node_available || !token.helper_available,
-    note: '服务器没有官方原生 SDK 时会明确显示不可用；不要手工填写或伪造设备令牌。',
+    note: tx('page.client.rt.note'),
   }
 }
 
@@ -344,10 +350,10 @@ export function scanView(
     plain: Boolean(item.has_plain_credential),
   }))
   const hasClient = Boolean(detect?.has_client ?? payload?.has_client)
-  let stateText = '未检测到客户端'
-  if (dirs.length && items.length) stateText = '已检测到客户端'
-  else if (dirs.length) stateText = '已找到客户端目录 · 这些目录里没有凭据文件'
-  else if (hasClient) stateText = '已探测到参数 · 本机没有该客户端的数据目录'
+  let stateText = tx('page.client.scan.none')
+  if (dirs.length && items.length) stateText = tx('page.client.scan.found')
+  else if (dirs.length) stateText = tx('page.client.scan.dirsOnly')
+  else if (hasClient) stateText = tx('page.client.scan.paramsOnly')
   return {
     stateText,
     hasClient,
@@ -382,8 +388,9 @@ function derivedHeaderValue(effective: Record<string, unknown>, name: string): s
  */
 export function headerSourceTone(source: string | null | undefined): 'brand' | 'ok' | 'neutral' {
   const text = String(source || '')
-  if (text.startsWith('档案值')) return 'brand'
-  if (text.startsWith('SDK')) return 'ok'
+  // 兼容后端中文前缀与本文件翻译后的来源名（英文界面下 source 已是英文）
+  if (text.startsWith('档案值') || text === tx('page.client.origin.profile')) return 'brand'
+  if (text.startsWith('SDK') || text === tx('page.client.origin.sdk')) return 'ok'
   return 'neutral'
 }
 
@@ -400,7 +407,7 @@ export function headerRows(payload: ClientProfilePayload | null | undefined): He
     rows.push({
       name,
       value: name in extra ? asText(extra[name]) : derivedHeaderValue(eff, name),
-      source: '档案值（探测/保存/兜底）',
+      source: tx('page.client.origin.profile'),
     })
   }
   for (const name of Object.keys(groups).sort()) {
@@ -408,7 +415,7 @@ export function headerRows(payload: ClientProfilePayload | null | undefined): He
     for (const header of groups[name] || []) {
       rows.push({
         name: header,
-        value: '—（运行时生成）',
+        value: tx('page.client.header.runtime'),
         source: GROUP_ORIGIN[name] || name,
       })
     }

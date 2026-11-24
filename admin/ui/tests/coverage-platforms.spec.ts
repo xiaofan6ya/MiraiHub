@@ -435,12 +435,15 @@ describe('平台管理 · 初次加载与卡片', () => {
     expect(wrapper.text()).toContain('已禁用 1')
     expect(wrapper.text()).toContain('共 3 个平台 · 已启用 2 · 已禁用 1')
 
-    // 卡片上的今日指标来自 /api/platform/speed
-    expect(wrapper.text()).toContain('今日 1,786 次')
+    // 卡片上的今日指标来自 /api/platform/speed（三格统计：账号 / 今日请求 / TTFT · TPS）
+    expect(wrapper.text()).toContain('今日请求')
+    expect(wrapper.text()).toContain('1,786')
     expect(wrapper.text()).toContain('98.0%')
-    expect(wrapper.text()).toContain('TTFT 1.2s · TPS 12.3')
-    // 可用账号 / 剩余额度来自 /api/accounts 快照
-    expect(wrapper.text()).toContain('2/2 可用')
+    expect(wrapper.text()).toContain('1.2s · 12.3')
+    // 可用账号 / 剩余额度来自 /api/accounts 快照：「可用 / 总数」
+    expect(wrapper.text()).toContain('2/2')
+    // 常态不再每张卡都挂「已启用」徽章：今日有请求的显示「运行中」
+    expect(wrapper.text()).toContain('运行中')
     expect(wrapper.text()).toContain('剩余额度 12,954')
 
     // 跑分表：表体行在 jsdom 里按需渲染，这里断言「收到两行数据」的分页统计 + 表头
@@ -453,7 +456,7 @@ describe('平台管理 · 初次加载与卡片', () => {
     expect(mocks.getPlatformSpeed).toHaveBeenCalledWith(24, expect.anything())
   })
 
-  it('禁用平台：卡片 60% 透明 + 不参与调度提示；tier 优先平台自报、缺失走兜底表', async () => {
+  it('禁用平台：卡片 60% 透明 + 不参与调度提示；平台分级已删除（后端仍下发 rating 也不显示）', async () => {
     const { wrapper } = await mountPage()
     const disabled = wrapper.findAll('.pf-card.is-disabled')
     expect(disabled).toHaveLength(1)
@@ -461,10 +464,11 @@ describe('平台管理 · 初次加载与卡片', () => {
     expect(disabled[0].text()).toContain('已禁用')
     expect(disabled[0].text()).toContain('不参与调度，账号仍可管理（界面禁用）')
 
-    // loomy 自报 elite；workbuddy 没声明 → 兜底表「夯」
-    expect(disabled[0].text()).toContain('人上人')
+    // r4：分级功能删除。loomy 仍带 rating.tier=elite，卡片不显示任何分级文案；workbuddy 也不再走兜底表
+    expect(disabled[0].text()).not.toContain('人上人')
     const workbuddy = cardByLabel('WorkBuddy')!
-    expect(workbuddy.textContent).toContain('夯')
+    expect(workbuddy.textContent).not.toContain('夯')
+    expect(wrapper.text()).not.toMatch(/人上人|拉完了|平均级/)
     // 单区平台显示区域标签
     expect(cardByLabel('Trae 国内版')!.textContent).toContain('国内版')
   })
@@ -531,29 +535,25 @@ describe('平台管理 · 筛选 / 空态 / 错误态', () => {
 })
 
 describe('平台管理 · 当前平台切换与跳转', () => {
-  it('「设为当前」写 store + Toast，按钮变「当前平台」且禁用', async () => {
+  it('「设为当前」收进 ⋯ 菜单：写 store + Toast，卡片标「当前平台」（左侧品牌色竖条）', async () => {
     const { wrapper } = await mountPage()
     const store = usePlatformStore()
     // 用单区、realm 为空的 Loomy：store.setCurrent 会把「不存在的 realm」归一成 ''，
     // 只有这种平台的卡片能稳定进入「当前平台」态（trae-cn 的 realm 会被清掉）。
+    // 卡片上直接露出的按钮只剩「账号池」（第 1 轮审查 P2：每张卡 3 个按钮太重）。
     const loomy = cardByLabel('Loomy')!
+    expect(Array.from(loomy.querySelectorAll('button')).some((el) => (el.textContent || '').trim() === '设为当前')).toBe(false)
 
-    const setCurrent = Array.from(loomy.querySelectorAll('button')).find(
-      (el) => (el.textContent || '').trim() === '设为当前',
-    ) as HTMLElement
-    setCurrent.click()
-    await settle()
+    await openCardMenu('Loomy')
+    await pickMenu('设为当前')
 
     expect(store.platform).toBe('loomy')
     expect(store.realm).toBe('')
     expect(bodyText()).toContain('已切换到 Loomy')
-    const now = Array.from(cardByLabel('Loomy')!.querySelectorAll('button')).find(
-      (el) => (el.textContent || '').trim() === '当前平台',
-    ) as HTMLButtonElement
-    expect(now).toBeTruthy()
-    expect(now.disabled).toBe(true)
-    // workbuddy 不再是当前平台 → 按钮恢复「设为当前」
-    expect(cardByLabel('WorkBuddy')!.textContent).toContain('设为当前')
+    const current = cardByLabel('Loomy')!
+    expect(current.classList.contains('is-current')).toBe(true)
+    expect(current.textContent).toContain('当前平台')
+    expect(cardByLabel('WorkBuddy')!.classList.contains('is-current')).toBe(false)
     expect(wrapper.findAll('.pf-card')).toHaveLength(3)
   })
 
@@ -616,7 +616,8 @@ describe('平台管理 · 卡片 ⋯ 菜单与危险操作', () => {
     expect(scanOption).toBeTruthy()
     expect(scanOption!.querySelector('.n-dropdown-option-body--disabled')).toBeTruthy()
     expect(labels).toContain('导入账号')
-    expect(labels).toContain('平均级：人上人')
+    // r4：分级已删除，菜单里不再有「平均级：…」
+    expect(labels.some((label) => label.startsWith('平均级'))).toBe(false)
 
     await pickMenu('导入账号')
     expect(bodyText()).toContain('已选平台 loomy：把该平台的导出文件拖进来即可')
@@ -644,12 +645,16 @@ describe('平台管理 · 卡片 ⋯ 菜单与危险操作', () => {
     expect(mocks.listPlatforms).toHaveBeenCalledTimes(3)
   })
 
-  it('导出本平台：调用 export-all(backup, 落库名) 并提示数量', async () => {
+  it('导出本平台：二次确认后调用 export-all(backup, 落库名, 已确认) 并提示数量', async () => {
     await mountPage()
     await openCardMenu('Trae 国内版')
     await pickMenu('导出本平台')
 
-    expect(mocks.exportPlatformsAll).toHaveBeenCalledWith('backup', 'trae')
+    // r5：含明文凭证的导出先过防误触确认（后端 export_guard 要求 X-Export-Confirm 头）
+    expect(bodyText()).toContain('导出可直接登录的完整凭证？')
+    await confirmDialog('导出完整凭证')
+
+    expect(mocks.exportPlatformsAll).toHaveBeenCalledWith('backup', 'trae', true)
     expect(bodyText()).toContain('已导出 2 个账号（1 个平台）')
   })
 
@@ -658,6 +663,7 @@ describe('平台管理 · 卡片 ⋯ 菜单与危险操作', () => {
     await mountPage()
     await openCardMenu('WorkBuddy')
     await pickMenu('导出本平台')
+    await confirmDialog('导出完整凭证')
     expect(bodyText()).toContain('该平台没有账号可导出')
   })
 })
@@ -700,7 +706,11 @@ describe('平台管理 · 批量操作', () => {
 
     setFileInput(input, [{ name: 'backup.json', text: async () => IMPORT_FILE }])
     await settle()
-    expect(bodyText()).toContain('workbuddy · 1 个账号')
+    // 预览行 = 落库名 + 账号数两个 span（左右对齐），不再是一条「名 · 数量」字符串
+    const preview = document.querySelector('.pf-preview') as HTMLElement | null
+    expect(preview).toBeTruthy()
+    expect(preview!.querySelector('.pf-preview__name')!.textContent!.trim()).toBe('workbuddy')
+    expect(preview!.querySelector('.pf-preview__count')!.textContent!.trim()).toBe('1 个账号')
 
     await clickButton('开始导入')
     await settle()
@@ -746,7 +756,8 @@ describe('平台管理 · 批量操作', () => {
     await settle()
 
     await clickButton('开始导出')
-    expect(mocks.exportPlatformsAll).toHaveBeenCalledWith('plain', '')
+    // plain 模式不需要凭证确认，第三个参数 fixed 为 false
+    expect(mocks.exportPlatformsAll).toHaveBeenCalledWith('plain', '', false)
     expect(bodyText()).toContain('已导出 2 个账号')
 
     // 第二次返回空 → 提示无账号
@@ -778,8 +789,9 @@ describe('平台管理 · 跑分窗口', () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.findAll('.pf-card')).toHaveLength(3)
-    expect(wrapper.text()).toContain('今日 0 次')
-    // 没有账号快照 → 只显示账号数
-    expect(wrapper.text()).toContain('账号 2 个')
+    expect(wrapper.text()).toMatch(/今日请求\s*0/)
+    // 没有账号快照 → 只显示账号数（不显示「可用 / 总数」）
+    expect(wrapper.text()).toMatch(/账号\s*2/)
+    expect(wrapper.text()).not.toContain('2/2')
   })
 })

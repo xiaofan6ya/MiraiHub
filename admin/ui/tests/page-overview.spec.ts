@@ -257,6 +257,8 @@ describe('buildMonitorRows / monitorConclusion：账号状态', () => {
     expect(rows[0]).toMatchObject({ count: 3, pct: 75, faint: false, tone: 'ok' })
     expect(rows[1]).toMatchObject({ count: 1, pct: 25, faint: false, tone: 'warn' })
     expect(rows[2]).toMatchObject({ count: 0, pct: 0, faint: true })
+    // 01-direction §3.3：熔断 / 额度耗尽 = danger，已禁用 = 灰（不是朱色）
+    expect(rows.map((row) => row.tone)).toEqual(['ok', 'warn', 'danger', 'danger', 'neutral'])
   })
 
   it('结论：全部正常 / 冷却 / 熔断 / 额度耗尽 / 已禁用 / 无账号', () => {

@@ -1,5 +1,6 @@
-/* MiraiHub UI v2 设计令牌。复制到 admin/ui/src/styles/tokens.css，原样使用，不要改值。
-   主题切换：<html data-theme="light|dark">。默认跟随系统。 */
+/* MiraiHub UI v2.1 设计令牌（「调度台 · 精制版」，docs/ui-v2/10-visual-refresh.md 第 2 节）。
+   主题切换：<html data-theme="light|dark">。默认跟随系统。
+   改值时同步：index.html 首屏占位里的字面量、theme/naiveTheme.ts 的 LIGHT_FALLBACK。 */
 
 :root,
 :root[data-theme="light"] {
@@ -7,16 +8,17 @@
 
   --bg: #F3F5F8;
   --surface: #FFFFFF;
-  --surface-2: #F8F9FB;      /* 表头、输入框底、次级区块 */
-  --surface-hover: #F1F3F7;  /* 行悬停、菜单项悬停 */
+  --surface-raised: #FFFFFF;   /* 浮起的卡片、tooltip */
+  --surface-2: #F7F8FA;        /* 表头、输入框底、次级区块、骨架屏 */
+  --surface-hover: #F1F3F7;    /* 行悬停、菜单项悬停 */
   --border: #E3E6EC;
   --border-soft: #EDEFF3;
   --border-strong: #CDD2DB;
 
   --fg: #171A21;
-  --fg-2: #454B57;           /* 次级正文 */
-  --fg-muted: #6B7280;       /* 说明、表头 */
-  --fg-faint: #9AA1AD;       /* 占位符、禁用 */
+  --fg-2: #454B57;             /* 次级正文 */
+  --fg-muted: #6B7280;         /* 说明、表头 */
+  --fg-faint: #9AA1AD;         /* 占位符、禁用 */
 
   --brand: #3148C8;
   --brand-hover: #2839A6;
@@ -41,25 +43,45 @@
   --chart-7: #6B7A2E;
   --chart-8: #9AA1AD;
 
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 1px rgba(16, 24, 40, .03);
+  --shadow-2: 0 6px 16px rgba(16, 24, 40, .08), 0 2px 4px rgba(16, 24, 40, .04);
   --shadow-pop: 0 8px 28px rgba(23, 26, 33, .12), 0 1px 3px rgba(23, 26, 33, .08);
   --scrim: rgba(18, 21, 27, .38);
+
+  /* 内容区顶部极淡的品牌光晕（只用在主内容区顶部） */
+  --bg-glow: radial-gradient(1200px 240px at 30% -40px, rgba(49, 72, 200, .07), transparent);
+
+  /* 侧栏：两种主题都是深墨蓝 */
+  --side-bg: #121829;
+  --side-fg: #E7EAF3;
+  --side-fg-muted: #8C94AB;
+  --side-hover-bg: rgba(255, 255, 255, .06);
+  --side-active-bg: rgba(125, 143, 255, .18);
+  --side-border: rgba(255, 255, 255, .06);
+  --side-accent: #7D8FFF;      /* 选中项左侧 3px 竖条：深底上要亮，所以不用 --brand */
+
+  --topbar-bg: rgba(244, 246, 250, .82);
+  --ring: rgba(49, 72, 200, .22);
+  --grad-brand: linear-gradient(135deg, #3148C8, #5B6CF0);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
+  /* 表面层级：--bg < --surface < --surface-raised < 浮层，每级都有可辨的亮度差 */
   --bg: #12151B;
-  --surface: #1A1E26;
-  --surface-2: #20242D;
-  --surface-hover: #252A34;
-  --border: #2B303B;
-  --border-soft: #242833;
-  --border-strong: #3A404D;
+  --surface: #1C2029;
+  --surface-raised: #222733;
+  --surface-2: #21252F;
+  --surface-hover: #272C37;
+  --border: #323846;
+  --border-soft: #292E39;
+  --border-strong: #444B5A;
 
   --fg: #E6E9EF;
   --fg-2: #BCC2CD;
   --fg-muted: #8D95A3;
-  --fg-faint: #636B78;
+  --fg-faint: #6A7280;
 
   --brand: #7D8FFF;
   --brand-hover: #98A6FF;
@@ -83,8 +105,25 @@
   --chart-7: #A8B65A;
   --chart-8: #636B78;
 
-  --shadow-pop: 0 10px 32px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
+  /* 深色：更深的投影 + 1px 内高光（11-polish-motion §3「深色」） */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4), inset 0 1px 0 rgba(255, 255, 255, .04);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .04);
+  --shadow-pop: 0 10px 32px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3), inset 0 1px 0 rgba(255, 255, 255, .05);
   --scrim: rgba(0, 0, 0, .55);
+
+  --bg-glow: radial-gradient(1200px 240px at 30% -40px, rgba(125, 143, 255, .10), transparent);
+
+  --side-bg: #0C0F16;
+  --side-fg: #E6E9EF;
+  --side-fg-muted: #7E8699;
+  --side-hover-bg: rgba(255, 255, 255, .06);
+  --side-active-bg: rgba(125, 143, 255, .18);
+  --side-border: rgba(255, 255, 255, .06);
+  --side-accent: #7D8FFF;
+
+  --topbar-bg: rgba(18, 21, 27, .78);
+  --ring: rgba(125, 143, 255, .30);
+  --grad-brand: linear-gradient(135deg, #6E80FF, #9AA6FF);
 }
 
 :root {
@@ -93,37 +132,63 @@
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 
   --fs-display: 40px; --lh-display: 44px;
-  --fs-h1: 22px;      --lh-h1: 30px;
+  --fs-h1: 24px;      --lh-h1: 32px;
   --fs-h2: 15px;      --lh-h2: 22px;
-  --fs-stat: 26px;    --lh-stat: 32px;
+  --fs-h3: 13px;      --lh-h3: 18px;
+  --fs-stat: 28px;    --lh-stat: 34px;
   --fs-body: 14px;    --lh-body: 22px;
   --fs-small: 12px;   --lh-small: 18px;
   --fs-tiny: 11px;    --lh-tiny: 16px;
+  --fs-mono: 12.5px;
 
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px;
   --sp-6: 24px; --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
 
-  --r-card: 10px;
-  --r-ctl: 7px;
-  --r-chip: 5px;
+  --r-card: 12px;
+  --r-lg: 14px;
+  --r-ctl: 8px;
+  --r-chip: 6px;
 
-  --side-w: 224px;
+  --ctl-h: 34px;          /* 按钮 / 输入框 md */
+  --ctl-h-sm: 28px;
+  --row-h: 44px;          /* 表格行高 */
+  --row-h-compact: 36px;
+
+  --side-w: 232px;
   --side-w-collapsed: 64px;
   --topbar-h: 56px;
-  --content-max: 1440px;
+  --content-max: 1600px;
+  --content-max-wide: 1920px;
+  --content-pad: 32px;    /* ≤1280 24px，手机 16px（见 base.css） */
 
-  --ease: cubic-bezier(.2, .7, .2, 1);
-  --t-fast: 120ms;
+  /* 动效令牌（11-polish-motion §1）：进入/展开用 --ease-out，位移/切换用 --ease-in-out。
+     --dur-1 悬停与按压 / --dur-2 浮层与 tab / --dur-3 抽屉与路由。 */
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 260ms;
+
+  /* 旧名保留（已有组件在用），值对齐到新令牌。 */
+  --ease: var(--ease-out);
+  --t-fast: var(--dur-1);
   --t-base: 160ms;
-  --t-slow: 200ms;
+  --t-slow: var(--dur-2);
 }
 
 html { font-family: var(--font-sans); font-size: var(--fs-body); line-height: var(--lh-body);
   background: var(--bg); color: var(--fg); -webkit-font-smoothing: antialiased; scrollbar-gutter: stable; }
 .tnum, td, .stat-value { font-variant-numeric: tabular-nums; }
-.mono { font-family: var(--font-mono); font-size: 12.5px; }
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: var(--r-ctl); }
+.mono { font-family: var(--font-mono); font-size: var(--fs-mono); }
+/* 第 4 轮：去掉这里的 border-radius —— 它会改写元素自身圆角（12px 卡片、999px 胶囊聚焦时变成 8px 直角跳一下）。
+   现代浏览器的 outline 本来就沿元素自身圆角绘制。 */
+:focus-visible { outline: 3px solid var(--ring); outline-offset: 1px; }
 
+/* 减少动效：令牌归零 + 兜底把所有动画/过渡压到 0（11-polish-motion §1 最后一条）。 */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0ms !important; transition-duration: 0ms !important; }
+  :root { --dur-1: 0ms; --dur-2: 0ms; --dur-3: 0ms; --t-base: 0ms; }
+  *, *::before, *::after {
+    animation-duration: 0ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important; scroll-behavior: auto !important;
+  }
 }

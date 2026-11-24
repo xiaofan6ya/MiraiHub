@@ -9,7 +9,10 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  dedupePricing,
   filterMarketCards,
+  marketMultiplier,
+  marketPlatforms,
   hoursToDays,
   indexCallNames,
   indexTrendSeries,
@@ -483,5 +486,124 @@ describe('索引与窗口换算', () => {
     expect(hoursToDays(72)).toBe(3)
     expect(hoursToDays(168)).toBe(7)
     expect(hoursToDays(5)).toBe(1)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * 修复轮（fix_plan N3 / 第 3 轮审查 A1、A2）：按量倍率、平台并集、定价去重
+ * 同时覆盖「旧后端」（min_multiplier=-1、platforms 只含有流量的平台）与
+ * 「新后端」（min_multiplier=null + metered、platforms 已是并集、pricing 带 realm）两种形状。
+ * ------------------------------------------------------------------ */
+
+function meteredItem(overrides: Partial<MarketItem> = {}): MarketItem {
+  return {
+    key: 'deepseekv41flash',
+    name: 'DeepSeek-V4.1-Flash',
+    platforms: ['marvis'],
+    platform_labels: ['腾讯 Marvis'],
+    models: ['deepseek-v4.1-flash'],
+    requests: 120,
+    success_rate: 1,
+    tokens: 1000,
+    credits: 0,
+    avg_latency_ms: 800,
+    avg_ttfb_ms: 0,
+    tps: 10,
+    pricing: [
+      { platform: 'marvis', platform_label: '腾讯 Marvis', model_id: 'ds-flash', multiplier: -1, free: false },
+      { platform: 'marvis', platform_label: '腾讯 Marvis', model_id: 'ds-flash', multiplier: -1, free: false },
+      { platform: 'loomy', platform_label: 'Loomy', model_id: 'ds-flash-loomy', multiplier: -1, free: false },
+    ],
+    free: false,
+    min_multiplier: -1,
+    active_accounts: 3,
+    exhausted_accounts: 0,
+    available: true,
+    ...overrides,
+  }
+}
+
+describe('按量计费（负倍率）', () => {
+  it('旧后端 min_multiplier=-1：显示「按量计费」，不显示 ×-1.00', () => {
+    const [card] = toMarketCards({ ...marketPayload, items: [meteredItem()] })
+    expect(card.metered).toBe(true)
+    expect(card.multiplier).toBeNull()
+    expect(priceText(card)).toBe('按量计费')
+    expect(priceText(card)).not.toContain('-1')
+  })
+
+  it('新后端 min_multiplier=null + metered=true：同样是「按量计费」', () => {
+    const [card] = toMarketCards({
+      ...marketPayload,
+      items: [meteredItem({ min_multiplier: null, metered: true })],
+    })
+    expect(card.metered).toBe(true)
+    expect(priceText(card)).toBe('按量计费')
+  })
+
+  it('有倍率与按量混合时取 ≥0 的最小倍率', () => {
+    expect(
+      marketMultiplier({
+        min_multiplier: -1,
+        pricing: [
+          { platform: 'marvis', platform_label: 'Marvis', model_id: 'a', multiplier: -1, free: false },
+          { platform: 'workbuddy', platform_label: 'WorkBuddy', model_id: 'b', multiplier: 1.5, free: false },
+          { platform: 'qoder', platform_label: 'Qoder', model_id: 'c', multiplier: 0.8, free: false },
+        ],
+      }),
+    ).toEqual({ multiplier: 0.8, metered: false })
+    expect(marketMultiplier({ min_multiplier: null, pricing: [] })).toEqual({ multiplier: null, metered: false })
+  })
+
+  it('价格排序：免费 < 有倍率 < 按量 < 未定价', () => {
+    const cards = toMarketCards({
+      ...marketPayload,
+      items: [...marketItems, meteredItem({ key: 'metered', name: 'Metered' })],
+    })
+    const order = sortMarketCards(cards, 'price', 'asc').map((card) => card.key)
+    expect(order.indexOf('glm53')).toBeLessThan(order.indexOf('deepseekv41flash'))
+    expect(order.indexOf('gpt6astra')).toBeLessThan(order.indexOf('metered'))
+    expect(order.indexOf('metered')).toBeLessThan(order.indexOf('nopriced'))
+  })
+
+  it('无样本的 TTFT 是 0：卡片保留 0，页面负责显示 —', () => {
+    const [card] = toMarketCards({ ...marketPayload, items: [meteredItem()] })
+    expect(card.ttfbMs).toBe(0)
+  })
+})
+
+describe('平台并集与定价去重', () => {
+  it('旧后端：platforms 只有流量平台 → 合并定价里的平台', () => {
+    const [card] = toMarketCards({ ...marketPayload, items: [meteredItem()] })
+    expect(card.platforms).toEqual(['marvis', 'loomy'])
+    expect(card.platformLabels).toEqual(['腾讯 Marvis', 'Loomy'])
+    expect(card.platformCount).toBe(2)
+  })
+
+  it('只有定价、没有流量的平台也算进来（requests=0 的平台不丢）', () => {
+    const merged = marketPlatforms(
+      { platforms: [], platform_labels: [] },
+      [{ platform: 'trae', platform_label: 'Trae 国内版', model_id: 'x', multiplier: 1, free: false }],
+    )
+    expect(merged).toEqual({ ids: ['trae'], labels: ['Trae 国内版'] })
+  })
+
+  it('新后端：platforms 已是并集时不重复', () => {
+    const [card] = toMarketCards({
+      ...marketPayload,
+      items: [meteredItem({ platforms: ['loomy', 'marvis'], platform_labels: ['Loomy', '腾讯 Marvis'] })],
+    })
+    expect(card.platforms).toEqual(['loomy', 'marvis'])
+  })
+
+  it('定价按 (platform, realm, model_id) 去重；realm 不同的 Trae 两区各留一条', () => {
+    const rows = dedupePricing([
+      { platform: 'marvis', platform_label: 'Marvis', model_id: 'a', multiplier: 1, free: false },
+      { platform: 'marvis', platform_label: 'Marvis', model_id: 'a', multiplier: 1, free: false },
+      { platform: 'trae', platform_label: 'Trae 国内版', model_id: 'b', multiplier: 1, free: false, realm: 'cn' },
+      { platform: 'trae', platform_label: 'Trae 国际版', model_id: 'b', multiplier: 1, free: false, realm: 'intl' },
+    ])
+    expect(rows).toHaveLength(3)
+    expect(dedupePricing(null)).toEqual([])
   })
 })

@@ -1,24 +1,33 @@
 <script setup lang="ts">
 /**
- * S21 概览 /overview（模板 A：状态行 + 英雄卡 + 流量带 + 次级卡片）
+ * S21 概览 /overview（v2.1，10-visual-refresh：英雄卡线路带 + KPI 行 + 平台健康 + 最近请求）
  *
  * 契约：docs/ui-v2/contracts/overview.md（末尾「## 实现对照」）
- * 设计稿：docs/ui-v2/06-pages-a.md P1
+ * 设计稿：docs/ui-v2/06-pages-a.md P1、10-visual-refresh.md §1.4 / §1.8
  *
  * 数据：
  *   · /api/overview          —— 额度、用量、缓存、账号监测（X-Platform 生效，切平台会变）；
- *   · /api/stats/dashboard   —— 流量带的每平台请求数 / 成功率（全网关口径）；
- *   · /api/sentinel/status   —— 告警横幅（封控 / 平台暂停）；
- *   · platform store         —— 平台数、图标、禁用状态（外壳已加载，不重复请求）。
+ *   · /api/stats/dashboard   —— ① 线路带 + 平台健康（全网关，window=day 自然日）；
+ *                               ② KPI 迷你折线（当前平台，window=day，失败不影响首屏）；
+ *   · /api/sentinel/status   —— 告警横幅 + 最近请求（traffic.recent，全网关，近 1 小时）；
+ *   · platform store         —— 平台数、图标、启用状态、账号数（外壳已加载，不重复请求）。
  *
- * 四态：首次加载骨架 / 刷新保留旧数据（卡片右上角转圈）/ 空（各卡片 Empty / 流量带自带「暂无流量」）/ 错误（ErrorBlock + 重试）。
+ * 口径（第 1 轮审查 P0-5 / P0-6、N5）：每块都在卡头标明——
+ *   KPI / 账号状态 / 缓存命中 = 当前平台（或「全网关」），线路带 / 平台健康 / 最近请求 = 全网关；
+ *   时间窗一律北京时间自然日（「今日」= 00:00 起，不是滚动 24 小时）。
+ *
+ * 四态：首次加载骨架 / 刷新保留旧数据（卡片右上角转圈）/ 空 / 错误（ErrorBlock + 重试）。
  * 平台切换：订阅 usePlatformStore().onChange 重新取数，卸载取消。
  * 时间范围（今日 / 7 天 / 30 天）同步路由 query（?days=7）。
+ *
+ * r3 续跑（11 §2）：
+ *   · 后台每 30 秒静默刷新（usePolling：标签页隐藏 / KeepAlive 离开时暂停，回来立即刷新一次）；
+ *   · 静默刷新与「回到缓存页」都不置 loading —— 卡片不转圈、不出骨架，只在页头时间旁显示 14px 小转圈；
+ *   · 静默刷新失败不弹 toast（避免每 30 秒弹一次），页头状态点变红，手动刷新才提示。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NSkeleton } from 'naive-ui'
-import { Copy, RefreshCw, TriangleAlert } from 'lucide-vue-next'
+import { RefreshCw, TriangleAlert } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
   Badge,
@@ -26,17 +35,15 @@ import {
   Card,
   Empty,
   ErrorBlock,
-  IconBtn,
   KV,
+  KpiCard,
   Meter,
   Ring,
-  RouteRibbon,
   Segmented,
-  StatStrip,
   StatusDot,
   type SegmentedOption,
 } from '@/components'
-import { useTableQuery, useToast } from '@/composables'
+import { usePolling, useRevisit, useTableQuery, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { fmtTime } from '@/utils/format'
 import { failureText } from '@/utils/error'
@@ -49,19 +56,26 @@ import {
   buildCache,
   buildLanes,
   buildMonitorRows,
-  buildUsageItems,
+  buildOverviewKpis,
+  buildPlatformHealth,
+  buildRecent,
   daysLabel,
   getOverview,
   getOverviewTraffic,
+  getOverviewTrend,
   getSentinelStatus,
   lanesTotal,
   monitorConclusion,
   normalizeOverviewDays,
+  overviewScopeLabel,
   type OverviewPayload,
   type SentinelStatusPayload,
 } from '@/api/overview'
 import type { StatsDashboardPayload } from '@/api/stats'
 import { useI18n } from '@/i18n'
+import OverviewHero from './Overview/OverviewHero.vue'
+import OverviewHealth from './Overview/OverviewHealth.vue'
+import OverviewRecent from './Overview/OverviewRecent.vue'
 
 const { t } = useI18n()
 const helpText = computed(() => t('page.overview.help'))
@@ -94,10 +108,13 @@ function setDays(value: string | number): void {
 
 const payload = ref<OverviewPayload | null>(null)
 const traffic = ref<StatsDashboardPayload | null>(null)
+const trend = ref<StatsDashboardPayload | null>(null)
 const sentinel = ref<SentinelStatusPayload | null>(null)
 const loading = ref(false)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 const updatedAt = ref<Date | null>(null)
+/** 后台静默刷新进行中（页头小转圈）。 */
+const silentBusy = ref(false)
 
 let controller: AbortController | null = null
 
@@ -112,35 +129,40 @@ function prettyDetail(detail: unknown): string {
   }
 }
 
-async function load(): Promise<void> {
+/** 线路带 / 告警 / 折线是锦上添花：失败一律降级成 null，不拖垮整页。 */
+function soft<T>(promise: Promise<T>): Promise<T | null> {
+  return promise.catch(() => null)
+}
+
+async function load(options: { silent?: boolean } = {}): Promise<void> {
+  // 静默刷新只在已有数据、且没有手动请求在途时进行（不打断手动刷新）。
+  const silent = Boolean(options.silent) && payload.value !== null
+  if (silent && controller) return
   controller?.abort()
   const current = new AbortController()
   controller = current
-  loading.value = true
-  loadError.value = null
+  if (silent) silentBusy.value = true
+  else loading.value = true
+  if (!silent) loadError.value = null
   try {
     const [main, lanesData, sentinelData] = await Promise.all([
       getOverview(days.value, current.signal),
-      // 流量带 / 告警是锦上添花：失败不拖垮整页。
-      getOverviewTraffic(days.value, current.signal).catch((error: unknown) => {
-        if (isAbortError(error)) return null
-        return null
-      }),
-      getSentinelStatus(300, current.signal).catch((error: unknown) => {
-        if (isAbortError(error)) return null
-        return null
-      }),
+      soft(getOverviewTraffic(days.value, current.signal)),
+      soft(getSentinelStatus(300, current.signal)),
     ])
     if (controller !== current) return
+    loadError.value = null
     payload.value = main
     traffic.value = lanesData
     sentinel.value = sentinelData
     updatedAt.value = new Date()
+    void loadTrend(main, current)
   } catch (error) {
     if (isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     loadError.value = { message: failureText(t('page.overview.loadError'), error), detail }
-    // 已有数据时刷新失败：只提示，保留旧数据。
+    // 已有数据时刷新失败：只提示，保留旧数据；后台静默刷新失败不弹 toast。
+    if (silent) return
     toast.error(
       failureText(
         t(payload.value ? 'page.overview.refreshError' : 'page.overview.loadError'),
@@ -151,8 +173,24 @@ async function load(): Promise<void> {
     if (controller === current) {
       controller = null
       loading.value = false
+      silentBusy.value = false
     }
   }
+}
+
+/**
+ * KPI 迷你折线：与 KPI 同口径（当前平台）。不阻塞首屏；
+ * 没有当前平台（全网关）时直接复用线路带那份序列。
+ */
+async function loadTrend(main: OverviewPayload, current: AbortController): Promise<void> {
+  const platform = String(main.platform || '')
+  if (!platform) {
+    trend.value = traffic.value
+    return
+  }
+  const data = await soft(getOverviewTrend(days.value, platform, current.signal))
+  if (current.signal.aborted) return
+  trend.value = data
 }
 
 /* ------------------------------------------------------------------ *
@@ -168,7 +206,7 @@ const hero = computed(() =>
     t,
   ),
 )
-const usageItems = computed(() => buildUsageItems(payload.value?.window, days.value, t))
+const kpis = computed(() => buildOverviewKpis(payload.value, trend.value, days.value, t))
 const monitorRows = computed(() => buildMonitorRows(payload.value?.monitor, t))
 const monitorTotal = computed(() => Number(payload.value?.monitor?.total ?? 0))
 const conclusion = computed(() => monitorConclusion(payload.value?.monitor, t))
@@ -176,16 +214,27 @@ const alerts = computed(() => buildAlerts(payload.value, sentinel.value, t))
 const cache = computed(() => buildCache(payload.value?.cache, t))
 const lanes = computed(() => buildLanes(traffic.value, platformStore.platforms, t))
 const trafficTotal = computed(() => lanesTotal(lanes.value))
+const health = computed(() => buildPlatformHealth(traffic.value, platformStore.platforms, t))
+const recent = computed(() => buildRecent(sentinel.value, 8, t))
 
 const modelCount = computed(() => Number(payload.value?.models ?? 0))
 const platformCount = computed(() => platformStore.platforms.length)
-const platformLabel = computed(() => payload.value?.platform_label || t('page.overview.allPlatforms'))
 const rangeLabel = computed(() => daysLabel(days.value, t))
 const trafficTitle = computed(() =>
   days.value === 1
     ? t('page.overview.traffic.todayTitle')
     : t('page.overview.traffic.daysTitle', { days: days.value }),
 )
+
+/** 口径标签：用量 / 账号跟随当前平台，流量是全网关。 */
+const usageScope = computed(() => overviewScopeLabel(payload.value, 'usage', t))
+const accountScope = computed(() => overviewScopeLabel(payload.value, 'accounts', t))
+const trafficScope = computed(() => overviewScopeLabel(payload.value, 'traffic', t))
+/** 「北京时间自然日」写在 KPI 行标题里（第 1 轮审查 P0-5：「今日」不是滚动 24 小时）。 */
+const kpiCaption = computed(() =>
+  t('page.overview.kpi.caption', { scope: usageScope.value, range: rangeLabel.value }),
+)
+
 const updatedText = computed(() => (updatedAt.value ? fmtTime(updatedAt.value) : '—'))
 const statusText = computed(() =>
   loadError.value
@@ -206,7 +255,7 @@ async function copyBase(): Promise<void> {
   else toast.error(t('common.copyFailed'))
 }
 
-/** 点击线路：切到该平台（全局上下文）并打开平台管理页。 */
+/** 点击线路 / 健康行：切到该平台（全局上下文）并打开平台管理页。 */
 function onLaneSelect(id: string): void {
   const spec = platformStore.specOf(id) || platformStore.specFor(id)
   if (spec) platformStore.setCurrent(spec.id)
@@ -238,6 +287,13 @@ onBeforeUnmount(() => {
   controller = null
 })
 
+// 回到缓存页（KeepAlive）：保留旧数据静默刷新，不出骨架（11-polish-motion §2）。
+useRevisit(() => load({ silent: true }), { minIntervalMs: 5000 })
+
+// 线路带 / KPI 的后台静默刷新：30 秒一次，不可见或离开页面时暂停（usePolling 自带）。
+const poll = usePolling(() => load({ silent: true }), 30000, { immediate: false })
+onMounted(() => poll.start())
+
 // 时间范围（含浏览器前进后退、分享链接）是唯一需要重新请求的视图状态。
 watch(days, () => {
   void load()
@@ -247,6 +303,21 @@ watch(days, () => {
 <template>
   <div class="ov-page">
     <PageHeader :help="helpText">
+      <template #meta>
+        <StatusDot :tone="statusTone" :label="statusText" />
+        <span class="ov-meta">
+          {{ t('page.overview.platformsModels', { platforms: platformCount, models: modelCount }) }}
+        </span>
+        <span class="ov-meta ov-meta--time">
+          <RefreshCw
+            v-if="silentBusy"
+            class="ov-spin"
+            :size="14"
+            :aria-label="t('page.overview.silentRefreshing')"
+          />
+          {{ t('page.overview.updatedAt', { time: updatedText }) }}
+        </span>
+      </template>
       <template #actions>
         <Segmented
           :options="dayOptions"
@@ -273,40 +344,30 @@ watch(days, () => {
       aria-busy="true"
       :aria-label="t('page.overview.loadingAria')"
     >
-      <n-skeleton height="48px" />
-      <!-- 与真实卡片同尺寸的静态文案：LCP 在首屏即锁定，不再等 /api/overview。 -->
-      <div class="mh-card ov-skeleton__note">
-        <p class="ov-balance__value">{{ t('common.loading') }}</p>
-        <p class="ov-note">{{ t('page.overview.balance.remaining') }}</p>
-      </div>
-      <div class="ov-hero">
-        <n-skeleton height="196px" />
-        <n-skeleton height="196px" />
-      </div>
+      <!-- 骨架与真实布局同构：英雄卡 / KPI 卡 / 两栏，同尺寸，数据到来不跳动（11 §4-1）。 -->
+      <OverviewHero
+        :title="trafficTitle"
+        scope=""
+        :range-label="rangeLabel"
+        :lanes="[]"
+        :total="0"
+        :base-url="baseUrl"
+        skeleton
+      />
+      <section class="ov-section">
+        <p class="ov-section__caption"><span class="mh-skeleton ov-skeleton__caption" /></p>
+        <div class="ov-kpis">
+          <KpiCard v-for="item in kpis" :key="item.key" :label="item.label" :value="null" loading />
+        </div>
+      </section>
       <div class="ov-grid">
-        <n-skeleton height="280px" />
-        <n-skeleton height="280px" />
+        <div class="mh-skeleton ov-skeleton__block" />
+        <div class="mh-skeleton ov-skeleton__block" />
       </div>
-      <n-skeleton height="196px" />
     </div>
 
     <template v-else>
-      <!-- 状态行 -->
-      <Card flush class="ov-status-card">
-        <div class="ov-status">
-          <StatusDot :tone="statusTone" :label="statusText" :pulse="!loadError && !firstLoading" />
-          <span class="ov-status__label">Base URL</span>
-          <code class="mono ov-status__url">{{ baseUrl }}</code>
-          <IconBtn :label="t('page.overview.copyBase')" :icon="Copy" @click="copyBase" />
-          <span class="ov-status__meta">
-            {{ t('page.overview.platformsModels', { platforms: platformCount, models: modelCount }) }}
-          </span>
-          <span class="ov-status__meta">{{ t('page.overview.current', { platform: platformLabel }) }}</span>
-          <span class="ov-status__right">{{ t('page.overview.updatedAt', { time: updatedText }) }}</span>
-        </div>
-      </Card>
-
-      <!-- 告警横幅 -->
+      <!-- 告警横幅（只在异常时出现） -->
       <div
         v-for="(alert, index) in alerts"
         :key="alert.title + index"
@@ -322,95 +383,124 @@ watch(days, () => {
         <RouterLink class="ov-alert__link" :to="alert.to">{{ alert.actionLabel }} →</RouterLink>
       </div>
 
-      <!-- 英雄卡 + 用量条 -->
-      <div class="ov-hero">
-        <Card class="ov-balance">
-          <div class="ov-balance__head">
-            <span class="ov-label">{{ t('page.overview.balance.remaining') }}</span>
-            <Badge tone="neutral">{{ t('page.overview.balance.models', { count: modelCount }) }}</Badge>
-          </div>
-          <p class="ov-balance__value">{{ hero.remainText }}</p>
-          <p class="ov-balance__rows">
-            <span v-for="row in hero.rows" :key="row.label">
-              {{ row.label }} <b class="tnum">{{ row.value }}</b>
-            </span>
-          </p>
-          <Meter
-            :value="hero.ratio * 100"
-            :tone="hero.tone"
-            :aria-label="t('page.overview.balance.ratioAria', { ratio: hero.ratioText })"
-          />
-          <p class="ov-note">{{ hero.caption }}</p>
-          <p v-if="hero.note" class="ov-note">{{ hero.note }}</p>
-        </Card>
-        <StatStrip :items="usageItems" />
-      </div>
+      <!-- 英雄卡：线路带（全网关） -->
+      <OverviewHero
+        :title="trafficTitle"
+        :scope="trafficScope"
+        :range-label="rangeLabel"
+        :lanes="lanes"
+        :total="trafficTotal"
+        :loading="loading"
+        :base-url="baseUrl"
+        :window-minutes="days * 1440"
+        @select="onLaneSelect"
+        @copy="copyBase"
+      />
 
-      <!-- 流量带 + 账号状态 -->
-      <div class="ov-grid">
-        <Card :title="trafficTitle" :loading="loading">
-          <template #extra>
-            <span class="ov-note">{{ t('page.overview.traffic.hint', { range: rangeLabel }) }}</span>
-          </template>
-          <RouteRibbon
-            :source="{ label: t('page.overview.source'), total: trafficTotal }"
-            :lanes="lanes"
-            @select="onLaneSelect"
-          />
-          <p v-if="!lanes.length" class="ov-note">{{ t('page.overview.traffic.empty') }}</p>
-        </Card>
-
-        <Card :title="t('page.overview.accounts.title')" :loading="loading">
-          <template #extra>
-            <RouterLink class="ov-link" to="/accounts">{{ t('page.overview.accounts.all') }}</RouterLink>
-          </template>
-          <div v-if="monitorTotal > 0" class="ov-monitor">
-            <div v-for="row in monitorRows" :key="row.key" class="ov-monitor__row">
-              <span class="ov-monitor__label" :class="{ 'is-faint': row.faint }">
-                {{ row.label }}
-              </span>
-              <Meter
-                :value="row.pct"
-                :tone="row.tone"
-                :aria-label="t('page.overview.accounts.ratioAria', { label: row.label })"
-              />
-              <span class="ov-monitor__count tnum" :class="{ 'is-faint': row.faint }">
-                {{ row.count }}
-              </span>
-            </div>
-            <p
-              class="ov-conclusion"
-              :class="conclusion.tone === 'ok' ? 'is-ok' : 'is-warn'"
-            >
-              <RouterLink v-if="conclusion.to" :to="conclusion.to">
-                {{ conclusion.text }} →
-              </RouterLink>
-              <template v-else>{{ conclusion.text }}</template>
-            </p>
-          </div>
-          <Empty v-else :description="t('page.overview.accounts.empty')" compact>
-            <Btn variant="default" size="sm" @click="router.push('/accounts')">
-              {{ t('page.overview.accounts.go') }}
-            </Btn>
-          </Empty>
-        </Card>
-      </div>
-
-      <!-- 缓存命中 -->
-      <Card :title="t('page.overview.cache.title')" :loading="loading">
-        <div class="ov-cache">
-          <Ring
-            :value="cache.value"
-            :text="cache.text"
-            tone="brand"
-            :label="t('page.overview.cache.ringLabel')"
-          />
-          <div class="ov-cache__body">
-            <KV :items="cache.kv" label-width="84px" />
-            <p class="ov-note">{{ cache.note }}</p>
-          </div>
+      <!-- KPI 行（当前平台 · 自然日） -->
+      <section class="ov-section" :aria-label="kpiCaption">
+        <p class="ov-section__caption">
+          <Badge tone="neutral">{{ usageScope }}</Badge>
+          <span>{{ kpiCaption }}</span>
+        </p>
+        <div class="ov-kpis">
+          <KpiCard
+            v-for="item in kpis"
+            :key="item.key"
+            :label="item.label"
+            :value="item.value"
+            split-unit
+            :hint="item.hint"
+            :tone="item.tone"
+            :spark="item.spark"
+            :loading="loading && !!payload"
+          >
+            <template v-if="item.key === 'balance'" #extra>
+              <div class="ov-balance">
+                <Meter
+                  :value="hero.ratio * 100"
+                  :tone="hero.tone"
+                  :height="4"
+                  :aria-label="t('page.overview.balance.ratioAria', { ratio: hero.ratioText })"
+                />
+                <p class="ov-balance__rows">
+                  <span v-for="row in hero.rows" :key="row.label">
+                    {{ row.label }} <b class="tnum">{{ row.value }}</b>
+                  </span>
+                </p>
+                <p v-if="hero.note" class="ov-note">{{ hero.note }}</p>
+              </div>
+            </template>
+          </KpiCard>
         </div>
-      </Card>
+      </section>
+
+      <!-- 平台健康 + 账号状态 / 缓存命中 -->
+      <div class="ov-grid">
+        <OverviewHealth
+          :health="health"
+          :scope="trafficScope"
+          :loading="loading"
+          @select="onLaneSelect"
+        />
+
+        <div class="ov-side">
+          <Card :title="t('page.overview.accounts.title')" :loading="loading">
+            <template #extra>
+              <span class="ov-scope">{{ accountScope }}</span>
+              <RouterLink class="ov-link" to="/accounts">{{ t('page.overview.accounts.all') }}</RouterLink>
+            </template>
+            <div v-if="monitorTotal > 0" class="ov-monitor">
+              <div v-for="row in monitorRows" :key="row.key" class="ov-monitor__row">
+                <span class="ov-monitor__label" :class="{ 'is-faint': row.faint }">
+                  {{ row.label }}
+                </span>
+                <Meter
+                  :value="row.pct"
+                  :tone="row.tone"
+                  :height="6"
+                  :aria-label="t('page.overview.accounts.ratioAria', { label: row.label })"
+                />
+                <span class="ov-monitor__count tnum" :class="{ 'is-faint': row.faint }">
+                  {{ row.count }}
+                </span>
+              </div>
+              <p class="ov-conclusion" :class="conclusion.tone === 'ok' ? 'is-ok' : 'is-warn'">
+                <RouterLink v-if="conclusion.to" :to="conclusion.to">
+                  {{ conclusion.text }} →
+                </RouterLink>
+                <template v-else>{{ conclusion.text }}</template>
+              </p>
+            </div>
+            <Empty v-else :description="t('page.overview.accounts.empty')" compact>
+              <Btn variant="primary" size="sm" @click="router.push('/accounts')">
+                {{ t('page.overview.accounts.go') }}
+              </Btn>
+            </Empty>
+          </Card>
+
+          <Card :title="t('page.overview.cache.title')" :loading="loading">
+            <template #extra>
+              <span class="ov-scope">{{ usageScope }}</span>
+            </template>
+            <div class="ov-cache">
+              <Ring
+                :value="cache.value"
+                :text="cache.text"
+                tone="brand"
+                :label="t('page.overview.cache.ringLabel')"
+              />
+              <div class="ov-cache__body">
+                <KV :items="cache.kv" label-width="72px" />
+                <p class="ov-note">{{ cache.note }}</p>
+              </div>
+            </div>
+          </Card>
+        </div>
+      </div>
+
+      <!-- 最近请求（全网关 · 近 1 小时） -->
+      <OverviewRecent :rows="recent" :scope="trafficScope" :loading="loading" />
     </template>
   </div>
 </template>
@@ -418,59 +508,58 @@ watch(days, () => {
 <style scoped>
 .ov-page {
   display: grid;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-width: 0;
+}
+
+.ov-meta {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.ov-meta--time {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-spin {
+  color: var(--fg-muted);
+  animation: ov-spin 900ms linear infinite;
+}
+
+@keyframes ov-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-spin {
+    animation-duration: 2.4s;
+  }
 }
 
 .ov-skeleton {
   display: grid;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-width: 0;
 }
 
-.ov-skeleton__note {
-  min-height: 196px;
-  padding: var(--sp-4) var(--sp-5);
-}
-
-/* ---------- 状态行 ---------- */
-.ov-status-card {
-  min-width: 0;
-}
-
-.ov-status {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-3);
-  min-height: 48px;
-  padding: var(--sp-2) var(--sp-5);
-}
-
-.ov-status__label {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-}
-
-.ov-status__url {
-  color: var(--fg-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
+.ov-skeleton__caption {
+  display: inline-block;
+  width: 240px;
+  max-width: 60%;
+  height: 18px;
   border-radius: var(--r-chip);
-  padding: 1px var(--sp-2);
-  word-break: break-all;
 }
 
-.ov-status__meta {
-  font-size: var(--fs-small);
-  line-height: var(--lh-small);
-  color: var(--fg-muted);
-}
-
-.ov-status__right {
-  margin-left: auto;
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
+.ov-skeleton__block {
+  min-height: 320px;
+  border-radius: var(--r-card);
 }
 
 /* ---------- 告警横幅 ---------- */
@@ -479,14 +568,14 @@ watch(days, () => {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-ctl);
+  border-radius: var(--r-card);
   border: 1px solid transparent;
   min-width: 0;
 }
 
 .ov-alert.is-danger {
   background: var(--danger-soft);
-  border-color: var(--danger-soft);
+  border-color: var(--danger);
   color: var(--danger);
 }
 
@@ -528,41 +617,35 @@ watch(days, () => {
   text-decoration: underline;
 }
 
-/* ---------- 英雄卡 ---------- */
-.ov-hero {
+/* ---------- KPI 行 ---------- */
+.ov-section {
   display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: var(--sp-4);
-  align-items: stretch;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
-.ov-balance {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.ov-balance__head {
+.ov-section__caption {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--sp-2);
-}
-
-.ov-label {
+  margin: 0;
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
 }
 
-.ov-balance__value {
-  margin: 0;
-  font-size: var(--fs-display);
-  line-height: var(--lh-display);
-  font-weight: 600;
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
+/* 一行 4 个（≥1280）、2 个（≥768）、1 个（手机）；卡片按内容等高，不强撑（§1.4）。 */
+.ov-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+.ov-balance {
+  display: grid;
+  gap: var(--sp-2);
 }
 
 .ov-balance__rows {
@@ -570,7 +653,7 @@ watch(days, () => {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: var(--sp-1) var(--sp-4);
+  gap: var(--sp-1) var(--sp-3);
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
@@ -588,13 +671,24 @@ watch(days, () => {
   color: var(--fg-muted);
 }
 
-/* ---------- 两列卡片 ---------- */
+/* ---------- 两列 ---------- */
 .ov-grid {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
   gap: var(--sp-4);
-  align-items: stretch;
+  align-items: start;
   min-width: 0;
+}
+
+.ov-side {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.ov-scope {
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
 }
 
 /* ---------- 账号状态 ---------- */
@@ -625,7 +719,7 @@ watch(days, () => {
 
 .ov-monitor__label.is-faint,
 .ov-monitor__count.is-faint {
-  color: var(--fg-muted);
+  color: var(--fg-faint);
 }
 
 .ov-conclusion {
@@ -666,36 +760,37 @@ watch(days, () => {
 .ov-cache {
   display: flex;
   align-items: center;
-  gap: var(--sp-6);
+  gap: var(--sp-4);
   flex-wrap: wrap;
 }
 
 .ov-cache__body {
   display: grid;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
   flex: 1;
-  min-width: 220px;
+  min-width: 160px;
+}
+
+@media (max-width: 1279px) {
+  .ov-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1023px) {
-  .ov-hero,
   .ov-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .ov-side {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
-@media (max-width: 640px) {
-  .ov-status {
-    padding: var(--sp-3) var(--sp-4);
-  }
-
-  .ov-status__right {
-    margin-left: 0;
-    width: 100%;
-  }
-
-  .ov-cache {
-    gap: var(--sp-4);
+@media (max-width: 767px) {
+  .ov-kpis,
+  .ov-side {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

@@ -140,13 +140,16 @@ describe('结论横幅与 6 格统计', () => {
 })
 
 describe('线路带与平台健康', () => {
-  it('线路带只含有流量的平台，成功率按 0–100 归一', () => {
+  it('线路带按请求量降序，0 请求的平台也画成细线，成功率按 0–100 归一', () => {
     const ribbon = toRibbon(traffic())
     expect(ribbon.source).toEqual({ label: '客户端请求', total: 1250 })
-    expect(ribbon.lanes.map((lane) => lane.id)).toEqual(['workbuddy', 'qoder'])
+    // 0 请求的平台（Loomy）也保留一条线：始终是扇形，单平台有流量时不会退化成一根粗条
+    expect(ribbon.lanes.map((lane) => lane.id)).toEqual(['workbuddy', 'qoder', 'loomy'])
     expect(ribbon.lanes[0].successRate).toBeCloseTo(30.6, 1)
     expect(ribbon.lanes[1].successRate).toBe(100)
     expect(ribbon.lanes[0].status).toBe('HTTP 200')
+    expect(ribbon.lanes[2].count).toBe(0)
+    expect(ribbon.lanes[2].successRate).toBeNull()
   })
 
   it('平台健康：成功 / 失败·超时两段 + 成功率着色', () => {

@@ -1,5 +1,8 @@
 <script setup lang="ts">
-/** 状态徽章：高 20px、圆角 5px、12px/500；状态与颜色的映射全站一致。 */
+/**
+ * 状态徽章（10-visual-refresh §1.6）：高 22px、圆角 --r-chip（6px）、soft 底 + 状态色文字、12px/500；
+ * dot 变体前面带 6px 圆点（表格状态列「圆点 + 文字」用它）。状态与颜色的映射全站一致。
+ */
 import { computed } from 'vue'
 import { badgeToneStyle, type BadgeTone } from './badge'
 
@@ -27,7 +30,7 @@ const style = computed(() => badgeToneStyle(props.tone))
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  height: 20px;
+  height: 22px;
   padding: 0 var(--sp-2);
   border-radius: var(--r-chip);
   font-size: var(--fs-small);
@@ -35,6 +38,7 @@ const style = computed(() => badgeToneStyle(props.tone))
   font-weight: 500;
   white-space: nowrap;
   vertical-align: middle;
+  font-variant-numeric: tabular-nums;
 }
 
 .mh-badge__dot {

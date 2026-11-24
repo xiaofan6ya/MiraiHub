@@ -12,6 +12,7 @@
  */
 import { defineComponent, h, ref, type VNodeChild } from 'vue'
 import { NInput, useDialog } from 'naive-ui'
+import { t } from '@/i18n'
 
 export interface ConfirmOptions {
   /** 问句标题，如"删除 3 个账号？"。 */
@@ -35,7 +36,7 @@ export function useConfirm() {
 
   function confirm(options: ConfirmOptions | string): Promise<boolean> {
     const opts: ConfirmOptions = typeof options === 'string' ? { title: options } : options
-    const okText = opts.okText || '确定'
+    const okText = opts.okText || t('common.confirm')
     const phrase = opts.requireText === true ? okText : (opts.requireText || '')
 
     return new Promise<boolean>((resolve) => {
@@ -60,7 +61,7 @@ export function useConfirm() {
             return () =>
               h('div', null, [
                 opts.message ? h('p', { style: 'margin:0 0 8px' }, opts.message) : null,
-                h('p', { style: 'margin:0 0 8px' }, '请输入「' + phrase + '」以确认：'),
+                h('p', { style: 'margin:0 0 8px' }, t('confirm.typeToConfirm', { text: phrase })),
                 h(NInput, {
                   value: typed.value,
                   placeholder: phrase,
@@ -74,7 +75,7 @@ export function useConfirm() {
                   },
                 }),
                 mismatch.value
-                  ? h('p', { style: 'margin:8px 0 0' }, '输入的内容不匹配，请重新输入')
+                  ? h('p', { style: 'margin:8px 0 0' }, t('confirm.mismatch'))
                   : null,
               ])
           },
@@ -94,7 +95,7 @@ export function useConfirm() {
         title: opts.title,
         content,
         positiveText: okText,
-        negativeText: opts.cancelText || '取消',
+        negativeText: opts.cancelText || t('common.cancel'),
         closable: false,
         autoFocus: false,
         onPositiveClick,

@@ -1,4 +1,4 @@
-/* 全局基线：只做浏览器默认值归一，不放业务样式。 */
+/* 全局基线 + 公共样式类（docs/ui-v2/10-visual-refresh.md 第 4 节）。不放业务样式。 */
 *,
 *::before,
 *::after {
@@ -10,6 +10,19 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--fg);
+}
+
+/*
+ * 字体落地（第 1 轮审查 P0-2）：Naive UI 运行时往 <head> 注入
+ * `body { font-family: v-sans, system-ui, … }`（naive-ui/es/_styles/global/index.cssr.mjs，
+ * 取自它自己的 common 常量，不读 theme-overrides），而且插在本文件之后 ——
+ * 同为 `body` 选择器时它赢，IBM Plex Sans 就整站失效。
+ * 用 `html body` 把特异性提到 (0,0,2) 稳赢，字号 / 行高一并回到令牌值。
+ */
+html body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
 }
 
 #app,
@@ -57,6 +70,17 @@ p {
 *::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 4px;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+/* 悬停加深（深色下 --fg-faint 比 --border-strong 亮，同样可见） */
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--fg-faint);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 *::-webkit-scrollbar-track {
@@ -65,4 +89,554 @@ p {
 
 ::selection {
   background: var(--brand-soft);
+}
+
+/* 排版细节（11-polish-motion §3）：标题字距 -0.01em。 */
+h1,
+h2 {
+  letter-spacing: -0.01em;
+}
+
+/* ================================================================== *
+ * 公共样式类（页面线可以直接用；组件里优先用对应组件）
+ * ================================================================== */
+
+/* 标准内容宽度：1600 居中。外壳 .shell-content 已经套了一层，页面一般不需要再写。 */
+.mh-page {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-left: auto;
+  margin-right: auto;
+  min-width: 0;
+}
+
+/* 表格类页面：上限放宽到 1920。页面根节点加这个类，外壳内容区跟着放宽。 */
+.mh-page--wide {
+  max-width: var(--content-max-wide);
+}
+
+/* 外壳内容区（AppShell 的 main.shell-content）遇到 .mh-page--wide 时放宽；
+   用 main 标签多一级特异性，压过 AppShell 自己的 scoped max-width。 */
+main.shell-content:has(.mh-page--wide) {
+  max-width: calc(var(--content-max-wide) + var(--content-pad) * 2);
+}
+
+/* 12 列栅格，gap 16；子项用 .mh-col-*，<1024 时一律占满 12 列。 */
+.mh-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+.mh-col-3 { grid-column: span 3; min-width: 0; }
+.mh-col-4 { grid-column: span 4; min-width: 0; }
+.mh-col-6 { grid-column: span 6; min-width: 0; }
+.mh-col-8 { grid-column: span 8; min-width: 0; }
+.mh-col-12 { grid-column: span 12; min-width: 0; }
+
+@media (max-width: 1023px) {
+  .mh-col-3,
+  .mh-col-4,
+  .mh-col-6,
+  .mh-col-8 {
+    grid-column: span 12;
+  }
+}
+
+/* KPI 自适应网格：≥1280 一行 4 个，≥768 2 个，手机 1 个；卡片按内容等高，不强拉伸。 */
+.mh-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+@media (max-width: 1279px) {
+  .mh-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .mh-kpis {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-3);
+  }
+}
+
+/* 纵向堆叠，gap 16。 */
+.mh-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+/* 表格上方的一行工具栏：左边搜索 / 筛选 chip，右边「共 N 条」与图标按钮；高度 ≤ 56px。 */
+.mh-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--ctl-h);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mh-toolbar > .mh-toolbar__spacer,
+.mh-toolbar__right {
+  margin-left: auto;
+}
+
+.mh-toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* 与 Card 组件同外观，给不用组件的地方。 */
+.mh-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-1);
+  min-width: 0;
+}
+
+a.mh-card,
+.mh-card.is-clickable {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    box-shadow var(--t-base) var(--ease),
+    border-color var(--t-base) var(--ease),
+    transform var(--dur-1) var(--ease-out);
+}
+
+/* 按压反馈（11-polish-motion §1）：可点卡片 / .mh-pressable 按下 scale(.98)。 */
+a.mh-card:active,
+.mh-card.is-clickable:active,
+.mh-pressable:active {
+  transform: scale(.98);
+}
+
+.mh-pressable {
+  transition: transform var(--dur-1) var(--ease-out);
+}
+
+a.mh-card:hover,
+.mh-card.is-clickable:hover {
+  box-shadow: var(--shadow-2);
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+
+.mh-muted {
+  color: var(--fg-muted);
+}
+
+.mh-faint {
+  color: var(--fg-faint);
+}
+
+.mh-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 统一骨架屏：--surface-2 细条 + 1.2s 微光（第 2 轮审查 P1-10：别用 52px 实心灰块）。 */
+.mh-skeleton {
+  display: block;
+  min-height: 12px;
+  border-radius: var(--r-chip);
+  background: var(--surface-2);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--surface-hover) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: mh-skeleton-shimmer 1.2s linear infinite;
+}
+
+@keyframes mh-skeleton-shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mh-skeleton {
+    animation: none;
+    background-image: none;
+  }
+}
+
+/* 屏幕阅读器专用文字。 */
+.mh-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * Naive UI 控件的全局视觉层（主题覆盖管不到的细节）
+ * ------------------------------------------------------------------ */
+
+/* 输入类控件聚焦：3px --ring 外环（主题覆盖里 boxShadowFocus 同值，这里兜住 jsdom / 变量为空时）。 */
+.n-input.n-input--focus,
+.n-base-selection.n-base-selection--focus,
+.n-base-selection.n-base-selection--active,
+.n-input-number .n-input.n-input--focus {
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+/* 主按钮内部高光（Btn 组件之外直接用 NButton type=primary 的地方也一致）。 */
+.n-button.n-button--primary-type:not(.n-button--disabled):not(.n-button--ghost):not(.n-button--text) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+
+/* 弹层（下拉、popover、dropdown）统一用浮层表面 + 阴影 + 卡片圆角。 */
+.n-popover:not(.n-tooltip) {
+  border-radius: var(--r-card);
+}
+
+/* Toast：浮层表面 + 1px 边框，深色下与背景分得开。 */
+.n-message {
+  border: 1px solid var(--border);
+}
+
+/* 抽屉与对话框：标题区和底部操作区分隔线用 --border-soft。 */
+.n-drawer .n-drawer-content .n-drawer-header {
+  border-bottom-color: var(--border-soft);
+}
+
+.n-drawer .n-drawer-content .n-drawer-footer {
+  border-top-color: var(--border-soft);
+}
+
+/* ================================================================== *
+ * 第 3 轮动效与细节（11-polish-motion）
+ * ================================================================== */
+
+/* 实时新行：--brand-soft 闪一下，900ms 淡出（useFlashKeys 返回的 class）。
+   DataTable 的行背景画在 td 上，所以 td 也要闪。 */
+.mh-row-flash,
+.mh-row-flash > td,
+.mh-row-flash .n-data-table-td {
+  animation: mh-row-flash 900ms var(--ease-out) both;
+}
+
+@keyframes mh-row-flash {
+  from {
+    background-color: var(--brand-soft);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+/* 变化的数字淡入 180ms（不做数字滚动）：<Transition name="mh-fade" mode="out-in"><span :key="value">…</span></Transition> */
+.mh-fade-enter-active {
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.mh-fade-enter-from {
+  opacity: 0;
+}
+
+/* 首屏骨架 → 数据：160ms 淡入，不跳动。数据容器加 .mh-fade-in。 */
+.mh-fade-in {
+  animation: mh-fade-in 160ms var(--ease-out) both;
+}
+
+@keyframes mh-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 单位比数字小一级、--fg-muted。 */
+.mh-unit {
+  margin-left: 2px;
+  font-size: .78em;
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+/* 图标与文字基线对齐。 */
+.mh-icon-inline {
+  vertical-align: -2px;
+}
+
+/* ---------- View Transitions：只做顶栏标题（router/viewTransition.ts） ---------- */
+/* 整页不做默认交叉淡入：内容区由 AppShell 自己淡入上移，避免两套动画叠加。 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+::view-transition-group(mh-page-title) {
+  animation-duration: var(--dur-2);
+  animation-timing-function: var(--ease-out);
+}
+
+::view-transition-old(mh-page-title) {
+  animation: mh-vt-title-out var(--dur-1) var(--ease-in-out) both;
+}
+
+::view-transition-new(mh-page-title) {
+  animation: mh-vt-title-in var(--dur-2) var(--ease-out) both;
+}
+
+@keyframes mh-vt-title-out {
+  to {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes mh-vt-title-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+/* ---------- Naive 浮层过渡：4px 位移 + 淡入 --dur-2；抽屉 --dur-3；弹窗 scale .98→1 ---------- */
+.n-popover-shared.popover-transition-enter-active,
+.n-popover-shared.popover-transition-leave-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out) !important;
+}
+
+.n-popover-shared.popover-transition-leave-active {
+  transition-duration: var(--dur-1) !important;
+}
+
+.n-popover-shared.popover-transition-enter-from,
+.n-popover-shared.popover-transition-leave-to {
+  opacity: 0;
+  transform: translateY(4px) !important;
+}
+
+/* 在触发点下方弹出的从上往下落 4px；左右同理 */
+[v-placement^="bottom"] > .n-popover-shared.popover-transition-enter-from,
+[v-placement^="bottom"] > .n-popover-shared.popover-transition-leave-to {
+  transform: translateY(-4px) !important;
+}
+
+[v-placement^="left"] > .n-popover-shared.popover-transition-enter-from,
+[v-placement^="left"] > .n-popover-shared.popover-transition-leave-to {
+  transform: translateX(4px) !important;
+}
+
+[v-placement^="right"] > .n-popover-shared.popover-transition-enter-from,
+[v-placement^="right"] > .n-popover-shared.popover-transition-leave-to {
+  transform: translateX(-4px) !important;
+}
+
+.n-drawer.slide-in-from-right-transition-enter-active,
+.n-drawer.slide-in-from-left-transition-enter-active,
+.n-drawer.slide-in-from-bottom-transition-enter-active,
+.n-drawer.slide-in-from-top-transition-enter-active {
+  transition: transform var(--dur-3) var(--ease-out) !important;
+}
+
+.n-drawer.slide-in-from-right-transition-leave-active,
+.n-drawer.slide-in-from-left-transition-leave-active,
+.n-drawer.slide-in-from-bottom-transition-leave-active,
+.n-drawer.slide-in-from-top-transition-leave-active {
+  transition: transform var(--dur-2) var(--ease-in-out) !important;
+}
+
+.n-modal.fade-in-scale-up-transition-enter-active,
+.n-dialog.fade-in-scale-up-transition-enter-active {
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out) !important;
+}
+
+.n-modal.fade-in-scale-up-transition-enter-from,
+.n-modal.fade-in-scale-up-transition-leave-to,
+.n-dialog.fade-in-scale-up-transition-enter-from,
+.n-dialog.fade-in-scale-up-transition-leave-to {
+  opacity: 0;
+  transform: scale(.98) !important;
+}
+
+/* 减少动效：浮层只保留淡入（时长已被 tokens.css 压到 0），按压不缩放，行闪烁关掉。 */
+@media (prefers-reduced-motion: reduce) {
+  a.mh-card:active,
+  .mh-card.is-clickable:active,
+  .mh-pressable:active {
+    transform: none;
+  }
+
+  .mh-row-flash,
+  .mh-row-flash > td,
+  .mh-row-flash .n-data-table-td,
+  .mh-fade-in {
+    animation: none;
+  }
+
+  ::view-transition-group(mh-page-title),
+  ::view-transition-old(mh-page-title),
+  ::view-transition-new(mh-page-title) {
+    animation: none;
+  }
+
+  .n-popover-shared.popover-transition-enter-from,
+  .n-popover-shared.popover-transition-leave-to,
+  .n-modal.fade-in-scale-up-transition-enter-from,
+  .n-modal.fade-in-scale-up-transition-leave-to,
+  .n-dialog.fade-in-scale-up-transition-enter-from,
+  .n-dialog.fade-in-scale-up-transition-leave-to {
+    transform: none !important;
+  }
+}
+
+/* ================================================================== *
+ * 第 4 轮视觉精修（10-visual-refresh / 11-polish-motion，只动全局层）
+ * ================================================================== */
+
+/* 浮层层级统一：--surface-raised + --shadow-pop + 1px 发丝边。
+   深色下浮层与卡片亮度接近，只靠阴影分不开（深底上阴影几乎不可见），所以加 1px 边；
+   浅色用 --border-soft，看起来更「干净利落」而不是糊一圈影子。tooltip 不动（Naive 自带反色底）。 */
+.n-popover-shared:not(.n-tooltip):not(.n-popover--raw),
+.n-dropdown-menu {
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border-soft) !important;
+}
+
+:root[data-theme="dark"] .n-popover-shared:not(.n-tooltip):not(.n-popover--raw),
+:root[data-theme="dark"] .n-dropdown-menu {
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border) !important;
+}
+
+.n-tooltip.n-popover-shared {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  border-radius: var(--r-ctl);
+}
+
+/* 弹窗 / 卡片式 modal：14px 大圆角 + 浮层阴影 + 发丝边（深色同上）。 */
+.n-modal.n-card,
+.n-dialog.n-modal {
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border-soft);
+}
+
+:root[data-theme="dark"] .n-modal.n-card,
+:root[data-theme="dark"] .n-dialog.n-modal {
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border);
+}
+
+/* 遮罩：用令牌 --scrim（浅色 38% 墨色 / 深色 55% 黑），两种主题都不发灰。 */
+.n-modal-mask,
+.n-drawer-mask {
+  background-color: var(--scrim) !important;
+}
+
+/* 抽屉：左侧 1px 分隔 + 浮层阴影；深色下靠 1px 边和背景分开。 */
+.n-drawer.n-drawer--right-placement {
+  box-shadow: var(--shadow-pop);
+  border-left: 1px solid var(--border-soft);
+}
+
+:root[data-theme="dark"] .n-drawer.n-drawer--right-placement {
+  border-left-color: var(--border);
+}
+
+.n-drawer .n-drawer-content .n-drawer-header {
+  font-size: var(--fs-h2);
+  line-height: var(--lh-h2);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Toast：浮层阴影 + 卡片圆角；内容 tabular-nums（「已复制 3 条」类计数不抖）。 */
+.n-message {
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-pop);
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-theme="dark"] .n-message {
+  border-color: var(--border-strong);
+}
+
+/* 表单控件：悬停时边框加深一级（Naive 默认悬停只换成品牌色，和聚焦态分不清）。 */
+.n-input:not(.n-input--disabled):not(.n-input--focus):hover,
+.n-base-selection:not(.n-base-selection--disabled):not(.n-base-selection--focus):not(.n-base-selection--active):hover {
+  --n-border-hover: 1px solid var(--border-strong) !important;
+}
+
+/* 禁用态：深色下 Naive 默认透明度叠在深底上几乎看不见（11 §3「禁用态单独核对对比度」）。 */
+:root[data-theme="dark"] .n-input.n-input--disabled,
+:root[data-theme="dark"] .n-base-selection.n-base-selection--disabled {
+  --n-text-color-disabled: var(--fg-faint) !important;
+  --n-placeholder-color-disabled: var(--fg-faint) !important;
+}
+
+/* 复选框 / 开关 / 单选的键盘聚焦也用同一种 3px 外环。 */
+.n-checkbox:focus-visible .n-checkbox-box,
+.n-radio:focus-visible .n-radio__dot,
+.n-switch:focus-visible .n-switch__rail {
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+/* 骨架屏：深色下 --surface-2 与 --surface 只差一点，微光换成更亮一级，保证「正在加载」可辨。 */
+:root[data-theme="dark"] .mh-skeleton {
+  background-color: var(--surface-hover);
+  background-image: linear-gradient(90deg, transparent 0%, var(--border) 50%, transparent 100%);
+}
+
+/* 1px 线在高 DPR 下不发虚：表格分隔、卡片边统一走整数像素（这里只做兜底，防止有人写 0.5px）。 */
+hr {
+  height: 0;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+  margin: var(--sp-4) 0;
+}
+
+/* kbd：命令面板、快捷键提示统一外观。 */
+kbd {
+  display: inline-flex;
+  align-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-chip);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-tiny);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="dark"] .mh-skeleton {
+    background-image: none;
+  }
 }

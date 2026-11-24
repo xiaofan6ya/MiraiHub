@@ -13,6 +13,11 @@
  */
 import { http } from './http'
 import { FMT_EMPTY, fmtCredit, fmtInt, fmtTime } from '@/utils/format'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 export type SelectionMode = 'manual' | 'automatic'
 
@@ -254,14 +259,14 @@ export function creditStatItems(payload: CreditExpiryPayload | null | undefined)
     {
       label: '可用积分',
       value: fmtCredit(s.available_remaining),
-      tone: 'brand',
+      // 不着色：数字本身不表达状态（01-direction §3.2；第 1 轮审查 P1-2）。
       foot: fmtInt(s.accounts) + ' 个启用账号 · ' + fmtInt(s.expiring_packages) + ' 个快到期包',
       help: '余额口径（Account.balance_remain），与账号池的「可用积分」一致。',
     },
     {
       label: payload.expiring_soon_days + ' 天内到期',
       value: fmtCredit(s.expiring_soon_remaining),
-      tone: s.expiring_soon_remaining > 0 ? 'warn' : 'brand',
+      tone: s.expiring_soon_remaining > 0 ? 'warn' : undefined,
       foot:
         s.expiring_soon_remaining > 0
           ? '占全部剩余 ' + atRisk.toFixed(1) + '% · 不用完会作废'
@@ -275,7 +280,7 @@ export function creditStatItems(payload: CreditExpiryPayload | null | undefined)
     {
       label: '最紧迫账号',
       value: s.soonest_account_name || FMT_EMPTY,
-      tone: s.expiring_soon_remaining > 0 ? 'warn' : 'brand',
+      tone: s.expiring_soon_remaining > 0 ? 'warn' : undefined,
       foot: soonestLabel(s.soonest_days_left),
       help: '按到期时间排最前的账号；实际流量仍由「账号调度策略」决定。',
     },
@@ -319,9 +324,10 @@ export function riskView(payload: CreditExpiryPayload | null | undefined): RiskV
       {
         label: '≤30 天' + (within30Window ? '（' + within30Window.packages + ' 个包）' : ''),
         value: within30,
-        tone: 'danger',
+        // ≤30 天是「快到期」而不是「已过期」：琥珀；30 天以外没有风险，用中性灰（01-direction §3.3）。
+        tone: 'warn',
       },
-      { label: '30 天以外', value: beyond30, tone: 'warn' },
+      { label: '30 天以外', value: beyond30, tone: 'neutral' },
       { label: '长期有效', value: evergreen, tone: 'ok' },
     ],
     total,
@@ -354,7 +360,7 @@ export function toPackageRows(packages: CreditPackageRow[] | null | undefined): 
       remainingRatio: ratio,
       remainingText: fmtCredit(remaining),
       totalText: total > 0 ? fmtCredit(total) : FMT_EMPTY,
-      expireText: item.expire_date || item.expire_label || (item.expire_at ? fmtTime(item.expire_at) : '长期有效'),
+      expireText: item.expire_date || item.expire_label || (item.expire_at ? fmtTime(item.expire_at) : tx('page.credits.pkg.evergreen')),
       rowKey: String(item.account_id ?? '') + '-' + String(item.package_code || item.display_name) + '-' + String(item.expire_at ?? 'ever'),
     }
   })
@@ -396,7 +402,8 @@ export function paginateRows<T>(rows: T[], page: number, pageSize: number): T[] 
 }
 
 export interface UsageBarsView {
-  items: Array<{ label: string; value: number; tone: 'warn' }>
+  /** 分类条形统一用品牌色（--chart-1），不拿 warn 琥珀当装饰（第 1 轮审查 P1-2）。 */
+  items: Array<{ label: string; value: number; tone: 'brand' }>
   hint: string
   total: number
   empty: boolean
@@ -414,7 +421,7 @@ export function usageBars(
     items: rows.slice(0, Math.max(1, limit)).map((item) => ({
       label: item.account_name + ' · ' + fmtInt(item.requests) + ' 次',
       value: Number(item.credits) || 0,
-      tone: 'warn' as const,
+      tone: 'brand' as const,
     })),
     hint: '近 ' + fmtInt(payload.range_days) + ' 天 · 合计 ' + fmtCredit(total) + ' 积分',
     total,
@@ -440,6 +447,84 @@ export function selectionPolicyDirty(
 ): boolean {
   if (!policy) return false
   return policy.mode !== mode || Number(policy.upstream_start_interval_ms) !== Number(interval)
+}
+
+/**
+ * 取数之后表单该显示什么（修第 1 轮审查 P0-10「选号模式下拉是空的」）。
+ *
+ * 原实现先把新 policy 赋值，再用「新 policy vs 表单」判断 dirty：首次加载时表单是空串，
+ * 和新 policy 必然不同 → 被当成「有未保存修改」直接跳过，下拉永远停在空值。
+ * 正确做法是拿**旧** policy 判断用户有没有改过：没改过（或者根本还没有旧值）就跟随新值。
+ * 返回 null 表示保留用户正在编辑的内容。
+ */
+export function nextPolicyForm(
+  previous: SelectionPolicy | null | undefined,
+  form: { mode: string; interval: number },
+  next: SelectionPolicy | null | undefined,
+): { mode: string; interval: number } | null {
+  if (!next) return null
+  const userEdited = previous ? selectionPolicyDirty(previous, form.mode, form.interval) : false
+  if (userEdited) return null
+  return { mode: String(next.mode || ''), interval: Number(next.upstream_start_interval_ms) || 0 }
+}
+
+/** 选号模式的选项；当前值不在列表里时补一项，避免下拉显示空白。 */
+export function modeSelectOptions(
+  policy: SelectionPolicy | null | undefined,
+): Array<{ label: string; value: string }> {
+  const list = (policy?.modes || []).map((item) => ({ label: item.label, value: String(item.value) }))
+  const current = String(policy?.mode || '')
+  if (current && !list.some((item) => item.value === current)) list.unshift({ label: current, value: current })
+  return list
+}
+
+/** KPI 行用的原始数值（文案由页面按 i18n 取）。 */
+export interface CreditKpis {
+  accounts: number
+  snapshotAccounts: number
+  available: number
+  expiringSoon: number
+  expiringDays: number
+  expiringPackages: number
+  /** 快到期占快照总量的百分比（0–100）。 */
+  atRiskPct: number
+  evergreen: number
+  soonestName: string
+  soonestDays: number | null
+}
+
+export function creditKpis(payload: CreditExpiryPayload | null | undefined): CreditKpis | null {
+  if (!payload) return null
+  const s = payload.summary || ({} as CreditSummary)
+  const days = s.soonest_days_left
+  return {
+    accounts: Number(s.accounts) || 0,
+    snapshotAccounts: Number(s.snapshot_accounts) || 0,
+    available: Number(s.available_remaining) || 0,
+    expiringSoon: Number(s.expiring_soon_remaining) || 0,
+    expiringDays: Number(payload.expiring_soon_days) || 7,
+    expiringPackages: Number(s.expiring_packages) || 0,
+    atRiskPct: Math.max(0, Math.min(100, (Number(s.at_risk_ratio) || 0) * 100)),
+    evergreen: Number(s.evergreen_remaining) || 0,
+    soonestName: String(s.soonest_account_name || ''),
+    soonestDays: days === null || days === undefined || !Number.isFinite(Number(days)) ? null : Number(days),
+  }
+}
+
+/** 剩余天数 → 语气：已过期 danger、7 天内 warn、其余 / 长期有效 neutral（不再用 ok 绿装饰）。 */
+export function daysTone(days: number | null | undefined): 'warn' | 'danger' | 'neutral' {
+  if (days === null || days === undefined || !Number.isFinite(Number(days))) return 'neutral'
+  if (Number(days) <= 0) return 'danger'
+  if (Number(days) <= 7) return 'warn'
+  return 'neutral'
+}
+
+/** 账号状态 → 圆点语气：只有 active 是 ok；已禁用是灰，不用红（第 1 轮审查 P1-2）。 */
+export function accountStatusTone(status: string): 'ok' | 'neutral' | 'warn' {
+  const value = String(status || 'active')
+  if (value === 'active') return 'ok'
+  if (value === 'banned' || value === 'expired') return 'warn'
+  return 'neutral'
 }
 
 /** 账号排行的状态标签（旧版 badge 的语义）。 */

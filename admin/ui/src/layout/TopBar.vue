@@ -12,9 +12,11 @@ import { groupTitle, pageTitle, useI18n } from '@/i18n'
 import { groupOf, isPageKey } from '@/router/pages'
 
 /**
- * 顶栏（03-shell §2.2）：高 56px、吸顶。
- * 左：≤1023 汉堡 + 平台上下文选择器（platformScoped 页面）或面包屑；
- * 右：命令面板入口 240px、服务状态、复制 API 地址、主题切换。
+ * 顶栏（03-shell §2.2 + 10-visual-refresh §1.2）：高 56px、吸顶、半透明 + 背景模糊。
+ *   左：<768 汉堡 + 面包屑「分组 / 页面」；
+ *   中：宽的搜索框样式按钮「搜索页面、账号、Key…  Ctrl K」，点开命令面板；
+ *   右：平台选择器胶囊（platformScoped 页面）、服务状态点（不闪烁；异常变 warn/danger 并带失败次数）、
+ *       复制 API 地址、主题。
  * 桌面壳（pywebview）里整条顶栏是拖拽区：interactive 子元素单独 no-drag。
  */
 const emit = defineEmits<{ (event: 'open-mobile-nav'): void }>()
@@ -33,18 +35,25 @@ const groupLabel = computed(() =>
 const pageLabel = computed(() =>
   pageKey.value ? pageTitle(pageKey.value) : String(route.meta.title ?? ''),
 )
+/** 单页分组（智能体 / 公开入口）分组名与页面名相同：只显示一段。 */
+const showGroupCrumb = computed(() => Boolean(groupLabel.value) && groupLabel.value !== pageLabel.value)
 
 const statusText = computed(() => heartbeat.statusText)
 const statusTone = computed(() => heartbeat.statusTone)
+/** 异常时显示连续失败次数（正常时不显示数字）。 */
+const failureCount = computed(() =>
+  heartbeat.status === 'ok' ? 0 : Math.max(1, Number(heartbeat.consecutiveFailures) || 0),
+)
 
 const beatText = computed(() => {
   if (!heartbeat.lastBeatAt) return '—'
   const tag = locale.value === 'en-US' ? 'en-US' : 'zh-CN'
   return new Date(heartbeat.lastBeatAt).toLocaleTimeString(tag, { hour12: false })
 })
-const statusTip = computed(() =>
-  t('shell.statusTip', { endpoint: heartbeat.endpoint, time: beatText.value }),
-)
+const statusTip = computed(() => {
+  const base = t('shell.statusTip', { endpoint: heartbeat.endpoint, time: beatText.value })
+  return failureCount.value ? base + ' · ' + t('shell.statusFailures', { count: failureCount.value }) : base
+})
 
 const themeLabel = computed(() =>
   mode.value === 'light'
@@ -84,15 +93,16 @@ async function copyApi(): Promise<void> {
         <Menu :size="18" />
       </button>
 
-      <PlatformPicker v-if="platformScoped" />
-      <nav v-else class="breadcrumb" :aria-label="t('shell.breadcrumbAria')">
-        <span class="crumb-group">{{ groupLabel }}</span>
-        <span class="crumb-sep" aria-hidden="true">/</span>
-        <span class="crumb-page">{{ pageLabel }}</span>
+      <nav class="breadcrumb" :aria-label="t('shell.breadcrumbAria')">
+        <template v-if="showGroupCrumb">
+          <span class="crumb-group">{{ groupLabel }}</span>
+          <span class="crumb-sep" aria-hidden="true">/</span>
+        </template>
+        <span class="crumb-page" aria-current="page">{{ pageLabel }}</span>
       </nav>
     </div>
 
-    <div class="topbar-right">
+    <div class="topbar-center">
       <button
         type="button"
         class="cmdk"
@@ -101,15 +111,25 @@ async function copyApi(): Promise<void> {
         @click="openCommandPalette"
       >
         <Search :size="16" class="cmdk-icon" />
-        <span class="cmdk-label">{{ t('shell.searchOrJump') }}</span>
+        <span class="cmdk-label">{{ t('shell.searchPlaceholder') }}</span>
         <kbd class="cmdk-kbd">{{ shortcutLabel }}</kbd>
       </button>
+    </div>
+
+    <div class="topbar-right">
+      <PlatformPicker v-if="platformScoped" />
 
       <n-tooltip placement="bottom" :delay="200">
         <template #trigger>
-          <span class="status" role="status" :aria-label="t('shell.serviceStatus', { status: statusText })">
+          <span
+            class="status"
+            :class="'is-' + statusTone"
+            role="status"
+            :aria-label="t('shell.serviceStatus', { status: statusText })"
+          >
             <span class="status-dot" :class="statusTone" />
             <span class="status-text">{{ statusText }}</span>
+            <span v-if="failureCount" class="status-count">{{ failureCount }}</span>
           </span>
         </template>
         {{ statusTip }}
@@ -117,9 +137,8 @@ async function copyApi(): Promise<void> {
 
       <n-tooltip placement="bottom" :delay="200">
         <template #trigger>
-          <button type="button" class="topbar-btn" :aria-label="t('shell.copyApi')" @click="copyApi">
+          <button type="button" class="topbar-icon-btn topbar-copy" :aria-label="t('shell.copyApi')" @click="copyApi">
             <Copy :size="16" />
-            <span class="btn-text">{{ t('shell.apiAddress') }}</span>
           </button>
         </template>
         {{ t('shell.copyApiTip', { url: apiBaseUrl() }) }}
@@ -149,11 +168,13 @@ async function copyApi(): Promise<void> {
   z-index: 20;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   height: var(--topbar-h);
-  padding: 0 var(--sp-3) 0 var(--sp-4);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  padding: 0 var(--sp-4) 0 var(--sp-6);
+  background: var(--topbar-bg);
+  -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border-soft);
   -webkit-app-region: drag;
 }
 
@@ -169,20 +190,29 @@ async function copyApi(): Promise<void> {
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
+}
+
+.topbar-center {
+  display: flex;
+  justify-content: center;
+  flex: 0 1 440px;
+  min-width: 0;
 }
 
 .topbar-right {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--sp-2);
-  flex: 0 0 auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .breadcrumb {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
+  gap: 6px;
   min-width: 0;
   font-size: var(--fs-body);
   color: var(--fg-muted);
@@ -199,6 +229,8 @@ async function copyApi(): Promise<void> {
 }
 
 .crumb-page {
+  /* 切页时由 View Transitions 平滑替换（router/viewTransition.ts，样式在 base.css） */
+  view-transition-name: mh-page-title;
   color: var(--fg);
   font-weight: 600;
   overflow: hidden;
@@ -206,34 +238,59 @@ async function copyApi(): Promise<void> {
   white-space: nowrap;
 }
 
+/* 搜索框样式的命令面板入口 */
 .cmdk {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  width: 240px;
-  height: 32px;
-  padding: 0 var(--sp-2) 0 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 6px 0 12px;
   border: 1px solid var(--border);
   border-radius: var(--r-ctl);
-  background: var(--surface-2);
+  background: var(--surface);
+  /* 第 4 轮：原 --fg-faint 在白底上对比度 ≈2.6，作为「入口按钮」的文案太淡；改 --fg-muted（≈4.8） */
   color: var(--fg-muted);
+  box-shadow: var(--shadow-1);
   cursor: pointer;
   transition:
     border-color var(--t-fast) var(--ease),
-    background var(--t-fast) var(--ease);
+    box-shadow var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease),
+    transform var(--dur-1) var(--ease-out);
 }
 
 .cmdk:hover {
   border-color: var(--border-strong);
-  background: var(--surface-hover);
+  color: var(--fg-2);
+}
+
+.cmdk:active,
+.topbar-icon-btn:active {
+  transform: scale(.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmdk:active,
+  .topbar-icon-btn:active {
+    transform: none;
+  }
+}
+
+.cmdk:focus-visible {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--ring);
 }
 
 .cmdk-icon {
   flex: 0 0 auto;
+  color: var(--fg-muted);
 }
 
 .cmdk-label {
   flex: 1 1 auto;
+  min-width: 0;
   text-align: left;
   font-size: var(--fs-body);
   overflow: hidden;
@@ -243,25 +300,38 @@ async function copyApi(): Promise<void> {
 
 .cmdk-kbd {
   flex: 0 0 auto;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: var(--r-chip);
-  background: var(--surface);
-  color: var(--fg-2);
+  background: var(--surface-2);
+  color: var(--fg-muted);
   font-family: var(--font-sans);
   font-size: var(--fs-tiny);
   line-height: var(--lh-tiny);
 }
 
+/* 服务状态：不闪烁（10-visual-refresh §1.9）；异常时整块变色并带失败次数 */
 .status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 var(--sp-2);
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-size: var(--fs-small);
+  font-weight: 500;
   color: var(--fg-muted);
   white-space: nowrap;
+}
+
+.status.is-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.status.is-danger {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .status-dot {
@@ -269,76 +339,95 @@ async function copyApi(): Promise<void> {
   height: 8px;
   border-radius: 50%;
   background: var(--ok);
-}
-
-.status-dot.ok {
-  background: var(--ok);
-  animation: mh-pulse 2s var(--ease) infinite;
+  box-shadow: 0 0 0 3px var(--ok-soft);
 }
 
 .status-dot.warn {
   background: var(--warn);
+  box-shadow: none;
 }
 
 .status-dot.danger {
   background: var(--danger);
+  box-shadow: none;
 }
 
-@keyframes mh-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
-  }
+/* 失败次数：状态色做底、表面色文字 */
+.status-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--surface);
+  font-size: var(--fs-tiny);
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .status-dot.ok {
-    animation: none;
-  }
+.status.is-warn .status-count {
+  background: var(--warn);
 }
 
-.topbar-btn,
+.status.is-danger .status-count {
+  background: var(--danger);
+}
+
 .topbar-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  width: 32px;
   height: 32px;
-  padding: 0 10px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--r-ctl);
   background: transparent;
   color: var(--fg-2);
-  font-size: var(--fs-body);
   cursor: pointer;
   transition:
     background var(--t-fast) var(--ease),
-    border-color var(--t-fast) var(--ease);
+    border-color var(--t-fast) var(--ease),
+    transform var(--dur-1) var(--ease-out);
 }
 
-.topbar-btn:hover,
 .topbar-icon-btn:hover {
   background: var(--surface-hover);
   border-color: var(--border);
   color: var(--fg);
 }
 
-.topbar-icon-btn {
-  width: 32px;
-  padding: 0;
+@media (max-width: 1279px) {
+  .topbar {
+    padding-left: var(--sp-4);
+    gap: var(--sp-3);
+  }
+  .status-text {
+    display: none;
+  }
+  .status {
+    padding: 0 8px;
+  }
 }
 
+/* <1024：搜索收成图标按钮，面包屑只留页面名 */
 @media (max-width: 1023px) {
+  .topbar-center {
+    flex: 0 0 auto;
+  }
   .cmdk {
     width: 32px;
+    height: 32px;
     padding: 0;
     justify-content: center;
+    box-shadow: none;
   }
   .cmdk-label,
   .cmdk-kbd {
+    display: none;
+  }
+  .crumb-group,
+  .crumb-sep {
     display: none;
   }
 }
@@ -350,13 +439,17 @@ async function copyApi(): Promise<void> {
   }
   .topbar-right {
     gap: 2px;
+    flex: 0 1 auto;
   }
-  .status-text,
-  .btn-text {
-    display: none;
+  .topbar-left {
+    flex: 1 1 auto;
   }
   .status {
-    padding: 0 4px;
+    padding: 0 6px;
+  }
+  /* 375 宽放不下：复制 API 地址在命令面板里也有 */
+  .topbar-copy {
+    display: none;
   }
 }
 </style>

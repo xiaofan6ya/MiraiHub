@@ -37,8 +37,14 @@ export interface MarketPricingEntry {
   platform_label: string
   /** 该平台的原始模型名（复制调用名时的兜底）。 */
   model_id: string
-  multiplier: number
+  /**
+   * 每千 Token 倍率。**负数 = 该平台没有倍率概念（按 token 计量）**，
+   * 与 routers/models.py 的 credit_multiplier < 0 同一约定；不是「便宜」。
+   */
+  multiplier: number | null
   free: boolean
+  /** 区域（trae 国内 / 国际）。后端补上之后用于去重；旧后端没有这个字段。 */
+  realm?: string
 }
 
 /** model-market 的 items[]：一个归一模型一张卡要的全部数字。 */
@@ -65,7 +71,13 @@ export interface MarketItem {
   pricing: MarketPricingEntry[]
   /** 全部平台都免费时才为 true。 */
   free: boolean
-  min_multiplier: number
+  /**
+   * 最低倍率。旧后端把 -1（按量）也算进 min，会得到 -1；新后端只取 ≥0 的最小值，
+   * 全部为负时返回 null 并带 metered=true。前端两种形状都兼容（见 toMarketCards）。
+   */
+  min_multiplier: number | null
+  /** 新后端：所有定价都是按量（没有倍率）。 */
+  metered?: boolean
   active_accounts: number
   exhausted_accounts: number
   available: boolean
@@ -246,6 +258,8 @@ export interface MarketCard {
   name: string
   platforms: string[]
   platformLabels: string[]
+  /** 与 platforms 同下标的悬停说明（同平台多区 / 多原名合并成一行）。 */
+  platformTitles: string[]
   platformCount: number
   models: string[]
   /** 主要调用名：aggregate 的 client_id 优先，其次最低倍率平台的 model_id。 */
@@ -257,8 +271,10 @@ export interface MarketCard {
   latencyMs: number
   ttfbMs: number
   tps: number
-  /** 最低倍率；没有定价时为 null。 */
+  /** 最低倍率（只看 ≥0 的倍率）；没有定价、或全部按量计费时为 null。 */
   multiplier: number | null
+  /** 有定价但全部是按量计费（倍率 < 0）：显示「按量」，不是「×-1.00」。 */
+  metered: boolean
   free: boolean
   activeAccounts: number
   exhaustedAccounts: number
@@ -375,6 +391,96 @@ export function primaryCallName(item: MarketItem, callNames: Map<string, string>
   return String(fromModels || item?.key || '')
 }
 
+/**
+ * 定价去重：同一 (platform, realm, model_id) 只留一条（第 3 轮审查 A1：两条 ModelConfig
+ * 归一到同一个 key 时 Marvis 出现两次）。旧后端没有 realm，退化成按 (platform, model_id)。
+ */
+export function dedupePricing(pricing: MarketPricingEntry[] | null | undefined): MarketPricingEntry[] {
+  const seen = new Set<string>()
+  const out: MarketPricingEntry[] = []
+  for (const entry of Array.isArray(pricing) ? pricing : []) {
+    if (!entry || !entry.platform) continue
+    const key = [entry.platform, entry.realm || '', entry.model_id || ''].join('\u0000')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(entry)
+  }
+  return out
+}
+
+/**
+ * 倍率口径（第 3 轮审查 A2）：负数是「按量计费」，不参与最小值。
+ *
+ *   · 有 ≥0 的倍率 → 取最小值；
+ *   · 只有负数倍率（或后端给了 metered=true / min_multiplier<0）→ metered，倍率 null；
+ *   · 没有定价 → 倍率 null、非 metered（显示「未定价」）。
+ * 旧后端的 min_multiplier=-1 和新后端的 null + metered 两种形状都能得到同一个结果。
+ */
+export function marketMultiplier(
+  item: Pick<MarketItem, 'min_multiplier' | 'metered'> & { pricing?: MarketPricingEntry[] | null },
+): { multiplier: number | null; metered: boolean } {
+  const pricing = Array.isArray(item?.pricing) ? item.pricing : []
+  if (!pricing.length) return { multiplier: null, metered: false }
+  const values = pricing
+    .map((entry) => (entry?.multiplier === null || entry?.multiplier === undefined ? Number.NaN : Number(entry.multiplier)))
+    .filter((value) => Number.isFinite(value))
+  const nonNegative = values.filter((value) => value >= 0)
+  if (nonNegative.length) return { multiplier: Math.min(...nonNegative), metered: false }
+  const fromBackend = item?.min_multiplier === null || item?.min_multiplier === undefined ? Number.NaN : Number(item.min_multiplier)
+  if (values.some((value) => value < 0) || item?.metered === true || (Number.isFinite(fromBackend) && fromBackend < 0)) {
+    return { multiplier: null, metered: true }
+  }
+  // 定价条目里没写倍率：退回后端汇总值（≥0 才可信）。都没有时给 null（显示「未定价」），
+  // 不能兜底成 0 —— 那会显示成「×0.00」，看上去像免费（本轮审计发现）。
+  return { multiplier: Number.isFinite(fromBackend) && fromBackend >= 0 ? fromBackend : null, metered: false }
+}
+
+/**
+ * 平台列表 = 有流量的平台 ∪ 有定价的平台（第 3 轮审查 A1：有流量的模型只列「近 24 小时跑过的平台」，
+ * 71 个模型里 25 个少了平台）。后端修好后两者本来就一致，这里取并集只是兜底，不会重复。
+ */
+export function marketPlatforms(
+  item: Pick<MarketItem, 'platforms' | 'platform_labels'>,
+  pricing: MarketPricingEntry[],
+): { ids: string[]; labels: string[] } {
+  const ids: string[] = []
+  const labels: string[] = []
+  const rawIds = Array.isArray(item?.platforms) ? item.platforms : []
+  const rawLabels = Array.isArray(item?.platform_labels) ? item.platform_labels : []
+  rawIds.forEach((id, index) => {
+    if (!id || ids.includes(id)) return
+    ids.push(id)
+    labels.push(String(rawLabels[index] || id))
+  })
+  for (const entry of pricing) {
+    if (!entry.platform || ids.includes(entry.platform)) continue
+    ids.push(entry.platform)
+    labels.push(String(entry.platform_label || entry.platform))
+  }
+  return { ids, labels }
+}
+
+/**
+ * 每个平台一行悬停说明：同一平台多个区 / 多个原始模型名（Trae 国内版 + 国际版、
+ * hy3-workbuddy + hy3-x-workbuddy）只画一个图标，tooltip 里把各区名称都列出来（第 3 轮审查 A3）。
+ */
+export function platformTitles(
+  ids: string[],
+  labels: string[],
+  pricing: MarketPricingEntry[],
+): string[] {
+  return ids.map((id, index) => {
+    const names: string[] = []
+    const push = (value: unknown): void => {
+      const text = String(value || '').trim()
+      if (text && !names.includes(text)) names.push(text)
+    }
+    push(labels[index] || id)
+    for (const entry of pricing) if (entry.platform === id) push(entry.platform_label)
+    return names.join(' · ')
+  })
+}
+
 /** 接口响应 → 卡片行。aggregate / trend 缺失时降级，不抛异常。 */
 export function toMarketCards(
   payload: ModelMarketPayload | null | undefined,
@@ -388,18 +494,18 @@ export function toMarketCards(
   return items
     .filter((item) => item && (item.key || item.name))
     .map((item) => {
-      const platforms = Array.isArray(item.platforms) ? item.platforms.filter(Boolean) : []
-      const labels = Array.isArray(item.platform_labels) ? item.platform_labels.filter(Boolean) : []
-      const pricing = Array.isArray(item.pricing) ? item.pricing.filter(Boolean) : []
+      const pricing = dedupePricing(item.pricing)
+      const { ids: platforms, labels } = marketPlatforms(item, pricing)
       const series = trendOfItem(item, trendIndex)
-      const multiplier = pricing.length ? Number(item.min_multiplier || 0) : null
+      const price = marketMultiplier({ ...item, pricing })
       const active = Math.max(0, Number(item.active_accounts) || 0)
       const exhausted = Math.max(0, Number(item.exhausted_accounts) || 0)
       return {
         key: String(item.key || item.name || ''),
         name: String(item.name || item.key || tr(translate, 'market.row.unknownModel')),
         platforms,
-        platformLabels: labels.length ? labels : platforms,
+        platformLabels: labels,
+        platformTitles: platformTitles(platforms, labels, pricing),
         platformCount: platforms.length,
         models: Array.isArray(item.models) ? item.models.filter(Boolean) : [],
         callName: primaryCallName(item, callNames),
@@ -413,7 +519,8 @@ export function toMarketCards(
         latencyMs: Math.max(0, Number(item.avg_latency_ms) || 0),
         ttfbMs: Math.max(0, Number(item.avg_ttfb_ms) || 0),
         tps: Math.max(0, Number(item.tps) || 0),
-        multiplier: multiplier === null ? null : Number.isFinite(multiplier) ? multiplier : null,
+        multiplier: price.multiplier,
+        metered: price.metered,
         free: Boolean(item.free) && pricing.length > 0,
         activeAccounts: active,
         exhaustedAccounts: exhausted,
@@ -473,9 +580,11 @@ export function sortMarketCards(
   const compare = (a: MarketCard, b: MarketCard): number => {
     if (key === 'name') return a.name.localeCompare(b.name, 'zh-CN')
     if (key === 'price') {
-      // 免费 = 0，排在最低；没有定价的排最后（契约 §5.4：价格升序）。
-      const av = a.multiplier === null ? Number.MAX_SAFE_INTEGER : a.free ? 0 : a.multiplier
-      const bv = b.multiplier === null ? Number.MAX_SAFE_INTEGER : b.free ? 0 : b.multiplier
+      // 免费 = 0，排在最低；按量计费排在有倍率的之后；没有定价的排最后（契约 §5.4：价格升序）。
+      const priceRank = (card: MarketCard): number =>
+        card.free ? 0 : card.multiplier !== null ? card.multiplier : card.metered ? Number.MAX_SAFE_INTEGER - 1 : Number.MAX_SAFE_INTEGER
+      const av = priceRank(a)
+      const bv = priceRank(b)
       return av - bv
     }
     if (key === 'success_rate') {
@@ -565,13 +674,16 @@ export function rateTone(rate: number | null | undefined): 'ok' | 'warn' | 'dang
   return 'danger'
 }
 
-/** 倍率文案（契约 §3.2）：免费 / ×1.00 / 未定价。 */
+/** 倍率文案（契约 §3.2）：免费 / ×1.00 / 按量 / 未定价。负倍率绝不显示成「×-1.00」。 */
 export function priceText(
-  card: Pick<MarketCard, 'free' | 'multiplier'>,
+  card: Pick<MarketCard, 'free' | 'multiplier'> & { metered?: boolean },
   translate?: Translate,
 ): string {
   if (card.free) return tr(translate, 'market.price.free')
-  if (card.multiplier === null) return tr(translate, 'market.price.none')
+  if (card.metered) return tr(translate, 'market.price.metered')
+  if (card.multiplier === null || !Number.isFinite(Number(card.multiplier)) || Number(card.multiplier) < 0) {
+    return tr(translate, 'market.price.none')
+  }
   return '×' + Number(card.multiplier).toFixed(2)
 }
 

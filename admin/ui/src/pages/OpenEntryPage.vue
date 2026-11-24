@@ -11,10 +11,14 @@
  *   1. 开关是「代次」语义：每次 toggle 旧链接与邀请码全部作废（确认框必须写明）；
  *   2. 单条链接无法撤销（后端只有整代失效），页面不伪造；
  *   3. 文案上限与后端 _sanitize_copy 完全一致，前端先拦并指行号。
+ *
+ * 10-visual-refresh 重做：保存统一走底部保存条（时效 + 文案一起保存，「放弃」恢复草稿）；
+ * 去掉页头的状态徽章和「关闭入口使全部失效」按钮（与开关重复，后果写在确认框里）；
+ * 入口关闭时访问链接的空状态直接提示「先开启入口」。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { NInput, NSelect, NSkeleton, NSwitch } from 'naive-ui'
-import { Link2, Power, RefreshCw } from 'lucide-vue-next'
+import { Link2, RefreshCw } from 'lucide-vue-next'
 import SettingsLayout from '@/layout/SettingsLayout.vue'
 import SettingsCard from '@/layout/SettingsCard.vue'
 import Badge from '@/components/base/Badge.vue'
@@ -25,7 +29,7 @@ import ErrorBlock from '@/components/base/ErrorBlock.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
 import FormField from '@/components/overlay/FormField.vue'
 import PlatformLogo from '@/components/identity/PlatformLogo.vue'
-import { useConfirm, useToast } from '@/composables'
+import { useConfirm, useRevisit, useToast } from '@/composables'
 import { failureText } from '@/utils/error'
 import { useI18n } from '@/i18n'
 import {
@@ -98,13 +102,17 @@ async function loadGate(): Promise<void> {
   }
 }
 
-async function loadConfig(): Promise<void> {
+/**
+ * 读配置并回填草稿。`resync` 指定回填哪份草稿：保存条一次保存两块时，
+ * 先保存的那块重读配置不能把另一块还没保存的草稿冲掉。
+ */
+async function loadConfig(resync?: 'ttl' | 'copy' | 'none'): Promise<void> {
   configLoading.value = true
   configError.value = ''
   try {
     config.value = await getOpenConfig()
-    syncCopyDraft(config.value?.copy)
-    ttlDraft.value = String(config.value?.ticket_ttl ?? 86400)
+    if (resync === undefined || resync === 'copy') syncCopyDraft(config.value?.copy)
+    if (resync === undefined || resync === 'ttl') ttlDraft.value = String(config.value?.ticket_ttl ?? 86400)
   } catch (error) {
     configError.value = failureText(t('page.openentry.action.loadConfig'), error)
   } finally {
@@ -131,6 +139,15 @@ function reload(): void {
 }
 
 const origin = ref('')
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (!dirty.value) reload()
+  },
+  { minIntervalMs: 10_000 },
+)
+
 onMounted(() => {
   origin.value = typeof window !== 'undefined' ? window.location.origin : ''
   reload()
@@ -184,7 +201,7 @@ async function saveTtl(): Promise<void> {
   try {
     await saveOpenConfig({ ticket_ttl: Number(ttlDraft.value) })
     toast.success(t('page.openentry.toast.ttlSaved'))
-    await loadConfig()
+    await loadConfig('ttl')
     await loadGate()
   } catch (error) {
     toast.error(failureText(t('page.openentry.action.saveTtl'), error))
@@ -253,7 +270,7 @@ async function togglePlatform(platform: OpenPlatform): Promise<void> {
         ? t('page.openentry.toast.platformHidden', { name: platform.label })
         : t('page.openentry.toast.platformShown', { name: platform.label }),
     )
-    await loadConfig()
+    await loadConfig('none')
   } catch (error) {
     toast.error(failureText(t('page.openentry.action.togglePlatform'), error))
   } finally {
@@ -309,7 +326,7 @@ async function saveCopy(): Promise<void> {
   try {
     await saveOpenConfig({ page_copy: normalizeCopy(copyFromForm.value) })
     toast.success(t('page.openentry.toast.copySaved'))
-    await loadConfig()
+    await loadConfig('copy')
   } catch (err) {
     toast.error(failureText(t('page.openentry.action.saveCopy'), err))
   } finally {
@@ -328,7 +345,7 @@ async function resetCopy(): Promise<void> {
   try {
     await saveOpenConfig({ page_copy: { title: '', sub: '', intro: [], foot: '' } })
     toast.success(t('page.openentry.toast.copyReset'))
-    await loadConfig()
+    await loadConfig('copy')
   } catch (err) {
     toast.error(failureText(t('page.openentry.action.resetCopy'), err))
   } finally {
@@ -336,13 +353,34 @@ async function resetCopy(): Promise<void> {
   }
 }
 
-const dirty = computed(() => ttlDirty.value || copyDirty.value)
+const dirty = computed(() => Number(ttlDirty.value) + Number(copyDirty.value))
+const saving = computed(() => ttlSaving.value || copySaving.value)
+
+/** 保存条「保存」：把有改动的区块依次保存（时效、文案各自的接口与提示不变）。 */
+async function saveAll(): Promise<void> {
+  if (saving.value) return
+  if (ttlDirty.value) await saveTtl()
+  if (copyDirty.value) await saveCopy()
+}
+
+/** 保存条「放弃」：草稿回到上次读到的配置，不发请求。 */
+function discardAll(): void {
+  ttlDraft.value = String(config.value?.ticket_ttl ?? 86400)
+  syncCopyDraft(config.value?.copy)
+}
 </script>
 
 <template>
-  <SettingsLayout :title="t('page.openentry.title')" :help="helpText" :sections="sections" :dirty="dirty">
+  <SettingsLayout
+    :title="t('page.openentry.title')"
+    :help="helpText"
+    :sections="sections"
+    :dirty="dirty"
+    :saving="saving"
+    @save="saveAll"
+    @discard="discardAll"
+  >
     <template #actions>
-      <Badge :tone="state.tone">{{ state.label }}</Badge>
       <Btn variant="quiet" :icon="RefreshCw" :loading="gateLoading || configLoading || ticketsLoading" @click="reload">
         {{ t('common.refresh') }}
       </Btn>
@@ -354,40 +392,25 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       :title="t('page.openentry.section.gate')"
       :description="t('page.openentry.gateDescription')"
       :dirty="ttlDirty"
-      :loading="ttlSaving"
-      :save-label="t('page.openentry.saveTtl')"
-      :save-disabled="!ttlDirty"
-      @save="saveTtl"
-      @reset="loadConfig"
     >
       <div v-if="gateLoading && !gate" class="oe-skeleton"><n-skeleton text :repeat="3" /></div>
       <ErrorBlock v-else-if="gateError" :title="gateError" retry @retry="loadGate" />
       <template v-else>
-        <div class="oe-gate">
-          <div class="oe-gate__text">
-            <div class="oe-gate__label">
-              {{ t('page.openentry.gateSwitch') }}
-              <Badge :tone="state.tone">{{ state.label }}</Badge>
-            </div>
-            <p class="oe-note">{{ meta }}</p>
-            <p class="oe-note">
-              {{ t('page.openentry.gateNote', { ttl: ttlLabel(gate?.ticket_ttl, t) }) }}
-            </p>
-          </div>
+        <FormField :label="t('page.openentry.gateSwitch')" :hint="meta">
           <div class="oe-gate__switch">
             <n-switch
               :value="Boolean(gate?.open)"
-              size="large"
               :loading="gateToggling"
               :disabled="gateLoading"
               :aria-label="t('page.openentry.gateAria')"
               @update:value="switchGate"
             />
-            <Btn variant="danger" size="sm" :icon="Power" :disabled="!gate?.open" @click="switchGate">
-              {{ t('page.openentry.closeGate') }}
-            </Btn>
+            <Badge :tone="state.tone" dot>{{ state.label }}</Badge>
+            <span class="oe-note">
+              {{ t('page.openentry.gateNote', { ttl: ttlLabel(gate?.ticket_ttl, t) }) }}
+            </span>
           </div>
-        </div>
+        </FormField>
 
         <FormField
           :label="t('page.openentry.field.ttl')"
@@ -408,11 +431,10 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       id="openentry-links"
       :title="t('page.openentry.section.links')"
       :description="t('page.openentry.linksDescription')"
-      hide-save
-      hide-reset
+      plain
     >
       <template #actions>
-        <Btn variant="default" size="sm" :icon="Link2" :disabled="!canIssue" @click="openDrawer">
+        <Btn variant="primary" size="sm" :icon="Link2" :disabled="!canIssue" @click="openDrawer">
           {{ t('page.openentry.generate') }}
         </Btn>
       </template>
@@ -434,14 +456,15 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
         <ul v-if="ticketRows.length" class="oe-tickets">
           <li v-for="ticket in ticketRows" :key="ticket.code" class="oe-ticket">
             <Copyable :value="ticketUrl(ticket)" class="oe-ticket__url" />
-            <Badge :tone="ticket.permanent ? 'brand' : 'neutral'">{{ ticketExpiryText(ticket, t) }}</Badge>
+            <Badge tone="neutral">{{ ticketExpiryText(ticket, t) }}</Badge>
           </li>
         </ul>
-        <Empty v-else compact :description="t('page.openentry.linksEmpty')">
-          <Btn variant="default" size="sm" :disabled="!canIssue" @click="openDrawer">
-            {{ t('page.openentry.generate') }}
-          </Btn>
-        </Empty>
+        <!-- 生成按钮只在卡头放一个；入口关闭时直接告诉用户先开启入口（第 2 轮审查 P2）。 -->
+        <Empty
+          v-else
+          compact
+          :description="canIssue ? t('page.openentry.linksEmpty') : t('page.openentry.linksEmptyClosed')"
+        />
         <p class="oe-note">{{ t('page.openentry.epochNote') }}</p>
       </template>
     </SettingsCard>
@@ -451,15 +474,14 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       id="openentry-platforms"
       :title="t('page.openentry.section.platforms')"
       :description="t('page.openentry.platformsDescription')"
-      hide-save
-      hide-reset
+      plain
     >
       <template #actions>
         <span class="oe-note">{{ platformSummary }}</span>
       </template>
 
       <div v-if="configLoading && !config" class="oe-skeleton"><n-skeleton text :repeat="3" /></div>
-      <ErrorBlock v-else-if="configError" :title="configError" retry @retry="loadConfig" />
+      <ErrorBlock v-else-if="configError" :title="configError" retry @retry="loadConfig()" />
       <template v-else>
         <ul v-if="config?.platforms?.length" class="oe-platforms">
           <li v-for="platform in config.platforms" :key="platform.id" class="oe-platform">
@@ -486,11 +508,7 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       :title="t('page.openentry.section.copy')"
       :description="t('page.openentry.copyDescription')"
       :dirty="copyDirty"
-      :loading="copySaving"
-      :save-label="t('page.openentry.saveCopy')"
-      :save-disabled="!copyDirty"
-      @save="saveCopy"
-      @reset="loadConfig"
+      plain
     >
       <template #actions>
         <Btn variant="quiet" size="sm" :disabled="copySaving" @click="resetCopy">
@@ -499,7 +517,7 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
       </template>
 
       <div v-if="configLoading && !config" class="oe-skeleton"><n-skeleton text :repeat="4" /></div>
-      <ErrorBlock v-else-if="configError" :title="configError" retry @retry="loadConfig" />
+      <ErrorBlock v-else-if="configError" :title="configError" retry @retry="loadConfig()" />
       <div v-else class="oe-copy">
         <div class="oe-copy__form">
           <FormField :label="t('page.openentry.field.title')" :hint="t('page.openentry.field.titleHint')">
@@ -554,23 +572,6 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
   padding: var(--sp-2) 0;
 }
 
-.oe-gate {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  flex-wrap: wrap;
-}
-
-.oe-gate__label {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-h2);
-  font-weight: 600;
-  color: var(--fg);
-}
-
 .oe-gate__switch {
   display: flex;
   align-items: center;
@@ -582,7 +583,9 @@ const dirty = computed(() => ttlDirty.value || copyDirty.value)
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
-  max-width: 68ch;
+  max-width: 80ch;
+  text-wrap: pretty;
+  margin: 0;
 }
 
 .oe-tickets,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 单张统计卡（需要独立卡片时用；成组请用 StatStrip）。 */
+/** 单张统计卡（需要独立卡片时用；成组请用 StatStrip；新页面优先用 KpiCard）。 */
 import { RouterLink } from 'vue-router'
 import Card from '../base/Card.vue'
 import StatCell from './StatCell.vue'
@@ -10,7 +10,7 @@ defineProps<{ item: StatItem }>()
 
 <template>
   <RouterLink v-if="item.to" :to="item.to" class="mh-stat-link">
-    <Card>
+    <Card hoverable>
       <StatCell :item="item" />
     </Card>
   </RouterLink>
@@ -24,17 +24,11 @@ defineProps<{ item: StatItem }>()
   display: block;
   color: inherit;
   text-decoration: none;
+  border-radius: var(--r-card);
 }
 
 .mh-stat-link:hover {
   text-decoration: none;
-}
-
-.mh-stat-link :deep(.mh-card) {
-  transition: border-color var(--t-fast) var(--ease);
-}
-
-.mh-stat-link:hover :deep(.mh-card) {
-  border-color: var(--border-strong);
+  color: inherit;
 }
 </style>

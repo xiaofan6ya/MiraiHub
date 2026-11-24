@@ -1,0 +1,445 @@
+/* ModelsPage.vue 的 scoped 样式（<style scoped src>，10-visual-refresh §5 拆分）。 */
+.models-page {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.models-card {
+  min-width: 0;
+}
+
+.models-filter {
+  padding: var(--sp-4) var(--sp-5) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.models-filter__search {
+  width: 260px;
+  max-width: 100%;
+}
+
+.models-filter__select {
+  width: 168px;
+}
+
+.models-filter__select.is-narrow {
+  width: 132px;
+}
+
+.models-body {
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
+  min-width: 0;
+}
+
+.models-skeleton {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+}
+
+.models-health-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+.models-footnote {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-faint);
+}
+
+:deep(.models-name) {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-width: 0;
+  cursor: pointer;
+  border-radius: var(--r-ctl);
+}
+
+:deep(.models-name:focus-visible) {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+:deep(.models-name__main) {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+:deep(.models-name__title) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+:deep(.models-name__text) {
+  font-weight: 500;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+:deep(.models-name__ids) {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--sp-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+:deep(.models-name__ids > *) {
+  flex: none;
+  max-width: 100%;
+}
+
+:deep(.models-name__ids > :first-child) {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+:deep(.models-name__caps) {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+  margin-left: auto;
+  padding-top: 2px;
+}
+
+:deep(.models-cap) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-chip);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+}
+
+:deep(.models-cap--reasoning) {
+  color: var(--brand);
+}
+
+:deep(.models-cap--video) {
+  color: var(--fg-2);
+}
+
+:deep(.models-platforms) {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* logo 放进 24px 方形浅底小块、间隔 4px，不再 -8px 叠放（第 3 轮审查 A3：互相压住、单色图标认不出）。 */
+:deep(.models-platform) {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-chip);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+/* 在跑流量的平台：描边加深一级，一眼能找到。 */
+:deep(.models-platform.is-live) {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-1);
+}
+
+:deep(.models-platform.is-more) {
+  width: auto;
+  min-width: 24px;
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+}
+
+/* 配置全部禁用、或确定没有可用账号的平台降到 40%。 */
+:deep(.models-platform.is-off) {
+  opacity: 0.4;
+}
+
+/* 同一平台多个区（Trae 国内 / 国际）：右下角小角标写区数。 */
+:deep(.models-platform__count) {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  border-radius: var(--r-chip);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: var(--fs-tiny);
+  line-height: 10px;
+  text-align: center;
+}
+
+:deep(.models-platforms__sum) {
+  margin-left: var(--sp-1);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+:deep(.models-mult) {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-2);
+}
+
+:deep(.models-mult.is-warn) {
+  color: var(--warn);
+}
+
+:deep(.models-mult.is-ok) {
+  color: var(--ok);
+}
+
+:deep(.models-mult.is-muted) {
+  color: var(--fg-faint);
+}
+
+:deep(.models-limits) {
+  display: grid;
+  gap: 1px;
+}
+
+:deep(.models-limits__line) {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+}
+
+:deep(.models-limits__label) {
+  color: var(--fg-faint);
+}
+
+:deep(.models-health) {
+  display: grid;
+  gap: 2px;
+}
+
+:deep(.models-health__line) {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+}
+
+:deep(.models-health__label) {
+  color: var(--fg-faint);
+}
+
+:deep(.models-health__sub) {
+  color: var(--fg-faint);
+}
+
+:deep(.models-status) {
+  display: grid;
+  gap: 2px;
+}
+
+:deep(.models-status__sub) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-faint);
+}
+
+:deep(.models-actions) {
+  display: flex;
+  justify-content: flex-end;
+}
+
+:deep(.models-dash) {
+  color: var(--fg-faint);
+}
+
+/* 编辑抽屉 */
+.models-edit-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.models-edit-head__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.models-edit-head__name {
+  font-size: var(--fs-h2);
+  line-height: var(--lh-h2);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.models-edit-head__meta {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+.models-edit-platforms,
+.models-edit-multipliers,
+.models-edit-map {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.models-edit-platform,
+.models-edit-multiplier {
+  display: grid;
+  grid-template-columns: 18px 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px 0;
+}
+
+.models-edit-platform__name,
+.models-edit-multiplier__name {
+  color: var(--fg);
+}
+
+.models-edit-platform__mult,
+.models-edit-multiplier__value {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.models-edit-multiplier__raw {
+  grid-column: 2 / -1;
+  color: var(--fg-muted);
+  font-size: var(--fs-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.models-edit-caps {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.models-edit-caps__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.models-edit-caps__label {
+  color: var(--fg-2);
+}
+
+.models-edit-caps__number {
+  width: 160px;
+}
+
+.models-edit-caps__hint {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+.models-edit-map__row {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.models-edit-map__platform {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--fg-2);
+}
+
+.models-edit-map__upstream {
+  color: var(--fg-muted);
+  font-size: var(--fs-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.models-edit-desc {
+  margin: 0;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  color: var(--fg-muted);
+}
+
+.models-edit-hint {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  color: var(--fg-faint);
+}
+
+@media (max-width: 640px) {
+  .models-filter {
+    padding: var(--sp-3) var(--sp-4);
+  }
+
+  .models-body {
+    padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  }
+
+  .models-filter__search,
+.models-filter__select,
+.models-filter__select.is-narrow {
+    width: 100%;
+  }
+
+  .models-edit-map__row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .models-edit-map__upstream {
+    grid-column: 1 / -1;
+  }
+}

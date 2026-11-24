@@ -121,9 +121,10 @@ export interface KindMeta {
   tone: 'ok' | 'brand' | 'neutral'
 }
 
+// 「余额观察」只是记录方式，不是状态：用中性灰，不拿品牌靛色当装饰（第 1 轮审查 P1-2）。
 const KIND_SPEC: Record<string, { key: MessageKey; tone: KindMeta['tone'] }> = {
   confirmed: { key: 'journal.kind.confirmed', tone: 'ok' },
-  observed: { key: 'journal.kind.observed', tone: 'brand' },
+  observed: { key: 'journal.kind.observed', tone: 'neutral' },
 }
 
 export function kindMeta(kind: string | null | undefined, translate?: Translate): KindMeta {
@@ -132,13 +133,19 @@ export function kindMeta(kind: string | null | undefined, translate?: Translate)
   return { label: String(kind || tr(translate, 'journal.kind.unknown')), tone: 'neutral' }
 }
 
-/** 变动着色：正数 ok、负数 danger、0 neutral。 */
-export type DeltaTone = 'ok' | 'danger' | 'neutral'
+/**
+ * 变动着色（第 2 轮审查 P2 积分流水）：
+ *   · 正数 ok 并带「+」；
+ *   · 负数是正常消耗，用正文色 `fg`，**不用红**；
+ *   · 0 / 无效值 neutral（灰）。
+ */
+export type DeltaTone = 'ok' | 'fg' | 'neutral'
 
 export function deltaTone(delta: number | null | undefined): DeltaTone {
+  if (delta === null || delta === undefined) return 'neutral'
   const value = Number(delta)
   if (!Number.isFinite(value) || value === 0) return 'neutral'
-  return value > 0 ? 'ok' : 'danger'
+  return value > 0 ? 'ok' : 'fg'
 }
 
 export interface JournalRow extends Record<string, unknown> {
@@ -158,6 +165,8 @@ export interface JournalRow extends Record<string, unknown> {
   deltaText: string
   deltaTone: DeltaTone
   balanceText: string
+  /** 变动后余额的原始数值（排序用；历史记录没存时为 null）。 */
+  balanceAfter: number | null
   balanceRecorded: boolean
   source: string
   sourceText: string
@@ -169,6 +178,8 @@ export interface JournalRow extends Record<string, unknown> {
  *
  * platformText 由调用方传入当前平台作用域的展示名：CreditEvent 没有平台列，
  * 跨平台时无法逐行归属（不猜），这一点在契约里写明。
+ * note 只写来源：类型已经有自己的一列，原来「余额观察 · 余额观察（来源未确认）」
+ * 这种把类型再拼一遍的说明是重复信息（第 2 轮审查 P1-6）。
  */
 export function toJournalRow(
   item: CreditEventItem,
@@ -200,10 +211,11 @@ export function toJournalRow(
     balanceText: balanceRecorded
       ? fmtInt(item.balance_after)
       : tr(translate, 'journal.row.balanceMissing'),
+    balanceAfter: balanceRecorded ? Number(item.balance_after) : null,
     balanceRecorded,
     source: item.source || '',
     sourceText,
-    note: meta.label + (sourceText && sourceText !== FMT_EMPTY ? ' · ' + sourceText : ''),
+    note: sourceText && sourceText !== FMT_EMPTY && sourceText !== meta.label ? sourceText : FMT_EMPTY,
   }
 }
 
@@ -217,6 +229,28 @@ export function toJournalRows(
 
 export interface JournalFilters {
   q?: string
+}
+
+export type JournalSortKey = 'time' | 'delta' | 'balance'
+
+/**
+ * 当前页内排序（后端不支持排序参数）。
+ * 修复：原来「余额」列按 delta 排（复制粘贴错误），现在按 balanceAfter 排；
+ * 没存余额的历史记录永远排在最后，不随升降序跳到最前。
+ */
+export function sortJournalRows(rows: JournalRow[], key: string, order: 'asc' | 'desc' | ''): JournalRow[] {
+  if (key !== 'time' && key !== 'delta' && key !== 'balance') return rows
+  if (order !== 'asc' && order !== 'desc') return rows
+  const factor = order === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    if (key === 'time') return String(a.fullTime).localeCompare(String(b.fullTime)) * factor
+    if (key === 'delta') return (a.delta - b.delta) * factor
+    const left = a.balanceAfter
+    const right = b.balanceAfter
+    if (left === null) return right === null ? 0 : 1
+    if (right === null) return -1
+    return (left - right) * factor
+  })
 }
 
 /**

@@ -1,5 +1,9 @@
 <script setup lang="ts">
-/** 8px 状态圆点 + 可选文字；pulse 只用于「运行中」。 */
+/**
+ * 8px 状态圆点 + 可选文字。
+ * pulse 保留做兼容，但**不再闪烁**（10-visual-refresh §1.9：不允许自发闪烁的状态点）：
+ * 改成一圈静态的 3px 同色光环，表示「正在运行」。
+ */
 import { computed } from 'vue'
 import { badgeToneStyle, type BadgeTone } from './badge'
 
@@ -42,24 +46,6 @@ const color = computed(() => badgeToneStyle(props.tone).text)
 }
 
 .mh-status--pulse .mh-status__dot {
-  animation: mh-status-pulse 1.6s var(--ease) infinite;
-}
-
-@keyframes mh-status-pulse {
-  0% {
-    box-shadow: 0 0 0 0 var(--brand-soft);
-  }
-  70% {
-    box-shadow: 0 0 0 4px var(--brand-soft);
-  }
-  100% {
-    box-shadow: 0 0 0 0 var(--brand-soft);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mh-status--pulse .mh-status__dot {
-    animation: none;
-  }
+  box-shadow: 0 0 0 3px var(--brand-soft);
 }
 </style>

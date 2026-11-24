@@ -35,6 +35,8 @@ vi.mock('@/composables', async (importOriginal) => {
  * GrowthPage 交互覆盖率测试（S24）。
  *
  * 只 mock 浏览器 fetch（页面通过 @/api/http 走它），不真实调用上游。
+ * 修复轮：页面从「卡片墙」改成表格（tr.gw-row，点 button.gw-expand 展开任务清单），
+ * 任务清单只拉**当前页、active** 的账号（第 3 轮审查 B1/B2），用例同步改写。
  * 覆盖：首屏渲染 / 搜索 / 状态筛选 / 清空筛选 / 分页 / 任务展开 / 单任务领奖 /
  * 账号领奖 / 全部领奖确认与取消 / 做任务 + JobProgress / 成长动作菜单 /
  * 刷新成长状态 / 任务清单失败重试 / 账号列表失败重试 / 平台不支持 / 空结果。
@@ -249,6 +251,22 @@ function bodyText(): string {
   return String(document.body.textContent || '')
 }
 
+function rows(wrapper: VueWrapper) {
+  return wrapper.findAll('tr.gw-row')
+}
+
+/** 按账号 id 找行（表格按「active 在前」排序，下标不等于后端顺序）。 */
+function rowOf(wrapper: VueWrapper, id: number) {
+  const row = wrapper.find('tr.gw-row[data-account="' + id + '"]')
+  if (!row.exists()) throw new Error('row not found: ' + id)
+  return row
+}
+
+async function expandRow(wrapper: VueWrapper, id: number): Promise<void> {
+  await rowOf(wrapper, id).find('button.gw-expand').trigger('click')
+  await flushPromises()
+}
+
 type ButtonHost = {
   findAll(selector: string): Array<{ text(): string; trigger(event: string): Promise<void> }>
 }
@@ -291,27 +309,44 @@ afterEach(() => {
 })
 
 describe('GrowthPage 首屏与筛选交互', () => {
-  it('渲染统计条、账号卡、任务状态与排除企业版脚注', async () => {
+  it('渲染 KPI 行、账号表格、任务状态与排除企业版脚注', async () => {
     installFetch(defaultHandler())
     const page = await mountGrowth()
     const text = page.wrapper.text()
 
     expect(text).toContain('成长计划')
     expect(text).toContain('193****2486')
-    expect(text).toContain('188****0911')
     expect(text).toContain('177****3322')
-    // 统计条 6 格
-    expect(text).toContain('任务总数')
+    // 默认只看「可操作」账号（第 2 轮审查 P2）：已禁用的 13 号不进首屏
+    expect(text).not.toContain('188****0911')
+    // KPI 行 4 格（10-visual-refresh §1.4）：可操作账号 / 可领奖励 / 任务完成 / 能量合计
+    expect(text).toContain('可操作账号')
     expect(text).toContain('可领奖励')
+    expect(text).toContain('任务完成')
     expect(text).toContain('能量合计')
-    // 卡片任务状态：可领取 / 已领取 / 未参与 / 可自动
-    expect(text).toContain('可领取')
-    expect(text).toContain('未参与')
-    expect(text).toContain('可自动')
-    // 禁用账号与「可做」判断
-    expect(text).toContain('已禁用')
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(3)
     expect(text).toContain('已排除 2 个企业版账号')
+    // 一行一个账号，active 在前
+    expect(rows(page.wrapper)).toHaveLength(2)
+    expect(rows(page.wrapper).map((row) => row.attributes('data-account'))).toEqual(['12', '14'])
+    // 已禁用账号不请求任务清单
+    expect(callsTo('/api/growth/accounts/13/tasks')).toHaveLength(0)
+    expect(callsTo('/api/growth/accounts/12/tasks')).toHaveLength(1)
+
+    // 切到「全部账号」才看到已禁用行：有「已禁用」状态点，也不露任何操作按钮
+    page.wrapper.findComponent(NSelect).vm.$emit('update:value', 'all')
+    await flushPromises()
+    expect(rows(page.wrapper)).toHaveLength(3)
+    expect(rows(page.wrapper).map((row) => row.attributes('data-account'))).toEqual(['12', '14', '13'])
+    expect(page.wrapper.text()).toContain('已禁用')
+    expect(rowOf(page.wrapper, 13).findAll('button')).toHaveLength(0)
+    expect(callsTo('/api/growth/accounts/13/tasks')).toHaveLength(0)
+
+    // 展开行后看到任务状态：可领取 / 未参与 / 可自动
+    await expandRow(page.wrapper, 12)
+    const expanded = page.wrapper.find('tr.gw-subrow').text()
+    expect(expanded).toContain('可领取')
+    expect(expanded).toContain('未参与')
+    expect(expanded).toContain('可自动')
 
     page.unmount()
   })
@@ -325,7 +360,7 @@ describe('GrowthPage 首屏与筛选交互', () => {
     await input.setValue('2486')
     await flushPromises()
 
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(1)
+    expect(rows(page.wrapper)).toHaveLength(1)
     expect(page.wrapper.text()).toContain('193****2486')
     expect(page.wrapper.text()).not.toContain('177****3322')
     expect(page.router.currentRoute.value.query.q).toBe('2486')
@@ -334,7 +369,8 @@ describe('GrowthPage 首屏与筛选交互', () => {
     expect(clear).toBeTruthy()
     await clear!.trigger('click')
     await flushPromises()
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(3)
+    // 只清搜索词，状态仍是默认的「可操作」：已禁用的 13 号不在列表里
+    expect(rows(page.wrapper)).toHaveLength(2)
     expect(page.router.currentRoute.value.query.q).toBeUndefined()
 
     page.unmount()
@@ -349,25 +385,25 @@ describe('GrowthPage 首屏与筛选交互', () => {
     select.vm.$emit('update:value', 'claimable')
     await flushPromises()
 
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(1)
+    expect(rows(page.wrapper)).toHaveLength(1)
     expect(page.wrapper.text()).toContain('193****2486')
     expect(page.router.currentRoute.value.query.state).toBe('claimable')
 
     select.vm.$emit('update:value', 'disabled')
     await flushPromises()
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(1)
+    expect(rows(page.wrapper)).toHaveLength(1)
     expect(page.wrapper.text()).toContain('188****0911')
 
     // 搜一个不存在的名字 → 空结果 + 清除筛选按钮
     await page.wrapper.find('input[placeholder="搜索账号"]').setValue('nobody')
     await flushPromises()
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(rows(page.wrapper)).toHaveLength(0)
     expect(page.wrapper.text()).toContain('没有符合条件的账号。')
     const clearButton = buttonByText(page.wrapper, '清除筛选')
     expect(clearButton).toBeTruthy()
     await clearButton!.trigger('click')
     await flushPromises()
-    expect(page.wrapper.findAll('article.gw-card').length).toBeGreaterThan(0)
+    expect(rows(page.wrapper).length).toBeGreaterThan(0)
 
     page.unmount()
   })
@@ -392,11 +428,13 @@ describe('GrowthPage 首屏与筛选交互', () => {
     })
     const page = await mountGrowth()
 
-    const cardNames = () => page.wrapper.findAll('article.gw-card h3').map((node) => node.text())
+    const cardNames = () => page.wrapper.findAll('tr.gw-row .gw-name').map((node) => node.text())
     expect(page.wrapper.text()).toContain('第 1 / 2 页')
     expect(cardNames()).toHaveLength(20)
     expect(cardNames()).toContain('账号01')
     expect(cardNames()).not.toContain('账号21')
+    // 只拉当前页 20 个账号的任务清单，不给第 21 个排队
+    expect(callsTo('/tasks')).toHaveLength(20)
 
     const next = buttonByText(page.wrapper, '下一页')
     expect(next).toBeTruthy()
@@ -405,6 +443,8 @@ describe('GrowthPage 首屏与筛选交互', () => {
     expect(page.router.currentRoute.value.query.page).toBe('2')
     expect(cardNames()).toEqual(['账号21'])
     expect(page.wrapper.text()).toContain('第 2 / 2 页')
+    // 翻到第 2 页才补拉第 21 个
+    expect(callsTo('/tasks')).toHaveLength(21)
 
     await buttonByText(page.wrapper, '上一页')!.trigger('click')
     await flushPromises()
@@ -413,21 +453,24 @@ describe('GrowthPage 首屏与筛选交互', () => {
     page.unmount()
   }, 15000)
 
-  it('任务超过 4 条时可展开全部/收起', async () => {
+  it('点行首箭头展开任务清单（全部任务，按可领取优先），再点收起', async () => {
     installFetch(defaultHandler())
     const page = await mountGrowth()
 
-    const firstCard = page.wrapper.findAll('article.gw-card')[0]
-    expect(firstCard.findAll('li.gw-task')).toHaveLength(4)
-    const expand = buttonByText(firstCard, '展开全部')
-    expect(expand).toBeTruthy()
-    await expand!.trigger('click')
-    expect(firstCard.findAll('li.gw-task')).toHaveLength(5)
-    expect(firstCard.text()).toContain('已领取')
-    expect(firstCard.text()).toContain('收起')
+    expect(page.wrapper.findAll('li.gw-task')).toHaveLength(0)
+    const toggle = rowOf(page.wrapper, 12).find('button.gw-expand')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    const items = page.wrapper.findAll('li.gw-task')
+    expect(items).toHaveLength(5)
+    expect(items[0].text()).toContain('发送一条对话')
+    expect(page.wrapper.find('tr.gw-subrow').text()).toContain('已领取')
 
-    await buttonByText(firstCard, '收起')!.trigger('click')
-    expect(firstCard.findAll('li.gw-task')).toHaveLength(4)
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(page.wrapper.findAll('li.gw-task')).toHaveLength(0)
 
     page.unmount()
   })
@@ -438,8 +481,8 @@ describe('GrowthPage 领奖与动作', () => {
     installFetch(defaultHandler())
     const page = await mountGrowth()
 
-    const firstCard = page.wrapper.findAll('article.gw-card')[0]
-    const claimTask = buttonByText(firstCard, '领奖')
+    await expandRow(page.wrapper, 12)
+    const claimTask = buttonByText(page.wrapper.find('tr.gw-subrow'), '领奖')
     expect(claimTask).toBeTruthy()
     await claimTask!.trigger('click')
     await flushPromises()
@@ -463,8 +506,7 @@ describe('GrowthPage 领奖与动作', () => {
     )
     const page = await mountGrowth()
 
-    const firstCard = page.wrapper.findAll('article.gw-card')[0]
-    const claimAccount = buttonByText(firstCard, '领奖 1')
+    const claimAccount = buttonByText(rowOf(page.wrapper, 12), '领奖 1')
     expect(claimAccount).toBeTruthy()
     await claimAccount!.trigger('click')
     await flushPromises()
@@ -507,8 +549,7 @@ describe('GrowthPage 领奖与动作', () => {
     installFetch(defaultHandler())
     const page = await mountGrowth()
 
-    const firstCard = page.wrapper.findAll('article.gw-card')[0]
-    const run = buttonByText(firstCard, '做任务')
+    const run = buttonByText(rowOf(page.wrapper, 12), '做任务')
     expect(run).toBeTruthy()
     await run!.trigger('click')
     await flushPromises()
@@ -575,15 +616,17 @@ describe('GrowthPage 失败态与平台能力', () => {
     )
     const page = await mountGrowth()
 
-    const firstCard = page.wrapper.findAll('article.gw-card')[0]
-    expect(firstCard.text()).toContain('加载任务清单失败：上游超时')
-    const retry = buttonByText(firstCard, '重试')
+    expect(rowOf(page.wrapper, 12).text()).toContain('加载失败')
+    const errorRow = page.wrapper.find('tr.gw-subrow--error')
+    expect(errorRow.text()).toContain('加载任务清单失败：上游超时')
+    const retry = buttonByText(errorRow, '重试')
     expect(retry).toBeTruthy()
     await retry!.trigger('click')
     await flushPromises()
 
-    expect(page.wrapper.findAll('article.gw-card')[0].text()).not.toContain('加载任务清单失败')
-    expect(page.wrapper.findAll('article.gw-card')[0].text()).toContain('发送一条对话')
+    expect(page.wrapper.find('tr.gw-subrow--error').exists()).toBe(false)
+    await expandRow(page.wrapper, 12)
+    expect(page.wrapper.find('tr.gw-subrow').text()).toContain('发送一条对话')
 
     page.unmount()
   })
@@ -598,7 +641,7 @@ describe('GrowthPage 失败态与平台能力', () => {
     const page = await mountGrowth()
 
     expect(page.wrapper.text()).toContain('加载成长账号失败：数据库连接失败')
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(rows(page.wrapper)).toHaveLength(0)
 
     fail = false
     const retry = buttonByText(page.wrapper, '重试')
@@ -607,7 +650,8 @@ describe('GrowthPage 失败态与平台能力', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(3)
+    // 默认「可操作」筛选下渲染 2 行（已禁用的 13 号收在筛选项里）
+    expect(rows(page.wrapper)).toHaveLength(2)
     expect(page.wrapper.text()).toContain('193****2486')
 
     page.unmount()
@@ -621,7 +665,7 @@ describe('GrowthPage 失败态与平台能力', () => {
     const page = await mountGrowth({ pinia })
 
     expect(page.wrapper.text()).toContain('当前平台没有成长计划')
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(rows(page.wrapper)).toHaveLength(0)
     expect(callsTo('/api/growth-center/accounts', 'GET')).toHaveLength(0)
 
     const go = buttonByText(page.wrapper, '去账号池')
@@ -643,7 +687,7 @@ describe('GrowthPage 失败态与平台能力', () => {
     const page = await mountGrowth()
 
     expect(page.wrapper.text()).toContain('当前平台还没有可管理的成长账号。')
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(rows(page.wrapper)).toHaveLength(0)
     const refresh = buttonByText(page.wrapper, '刷新')
     expect(refresh).toBeTruthy()
     await refresh!.trigger('click')
@@ -749,11 +793,12 @@ describe('GrowthPage 批量预取：熔断与取消', () => {
     const alerts = page.wrapper.findAll('.gw-bulk-error')
     expect(alerts).toHaveLength(1)
     expect(alerts[0].text()).toContain('连续 8 个账号加载失败')
-    expect(alerts[0].text()).toContain('剩余 ' + (STORM_SIZE - attempts) + ' 个账号未请求')
+    // 只给当前页（20 个）排队：剩余数是「本页还没请求的」，不是 194 个
+    expect(alerts[0].text()).toContain('剩余 ' + (20 - attempts) + ' 个账号未请求')
     expect(alerts[0].text()).toContain('上游超时')
 
     // 逐卡 502 收进那条全局提示里：卡片里没有错误块，全文只出现一次失败文案
-    expect(page.wrapper.findAll('.gw-card__error')).toHaveLength(0)
+    expect(page.wrapper.findAll('tr.gw-subrow--error')).toHaveLength(0)
     expect(countOf(page.wrapper.text(), '加载任务清单失败')).toBe(1)
 
     page.unmount()
@@ -794,9 +839,10 @@ describe('GrowthPage 批量预取：熔断与取消', () => {
     await flushPromises()
 
     expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(0)
-    // 重试只补「没有 payload」的账号：首轮失败的 + 从未请求的，合计正好 30 个
-    expect(callsTo('/tasks').length).toBe(firstBurst + 30)
-    expect(page.wrapper.findAll('article.gw-card')[0].text()).toContain('发送一条对话')
+    // 重试只补当前页「没有 payload」的账号：首轮失败的 + 从未请求的，合计正好 20 个（一页）
+    expect(callsTo('/tasks').length).toBe(firstBurst + 20)
+    await expandRow(page.wrapper, 500)
+    expect(page.wrapper.find('tr.gw-subrow').text()).toContain('发送一条对话')
 
     page.unmount()
   })
@@ -822,17 +868,56 @@ describe('GrowthPage 批量预取：熔断与取消', () => {
     ] as unknown as PlatformSpec[]
     const page = await mountGrowth({ pinia })
     await flushPromises()
-    expect(page.wrapper.findAll('article.gw-card').length).toBeGreaterThan(0)
+    expect(rows(page.wrapper).length).toBeGreaterThan(0)
     expect(probe.tasks()).toBe(2)
 
     store.setCurrent('trae')
     await flushPromises()
 
     expect(page.wrapper.text()).toContain('当前平台没有成长计划')
-    expect(page.wrapper.findAll('article.gw-card')).toHaveLength(0)
+    expect(rows(page.wrapper)).toHaveLength(0)
     expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(0)
     expect(probe.tasks()).toBe(2) // 旧队列已 abort，不再请求任务清单
 
     page.unmount()
   })
 })
+
+describe('GrowthPage 按需拉取（第 3 轮审查 B2）', () => {
+  it('已禁用账号一个都不请求；凭证类 4xx 只记在行上，不触发熔断', async () => {
+    const mixed: GrowthCenterAccount[] = Array.from({ length: 12 }, (_, index) => ({
+      id: 700 + index,
+      name: '混合账号' + String(index + 1).padStart(2, '0'),
+      status: index % 3 === 0 ? 'disabled' : 'active',
+      streak_days: 0,
+      energy: 0,
+    }))
+    installFetch((url, method) => {
+      if (method === 'GET' && /\/api\/growth-center\/accounts$/.test(url)) {
+        return { body: { items: mixed, excluded_enterprise: 0 } }
+      }
+      if (method === 'GET' && /\/api\/growth\/accounts\/\d+\/tasks/.test(url)) {
+        return { status: 409, body: { detail: '账号凭证缺少 auth' } }
+      }
+      return undefined
+    })
+    const page = await mountGrowth()
+    await flushPromises()
+    await flushPromises()
+
+    const activeIds = mixed.filter((item) => item.status === 'active').map((item) => item.id)
+    const requested = callsTo('/tasks').map((call) => Number(/accounts\/(\d+)\/tasks/.exec(call.url)?.[1]))
+    // 8 个 active 全部请求过（409 不熔断），4 个已禁用一个都没请求
+    expect(requested.sort()).toEqual(activeIds.sort())
+    expect(page.wrapper.findAll('.gw-bulk-error')).toHaveLength(0)
+    // 409 / 422 是「凭证缺失」：行内灰字，不摊成红色错误行、不进全局提示
+    expect(page.wrapper.findAll('tr.gw-subrow--error')).toHaveLength(0)
+    expect(page.wrapper.text()).not.toContain('加载任务清单失败')
+    for (const id of activeIds) {
+      expect(rowOf(page.wrapper, id).text()).toContain('凭证缺失')
+    }
+
+    page.unmount()
+  })
+})
+

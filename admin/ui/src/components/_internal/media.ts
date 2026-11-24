@@ -1,7 +1,9 @@
 import { onScopeDispose, ref, type Ref } from 'vue'
 
-/** 手机断点：04-components 规定 ≤640px 走卡片列表。 */
+/** 手机断点（≤640px）：抽屉铺满、表单单列等手机细节。 */
 export const MOBILE_QUERY = '(max-width: 640px)'
+/** 表格变卡片列表的断点：<768px（10-visual-refresh §1.5，覆盖 04-components 的 640）。 */
+export const TABLE_CARD_QUERY = '(max-width: 767px)'
 
 function safeMatchMedia(query: string): MediaQueryList | null {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return null

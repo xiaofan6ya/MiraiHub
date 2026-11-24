@@ -3,7 +3,9 @@
 import { computed } from 'vue'
 import { NDrawer, NDrawerContent } from 'naive-ui'
 import Btn from '../base/Btn.vue'
+import { MOBILE_QUERY, useMediaQuery } from '../_internal/media'
 import { useI18n } from '@/i18n'
+import { useKeepAliveSuspended } from '@/composables/useKeepAliveSuspended'
 
 const props = withDefaults(
   defineProps<{
@@ -37,7 +39,16 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const width = computed(() => (props.size === 'lg' ? 640 : 480))
+const isPhone = useMediaQuery(MOBILE_QUERY)
+/** 页面被 KeepAlive 缓存时收起（Teleport 出去的抽屉不跟页面走），回来原样恢复，表单内容不丢。 */
+const suspended = useKeepAliveSuspended()
+/*
+ * 挂起期间改用 display-directive="show"：抽屉只是隐藏，内容（子组件本地状态、输入框、抽屉内滚动位置）
+ * 不卸载，回来原样恢复；默认 'if' 会在离场动画后销毁内容。只对「页面里本来开着」的抽屉生效，
+ * 关着的抽屉不会因为离开页面被挂载出来（第 5 轮）。
+ */
+/** ≤640px（375 宽的手机）抽屉铺满：固定 480 / 640px 会比屏幕还宽，关闭按钮跑到屏幕外。 */
+const width = computed<number | string>(() => (isPhone.value ? '100%' : props.size === 'lg' ? 640 : 480))
 const submitLabel = computed(() => props.submitText ?? t('common.save'))
 const cancelLabel = computed(() => props.cancelText ?? t('common.cancel'))
 
@@ -49,7 +60,8 @@ function close(): void {
 
 <template>
   <n-drawer
-    :show="show"
+    :show="show && !suspended"
+    :display-directive="suspended && show ? 'show' : 'if'"
     :width="width"
     placement="right"
     :mask-closable="maskClosable"

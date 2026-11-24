@@ -22,12 +22,17 @@ import {
   modelStats,
   multiplierTone,
   paginateModelRows,
+  isBadgeDimmed,
+  platformBadges,
+  platformBaseId,
+  platformBaseLabel,
   sortModelRows,
   squashModelName,
   toModelRows,
   vendorOf,
   type ModelConfigItem,
   type ModelHealthItem,
+  type ModelPlatformRef,
   type ModelRow,
 } from '@/api/models'
 
@@ -199,7 +204,9 @@ describe('toModelRows：跨平台合成一行', () => {
       'deepseek-v4.1-flash-loomy',
     ])
     expect(deepseek.aliasOverflow).toBe(deepseek.aliases.length - MODEL_ALIAS_LIMIT)
-    expect(deepseek.aliasOverflow).toBe(1)
+    // 别名 chip 最多 2 个（第 1 轮审查 P2）
+    expect(MODEL_ALIAS_LIMIT).toBe(2)
+    expect(deepseek.aliasOverflow).toBe(2)
   })
 
   it('限制取各平台最小正值；倍率取最小正倍率；能力取并集', () => {
@@ -258,7 +265,7 @@ describe('展示口径纯函数', () => {
     expect(fmtMultiplier(1.5)).toBe('1.50x')
     expect(fmtMultiplier(0.8)).toBe('0.80x')
     expect(fmtMultiplier(0)).toBe('免费')
-    expect(fmtMultiplier(-1)).toBe('无量纲')
+    expect(fmtMultiplier(-1)).toBe('按量')
     expect(fmtMultiplier(null)).toBe('—')
     expect(fmtMultiplier(undefined)).toBe('—')
   })
@@ -469,5 +476,118 @@ describe('结果文案', () => {
         sample: '我是一个模型。',
       }),
     ).toBe('首字 450ms · 125.5 t/s · 提示 150 / 补全 500 tok · 账号 account-123')
+  })
+})
+
+describe('platformBadges：平台列按平台去重（第 3 轮审查 A3）', () => {
+  const ref = (platform: string, enabled: boolean, realm = '', label = platform): ModelPlatformRef =>
+    ({
+      configId: Math.floor(Math.random() * 1e6),
+      platform,
+      platformLabel: label,
+      realm,
+      clientId: platform + '-model',
+      modelId: platform + '-model',
+      upstreamId: platform + '-model',
+      multiplier: 1,
+      billingMode: '',
+      enabled,
+      caps: {},
+      modelType: 'text',
+    }) as ModelPlatformRef
+
+  it('同平台多条配置 / 多区合成一个 logo，记录区域与条数', () => {
+    const badges = platformBadges([
+      ref('workbuddy', true, '', 'WorkBuddy'),
+      ref('workbuddy', true, '', 'WorkBuddy'),
+      ref('trae', true, 'cn', 'Trae'),
+      ref('trae', false, 'intl', 'Trae'),
+    ])
+    expect(badges.map((badge) => badge.platform)).toEqual(['workbuddy', 'trae'])
+    expect(badges[0]).toMatchObject({ count: 2, enabled: true, realms: [] })
+    expect(badges[1]).toMatchObject({ count: 2, enabled: true, realms: ['cn', 'intl'] })
+  })
+
+  it('全部禁用的平台排到后面，同组保持原顺序', () => {
+    const badges = platformBadges([
+      ref('qoder', false),
+      ref('marvis', true),
+      ref('loomy', false),
+      ref('workbuddy', true),
+    ])
+    expect(badges.map((badge) => [badge.platform, badge.enabled])).toEqual([
+      ['marvis', true],
+      ['workbuddy', true],
+      ['qoder', false],
+      ['loomy', false],
+    ])
+  })
+
+  it('空输入安全', () => {
+    expect(platformBadges(null)).toEqual([])
+    expect(platformBadges([])).toEqual([])
+  })
+})
+
+describe('platformBadges：区级平台合并、在跑流量优先、0 账号降透明度（第 3 轮审查 A3）', () => {
+  const ref = (platform: string, enabled: boolean, label = platform, upstreamId = platform + '-m'): ModelPlatformRef =>
+    ({
+      configId: Math.floor(Math.random() * 1e6),
+      platform,
+      platformLabel: label,
+      realm: '',
+      clientId: upstreamId,
+      modelId: upstreamId,
+      upstreamId,
+      multiplier: 1,
+      billingMode: '',
+      enabled,
+      caps: {},
+      modelType: 'text',
+    }) as ModelPlatformRef
+
+  it('platformBaseId / platformBaseLabel 去掉区域后缀', () => {
+    expect(platformBaseId('trae-cn')).toBe('trae')
+    expect(platformBaseId('qoder-intl')).toBe('qoder')
+    expect(platformBaseId('workbuddy')).toBe('workbuddy')
+    expect(platformBaseLabel('Trae 国内版')).toBe('Trae')
+    expect(platformBaseLabel('Trae（国际版）')).toBe('Trae')
+    expect(platformBaseLabel('WorkBuddy')).toBe('WorkBuddy')
+  })
+
+  it('trae-cn + trae-intl 合成一个 Trae，区域从 id 后缀推出', () => {
+    const badges = platformBadges([ref('trae-cn', true, 'Trae 国内版'), ref('trae-intl', true, 'Trae 国际版')])
+    expect(badges).toHaveLength(1)
+    expect(badges[0]).toMatchObject({ platform: 'trae', icon: 'trae-cn', label: 'Trae', realms: ['cn', 'intl'], count: 2 })
+  })
+
+  it('在跑流量的排第一（真正在跑的 Marvis 不再被收进 +N），0 账号的排在有账号的后面', () => {
+    const refs = [
+      ref('workbuddy', true, 'WorkBuddy', 'wb-m'),
+      ref('loomy', true, 'Loomy', 'loomy-m'),
+      ref('trae-cn', true, 'Trae 国内版', 'trae-m'),
+      ref('qoder', false, 'Qoder', 'qoder-m'),
+      ref('marvis', true, '腾讯 Marvis', 'marvis-m'),
+    ]
+    const requests: Record<string, number> = { 'marvis-m': 120 }
+    const accounts: Record<string, number | null> = { workbuddy: 0, loomy: 3, 'trae-cn': null, qoder: 5, marvis: 2 }
+    const badges = platformBadges(refs, {
+      requestsOf: (item) => requests[item.upstreamId] || 0,
+      accountsOf: (id) => (id in accounts ? accounts[id] : null),
+    })
+    expect(badges.map((badge) => badge.platform)).toEqual(['marvis', 'loomy', 'trae', 'workbuddy', 'qoder'])
+    expect(badges[0].requests).toBe(120)
+    expect(isBadgeDimmed(badges.find((badge) => badge.platform === 'workbuddy')!)).toBe(true)
+    expect(isBadgeDimmed(badges.find((badge) => badge.platform === 'qoder')!)).toBe(true)
+    expect(isBadgeDimmed(badges.find((badge) => badge.platform === 'trae')!)).toBe(false)
+  })
+
+  it('同一区级平台的多个 model_id 只算一次账号数', () => {
+    const badges = platformBadges([ref('workbuddy', true, 'WorkBuddy', 'hy3-workbuddy'), ref('workbuddy', true, 'WorkBuddy', 'hy3-x-workbuddy')], {
+      accountsOf: () => 4,
+    })
+    expect(badges).toHaveLength(1)
+    expect(badges[0].accounts).toBe(4)
+    expect(badges[0].count).toBe(2)
   })
 })

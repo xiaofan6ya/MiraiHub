@@ -11,16 +11,21 @@
  *
  * 约定：
  *   · 筛选 / 时间范围 / 趋势粒度同步路由 query（useTableQuery）；
- *   · 平台上下文：订阅 usePlatformStore().onChange（口径仍是全网关，后端只看显式 ?platform=），卸载取消；
+ *   · 口径：**全网关**（后端只看显式 ?platform=，不读 X-Platform）—— 页头徽章写明「全网关」或所选平台；
+ *     因此不再订阅顶栏平台切换（platform_scoping_review §3：切了数字也不变，只是白打接口）；
  *   · 四态齐全：首次骨架 / 刷新保留旧数据 / 空 / 错误；
  *   · 饼图一律 BarList（04-components §2），行点击跳 /logs 带上当前时间范围。
+ *
+ * v2.1（10-visual-refresh）：统计条换成 KpiCard 行（带迷你折线）；趋势图输入 / 输出不再堆叠，
+ * 量级差大时分双轴；横轴本地时区；端点卡用禁用的「日志」按钮 + 说明，不再用一段灰字。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NSelect, NSkeleton } from 'naive-ui'
+import { NSelect } from 'naive-ui'
 import { Download, RefreshCw, ScrollText } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
+  Badge,
   BarList,
   Btn,
   Card,
@@ -29,14 +34,13 @@ import {
   Empty,
   ErrorBlock,
   FilterBar,
+  KpiCard,
   Segmented,
-  StatStrip,
   applyLineDefaults,
   type FilterChip,
   type SegmentedOption,
 } from '@/components'
 import { useTableQuery, useToast } from '@/composables'
-import { usePlatformStore } from '@/stores/platform'
 import { ApiError, isAbortError } from '@/api/http'
 import { errorMessage } from '@/utils/error'
 import { fmtCredit, fmtInt } from '@/utils/format'
@@ -51,13 +55,14 @@ import {
   resolveUsageWindow,
   saveText,
   toBarItems,
-  toStatItems,
   toTrendOption,
   toUsageParams,
+  toUsageKpis,
   usageCsv,
   usageChips,
   usageFilename,
   usageHasData,
+  usageScopeLabel,
   usageSummary,
   type UsageDistRow,
   type UsageFilters,
@@ -65,11 +70,15 @@ import {
   type UsagePayload,
   type UsageOptionsPayload,
 } from '@/api/usage'
-import { useI18n } from '@/i18n'
+import { groupTitle, useI18n } from '@/i18n'
+import { groupOf } from '@/router/pages'
+import { usePlatformStore } from '@/stores/platform'
+import { useRevisit } from '@/pages/_shared/useRevisit'
 
 const { t } = useI18n()
 /** 旧版面板副标题原样保留（收进 ⓘ）；语种跟随 useI18n。 */
 const helpText = computed(() => t('page.usage.help'))
+const eyebrow = computed(() => groupTitle(groupOf('usage').key))
 
 const toast = useToast()
 const router = useRouter()
@@ -303,7 +312,8 @@ const endpointOptions = computed(() => [
  * 统计条 / 趋势 / 分布
  * ------------------------------------------------------------------ */
 
-const statItems = computed(() => toStatItems(payload.value?.overview, t))
+const kpis = computed(() => toUsageKpis(payload.value?.overview, payload.value?.trend, t))
+const scopeLabel = computed(() => usageScopeLabel(filters, options.value, t))
 const trendRows = computed(() => payload.value?.trend || [])
 const trendOption = computed(() =>
   applyLineDefaults(toTrendOption(trendRows.value, grain.value, t)),
@@ -389,28 +399,19 @@ function exportCsv(): void {
  * 生命周期
  * ------------------------------------------------------------------ */
 
-let offPlatform: (() => void) | null = null
-let lastSelector = platformStore.selector
-
 onMounted(() => {
-  lastSelector = platformStore.selector
   reload()
-  offPlatform = platformStore.onChange((detail) => {
-    // 首屏 store 加载后也会 emit 一次：选择没变就别重复打接口。
-    if (detail.selector === lastSelector) return
-    lastSelector = detail.selector
-    reload()
-  })
 })
 
 onBeforeUnmount(() => {
-  offPlatform?.()
-  offPlatform = null
   controller?.abort()
   controller = null
   optionsController?.abort()
   optionsController = null
 })
+
+// 回到 KeepAlive 缓存页：只静默重取统计（筛选项跟时间窗走，不变），不出骨架（11 §2）。
+useRevisit(() => loadStats())
 
 // 时间窗变化：统计与筛选项都要重取。
 watch(
@@ -432,7 +433,10 @@ watch(
 
 <template>
   <div class="usage-page">
-    <PageHeader :help="helpText">
+    <PageHeader :help="helpText" :eyebrow="eyebrow">
+      <template #meta>
+        <Badge tone="neutral">{{ scopeLabel }}</Badge>
+      </template>
       <template #actions>
         <Btn variant="default" :icon="Download" :disabled="!payload" @click="exportCsv">
           {{ t('page.usage.export') }}
@@ -510,20 +514,36 @@ watch(
       aria-busy="true"
       :aria-label="t('page.usage.loadingAria')"
     >
-      <div class="usage-skeleton__strip"><n-skeleton text :repeat="2" /></div>
-      <div class="usage-skeleton__card"><n-skeleton text :repeat="6" /></div>
-      <div class="usage-skeleton__grid">
-        <div v-for="index in 3" :key="index" class="usage-skeleton__card">
-          <n-skeleton text :repeat="4" />
-        </div>
+      <!-- 与真实布局同构：KpiCard 自带骨架、趋势卡同标题同高、3 栏分布卡（11 §4-1）。 -->
+      <section class="usage-kpis">
+        <KpiCard v-for="item in kpis" :key="item.key" :label="item.label" :value="null" loading />
+      </section>
+      <Card class="usage-trend" :title="t('page.usage.card.trend')">
+        <div class="mh-skeleton usage-skeleton__chart" />
+      </Card>
+      <div class="usage-grid usage-grid--3">
+        <div v-for="index in 3" :key="index" class="mh-skeleton usage-skeleton__card" />
       </div>
     </div>
 
     <template v-else>
-      <StatStrip :items="statItems" :columns="6" />
+      <section class="usage-kpis" :aria-label="t('page.usage.kpiAria')">
+        <KpiCard
+          v-for="item in kpis"
+          :key="item.key"
+          :label="item.label"
+          :value="item.value"
+          split-unit
+          :hint="item.hint"
+          :tone="item.tone"
+          :spark="item.spark"
+          :loading="loading && !!payload"
+        />
+      </section>
 
-      <Card :title="t('page.usage.card.trend')" :loading="loading && !!payload">
+      <Card class="usage-trend" :title="t('page.usage.card.trend')" :loading="loading && !!payload">
         <template #extra>
+          <span class="usage-metric">{{ t('page.usage.trendScope', { range: win.label }) }}</span>
           <Segmented
             :options="grainOptions"
             :model-value="grain"
@@ -531,7 +551,7 @@ watch(
             @update:model-value="setGrain"
           />
         </template>
-        <Chart v-if="trendRows.length" :option="trendOption" height="240px" />
+        <Chart v-if="trendRows.length" :option="trendOption" height="260px" />
         <Empty v-else compact :description="emptyNote">
           <Btn v-if="hasFilters" variant="default" size="sm" @click="resetFilters">
             {{ t('page.usage.clearFilters') }}
@@ -596,7 +616,18 @@ watch(
         <Card :title="t('page.usage.card.endpoints')">
           <template #extra>
             <span class="usage-metric">{{ metricText(endpointMetric) }}</span>
-            <span class="usage-hint">{{ t('page.usage.card.endpointHint') }}</span>
+            <!-- 第 2 轮审查 P2：与其他卡一致放「日志」按钮，禁用并在悬停说明原因 -->
+            <span class="usage-disabled-tip" :title="t('page.usage.card.endpointHint')">
+              <Btn
+                variant="quiet"
+                size="sm"
+                :icon="ScrollText"
+                disabled
+                :aria-label="t('page.usage.card.endpointHint')"
+              >
+                {{ t('page.usage.action.logs') }}
+              </Btn>
+            </span>
           </template>
           <div v-if="endpointBars.length" class="usage-bars">
             <BarList :items="endpointBars" :format="rowFormat(endpointMetric)" />
@@ -669,6 +700,25 @@ watch(
   min-width: 0;
 }
 
+/* KPI 行：≥1280 一行 6 个，往下自动 3 / 2 / 1 个；卡片按内容等高（10-visual-refresh §1.4）。 */
+.usage-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+/* 趋势是本页唯一的大图：大卡圆角。 */
+.usage-trend {
+  border-radius: var(--r-lg);
+}
+
+.usage-disabled-tip {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
 .usage-select {
   width: 160px;
   max-width: 100%;
@@ -682,10 +732,14 @@ watch(
 
 .usage-grid--3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 子卡按内容高度排，不互相撑高留白（第 1 轮审查 P1-3） */
+  align-items: start;
 }
 
 .usage-grid--2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 子卡按内容高度排，不互相撑高留白（第 1 轮审查 P1-3） */
+  align-items: start;
 }
 
 .usage-metric {
@@ -714,10 +768,12 @@ watch(
 }
 
 .usage-footnote {
+  margin: 0;
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-muted);
-  max-width: 68ch;
+  max-width: 80ch;
+  text-wrap: pretty;
 }
 
 .usage-skeleton {
@@ -725,29 +781,20 @@ watch(
   gap: var(--sp-4);
 }
 
-.usage-skeleton__strip,
-.usage-skeleton__card {
-  padding: var(--sp-5);
-  border: 1px solid var(--border);
-  border-radius: var(--r-card);
-  background: var(--surface);
+/* 与 <Chart height="260px"> 同高 */
+.usage-skeleton__chart {
+  height: 260px;
+  border-radius: var(--r-ctl);
 }
 
-.usage-skeleton__grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--sp-4);
+.usage-skeleton__card {
+  min-height: 280px;
+  border-radius: var(--r-card);
 }
 
 @media (max-width: 1279px) {
   .usage-grid--3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 1023px) {
-  .usage-skeleton__grid {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

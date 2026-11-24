@@ -1,50 +1,21 @@
-import type { Component } from 'vue'
 import { createRouter, createWebHashHistory, type RouteRecordRaw, type Router } from 'vue-router'
 import AppShell from '@/layout/AppShell.vue'
 import Placeholder from '@/pages/_Placeholder.vue'
-import { PAGES, atRootHash, clearLegacyQuery, readLegacyTab, type PageKey } from './pages'
+import { PAGES, atRootHash, clearLegacyQuery, readLegacyTab } from './pages'
+import { PAGE_LOADERS } from './pageLoaders'
+import { installTitleViewTransition } from './viewTransition'
 
 /**
  * 路由实例（hash 模式）：`/admin/v2/#/accounts`，后端只需要服务一个 index.html。
  * 页面表在 ./pages.ts（导航、页签、命令面板共用），这里只负责路由与旧链接兼容。
  */
 export * from './pages'
-
-/**
- * 已实现的页面组件。未列入的 key 继续走 _Placeholder，
- * 这样逐页交付时导航与路由表始终完整（08-prompts-pages 的 S06–S30）。
- */
-const PAGE_COMPONENTS: Partial<Record<PageKey, () => Promise<Component>>> = {
-  maintenance: () => import('@/pages/MaintenancePage.vue').then((mod) => mod.default),
-  sync: () => import('@/pages/SyncPage.vue').then((mod) => mod.default),
-  alerts: () => import('@/pages/AlertsPage.vue').then((mod) => mod.default),
-  groups: () => import('@/pages/GroupsPage.vue').then((mod) => mod.default),
-  ip: () => import('@/pages/IpPage.vue').then((mod) => mod.default),
-  schedules: () => import('@/pages/SchedulesPage.vue').then((mod) => mod.default),
-  models: () => import('@/pages/ModelsPage.vue').then((mod) => mod.default),
-  market: () => import('@/pages/MarketPage.vue').then((mod) => mod.default),
-  keys: () => import('@/pages/KeysPage.vue').then((mod) => mod.default),
-  logs: () => import('@/pages/LogsPage.vue').then((mod) => mod.default),
-  usage: () => import('@/pages/UsagePage.vue').then((mod) => mod.default),
-  stats: () => import('@/pages/StatsPage.vue').then((mod) => mod.default),
-  sentinel: () => import('@/pages/SentinelPage.vue').then((mod) => mod.default),
-  gateway: () => import('@/pages/GatewayPage.vue').then((mod) => mod.default),
-  platforms: () => import('@/pages/PlatformsPage.vue').then((mod) => mod.default),
-  overview: () => import('@/pages/OverviewPage.vue').then((mod) => mod.default),
-  journal: () => import('@/pages/JournalPage.vue').then((mod) => mod.default),
-  credits: () => import('@/pages/CreditsPage.vue').then((mod) => mod.default),
-  growth: () => import('@/pages/GrowthPage.vue').then((mod) => mod.default),
-  accounts: () => import('@/pages/AccountsPage.vue').then((mod) => mod.default),
-  client: () => import('@/pages/ClientPage.vue').then((mod) => mod.default),
-  settings: () => import('@/pages/SettingsPage.vue').then((mod) => mod.default),
-  openentry: () => import('@/pages/OpenEntryPage.vue').then((mod) => mod.default),
-  agent: () => import('@/pages/AgentPage.vue').then((mod) => mod.default),
-}
+export { PAGE_LOADERS, prefetchPage, prefetchGroupIdle } from './pageLoaders'
 
 const pageRoutes: RouteRecordRaw[] = PAGES.map((page) => ({
   path: page.key,
   name: page.key,
-  component: PAGE_COMPONENTS[page.key] ?? Placeholder,
+  component: PAGE_LOADERS[page.key] ?? Placeholder,
   meta: {
     group: page.group,
     groupKey: page.groupKey,
@@ -84,7 +55,8 @@ export function createAppRouter(): Router {
       },
       { path: '/:pathMatch(.*)*', redirect: '/overview' },
     ],
-    scrollBehavior: () => ({ top: 0 }),
+    // 前进 / 后退回到原来的滚动位置（KeepAlive 缓存的页面不重新出骨架，位置也要对得上）。
+    scrollBehavior: (_to, _from, savedPosition) => savedPosition ?? { top: 0 },
   })
 
   router.beforeEach(() => {
@@ -97,6 +69,8 @@ export function createAppRouter(): Router {
     clearLegacyQuery()
     return { path: '/' + legacy }
   })
+
+  installTitleViewTransition(router)
 
   return router
 }

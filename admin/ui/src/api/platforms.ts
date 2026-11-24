@@ -17,7 +17,9 @@ export interface PlatformRealm {
   default?: boolean
 }
 
-/** 平台自评等级（控制台"平均级"徽标）。 */
+/**
+ * 平台自评等级。r4：分级功能已从前端删除，这里只保留类型以兼容后端仍下发的字段，前端不再读取。
+ */
 export interface PlatformRating {
   /** 只放行 hang / elite / npc / bad 四档，未知档位后端已丢弃。 */
   tier?: 'hang' | 'elite' | 'npc' | 'bad' | string
@@ -63,7 +65,8 @@ export interface PlatformSpec {
   realms: PlatformRealm[]
   /** 是否经网关代理（后端字段名 proxied）。 */
   proxied: boolean
-  rating: PlatformRating
+  /** r4：前端不再消费（分级已删除），保留可选以兼容后端响应。 */
+  rating?: PlatformRating
   /** 平台自定义扩展（actions / quota_unit 的原始来源）。 */
   extra: Record<string, unknown>
   /** 是否提供管理契约（账号池 / 任务 / 客户端探测 / 概览卡片）。 */
@@ -76,6 +79,11 @@ export interface PlatformSpec {
   account_count?: number | null
   /** 每个区域的账号数：{cn: 3, intl: 0}。 */
   realm_counts?: Record<string, number>
+  /**
+   * 可用（status=active）账号数。**可选**：当前后端还没有这个字段（已提给后端工作流），
+   * 有它时顶栏平台选择器才能区分「有账号但全部禁用」（琥珀）与「有可用账号」（绿）。
+   */
+  active_count?: number | null
 }
 
 /** 平台装配状态（admin/platform/loader.py: status()）。 */
@@ -113,8 +121,8 @@ export interface PlatformCurrentPayload {
  * 账号数随列表一起下发：否则卡片要按平台数逐个再打接口（N 次串行）。
  * 注意它是"上一次请求的缓存"，导入/删除账号后必须重新调用。
  */
-export function listPlatforms(): Promise<PlatformListPayload> {
-  return http<PlatformListPayload>('GET', '/api/platforms')
+export function listPlatforms(signal?: AbortSignal): Promise<PlatformListPayload> {
+  return http<PlatformListPayload>('GET', '/api/platforms', signal ? { signal } : {})
 }
 
 /**

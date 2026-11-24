@@ -10,7 +10,10 @@
  * 三条口径：
  *   1. 运行配置的分组/类型/上下界/重启标记全部由后端 CATALOG 下发（不硬编码 attr 语义），只提交改动项；
  *   2. 代理地址 API 永不返回明文（列表里 ***），修改必须整段重填；
- *   3. 逆向产物在 ADMIN_DEV_TOOLS=0 时后端整路由 404 → 卡片降级说明，不报错。
+ *   3. 逆向产物在 ADMIN_DEV_TOOLS=0 时后端整路由 404（生产环境的正常状态）→ 整块连同目录项一起隐藏，
+ *      不报错、不轮询（第 3 轮审查 B3）；500 / 断网仍显示错误 + 重试。
+ *   4. 10-visual-refresh：运行配置与邀请码的保存统一走底部保存条（「有 N 项未保存　放弃　保存」）；
+ *      改密码、出口代理、逆向产物这些是即时动作，保留各自的按钮。
  */
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -30,7 +33,7 @@ import DataTable from '@/components/data/DataTable.vue'
 import Empty from '@/components/base/Empty.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
 import type { TableColumn, TableRow } from '@/components'
-import { useConfirm, usePolling, useToast } from '@/composables'
+import { useConfirm, usePolling, useRevisit, useToast } from '@/composables'
 import { ApiError } from '@/api/http'
 import { failureText } from '@/utils/error'
 import { fmtTime } from '@/utils/format'
@@ -85,7 +88,8 @@ const sections = computed(() => [
   { id: 'settings-proxies', title: t('page.settings.sections.proxies') },
   { id: 'settings-invitation', title: t('page.settings.sections.invitation') },
   { id: 'settings-password', title: t('page.settings.sections.password') },
-  { id: 'settings-appsource', title: t('page.settings.sections.appsource') },
+  // 本部署没有逆向产物接口（生产环境）时整块隐藏，目录里也不留这一项。
+  ...(sourceMissing.value ? [] : [{ id: 'settings-appsource', title: t('page.settings.sections.appsource') }]),
 ])
 
 
@@ -138,6 +142,8 @@ async function loadRuntime(): Promise<void> {
     syncRuntimeDraft(runtimeFields.value)
   } catch (error) {
     runtimeError.value = failureText(t('page.settings.runtime.loadFailed'), error)
+    // 第 5 轮：已有表单时（回访静默刷新）失败只提示，不把整块表单换成错误块。
+    if (runtimeFields.value.length) toast.error(runtimeError.value)
   } finally {
     runtimeLoading.value = false
   }
@@ -299,6 +305,8 @@ async function loadProxies(): Promise<void> {
     proxyData.value = await listProxies()
   } catch (error) {
     proxyError.value = failureText(t('page.settings.proxies.loadFailed'), error)
+    // 第 5 轮：已有节点列表时刷新失败只提示，保留旧表（模板里错误块只在从未加载成功时出现）。
+    if (proxyData.value) toast.error(proxyError.value)
   } finally {
     proxyLoading.value = false
   }
@@ -389,12 +397,16 @@ async function loadInvitation(): Promise<void> {
     invitationInput.value = invitation.value?.invite_code || ''
   } catch (error) {
     invitationError.value = failureText(t('page.settings.invitation.loadFailed'), error)
+    if (invitation.value) toast.error(invitationError.value)
   } finally {
     invitationLoading.value = false
   }
 }
 
+const invitationSaving = ref(false)
+
 async function saveInvitationValue(value: string): Promise<void> {
+  invitationSaving.value = true
   try {
     invitation.value = await saveInvitation(value)
     invitationInput.value = invitation.value?.invite_code || ''
@@ -403,6 +415,8 @@ async function saveInvitationValue(value: string): Promise<void> {
     )
   } catch (error) {
     toast.error(failureText(t('page.settings.invitation.saveFailed'), error))
+  } finally {
+    invitationSaving.value = false
   }
 }
 
@@ -635,8 +649,53 @@ const unpackPoll = usePolling(
  * 生命周期
  * ------------------------------------------------------------------ */
 
+/**
+ * 保存条的改动项数：运行配置按改动的字段数，邀请码算一项。
+ * 改密码、逆向产物路径是即时动作（各自有按钮），不计入保存条。
+ */
 const dirty = computed(
-  () => runtimeDirty.value || invitationDirty.value || passwordDirty.value || sourceDirty.value,
+  () => Object.keys(runtimeUpdates.value).length + (invitation.value && invitationDirty.value ? 1 : 0),
+)
+const settingsSaving = computed(() => runtimeSaving.value || invitationSaving.value)
+
+async function saveAll(): Promise<void> {
+  if (settingsSaving.value) return
+  if (runtimeDirty.value) await saveRuntime()
+  if (invitation.value && invitationDirty.value) await saveInvitationValue(invitationInput.value.trim())
+}
+
+/** 保存条「放弃」：草稿回到上次读到的值，不发请求。 */
+function discardAll(): void {
+  syncRuntimeDraft(runtimeFields.value)
+  invitationInput.value = invitation.value?.invite_code || ''
+}
+
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (dirty.value) return
+    void loadRuntime()
+    void silently(() => loadProxies())
+    void loadInvitation()
+    void loadSource()
+  },
+  { minIntervalMs: 10_000 },
 )
 
 onMounted(() => {
@@ -658,6 +717,9 @@ onBeforeUnmount(() => {
     :help="helpText"
     :sections="sections"
     :dirty="dirty"
+    :saving="settingsSaving"
+    @save="saveAll"
+    @discard="discardAll"
   >
     <!-- 0. 界面语言（本地偏好，不写入后端配置） -->
     <LanguageCard />
@@ -668,14 +730,10 @@ onBeforeUnmount(() => {
       :title="t('page.settings.runtime.title')"
       :description="t('page.settings.runtime.description')"
       :dirty="runtimeDirty"
-      :loading="runtimeSaving"
-      :save-label="t('page.settings.runtime.saveLabel')"
-      :save-disabled="!runtimeDirty"
-      @save="saveRuntime"
-      @reset="loadRuntime"
+      plain
     >
       <div v-if="runtimeLoading && !runtimeFields.length" class="st-skeleton"><n-skeleton text :repeat="6" /></div>
-      <ErrorBlock v-else-if="runtimeError" :title="runtimeError" retry @retry="loadRuntime" />
+      <ErrorBlock v-else-if="runtimeError && !runtimeFields.length" :title="runtimeError" retry @retry="loadRuntime" />
       <template v-else>
         <div v-if="restartPending.length" class="st-banner">
           <Badge tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
@@ -699,9 +757,8 @@ onBeforeUnmount(() => {
               <div class="st-row__text">
                 <div class="st-row__label">
                   <span>{{ field.label }}</span>
-                  <code class="st-attr">{{ field.attr }}</code>
                   <Badge v-if="field.restart" tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
-                  <Badge v-if="field.overridden" tone="brand">{{ t('page.settings.runtime.overridden') }}</Badge>
+                  <Badge v-if="field.overridden" tone="neutral">{{ t('page.settings.runtime.overridden') }}</Badge>
                 </div>
                 <p v-if="field.desc" class="st-row__desc">{{ field.desc }}</p>
                 <p class="st-row__default">
@@ -716,6 +773,8 @@ onBeforeUnmount(() => {
                   <template v-if="field.min !== null || field.max !== null">
                     · {{ t('page.settings.runtime.range', { min: field.min ?? '−∞', max: field.max ?? '∞' }) }}
                   </template>
+                  <!-- 配置项的环境变量名只给运维对照用：降成最弱的一行小字（第 2 轮审查 P1-5）。 -->
+                  · <code class="st-attr" :title="t('page.settings.runtime.attrTitle')">{{ field.attr }}</code>
                 </p>
               </div>
               <div class="st-row__control">
@@ -754,8 +813,7 @@ onBeforeUnmount(() => {
       id="settings-proxies"
       :title="t('page.settings.proxies.title')"
       :description="t('page.settings.proxies.description')"
-      hide-save
-      hide-reset
+      plain
     >
       <template #actions>
         <Btn size="sm" variant="default" @click="router.push('/schedules')">
@@ -767,7 +825,7 @@ onBeforeUnmount(() => {
       </template>
 
       <div v-if="proxyLoading && !proxyData" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
-      <ErrorBlock v-else-if="proxyError" :title="proxyError" retry @retry="loadProxies" />
+      <ErrorBlock v-else-if="proxyError && !proxyData" :title="proxyError" retry @retry="loadProxies" />
       <template v-else>
         <p class="st-note">{{ proxySummary }}</p>
         <p class="st-note">{{ proxyData?.note || '' }}</p>
@@ -797,18 +855,16 @@ onBeforeUnmount(() => {
           :columns="proxyColumns"
           :data="proxyNodes as unknown as TableRow[]"
           row-key="id"
-          :loading="proxyLoading"
+          :loading="proxyLoading && !silentRefresh"
+          :refreshing="proxyLoading && silentRefresh"
         />
       </template>
+      <!-- 「添加节点」只在卡头放一个。 -->
       <Empty
-        v-if="!proxyLoading && !proxyError && !proxyNodes.length"
+        v-if="!proxyLoading && !(proxyError && !proxyData) && !proxyNodes.length"
         compact
         :description="t('page.settings.proxies.empty')"
-      >
-        <Btn variant="default" size="sm" @click="openProxyDrawer">
-          {{ t('page.settings.proxies.add') }}
-        </Btn>
-      </Empty>
+      />
     </SettingsCard>
 
     <!-- 3. 邀请绑定 -->
@@ -816,16 +872,15 @@ onBeforeUnmount(() => {
       id="settings-invitation"
       :title="t('page.settings.invitation.title')"
       :description="t('page.settings.invitation.description')"
-      hide-save
-      hide-reset
+      :dirty="Boolean(invitation) && invitationDirty"
     >
       <template #actions>
-        <Badge :tone="invitation?.enabled ? 'ok' : 'neutral'">
+        <Badge :tone="invitation?.enabled ? 'ok' : 'neutral'" dot>
           {{ invitation?.enabled ? t('page.settings.invitation.enabled') : t('page.settings.invitation.disabled') }}
         </Badge>
       </template>
       <div v-if="invitationLoading && !invitation" class="st-skeleton"><n-skeleton text :repeat="2" /></div>
-      <ErrorBlock v-else-if="invitationError" :title="invitationError" retry @retry="loadInvitation" />
+      <ErrorBlock v-else-if="invitationError && !invitation" :title="invitationError" retry @retry="loadInvitation" />
       <template v-else>
         <FormField
           :label="t('page.settings.invitation.field')"
@@ -838,17 +893,9 @@ onBeforeUnmount(() => {
               autocomplete="off"
             />
             <Btn
-              variant="primary"
+              v-if="invitation?.enabled"
+              variant="quiet"
               size="sm"
-              :disabled="!invitationDirty"
-              @click="saveInvitationValue(invitationInput.trim())"
-            >
-              {{ t('page.settings.invitation.save') }}
-            </Btn>
-            <Btn
-              variant="default"
-              size="sm"
-              :disabled="!invitation?.enabled"
               @click="disableInvitation"
             >
               {{ t('page.settings.invitation.disable') }}
@@ -864,45 +911,33 @@ onBeforeUnmount(() => {
       id="settings-password"
       :title="t('page.settings.password.title')"
       :description="t('page.settings.password.description')"
-      hide-save
-      hide-reset
     >
-      <div class="st-grid">
-        <FormField :label="t('page.settings.password.old')">
-          <n-input v-model:value="passwordDraft.old" type="password" autocomplete="current-password" />
-        </FormField>
-        <FormField :label="t('page.settings.password.next')" :hint="t('page.settings.password.hint')">
-          <n-input v-model:value="passwordDraft.next" type="password" autocomplete="new-password" />
-        </FormField>
-        <FormField :label="t('page.settings.password.confirm')">
+      <!-- 改密码是一次性动作（不是配置项），保留自己的按钮，不进底部保存条。 -->
+      <FormField :label="t('page.settings.password.old')">
+        <n-input v-model:value="passwordDraft.old" type="password" autocomplete="current-password" />
+      </FormField>
+      <FormField :label="t('page.settings.password.next')" :hint="t('page.settings.password.hint')">
+        <n-input v-model:value="passwordDraft.next" type="password" autocomplete="new-password" />
+      </FormField>
+      <FormField :label="t('page.settings.password.confirm')">
+        <div class="st-inline">
           <n-input v-model:value="passwordDraft.confirm" type="password" autocomplete="new-password" />
-        </FormField>
-      </div>
-      <div class="st-inline">
-        <Btn variant="primary" size="sm" :loading="passwordSaving" :disabled="!passwordDirty" @click="submitPassword">
-          {{ t('page.settings.password.save') }}
-        </Btn>
-      </div>
+          <Btn variant="default" :loading="passwordSaving" :disabled="!passwordDirty" @click="submitPassword">
+            {{ t('page.settings.password.save') }}
+          </Btn>
+        </div>
+      </FormField>
     </SettingsCard>
 
-    <!-- 5. 逆向产物 -->
+    <!-- 5. 逆向产物：本部署未开放（生产环境 404 / dev_tools=false）时整块不渲染 -->
     <SettingsCard
+      v-if="!sourceMissing"
       id="settings-appsource"
       :title="t('page.settings.appsource.title')"
       :description="t('page.settings.appsource.description')"
-      hide-save
-      hide-reset
+      plain
     >
-      <template #actions>
-        <Badge v-if="sourceStatus?.dev_tools === false || sourceMissing" tone="neutral">
-          {{ t('page.settings.appsource.unavailable') }}
-        </Badge>
-      </template>
-
       <div v-if="sourceLoading && !sourceStatus" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
-      <div v-else-if="sourceMissing" class="st-note">
-        {{ t('page.settings.appsource.unavailableBody') }}
-      </div>
       <template v-else>
         <ErrorBlock v-if="sourceError" :title="sourceError" retry @retry="loadSource" />
         <template v-if="sourceStatus">
@@ -1084,15 +1119,23 @@ onBeforeUnmount(() => {
 
 .st-rows {
   display: grid;
-  gap: var(--sp-3);
+  gap: 0;
 }
 
+/* 「左栏标签 + 说明 / 右栏控件」（10-visual-refresh §1.6）：组内每行用 --border-soft 分隔。 */
 .st-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 360px);
+  align-items: start;
+  gap: var(--sp-6);
   min-width: 0;
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-row:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .st-row__text {
@@ -1104,7 +1147,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  font-size: 13px;
+  font-size: var(--fs-h3);
   font-weight: 500;
   color: var(--fg);
 }
@@ -1120,7 +1163,8 @@ onBeforeUnmount(() => {
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   color: var(--fg-2);
-  max-width: 56ch;
+  max-width: 64ch;
+  text-wrap: pretty;
 }
 
 .st-row__default {
@@ -1130,8 +1174,9 @@ onBeforeUnmount(() => {
 }
 
 .st-row__control {
-  flex: none;
-  max-width: 50%;
+  min-width: 0;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .st-note {
@@ -1171,6 +1216,14 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+}
+
+/* 第 5 轮：手机宽度下代理池筛选 / 搜索各占一整行（行内 180 / 220px 宽在 375 下会挤成两行半宽）。 */
+@media (max-width: 767px) {
+  .st-filters > * {
+    flex: 1 1 100%;
+    width: 100% !important;
+  }
 }
 
 .st-progress {
@@ -1225,6 +1278,13 @@ onBeforeUnmount(() => {
 
   .st-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .st-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-2);
   }
 }
 </style>

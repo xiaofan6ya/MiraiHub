@@ -23,7 +23,8 @@
  * 页面只做摆放：格式化、分桶标签、图 option、排行条数据全部在这里的纯函数完成。
  */
 import { http } from './http'
-import { fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { bucketLocalParts, fmtCompact, fmtCredit, fmtDuration, fmtInt, fmtPct } from '@/utils/format'
+import { TOOLTIP_TITLES_KEY, bucketTooltipTitle } from '@/components/charts/options'
 import { t as defaultTranslate, type Translate } from '@/i18n'
 
 /**
@@ -133,6 +134,10 @@ export interface StatsDashboardPayload {
   errors: StatsErrorRow[]
   /** rollup = 小时汇总表；raw = 后端降级到原表。 */
   source?: string
+  /** 后端口径标记：`gateway` = 全网关（不读 X-Platform）。旧后端没有这个字段。 */
+  scope?: string
+  /** 耗时字段单位说明（新后端：全部毫秒）。 */
+  units?: Record<string, string>
 }
 
 /* -------------------------------------------------------------------------- */
@@ -223,6 +228,11 @@ export interface StatsQuery {
   platform?: string
   model?: string
   top_models?: number
+  /**
+   * 时间窗口径：`day` = 北京时间自然日（与 /api/overview 同口径）；不传 = 后端默认滚动窗口。
+   * 旧后端不认这个参数时会忽略，行为退回滚动窗口。
+   */
+  window?: 'day' | 'rolling'
 }
 
 function statsQuery(query: StatsQuery): Record<string, string | number> {
@@ -233,6 +243,7 @@ function statsQuery(query: StatsQuery): Record<string, string | number> {
   if (query.platform) out.platform = query.platform
   if (query.model) out.model = query.model
   if (query.top_models) out.top_models = query.top_models
+  if (query.window === 'day') out.window = 'day'
   return out
 }
 
@@ -289,13 +300,52 @@ export function statToneOf(rate: number | null | undefined): 'ok' | 'warn' | 'da
 }
 
 /**
- * 时间桶标签：小时桶 "2026-11-23 15:00" → "15:00"；
- * 天桶 "2026-11-23" → "11/23"（与 dashboard.js:bucketLabel 同口径）。
+ * 时间桶标签：小时桶 "2026-11-23 15:00"（UTC）→ 本地时区 "23:00"（UTC+8）；
+ * 天桶 "2026-11-23" → "11/23"（没有时刻，无法换算，原样取月日）。
+ *
+ * 旧实现直接截字符串 slice(11, 16)，把 UTC 桶当本地时间显示，横轴整体差 8 小时
+ * （第 1 轮审查 P0-4）。解析不了的小时桶（理论上不会出现）退回截字符串。
  */
 export function bucketLabel(key: string): string {
   const text = String(key || '')
+  const parts = bucketLocalParts(text)
+  if (parts) return String(parts.h).padStart(2, '0') + ':' + String(parts.mi).padStart(2, '0')
   if (text.length >= 13) return text.slice(11, 16)
   return text.slice(5).replace('-', '/')
+}
+
+/**
+ * 平均耗时上限：超过 1 小时的「平均首字 / 平均耗时」不可能是真的。
+ *
+ * 第 3 轮审查 C：后端汇总表曾把平均值放大约 1000 倍（fix_plan N1，`avg_ttfb_ms = 14,345,921`），
+ * 页面显示「239m 06s」。根因由后端 rollup 修复并重建汇总表；前端**不做 ÷1000**
+ * （修好之后正确数据会被缩小），只把明显不可能的值显示成「数据异常」，并在控制台打一次警告。
+ */
+export const AVG_DURATION_MAX_MS = 60 * 60 * 1000
+
+let durationWarned = false
+
+/** 平均耗时是否可信：>0 且 ≤ 1 小时。0 / 负数 / 非数 = 没有样本。 */
+export function durationState(ms: unknown): 'none' | 'ok' | 'anomaly' {
+  const value = Number(ms)
+  if (ms === null || ms === undefined || !Number.isFinite(value) || value <= 0) return 'none'
+  return value > AVG_DURATION_MAX_MS ? 'anomaly' : 'ok'
+}
+
+/** 平均耗时文案：无样本 —；不可信「数据异常」；其余 fmtDuration（入参毫秒）。 */
+export function avgDurationText(ms: unknown, translate?: Translate): string {
+  const state = durationState(ms)
+  if (state === 'none') return '—'
+  if (state === 'anomaly') {
+    if (!durationWarned && typeof console !== 'undefined') {
+      durationWarned = true
+      console.warn(
+        '[stats] 平均耗时超过 1 小时（' + String(ms) + ' ms），疑似后端汇总表放大（fix_plan N1），已显示为「数据异常」',
+      )
+    }
+    return tr(translate, 'stats.duration.anomaly')
+  }
+  return fmtDuration(ms)
 }
 
 /** StatStrip 的 5 格：请求 / 成功率 / Token 合计 / 积分 / 平均耗时（设计稿 P3）。 */
@@ -352,13 +402,91 @@ export function toSummaryItems(
     },
     {
       label: tr(translate, 'stats.summary.latency'),
-      value: fmtDuration(summary.avg_latency_ms),
+      value: avgDurationText(summary.avg_latency_ms, translate),
       foot: tr(translate, 'stats.summary.latencyFoot', {
-        ttfb: fmtDuration(summary.avg_ttfb_ms),
+        ttfb: avgDurationText(summary.avg_ttfb_ms, translate),
         tps: Number(summary.throughput_tps || 0).toFixed(1),
       }),
     },
   ]
+}
+
+/** KpiCard 的输入（与 10-visual-refresh §3 的 props 同形，不 import 组件）。 */
+export interface StatsKpi {
+  key: string
+  label: string
+  value: string
+  unit?: string
+  hint?: string
+  tone?: StatsTone
+  spark?: number[]
+}
+
+/** 每桶 Token 合计（/api/stats/usage 的 trend，只算成功请求）。 */
+export function tokenSpark(usage: StatsUsagePayload | null | undefined): number[] {
+  return (Array.isArray(usage?.trend) ? usage?.trend ?? [] : []).map(
+    (row) => (Number(row.prompt_tokens) || 0) + (Number(row.completion_tokens) || 0),
+  )
+}
+
+/**
+ * 数据看板 KPI 行（10-visual-refresh §1.4）：请求 / 成功率 / Token / 积分 / 平均耗时。
+ * 与 toSummaryItems 同口径，只是换成 KpiCard 形状并带上迷你折线。
+ */
+export function toStatsKpis(
+  payload: StatsDashboardPayload | null | undefined,
+  usage: StatsUsagePayload | null | undefined,
+  translate?: Translate,
+): StatsKpi[] {
+  const items = toSummaryItems(payload?.summary, translate)
+  const summary = payload?.summary
+  const requestsSpark = (payload?.trend?.total_requests ?? []).map((n) => Number(n) || 0)
+  const tokens = tokenSpark(usage)
+  const keys = ['requests', 'success', 'tokens', 'credits', 'latency']
+  return items.map((item, index) => {
+    const tone: StatsTone =
+      item.tone === 'ok' || item.tone === 'warn' || item.tone === 'danger' || item.tone === 'brand'
+        ? item.tone
+        : 'neutral'
+    const kpi: StatsKpi = {
+      key: keys[index] || String(index),
+      label: item.label,
+      value: item.value,
+      hint: item.foot,
+      tone: keys[index] === 'success' ? tone : 'brand',
+    }
+    if (keys[index] === 'requests' && requestsSpark.length > 1) kpi.spark = requestsSpark
+    if (keys[index] === 'tokens' && tokens.length > 1) kpi.spark = tokens
+    if (keys[index] === 'latency' && summary && durationState(summary.avg_latency_ms) === 'anomaly') {
+      kpi.tone = 'warn'
+      kpi.hint = tr(translate, 'stats.duration.anomalyHint')
+    }
+    return kpi
+  })
+}
+
+/** 失败分类（dashboard.errors）→ BarList 项；kind 为空记成「未知」。 */
+export function errorBarItems(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): StatsBarItem[] {
+  return (payload?.errors ?? [])
+    .map((row) => ({
+      label: String(row.kind || tr(translate, 'stats.bar.unknownError')),
+      value: Number(row.count) || 0,
+      tone: 'danger' as StatsTone,
+    }))
+    .filter((row) => row.value > 0)
+}
+
+/** 口径标签：dashboard 不读 X-Platform，一律是全网关（后端 `scope: "gateway"`）。 */
+export function statsScopeLabel(
+  payload: StatsDashboardPayload | null | undefined,
+  translate?: Translate,
+): string {
+  const platform = String(payload?.filters?.platform || '')
+  if (platform) return String(payload?.platform_label || platform)
+  return tr(translate, 'stats.scope.gateway')
 }
 
 export interface TrendSeriesData {
@@ -406,18 +534,27 @@ export function requestTrendOption(
       name: tr(translate, 'stats.trend.all'),
       type: 'line',
       data: data.total,
-      lineStyle: { width: 2.4 },
+      lineStyle: { width: 2.5 },
+      // 面积用 applyLineDefaults 的同色渐变（顶部 18%）；旧的 opacity .16 会叠在渐变上，几乎看不见。
+      areaStyle: {},
       z: 3,
     })
   }
-  for (const item of data.series) {
-    series.push({ name: item.name, type: 'line', data: item.values })
+  // 只有一个模型、且它就是全部请求时，模型线与「全部请求」完全重合 —— 不再画（第 1 轮审查 P2）。
+  const sameAsTotal = (values: number[]): boolean =>
+    values.length === data.total.length && values.every((value, index) => value === data.total[index])
+  const modelSeries =
+    data.total.length && data.series.length === 1 && sameAsTotal(data.series[0].values) ? [] : data.series
+  for (const item of modelSeries) {
+    series.push({ name: item.name, type: 'line', data: item.values, areaStyle: null, lineStyle: { width: 1.5 } })
   }
   return {
-    legend: { type: 'scroll', data: series.map((item) => String(item.name)), top: 0 },
-    xAxis: { type: 'category', boundaryGap: false, data: data.labels },
+    legend: { type: 'scroll', data: series.map((item) => String(item.name)), top: 0, left: 0 },
+    xAxis: { type: 'category', boundaryGap: false, data: data.labels, axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value' },
     series,
+    // tooltip 标题用完整本地时间（Chart.vue 渲染前剥掉这个键）。
+    [TOOLTIP_TITLES_KEY]: data.buckets.map(bucketTooltipTitle),
   }
 }
 
@@ -463,25 +600,64 @@ export function buildTokenTrend(usage: StatsUsagePayload | null | undefined): To
   return data
 }
 
-/** Token 趋势的 ECharts option（页面再套 applyBarDefaults）。 */
+/**
+ * Token 趋势的 ECharts option（页面再套 applyBarDefaults）。
+ *
+ * v2.1：输入和输出常差 1–2 个数量级（第 2 轮审查 P0-13 / 第 1 轮 P2），
+ * 堆在同一根柱子里输出贴着零看不见。改成**双轴**：
+ *   · 左轴：输入 = 未命中 + 缓存命中（两段堆叠柱，合计 = prompt_tokens）；
+ *   · 右轴：输出（折线）。
+ * 两者量级接近（比值 < 8）时共用左轴，读数更直观。
+ */
 export function tokenTrendOption(
   usage: StatsUsagePayload | null | undefined,
   translate?: Translate,
 ): Record<string, unknown> {
   const data = buildTokenTrend(usage)
-  const input = tr(translate, 'stats.legend.input')
+  const input = tr(translate, 'stats.legend.inputMiss')
   const output = tr(translate, 'stats.legend.output')
   const cached = tr(translate, 'stats.legend.cached')
+  const dual = needsDualAxis(
+    data.prompt.map((value, index) => value + (data.cached[index] || 0)),
+    data.output,
+  )
   return {
-    legend: { data: [input, output, cached], top: 0 },
+    legend: { data: [input, cached, output], top: 0, left: 0 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    [TOOLTIP_TITLES_KEY]: (Array.isArray(usage?.trend) ? usage?.trend ?? [] : []).map((row) =>
+      bucketTooltipTitle(row.bucket),
+    ),
     xAxis: { type: 'category', data: data.labels },
-    yAxis: { type: 'value' },
+    yAxis: dual
+      ? [
+          { type: 'value', name: tr(translate, 'stats.axis.input') },
+          { type: 'value', name: tr(translate, 'stats.axis.output'), splitLine: { show: false } },
+        ]
+      : { type: 'value' },
     series: [
       { name: input, type: 'bar', stack: 'tokens', data: data.prompt },
-      { name: output, type: 'bar', stack: 'tokens', data: data.output },
       { name: cached, type: 'bar', stack: 'tokens', data: data.cached },
+      {
+        name: output,
+        type: 'line',
+        yAxisIndex: dual ? 1 : 0,
+        data: data.output,
+        z: 3,
+      },
     ],
   }
+}
+
+/**
+ * 两组数据是否需要分轴：较大一组的峰值是较小一组峰值的 8 倍以上。
+ * 任一组全 0 时不分轴（没有可比的东西）。
+ */
+export function needsDualAxis(a: number[], b: number[], ratio = 8): boolean {
+  const peak = (values: number[]): number => values.reduce((max, value) => Math.max(max, Number(value) || 0), 0)
+  const pa = peak(a)
+  const pb = peak(b)
+  if (pa <= 0 || pb <= 0) return false
+  return Math.max(pa, pb) / Math.min(pa, pb) >= ratio
 }
 
 export interface StatsBarItem {

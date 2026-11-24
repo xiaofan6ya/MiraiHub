@@ -5,7 +5,8 @@
  * 后端：admin/routers/sync.py
  *   · get_config  → GET  /api/sync/config   读配置（库中无密钥时自动生成并落库）
  *   · save_config → POST /api/sync/config   写配置（URL 非空才写、密钥留空沿用）
- *   · push        → POST /api/sync/push     先写库再推送到 {remote_url}/api/sync/receive
+ *   · reveal      → POST /api/sync/config/reveal  显示密钥明文（写审计；GET 只给掩码）
+ *   · push        → POST /api/sync/push     只推往**已保存**的地址（请求体地址与已保存不一致 → 400）
  *
  * 字段名与后端完全一致（snake_case 原样保留），不做 camelCase 转换。
  * 页面禁止直接 fetch：请求统一走 ./http。
@@ -18,6 +19,8 @@ import { fmtFullTime, fmtInt, fmtRelative, maskSecret, toDate } from '@/utils/fo
 export interface SyncRemoteCounts {
   added?: number
   updated?: number
+  /** 线上那一行更新、没有被覆盖的账号数（S3 起接收端返回，只有 accounts 有）。 */
+  skipped_not_newer?: number
 }
 
 export interface SyncRemoteProfile {
@@ -45,10 +48,24 @@ export interface SyncRemoteResult {
  */
 export interface SyncConfigPayload {
   remote_url: string
-  /** 完整密钥（仅已登录管理员可见，可复制）。 */
-  secret: string
+  /**
+   * 密钥。两种后端形状都要兼容（第 3 轮审查 B7 / fix_plan S5）：
+   *   · 旧后端：完整明文（GET 直接下发）；
+   *   · 新后端：不再下发明文 —— 省略 / 空串 / 与 secret_masked 相同的掩码串，
+   *     并给出 `has_secret`；明文只能通过 revealSyncSecret()（单独接口 + 审计）取。
+   * 页面一律经 plainSecretOf() 读取，不要直接用这个字段。
+   */
+  secret?: string
   /** 后端打码：`********abcd`（长度 ≤4 时为 `****`，空密钥为空串）。 */
   secret_masked: string
+  /** 早期草案字段名，与 secret_set 同义（保留兼容）。 */
+  has_secret?: boolean
+  /** 新后端（S5）：库里是否已有密钥（明文不再下发时用它判断「已设置」）。 */
+  secret_set?: boolean
+  /** 新后端：可以走 reveal 接口取明文。 */
+  secret_revealable?: boolean
+  /** 新后端：线上地址只接受 https（SYNC_ALLOW_HTTP 未开）。 */
+  https_only?: boolean
   is_auto_generated: boolean
   last_push_at?: number | string | null
   last_push_result?: SyncRemoteResult | null
@@ -58,11 +75,15 @@ export interface SyncConfigPayload {
 export interface SyncConfigInput {
   remote_url: string
   secret: string
+  /** 修改**已有**同步地址时的二次确认（当前后台登录密码）；其他情况不带。 */
+  admin_password?: string
 }
 
 export interface SyncSaveResult {
   ok: boolean
   secret_set: boolean
+  /** 新后端：保存后库里的地址。 */
+  remote_url?: string
 }
 
 export interface SyncPushResult {
@@ -82,6 +103,8 @@ export interface SyncPushResult {
 export interface SyncCountPair {
   added: number
   updated: number
+  /** 线上更新、未覆盖（只有账号有；旧接收端不返回时为 0）。 */
+  skipped?: number
 }
 
 /** 客户端参数在线上应用的结果；applied=null 表示本地就没有可推的字段。 */
@@ -165,6 +188,16 @@ export function getSyncConfig(signal?: AbortSignal): Promise<SyncConfigPayload> 
   return http<SyncConfigPayload>('GET', '/api/sync/config', { signal })
 }
 
+/**
+ * 显示密钥（新后端的单独接口，后端会写审计日志）。
+ *
+ * 约定：`POST /api/sync/config/reveal` → `{ secret: string }`（已提给安全工作流；
+ * 路径若不同只需改这里）。旧后端没有这个接口会 404，调用方据此提示「后端不支持」。
+ */
+export function revealSyncSecret(): Promise<{ secret: string }> {
+  return http<{ secret: string }>('POST', '/api/sync/config/reveal', { body: {} })
+}
+
 /** 保存同步配置；返回 `secret_set` 表示库里最终是否有密钥。 */
 export function saveSyncConfig(input: SyncConfigInput): Promise<SyncSaveResult> {
   return http<SyncSaveResult>('POST', '/api/sync/config', { body: input })
@@ -173,7 +206,8 @@ export function saveSyncConfig(input: SyncConfigInput): Promise<SyncSaveResult> 
 /**
  * 把本地账号 / 模型配置 / 客户端参数推送到线上。
  *
- * 带上 `remote_url` / `secret` 时后端会先写库再推送（旧版行为：不强制先点保存）。
+ * S3 起后端**只推往已保存的地址**：请求体里的地址与已保存的不一致返回 400（「请先保存」），
+ * 所以页面不带参数调用；有未保存修改时页面先拦下来提示保存。参数只为兼容旧调用方保留。
  */
 export function pushToOnline(input?: SyncConfigInput): Promise<SyncPushResult> {
   return http<SyncPushResult>('POST', '/api/sync/push', { body: input ?? {} })
@@ -231,16 +265,73 @@ export function normalizeSyncInput(form: SyncFormInput): SyncConfigInput {
   }
 }
 
+/** 像掩码的串：含 `*` / `•` / `…`（真实密钥是 hex，不会出现这些字符）。 */
+export function looksMaskedSecret(value: unknown): boolean {
+  const text = asString(value)
+  return Boolean(text) && /[*•…]/.test(text)
+}
+
+/**
+ * GET 响应里的**明文**密钥；新后端（只给掩码）或没有密钥时返回空串。
+ *
+ * 判定：有值、不像掩码、也不等于 secret_masked 才算明文。
+ */
+export function plainSecretOf(config: SyncConfigPayload | null | undefined): string {
+  const secret = asString(config?.secret)
+  if (!secret) return ''
+  if (looksMaskedSecret(secret)) return ''
+  if (secret === asString(config?.secret_masked)) return ''
+  return secret
+}
+
+/** 库里是否有密钥（新后端的 secret_set / 早期草案的 has_secret）。 */
+export function hasStoredSecret(config: SyncConfigPayload | null | undefined): boolean {
+  return config?.secret_set === true || config?.has_secret === true
+}
+
+/** 后端是否只下发掩码（明文要走 revealSyncSecret）。库里有密钥但响应里没有明文即是。 */
+export function isSecretMasked(config: SyncConfigPayload | null | undefined): boolean {
+  if (!config) return false
+  if (plainSecretOf(config)) return false
+  return hasStoredSecret(config) || Boolean(asString(config.secret_masked)) || Boolean(asString(config.secret))
+}
+
+/**
+ * 这次保存是否在**修改已有的**同步地址（后端要求带当前后台密码二次确认）。
+ * 首次填写（库里还没有地址）、地址没变、清空输入框（后端不写库）都不需要。
+ */
+export function needsAdminPassword(form: SyncFormInput, baseline: SyncConfigPayload | null | undefined): boolean {
+  const saved = normalizeRemoteUrl(baseline?.remote_url)
+  const next = normalizeRemoteUrl(form.remoteUrl)
+  return Boolean(saved) && Boolean(next) && next !== saved
+}
+
+/**
+ * 地址的本地校验文案 key：空串 = 没问题（空地址另有提示）。
+ * 后端仍会再校验一次（内网 / 回环地址等），失败时 400 的 detail 是中文原因，页面原样显示。
+ */
+export function remoteUrlProblem(
+  raw: unknown,
+  httpsOnly: boolean | undefined,
+): '' | 'invalid' | 'httpsOnly' {
+  const value = normalizeRemoteUrl(raw)
+  if (!value) return ''
+  if (!isHttpUrl(value)) return 'invalid'
+  if (httpsOnly === true && !/^https:\/\//i.test(value)) return 'httpsOnly'
+  return ''
+}
+
 /**
  * 表单是否有未保存修改。
  *
  * · URL 按归一后比较（末尾斜杠不算修改）；
  * · 密钥留空提交是"保持现有密钥"，但**清空输入框本身**算修改（保存后会重载出原值）。
+ * · 掩码模式（新后端）下输入框初始为空，基线也按空串算；用户填了新值才算修改。
  */
 export function isSyncFormDirty(form: SyncFormInput, baseline: SyncConfigPayload | null | undefined): boolean {
   if (!baseline) return false
   if (normalizeRemoteUrl(form.remoteUrl) !== normalizeRemoteUrl(baseline.remote_url)) return true
-  return asString(form.secret).trim() !== asString(baseline.secret)
+  return asString(form.secret).trim() !== plainSecretOf(baseline)
 }
 
 /* ------------------------------------------------------------------ *
@@ -252,11 +343,15 @@ function countPair(value: unknown): SyncCountPair | null {
   const record = value as Record<string, unknown>
   const added = Number(record.added)
   const updated = Number(record.updated)
+  // 线上响应叫 skipped_not_newer，本机记录里存成 skipped。
+  const skipped = Number(record.skipped_not_newer ?? record.skipped)
   if (!Number.isFinite(added) && !Number.isFinite(updated)) return null
-  return {
+  const pair: SyncCountPair = {
     added: Number.isFinite(added) ? added : 0,
     updated: Number.isFinite(updated) ? updated : 0,
   }
+  if (Number.isFinite(skipped) && skipped > 0) pair.skipped = skipped
+  return pair
 }
 
 function profileOutcome(value: unknown): SyncProfileOutcome | null {
@@ -325,9 +420,12 @@ export function formatPushSummary(
   translate?: Translate,
 ): SyncPushSummaryText {
   const tr = translate ?? defaultTranslate
-  const accounts = summary.accounts
+  let accounts = summary.accounts
     ? '+' + fmtInt(summary.accounts.added) + ' / ~' + fmtInt(summary.accounts.updated)
     : '—'
+  if (summary.accounts?.skipped) {
+    accounts += ' · ' + tr('page.sync.summary.skipped', { count: fmtInt(summary.accounts.skipped) })
+  }
   const models = summary.models
     ? '+' + fmtInt(summary.models.added) + ' / ~' + fmtInt(summary.models.updated)
     : '—'
@@ -484,8 +582,10 @@ export function describeSyncConfig(
 ): SyncStatusView {
   const tr = translate ?? defaultTranslate
   const url = normalizeRemoteUrl(config?.remote_url)
-  const secret = asString(config?.secret)
-  const masked = asString(config?.secret_masked) || (secret ? maskSecret(secret) : '')
+  const secret = plainSecretOf(config)
+  const masked =
+    asString(config?.secret_masked) ||
+    (secret ? maskSecret(secret) : looksMaskedSecret(config?.secret) ? asString(config?.secret) : '')
   const fromBackend = backendRecord(config)
   const latest = fromBackend ?? record
 
@@ -518,11 +618,11 @@ export function describeSyncConfig(
   return {
     url: { configured: Boolean(url), value: url },
     secret: {
-      configured: Boolean(secret || masked),
+      configured: Boolean(secret || masked || hasStoredSecret(config)),
       masked,
       autoGenerated: config?.is_auto_generated === true,
     },
     lastPush,
-    empty: !url && !secret && !masked,
+    empty: !url && !secret && !masked && !hasStoredSecret(config),
   }
 }

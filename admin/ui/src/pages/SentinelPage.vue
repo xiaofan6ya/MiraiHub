@@ -12,8 +12,8 @@
  * 都走 usePolling：页面不可见自动暂停、连续失败 3 次停表并给「恢复」。
  */
 import { computed, h, onMounted, ref, type VNodeChild } from 'vue'
-import { NInput, NModal, NSelect, NSkeleton } from 'naive-ui'
-import { Pause, Play, RefreshCw, ShieldAlert } from 'lucide-vue-next'
+import { NInput, NModal, NSelect } from 'naive-ui'
+import { Pause, RefreshCw } from 'lucide-vue-next'
 import PageHeader from '@/layout/PageHeader.vue'
 import {
   Badge,
@@ -22,20 +22,24 @@ import {
   DataTable,
   Empty,
   ErrorBlock,
+  KpiCard,
   RouteRibbon,
   RowActions,
   Segmented,
   StackMeter,
-  StatStrip,
   type FilterChip,
   type SorterPayload,
   type TableColumn,
   type TableRow,
 } from '@/components'
-import { useConfirm, usePolling, useTableQuery, useToast } from '@/composables'
+import { useConfirm, useKeepAliveSuspended, usePolling, useTableQuery, useToast } from '@/composables'
 import { errorMessage, failureText } from '@/utils/error'
 import { FMT_EMPTY, fmtInt } from '@/utils/format'
-import { useI18n } from '@/i18n'
+import { groupTitle, useI18n } from '@/i18n'
+import { groupOf } from '@/router/pages'
+import SentinelStatusPanel from './Sentinel/SentinelStatusPanel.vue'
+import SentinelLive from './Sentinel/SentinelLive.vue'
+import { useRevisit } from '@/pages/_shared/useRevisit'
 import {
   getSentinelStatus,
   getTraffic,
@@ -49,10 +53,10 @@ import {
   toLiveRows,
   toPlatformHealth,
   toRibbon,
+  toSentinelKpis,
   toSignalRows,
-  toStats,
+  toStatusLine,
   type AccountSignalRow,
-  type SentinelStat,
   type SentinelStatus,
   type SignalRow,
   type TrafficPayload,
@@ -60,8 +64,11 @@ import {
 
 const { t } = useI18n()
 const helpText = computed(() => t('page.sentinel.help'))
+const eyebrow = computed(() => groupTitle(groupOf('sentinel').key))
 
 const toast = useToast()
+/** 第 5 轮：KeepAlive 离开时收起本页直接使用的 NModal（Teleport 不随页面移走，否则会盖在下一页上）。 */
+const suspended = useKeepAliveSuspended()
 const confirm = useConfirm()
 const table = useTableQuery('sentinel', {
   pageSize: 20,
@@ -106,39 +113,64 @@ onMounted(() => {
   trafficPoll.start()
 })
 
+/**
+ * 手动刷新才显示小转圈；后台轮询静默（以前把 `statusPoll.running` 当 loading，
+ * 轮询一直在跑 → 状态区 4 张 KPI 右上角永远在转）。
+ */
+const refreshing = ref(false)
+
 function refresh(): void {
-  void statusPoll.trigger()
-  void trafficPoll.trigger()
+  refreshing.value = true
+  void Promise.all([statusPoll.trigger(), trafficPoll.trigger()])
+    .catch(() => undefined)
+    .finally(() => {
+    refreshing.value = false
+  })
 }
+
+// KeepAlive：离开时停掉 10s / 2s 两个轮询（缓存页不是 document.hidden，usePolling 自己停不了），
+// 回来时 start() 立即各拉一次，保留旧数据，不出骨架（11 §2）。
+useRevisit(
+  () => {
+    statusPoll.start()
+    trafficPoll.start()
+  },
+  {
+    onLeave: () => {
+      statusPoll.stop()
+      trafficPoll.stop()
+    },
+  },
+)
 
 /* ------------------------------ 视图模型 ------------------------------ */
 const banner = computed(() => toBanner(status.value, traffic.value))
 
 /**
- * traffic 的口径是 window=3600（contracts/sentinel §2.1 的 /api/sentinel/traffic），
- * 滚动 1 小时，不是自然日 —— 统计格不能沿用「今日」，否则与使用记录的
- * 「今日（自然日）」对不上。覆盖放在页面这层：toStats 仍是接口字段的直译。
+ * 统计口径（本轮审计纠正）：traffic 的 platforms / totals 是 traffic_stats 按**服务器日期**分键的
+ * 「今日累计」，window=3600 只影响 recent 明细 —— 上一轮把第 0 格改名成「近 1 小时请求」是错的。
+ * 状态总览只留 4 个 KpiCard；「涉及账号」「暂停中的平台」并进状态行（toStatusLine）。
  */
-const STAT_LABEL_OVERRIDES: Record<number, Partial<SentinelStat>> = {
-  // 第 0 格原本叫「今日请求」；按序号覆盖，不依赖 api 回传的中文 label（英文态下 label 会变）。
-  0: {
-    label: t('page.sentinel.stat.requests1h'),
-    help: t('page.sentinel.stat.requests1hHelp'),
-  },
-}
-
-const stats = computed(() =>
-  toStats(status.value, traffic.value, t).map((item, index) => {
-    const patch = STAT_LABEL_OVERRIDES[index]
-    return patch ? { ...item, ...patch } : item
-  }),
-)
+const kpis = computed(() => toSentinelKpis(status.value, traffic.value, t))
+const statusLine = computed(() => toStatusLine(status.value, traffic.value, t))
 const ribbon = computed(() => toRibbon(traffic.value, t))
+/**
+ * 第 5 轮：RouteRibbon 脉冲按「count / windowMinutes」换算。traffic 的计数是**今日累计**，
+ * 时间窗取今天已过去的分钟数（至少 60，凌晨刚过零点时不至于快到顶）；随 traffic 每次刷新重算。
+ */
+const ribbonWindowMinutes = computed(() => {
+  void traffic.value
+  const now = new Date()
+  return Math.max(60, now.getHours() * 60 + now.getMinutes())
+})
 const health = computed(() => toPlatformHealth(traffic.value, t))
 const liveRows = computed(() => toLiveRows(traffic.value, 50, t))
 const signalRows = computed(() => toSignalRows(status.value, traffic.value, t))
 const accountRows = computed(() => toAccountRows(status.value, traffic.value, t))
 const paused = computed(() => pausedKeys(status.value))
+const pausedItems = computed(() =>
+  paused.value.map((key) => ({ key, label: pausedLabel(key, traffic.value, t) })),
+)
 const storage = computed(() => storageText(status.value, traffic.value, t))
 
 const platformLabelOf = computed(() => {
@@ -386,8 +418,14 @@ async function onResume(platform = ''): Promise<void> {
   })
   if (!ok) return
   try {
-    await resumePlatform(platform)
-    toast.success(t('page.sentinel.toast.resumed', { name }))
+    const result = await resumePlatform(platform)
+    // 恢复单个平台时，全局暂停仍在（data-scoping D4：后端不再顺手解除 all）——必须讲清楚，
+    // 否则用户以为恢复了，请求却还是 503。
+    if (platform && result && result.still_paused_by_all) {
+      toast.warning(t('page.sentinel.toast.stillPausedByAll', { name }))
+    } else {
+      toast.success(t('page.sentinel.toast.resumed', { name }))
+    }
     refresh()
   } catch (error) {
     toast.error(failureText(t('page.sentinel.action.resume'), error))
@@ -477,13 +515,16 @@ const columns = computed<TableColumn[]>(() =>
 
 <template>
   <div class="sentinel-page">
-    <PageHeader :title="t('page.sentinel.title')" :help="helpText">
-      <template #actions>
+    <PageHeader :title="t('page.sentinel.title')" :help="helpText" :eyebrow="eyebrow">
+      <template #meta>
+        <Badge tone="neutral">{{ t('page.sentinel.scope') }}</Badge>
         <span class="sentinel-storage">{{ t('page.sentinel.storage', { backend: storage }) }}</span>
-        <Btn variant="quiet" :icon="Pause" @click="openPause('', banner.suggestedSeconds)">
+      </template>
+      <template #actions>
+        <Btn variant="default" :icon="Pause" @click="openPause('', banner.suggestedSeconds)">
           {{ t('page.sentinel.pauseOpen') }}
         </Btn>
-        <Btn variant="quiet" :icon="RefreshCw" :loading="statusPoll.running.value && loading" @click="refresh()">
+        <Btn variant="quiet" :icon="RefreshCw" :loading="refreshing || (loading && !status)" @click="refresh()">
           {{ t('common.refresh') }}
         </Btn>
       </template>
@@ -495,48 +536,29 @@ const columns = computed<TableColumn[]>(() =>
       :retry-label="t('common.retry')"
       @retry="refresh()"
     />
+    <!-- 骨架与真实布局同构：状态行 / 4 张 KpiCard / 左右分栏，统一 .mh-skeleton（11 §4-1）。 -->
     <div v-else-if="loading && !status" class="sentinel-skeleton" aria-busy="true">
-      <n-skeleton height="64px" />
-      <n-skeleton height="96px" />
-      <n-skeleton :repeat="3" height="120px" />
+      <div class="mh-skeleton sentinel-skeleton__line" />
+      <section class="sentinel-skeleton__kpis">
+        <KpiCard v-for="item in kpis" :key="item.key" :label="item.label" :value="null" loading />
+      </section>
+      <div class="sentinel-split">
+        <div class="mh-skeleton sentinel-skeleton__main" />
+        <div class="mh-skeleton sentinel-skeleton__side" />
+      </div>
     </div>
 
     <template v-else>
-      <!-- 结论横幅 -->
-      <section class="sentinel-banner" :class="'is-' + banner.tone" role="status">
-        <ShieldAlert :size="20" class="sentinel-banner__icon" />
-        <div class="sentinel-banner__body">
-          <strong>{{ banner.title }}</strong>
-          <span>{{ banner.detail }}</span>
-        </div>
-        <div class="sentinel-banner__actions">
-          <Btn
-            v-if="banner.tripped"
-            variant="danger"
-            solid
-            size="sm"
-            @click="openPause(banner.platform, banner.suggestedSeconds)"
-          >
-            {{
-              banner.platformLabel
-                ? t('page.sentinel.pauseTrippedLabel', { platform: banner.platformLabel })
-                : t('page.sentinel.pauseTrippedThis')
-            }}
-          </Btn>
-          <Btn
-            v-for="key in paused"
-            :key="key"
-            variant="quiet"
-            size="sm"
-            :icon="Play"
-            @click="onResume(key === 'all' ? '' : key)"
-          >
-            {{ t('page.sentinel.resumeBtn', { name: pausedLabel(key, traffic, t) }) }}
-          </Btn>
-        </div>
-      </section>
-
-      <StatStrip :items="stats" />
+      <!-- 状态总览：常态一行、异常横幅 + 4 个 KPI -->
+      <SentinelStatusPanel
+        :banner="banner"
+        :line="statusLine"
+        :kpis="kpis"
+        :paused="pausedItems"
+        :loading="refreshing"
+        @pause="(platform: string, seconds: number) => openPause(platform, seconds)"
+        @resume="(key: string) => onResume(key === 'all' ? '' : key)"
+      />
 
       <div class="sentinel-split">
         <div class="sentinel-main">
@@ -544,7 +566,13 @@ const columns = computed<TableColumn[]>(() =>
             <template #extra>
               <span class="sentinel-hint">{{ t('page.sentinel.realtime.hint') }}</span>
             </template>
-            <RouteRibbon :source="ribbon.source" :lanes="ribbon.lanes" @select="selectPlatform" />
+            <RouteRibbon
+              :source="ribbon.source"
+              :lanes="ribbon.lanes"
+              :max-height="300"
+              :window-minutes="ribbonWindowMinutes"
+              @select="selectPlatform"
+            />
             <p class="sentinel-legend">
               <span><i class="dot is-ok" />{{ t('page.sentinel.legend.ok') }}</span>
               <span><i class="dot is-warn" />{{ t('page.sentinel.legend.warn') }}</span>
@@ -587,26 +615,12 @@ const columns = computed<TableColumn[]>(() =>
         </div>
 
         <div class="sentinel-side">
-          <Card :title="t('page.sentinel.live.title')">
-            <template #extra>
-              <span class="sentinel-hint">
-                {{ trafficPoll.paused.value ? t('page.sentinel.live.paused') : t('page.sentinel.refreshEvery') }}
-              </span>
-            </template>
-            <Empty v-if="!liveRows.length" compact :description="t('page.sentinel.live.empty')" />
-            <ol v-else class="sentinel-live" aria-live="polite">
-              <li v-for="row in liveRows" :key="row.rid" class="sentinel-live__row" :class="'is-' + row.tone">
-                <span class="sentinel-live__time tnum">{{ row.time }}</span>
-                <span class="sentinel-live__model mono" :title="row.error">{{ row.model }}</span>
-                <span class="sentinel-live__plat">{{ row.platformLabel }}</span>
-                <span class="sentinel-live__status tnum">{{ row.statusText }}</span>
-              </li>
-            </ol>
-            <p v-if="trafficPoll.paused.value" class="sentinel-warn">
-              {{ trafficPoll.pausedMessage.value }}
-              <Btn variant="quiet" size="sm" @click="trafficPoll.resume()">{{ t('page.sentinel.resume') }}</Btn>
-            </p>
-          </Card>
+          <SentinelLive
+            :rows="liveRows"
+            :paused="trafficPoll.paused.value"
+            :paused-message="trafficPoll.pausedMessage.value"
+            @resume="trafficPoll.resume()"
+          />
         </div>
       </div>
 
@@ -691,10 +705,11 @@ const columns = computed<TableColumn[]>(() =>
 
     <!-- 暂停平台 -->
     <n-modal
-      v-model:show="pauseOpen"
+      :show="pauseOpen && !suspended"
+      @update:show="(value: boolean) => (pauseOpen = value)"
       preset="card"
       :title="t('page.sentinel.pauseModalTitle')"
-      :style="{ width: '480px' }"
+      :style="{ width: '480px', maxWidth: 'calc(100vw - 32px)' }"
     >
       <div class="sentinel-form">
         <label class="sentinel-field">
@@ -739,53 +754,36 @@ const columns = computed<TableColumn[]>(() =>
 }
 .sentinel-skeleton {
   display: grid;
-  gap: var(--sp-3);
-}
-.sentinel-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-5);
-  border-radius: var(--r-card);
-  border: 1px solid var(--border);
-  flex-wrap: wrap;
-}
-.sentinel-banner.is-ok {
-  background: var(--ok-soft);
-  border-color: var(--ok-soft);
-}
-.sentinel-banner.is-danger {
-  background: var(--danger-soft);
-  border-color: var(--danger-soft);
-}
-.sentinel-banner__icon {
-  color: var(--fg-muted);
-  flex: none;
-}
-.sentinel-banner.is-ok .sentinel-banner__icon {
-  color: var(--ok);
-}
-.sentinel-banner.is-danger .sentinel-banner__icon {
-  color: var(--danger);
-}
-.sentinel-banner__body {
-  display: grid;
-  gap: 2px;
+  gap: var(--sp-4);
   min-width: 0;
-  flex: 1;
 }
-.sentinel-banner__body strong {
-  font-size: var(--fs-body);
-  color: var(--fg);
+/* 与 SentinelStatusPanel 的状态行同高 */
+.sentinel-skeleton__line {
+  height: 58px;
+  border-radius: var(--r-card);
 }
-.sentinel-banner__body span {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
+.sentinel-skeleton__kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-4);
 }
-.sentinel-banner__actions {
-  display: flex;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
+.sentinel-skeleton__main {
+  min-height: 420px;
+  border-radius: var(--r-card);
+}
+.sentinel-skeleton__side {
+  min-height: 420px;
+  border-radius: var(--r-card);
+}
+@media (max-width: 1279px) {
+  .sentinel-skeleton__kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 767px) {
+  .sentinel-skeleton__kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .sentinel-split {
   display: grid;
@@ -873,63 +871,6 @@ const columns = computed<TableColumn[]>(() =>
   color: var(--fg-muted);
   margin-left: auto;
 }
-.sentinel-live {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 2px;
-  max-height: 420px;
-  overflow: auto;
-}
-.sentinel-live__row {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) 84px 56px;
-  gap: var(--sp-2);
-  align-items: center;
-  padding: 4px 0;
-  font-size: var(--fs-small);
-  border-bottom: 1px solid var(--border-soft);
-  animation: sentinel-row-in 150ms var(--ease);
-}
-.sentinel-live__time {
-  color: var(--fg-muted);
-}
-.sentinel-live__model {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg-2);
-}
-.sentinel-live__plat {
-  color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sentinel-live__status {
-  text-align: right;
-}
-.sentinel-live__row.is-ok .sentinel-live__status {
-  color: var(--ok);
-}
-.sentinel-live__row.is-warn .sentinel-live__status {
-  color: var(--warn);
-}
-.sentinel-live__row.is-danger .sentinel-live__status {
-  color: var(--danger);
-}
-.sentinel-live__row.is-brand .sentinel-live__status {
-  color: var(--brand);
-}
-@keyframes sentinel-row-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
 .sentinel-warn {
   margin-top: var(--sp-2);
   font-size: var(--fs-small);
@@ -978,7 +919,7 @@ const columns = computed<TableColumn[]>(() =>
 .sentinel-field {
   display: grid;
   gap: var(--sp-1);
-  font-size: 13px;
+  font-size: var(--fs-h3);
   color: var(--fg);
 }
 .sentinel-form__actions {
@@ -994,12 +935,6 @@ const columns = computed<TableColumn[]>(() =>
 @media (max-width: 640px) {
   .sentinel-filter {
     width: 100%;
-  }
-  .sentinel-live__row {
-    grid-template-columns: 64px minmax(0, 1fr) 56px;
-  }
-  .sentinel-live__plat {
-    display: none;
   }
 }
 </style>

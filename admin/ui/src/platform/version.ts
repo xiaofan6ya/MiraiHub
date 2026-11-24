@@ -29,7 +29,10 @@ export async function loadAppInfo(): Promise<void> {
       updateAvailable.value = Boolean(parsed?.available)
       return
     }
-    const releases = await http<{ available?: boolean }>('GET', '/api/app/releases')
+    // summary=1：后端只回顶栏要的几个字段（约 200B，原来是 100KB+ 的整包清单）；旧后端忽略该参数。
+    const releases = await http<{ available?: boolean }>('GET', '/api/app/releases', {
+      query: { summary: 1 },
+    })
     updateAvailable.value = Boolean(releases?.available)
   } catch (error) {
     // 生产镜像按最小面构建，没有自我更新通道 → 503。这不是错误，只是没有更新信息。

@@ -534,8 +534,10 @@ describe('KeysPage 首屏与对接信息', () => {
 
     expect(wrapper.find('h1').text()).toContain('API Keys')
     expect(wrapper.text()).toContain('共 2 个 Key · 正常 1 · 已停用 1 · 不限额 1')
-    // PageHeader 的选号策略按钮取 /api/credits/selection-policy 的 modes 文案
+    // 对接信息卡里的账号调度策略按钮取 /api/credits/selection-policy 的 modes 文案（v2.1 从页头移进卡片）
     expect(findButton(document, '严格到期优先')).toBeTruthy()
+    // 页头只剩「接入指南」+ 唯一主按钮「创建 Key」
+    expect(buttonsIn(headerActions()).map((el) => (el.textContent || '').trim())).toEqual(['接入指南', '创建 Key'])
 
     const copies = wrapper.findAllComponents(Copyable)
     expect(copies.length).toBeGreaterThanOrEqual(3)
@@ -613,13 +615,12 @@ describe('KeysPage 搜索 / 筛选 / 分页 / 排序', () => {
     expect(router.currentRoute.value.query.q).toBe('旧测试')
     expect(cards()).toHaveLength(1)
     expect(wrapper.text()).toContain('筛选出 1 / 共 2 个 Key · 正常 0')
-    const chip = document.querySelector('.mh-filter__chip') as HTMLElement
-    expect(chip.textContent).toContain('搜索')
-    expect(chip.textContent).toContain('旧测试')
+    // v2.1：筛选控件本身显示当前值，不再重复一排「已筛选」chip；清除走工具栏「重置」
+    expect(document.querySelector('.mh-filter__chip')).toBeNull()
 
-    chip.click()
-    await settle()
+    await clickButton(document, '重置')
     expect(router.currentRoute.value.query.q).toBeUndefined()
+    expect(inputByPlaceholder('搜索名称 / 备注 / 账号').value).toBe('')
     expect(cards()).toHaveLength(2)
   })
 
@@ -687,7 +688,11 @@ describe('KeysPage 搜索 / 筛选 / 分页 / 排序', () => {
     await mountPage()
     expect(listKeys).toHaveBeenCalledTimes(1)
 
-    await clickButton(headerActions(), '刷新')
+    // v2.1：刷新是表格工具栏右侧的图标按钮
+    const refresh = document.querySelector('.mh-table__toolbar button[aria-label="刷新"]') as HTMLElement | null
+    expect(refresh, 'toolbar refresh').toBeTruthy()
+    refresh!.click()
+    await settle()
     expect(listKeys).toHaveBeenCalledTimes(2)
 
     const shareRefresh = Array.from(document.querySelectorAll('.keys-share button')).find(
@@ -1091,7 +1096,7 @@ describe('KeysPage 抽屉（用量 / 来源 IP / 全部模型 / 接入指南）'
 
   it('点选号策略跳到积分到期页', async () => {
     const { router } = await mountPage({ mobile: false })
-    await clickButton(headerActions(), '严格到期优先')
+    await clickButton(document.querySelector('.keys-share') as HTMLElement, '严格到期优先')
     expect(router.currentRoute.value.path).toBe('/credits')
   })
 })
@@ -1110,5 +1115,33 @@ describe('KeysPage 错误态', () => {
     expect(listKeys).toHaveBeenCalledTimes(2)
     expect(cards()).toHaveLength(2)
     expect(wrapper.find('.mh-error').exists()).toBe(false)
+  })
+})
+
+describe('KeysPage v2.1：查看完整 Key 先提示审计、限制文案带分隔', () => {
+  it('查看完整 Key：先显示审计提示，确认后才调用 view 接口', async () => {
+    await mountPage()
+    await openRowMenu(0)
+    await clickRowMenu('查看完整 Key')
+
+    await waitFor(() => bodyText().includes('写入安全审计'), 'reveal modal')
+    expect(viewKey).not.toHaveBeenCalled()
+    const modal = document.querySelector('.kr-modal') as HTMLElement
+    await clickButton(modal, '显示完整 Key')
+    expect(viewKey).toHaveBeenCalledWith(7)
+    expect(bodyText()).toContain('sk-7-full-visible')
+  })
+
+  it('复制 Key 的成功提示写明本次读取已记入审计', async () => {
+    await mountPage()
+    await clickButton(cards()[0], '复制 Key')
+    expect(bodyText()).toContain('本次读取已记入审计')
+  })
+
+  it('并发与频率用「 · 」连接，不再拼成「不限不限频率」', async () => {
+    await mountPage()
+    const first = cards()[0].textContent || ''
+    expect(first).toContain('并发不限 · 频率随全局')
+    expect(first).not.toContain('不限不限')
   })
 })

@@ -1,0 +1,263 @@
+/* SchedulesPage.vue 的 scoped 样式（<style scoped src>，10-visual-refresh §5 拆分）。表格单元格由 h() 渲染，选择器用 :deep。 */
+.schedules-page {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.schedules-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn-soft);
+  border-radius: var(--r-ctl);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+}
+
+.schedules-card {
+  min-width: 0;
+}
+
+.schedules-filter {
+  padding: var(--sp-4) var(--sp-5) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.schedules-filter__search {
+  width: 240px;
+  max-width: 100%;
+}
+
+.schedules-filter__select {
+  width: 160px;
+}
+
+.schedules-body {
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
+  min-width: 0;
+}
+
+.schedules-skeleton {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+}
+
+:deep(.sc-name-cell) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+:deep(.sc-name-cell__head),
+:deep(.sc-name-cell__sub),
+:deep(.sc-cycle__line) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+:deep(.sc-name-cell__sub) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+:deep(.sc-sep) {
+  color: var(--fg-faint);
+}
+
+/* 标识只在 <wbr>（下划线后）换行，不在单词中间断开。 */
+:deep(.sc-task__id) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+  word-break: keep-all;
+  overflow-wrap: normal;
+  white-space: normal;
+  background: transparent;
+  padding: 0;
+}
+
+:deep(.sc-result) {
+  overflow: hidden;
+}
+
+:deep(.sc-result__head) {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+:deep(.sc-result__time) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:deep(.sc-name) {
+  font-weight: 500;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+:deep(.sc-name__stop) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--warn);
+}
+
+:deep(.sc-task),
+:deep(.sc-scope),
+:deep(.sc-cycle),
+:deep(.sc-proxy),
+:deep(.sc-result) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+:deep(.sc-task__label),
+:deep(.sc-scope) {
+  color: var(--fg);
+}
+
+:deep(.sc-task__id),
+:deep(.sc-scope__hint),
+:deep(.sc-cycle__zone),
+:deep(.sc-cycle__next),
+:deep(.sc-proxy__hint) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+:deep(.sc-cycle__next.is-due) {
+  color: var(--warn);
+}
+
+:deep(.sc-proxy__main.is-global) {
+  color: var(--fg-muted);
+}
+
+:deep(.sc-result__head) {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+:deep(.sc-result__time) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+:deep(.sc-result__summary) {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedules-readonly {
+  display: inline-block;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+}
+
+.schedules-interval {
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.schedules-interval__unit {
+  width: 120px;
+  flex: none;
+}
+
+.schedules-time {
+  width: 120px;
+}
+
+.schedules-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.schedules-grid2 {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.schedules-enabled {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+}
+
+.schedules-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin: 0;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+}
+
+.schedules-result__summary {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+}
+
+@media (min-width: 720px) {
+  .schedules-grid2 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .schedules-filter {
+    padding: var(--sp-3) var(--sp-4);
+  }
+
+  .schedules-body {
+    padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  }
+
+  .schedules-filter__search,
+.schedules-filter__select {
+    width: 100%;
+  }
+
+  .schedules-interval {
+    flex-wrap: wrap;
+  }
+}

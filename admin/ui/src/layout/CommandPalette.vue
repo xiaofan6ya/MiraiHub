@@ -6,10 +6,10 @@ import { CornerDownLeft, Search } from 'lucide-vue-next'
 import { PAGES } from '@/router/pages'
 import { usePlatformStore } from '@/stores/platform'
 import type { PlatformSpec } from '@/api/platforms'
-import { useCommands } from './commandRegistry'
+import { SHELL_SHORTCUTS, useCommands, waitForCommand } from './commandRegistry'
 import { apiBaseUrl, copyText } from '@/platform/clipboard'
 import { useTheme } from '@/theme/useTheme'
-import { groupTitle, pageTitle, useI18n } from '@/i18n'
+import { groupTitle, pageTitle, useI18n, type MessageKey } from '@/i18n'
 
 /**
  * 命令面板（03-shell §2.4）：Ctrl/⌘+K 打开，居中 560px 浮层；
@@ -126,6 +126,25 @@ const operationItems = computed<PaletteItem[]>(() => {
       },
     },
   ]
+  // 全局快捷操作：页面已注册同 id 时用页面那条（下面的循环），否则跳页面后再执行。
+  const registered = new Set(commands.value.map((command) => command.id))
+  for (const shortcut of SHELL_SHORTCUTS) {
+    if (registered.has(shortcut.id)) continue
+    items.push({
+      id: 'cmd.' + shortcut.id,
+      title: t(shortcut.titleKey as MessageKey),
+      sub: t(shortcut.hintKey as MessageKey),
+      keywords: t(shortcut.keywordsKey as MessageKey),
+      run: async () => {
+        // 先关面板再跳转：等页面挂载、注册命令期间面板不该挡在新页面上。
+        close()
+        await router.push(shortcut.path)
+        const command = await waitForCommand(shortcut.id)
+        if (command) await command.run()
+        else message.warning(t('cmdk.shortcutUnavailable'))
+      },
+    })
+  }
   for (const command of commands.value) {
     items.push({
       id: 'cmd.' + command.id,

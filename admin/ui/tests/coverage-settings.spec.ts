@@ -279,6 +279,13 @@ function bodyText(): string {
   return document.body.textContent || ''
 }
 
+/** 底部保存条（SettingsLayout）：运行配置与邀请码都从这里保存 / 放弃，没有改动时不渲染。 */
+function saveBarOf(wrapper: { element: Element }): HTMLElement {
+  const el = wrapper.element.querySelector('.mh-savebar') as HTMLElement | null
+  expect(el, '保存条未出现').toBeTruthy()
+  return el as HTMLElement
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   getRuntimeConfig.mockResolvedValue({ fields: runtimeFields() })
@@ -381,14 +388,16 @@ describe('SettingsPage · 运行配置保存', () => {
     docSwitch!.vm.$emit('update:value', true)
     await flush()
 
-    expect(wrapper.text()).toContain('有未保存的修改')
-    await click(wrapper.element, '保存配置')
+    // SettingsPage 把改动项数交给 SaveBar（第 5 轮：卡内保存按钮收进底部保存条），
+    // 计数型 dirty 渲染「有 N 项未保存」，不再是布尔型的「有未保存的修改」。
+    expect(saveBarOf(wrapper).textContent).toContain('有 1 项未保存')
+    await click(saveBarOf(wrapper), '保存')
 
     expect(saveRuntimeConfig).toHaveBeenCalledTimes(1)
     expect(saveRuntimeConfig).toHaveBeenCalledWith({ ENABLE_DOCS: true })
     expect(wrapper.text()).toContain('有 1 项修改需要重启服务后生效')
     expect(bodyText()).toContain('已保存 1 项运行配置')
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(wrapper.element.querySelector('.mh-savebar'), '保存后保存条应消失').toBeNull()
   })
 
   it('数字与字符串控件改动都进入 diff（清空字符串 = 回落 .env），保存后按快照回填', async () => {
@@ -417,7 +426,7 @@ describe('SettingsPage · 运行配置保存', () => {
     text!.vm.$emit('update:value', '')
 
     await flush()
-    await click(wrapper.element, '保存配置')
+    await click(saveBarOf(wrapper), '保存')
 
     expect(saveRuntimeConfig).toHaveBeenCalledWith({
       GATEWAY_REQUEST_TIMEOUT: 90,
@@ -426,7 +435,7 @@ describe('SettingsPage · 运行配置保存', () => {
     // changed / reverted 都算受理：清空字符串（回落默认）不应被当成「未保存」
     expect(number!.props('value')).toBe(90)
     expect(text!.props('value')).toBe('miraihub')
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(wrapper.element.querySelector('.mh-savebar'), '保存后保存条应消失').toBeNull()
   })
 
   it('保存返回 errors 时用错误 Toast 列出未保存项，未落库的改动留在草稿里', async () => {
@@ -443,15 +452,15 @@ describe('SettingsPage · 运行配置保存', () => {
       .find((item) => (item.attributes('aria-label') || '') === '开放 API 文档')
     docSwitch!.vm.$emit('update:value', true)
     await flush()
-    await click(wrapper.element, '保存配置')
+    await click(saveBarOf(wrapper), '保存')
 
     expect(bodyText()).toContain('部分配置未保存')
     expect(bodyText()).toContain('ENABLE_DOCS 需要重启才能生效')
     // errors 里的字段后端没有落库（runtime_settings.py:save 只 continue）：
     // 用返回的 fields 快照重置草稿会把用户刚改的值静默丢掉，所以值要留在草稿里、仍算未保存。
     expect(docSwitch!.props('value')).toBe(true)
-    expect(wrapper.text()).toContain('有未保存的修改')
-    expect(buttonByText(wrapper.find('#settings-runtime').element, '保存配置')?.disabled).toBe(false)
+    expect(saveBarOf(wrapper).textContent).toContain('有 1 项未保存')
+    expect(buttonByText(saveBarOf(wrapper), '保存')?.disabled).toBe(false)
   })
 
   it('部分成功：成功的字段回填服务端值，未保存项留草稿，重试只再提交未保存项', async () => {
@@ -473,15 +482,16 @@ describe('SettingsPage · 运行配置保存', () => {
     number!.vm.$emit('update:value', 90)
     docSwitch!.vm.$emit('update:value', true)
     await flush()
-    await click(wrapper.element, '保存配置')
+    await click(saveBarOf(wrapper), '保存')
 
     expect(saveRuntimeConfig).toHaveBeenNthCalledWith(1, { GATEWAY_REQUEST_TIMEOUT: 90, ENABLE_DOCS: true })
     // 落库的字段回到服务端快照（90，不再算改动）；失败的开关仍在草稿里
     expect(number!.props('value')).toBe(90)
     expect(docSwitch!.props('value')).toBe(true)
-    expect(wrapper.text()).toContain('有未保存的修改')
+    // 只剩 ENABLE_DOCS 这一项未落库 → 保存条计数为 1。
+    expect(saveBarOf(wrapper).textContent).toContain('有 1 项未保存')
 
-    await click(wrapper.element, '保存配置')
+    await click(saveBarOf(wrapper), '保存')
     expect(saveRuntimeConfig).toHaveBeenNthCalledWith(2, { ENABLE_DOCS: true })
   })
 
@@ -493,26 +503,28 @@ describe('SettingsPage · 运行配置保存', () => {
       .find((item) => (item.attributes('aria-label') || '') === '开放 API 文档')
     docSwitch!.vm.$emit('update:value', true)
     await flush()
-    await click(wrapper.element, '保存配置')
+    await click(saveBarOf(wrapper), '保存')
 
     expect(bodyText()).toContain('保存运行配置失败：503 upstream busy')
-    expect(wrapper.text()).toContain('有未保存的修改')
+    expect(saveBarOf(wrapper).textContent).toContain('有 1 项未保存')
   })
 
-  it('取消（重置）重新拉取运行配置并回到服务端值', async () => {
+  it('放弃：草稿回到上次读到的服务端值（不重新请求），保存条消失', async () => {
     const { wrapper } = await mountPage()
     const docSwitch = wrapper
       .findAllComponents(NSwitch)
       .find((item) => (item.attributes('aria-label') || '') === '开放 API 文档')
     docSwitch!.vm.$emit('update:value', true)
     await flush()
-    expect(wrapper.text()).toContain('有未保存的修改')
+    expect(saveBarOf(wrapper).textContent).toContain('有 1 项未保存')
 
     const before = getRuntimeConfig.mock.calls.length
-    await click(wrapper.find('#settings-runtime').element, '取消')
+    await click(saveBarOf(wrapper), '放弃')
 
-    expect(getRuntimeConfig.mock.calls.length).toBeGreaterThan(before)
-    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(getRuntimeConfig.mock.calls.length).toBe(before)
+    expect(docSwitch!.props('value')).toBe(false)
+    expect(wrapper.text()).not.toContain('项未保存')
+    expect(wrapper.element.querySelector('.mh-savebar')).toBeNull()
   })
 
   it('加载失败渲染 ErrorBlock，重试重新取数', async () => {
@@ -649,18 +661,19 @@ describe('SettingsPage · WorkBuddy 邀请绑定', () => {
       .find((item) => (item.attributes('placeholder') || '').includes('邀请码'))
     expect(input, '邀请码输入框').toBeTruthy()
 
-    const saveButton = (): HTMLButtonElement =>
-      buttonByText(invite.element, '保存') as HTMLButtonElement
-    expect(saveButton().disabled).toBe(true)
+    // 邀请码也走底部保存条：卡片里不再有单独的「保存」
+    const hasSaveBar = (): boolean => Boolean(wrapper.element.querySelector('.mh-savebar'))
+    expect(buttonByText(invite.element, '保存')).toBeNull()
+    expect(hasSaveBar()).toBe(false)
 
     await input!.setValue(' ABC123 ')
     await flush()
-    expect(saveButton().disabled).toBe(true)
+    expect(hasSaveBar()).toBe(false)
 
     await input!.setValue('https://wb.example.com/invite/NEW99')
     await flush()
-    expect(saveButton().disabled).toBe(false)
-    await click(invite.element, '保存')
+    expect(hasSaveBar()).toBe(true)
+    await click(saveBarOf(wrapper), '保存')
 
     expect(saveInvitation).toHaveBeenCalledWith('https://wb.example.com/invite/NEW99')
     expect(bodyText()).toContain('邀请绑定已保存')
@@ -749,26 +762,27 @@ describe('SettingsPage · 修改登录密码', () => {
  * ------------------------------------------------------------------ */
 
 describe('SettingsPage · 逆向产物', () => {
-  it('后端整路由 404（DEV_TOOLS=0）时降级说明，不影响其它区块', async () => {
+  it('后端整路由 404（DEV_TOOLS=0，生产环境常态）时整块和目录项都隐藏，不报错、不影响其它区块', async () => {
     // 真实路径：ADMIN_DEV_TOOLS=0 → http 层抛 ApiError(404)
     getAppSourceStatus.mockRejectedValue(new ApiError(404, 'Not Found'))
     const { wrapper } = await mountPage()
 
-    const source = wrapper.find('#settings-appsource')
-    expect(source.text()).toContain('本部署未开放')
-    expect(source.text()).toContain('本部署未开放逆向产物（ADMIN_DEV_TOOLS=0 或非本机运行时）')
-    // 404 是「未开放」，不是错误态：不该出现错误块
-    expect(source.text()).not.toContain('加载逆向产物状态失败')
+    expect(wrapper.find('#settings-appsource').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('加载逆向产物状态失败')
+    expect(bodyText()).not.toContain('加载逆向产物状态失败')
+    // 目录里也不留「逆向产物」
+    const navText = wrapper.find('.settings-nav').text()
+    expect(navText).toContain('运行配置')
+    expect(navText).not.toContain('逆向产物')
     expect(wrapper.find('#settings-invitation').text()).toContain('已启用')
   })
 
-  it('非 ApiError 的 404 文案（代理层改写）同样按「未开放」降级', async () => {
+  it('非 ApiError 的 404 文案（代理层改写）同样按「未开放」隐藏', async () => {
     getAppSourceStatus.mockRejectedValue(new Error('404 Not Found'))
     const { wrapper } = await mountPage()
 
-    const source = wrapper.find('#settings-appsource')
-    expect(source.text()).toContain('本部署未开放逆向产物')
-    expect(source.text()).not.toContain('加载逆向产物状态失败')
+    expect(wrapper.find('#settings-appsource').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('加载逆向产物状态失败')
   })
 
   it('状态接口 500 不降级：显示错误 + 重试，重试成功后回到正常渲染', async () => {
@@ -803,15 +817,13 @@ describe('SettingsPage · 逆向产物', () => {
     expect(wrapper.find('#settings-proxies').text()).toContain('共 2 个节点')
   })
 
-  it('状态接口回报 dev_tools=false 时同样降级（防御性口径）', async () => {
+  it('状态接口回报 dev_tools=false 时同样隐藏（防御性口径）', async () => {
     getAppSourceStatus.mockResolvedValue(sourceStatus({ dev_tools: false }))
     const { wrapper } = await mountPage()
 
-    const source = wrapper.find('#settings-appsource')
-    expect(source.text()).toContain('本部署未开放逆向产物')
-    // 降级时不再渲染状态行（卡片说明里本来就有 app.asar 字样，只断言真实路径）
-    expect(source.text()).not.toContain('D:\\WorkBuddy\\resources\\app.asar')
-    expect(source.text()).not.toContain('加载逆向产物状态失败')
+    expect(wrapper.find('#settings-appsource').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('D:\\WorkBuddy\\resources\\app.asar')
+    expect(wrapper.text()).not.toContain('加载逆向产物状态失败')
   })
 
   it('路径校验保存 / 输出目录校验 / 检索命中与产物未产出', async () => {

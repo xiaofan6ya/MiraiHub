@@ -4,9 +4,12 @@ import {
   claimableCodes,
   filterGrowthCards,
   growthStats,
+  isOutageError,
   levelTone,
   pageGrowthCards,
+  pendingTaskIds,
   progressOf,
+  sortGrowthCards,
   sortTasks,
   summarizeClaim,
   taskStatusOf,
@@ -16,6 +19,7 @@ import {
   type GrowthCenterAccount,
   type GrowthTask,
 } from '@/api/growth'
+import { ApiError } from '@/api/http'
 
 /**
  * 契约 docs/ui-v2/contracts/growth.md 的数据转换。
@@ -84,7 +88,8 @@ function tasksPayload(overrides: Partial<GrowthAccountTasksPayload> = {}): Growt
 describe('任务状态 / 分级口径', () => {
   it('accept_status → 文案与语气（上游原值）', () => {
     expect(taskStatusOf({ task_code: 'a', accept_status: 'completed' })).toEqual({ label: '可领取', tone: 'warn' })
-    expect(taskStatusOf({ task_code: 'a', accept_status: 'claimed' })).toEqual({ label: '已领取', tone: 'ok' })
+    // 已领取是常态：灰色（只有可领取 / 进行中用彩色）
+    expect(taskStatusOf({ task_code: 'a', accept_status: 'claimed' })).toEqual({ label: '已领取', tone: 'neutral' })
     expect(taskStatusOf({ task_code: 'a', accept_status: 'not_accepted' })).toEqual({ label: '未参与', tone: 'neutral' })
     expect(taskStatusOf({ task_code: 'a', accept_status: 'accepted' })).toEqual({ label: '进行中', tone: 'brand' })
     expect(taskStatusOf({ task_code: 'a', accept_status: 'weird' }).label).toBe('进行中')
@@ -205,7 +210,9 @@ describe('growthStats：统计条', () => {
     expect(stats.map((item) => item.label)).toEqual(['账号', '任务总数', '已完成', '可领奖励', '可领积分', '能量合计'])
     expect(stats[0]).toMatchObject({ value: '3', foot: '已排除 2 个企业版账号' })
     expect(stats[1].value).toBe('4')
-    expect(stats[2]).toMatchObject({ value: '1', tone: 'ok' })
+    // 「已完成」不是状态，不着色（第 1 轮审查 P1-2：状态色只表达状态）
+    expect(stats[2].value).toBe('1')
+    expect(stats[2].tone).toBeUndefined()
     expect(stats[3]).toMatchObject({ value: '1', tone: 'warn' })
     expect(stats[4]).toMatchObject({ value: '50', tone: 'warn' })
     expect(stats[5].value).toBe('330')
@@ -262,3 +269,46 @@ describe('成长中心动作表（growth_center.js 的全部动作）', () => {
     ])
   })
 })
+
+describe('按需拉取（第 3 轮审查 B1 / B2）：只拉当前页、只拉 active 账号', () => {
+  it('已禁用账号永远不请求；已加载 / 加载中 / 已失败的默认跳过', () => {
+    const cards = toGrowthCards(ACCOUNTS, { 12: tasksPayload() }, { loading: {}, errors: {} })
+    // 12 已加载、13 未加载、14 已禁用
+    expect(pendingTaskIds(cards)).toEqual([13])
+    const withState = toGrowthCards(ACCOUNTS, {}, { loading: { 12: true }, errors: { 13: '加载任务清单失败：HTTP 502' } })
+    expect(pendingTaskIds(withState)).toEqual([])
+  })
+
+  it('force=true：已加载与已失败的也重拉，但正在加载的不重复发', () => {
+    const cards = toGrowthCards(ACCOUNTS, { 12: tasksPayload() }, { loading: {}, errors: { 13: 'x' } })
+    expect(pendingTaskIds(cards, true)).toEqual([12, 13])
+    const busy = toGrowthCards(ACCOUNTS, {}, { loading: { 12: true } })
+    expect(pendingTaskIds(busy, true)).toEqual([13])
+  })
+
+  it('toGrowthCards 标出 loaded', () => {
+    const cards = toGrowthCards(ACCOUNTS, { 12: tasksPayload() })
+    expect(cards.map((card) => card.loaded)).toEqual([true, false, false])
+  })
+
+  it('排序：可操作账号在前，已禁用沉底，同组保持后端顺序', () => {
+    const accounts: GrowthCenterAccount[] = [
+      { id: 1, name: 'a', status: 'disabled' },
+      { id: 2, name: 'b', status: 'active' },
+      { id: 3, name: 'c', status: 'disabled' },
+      { id: 4, name: 'd', status: 'active' },
+    ]
+    expect(sortGrowthCards(toGrowthCards(accounts, {})).map((card) => card.account.id)).toEqual([2, 4, 1, 3])
+  })
+
+  it('熔断只统计「整体不可用」的失败：4xx（凭证缺失）不算，5xx / 408 / 429 / 网络错误算', () => {
+    expect(isOutageError(new ApiError(502, '上游超时'))).toBe(true)
+    expect(isOutageError(new ApiError(503, 'x'))).toBe(true)
+    expect(isOutageError(new ApiError(429, 'x'))).toBe(true)
+    expect(isOutageError(new ApiError(408, 'x'))).toBe(true)
+    expect(isOutageError(new ApiError(409, '账号凭证缺少 auth'))).toBe(false)
+    expect(isOutageError(new ApiError(422, 'x'))).toBe(false)
+    expect(isOutageError(new TypeError('Failed to fetch'))).toBe(true)
+  })
+})
+

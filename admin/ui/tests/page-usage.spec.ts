@@ -25,6 +25,13 @@ import {
   type UsagePayload,
 } from '@/api/usage'
 
+/** 后端 UTC 小时桶 → 本地时区 MM-DD HH:mm（与 chartBucketLabel 同口径，和机器时区无关）。 */
+function localMDHM(utcBucket: string): string {
+  const date = new Date(utcBucket.replace(' ', 'T') + 'Z')
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes())
+}
+
 /**
  * 契约 docs/ui-v2/contracts/usage.md §二/§三/§四 的数据转换。
  * 测试数据按后端真实响应形状造（GET /api/stats/usage → stats.py:usage_stats / _usage_aggregates）。
@@ -278,21 +285,34 @@ describe('统计条 toStatItems', () => {
 })
 
 describe('趋势 option', () => {
-  it('输入/输出两条堆叠面积，x 轴裁成 MM-DD HH:00', () => {
+  it('输入/输出两条线不堆叠，x 轴裁成 MM-DD HH:00；量级接近时共用一根轴', () => {
     const option = toTrendOption(samplePayload().trend, 'hour') as {
       xAxis: { data: string[] }
-      series: Array<{ name: string; stack?: string; data: number[] }>
+      yAxis: unknown
+      series: Array<{ name: string; stack?: string; yAxisIndex?: number; data: number[] }>
     }
-    expect(option.xAxis.data).toEqual(['11-23 10:00', '11-23 11:00'])
+    expect(option.xAxis.data).toEqual([localMDHM('2026-11-23 10:00'), localMDHM('2026-11-23 11:00')])
     expect(option.series.map((item) => item.name)).toEqual(['输入', '输出'])
-    expect(option.series.every((item) => item.stack === 'tokens')).toBe(true)
+    // 第 2 轮审查 P0-13：堆叠会让最上面那条线的高度 = 输入 + 输出，颜色与图例对不上
+    expect(option.series.every((item) => item.stack === undefined)).toBe(true)
     expect(option.series[0].data).toEqual([1000, 2000])
     expect(option.series[1].data).toEqual([300, 600])
+    expect(Array.isArray(option.yAxis)).toBe(false)
+    expect(option.series[1].yAxisIndex).toBe(0)
+  })
+
+  it('输入是输出 8 倍以上时输出走右轴', () => {
+    const option = toTrendOption(
+      [{ bucket: '2026-11-23 10:00', prompt_tokens: 100000, completion_tokens: 100, cached_tokens: 0, credits: 0, requests: 1 }],
+      'hour',
+    ) as { yAxis: unknown[]; series: Array<{ yAxisIndex?: number }> }
+    expect(option.yAxis).toHaveLength(2)
+    expect(option.series[1].yAxisIndex).toBe(1)
   })
 
   it('按天只保留 MM-DD', () => {
     expect(chartBucketLabel('2026-11-23', 'day')).toBe('11-23')
-    expect(chartBucketLabel('2026-11-23 10:00', 'hour')).toBe('11-23 10:00')
+    expect(chartBucketLabel('2026-11-23 10:00', 'hour')).toBe(localMDHM('2026-11-23 10:00'))
     expect(chartBucketLabel('刚刚', 'hour')).toBe('刚刚')
     const empty = toTrendOption(null, 'hour') as { series: Array<{ data: number[] }> }
     expect(empty.series.map((item) => item.data)).toEqual([[], []])

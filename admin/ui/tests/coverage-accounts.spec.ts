@@ -91,7 +91,12 @@ describe('AccountsPage 覆盖率补测', () => {
     await new Promise((resolve) => setTimeout(resolve, 400))
     await flush()
     expect(router.currentRoute.value.query.q).toBe('主号')
-    expect(wrapper.text()).toContain('搜索')
+    // 工具栏搜索框只有 placeholder（无可见「搜索」文案）；用筛选结果与「重置」按钮证明筛选已生效，
+    // NDataTable 在 jsdom 不渲染虚拟行，所以看工具栏统计（共 N 个账号）而不是行文本。
+    const text = wrapper.text()
+    expect(text).toContain('共 1 个账号')
+    expect(text).not.toContain('共 2 个账号')
+    expect(wrapper.findAll('button').some((btn) => btn.text().includes('重置'))).toBe(true)
   })
 
   it('列表失败渲染错误态并可重试', async () => {

@@ -17,7 +17,15 @@ withDefaults(defineProps<{ items: KvItem[]; labelWidth?: string }>(), {
       class="mh-kv__row"
       :class="{ 'mh-kv__row--block': item.block }"
     >
-      <dt class="mh-kv__label" :style="{ width: labelWidth, flexBasis: labelWidth }">
+      <!--
+        block 行是 flex-direction: column，flex-basis 会变成**高度**（第 2 轮审查 P0-12：
+        值被挤到 120px 以下）。所以 block 行不写宽度 / flex-basis，标签自然占一行。
+        宽度经 CSS 变量传给样式表（不再写内联 width），手机端可以直接覆盖，不需要 !important。
+      -->
+      <dt
+        class="mh-kv__label"
+        :style="item.block ? undefined : { '--kv-label-w': labelWidth }"
+      >
         {{ item.label }}
       </dt>
       <dd class="mh-kv__value" :class="{ mono: item.mono && !item.slot }">
@@ -54,6 +62,8 @@ withDefaults(defineProps<{ items: KvItem[]; labelWidth?: string }>(), {
   font-size: var(--fs-small);
   line-height: var(--lh-small);
   flex: none;
+  width: var(--kv-label-w, auto);
+  flex-basis: var(--kv-label-w, auto);
 }
 
 .mh-kv__value {
@@ -76,8 +86,8 @@ withDefaults(defineProps<{ items: KvItem[]; labelWidth?: string }>(), {
   }
 
   .mh-kv__label {
-    width: auto !important;
-    flex-basis: auto !important;
+    width: auto;
+    flex-basis: auto;
   }
 }
 </style>

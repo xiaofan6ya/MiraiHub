@@ -17,9 +17,10 @@
  * 三条口径：
  *   1. 平台能力不硬编码：页面用 platformStore.supports('growth')（PLATFORM_ONLY_TABS）；
  *   2. 任务「可做 / 可领」只看后端字段：actionable / accept_status / summary.claimable；
- *   3. 任务清单接口慢：逐账号并发拉取（页面限流 2），失败的卡单独报错，不影响其它卡。
+ *   3. 任务清单接口慢且每次都会打上游：**只拉当前页可见、状态为 active 的账号**（页面限流 2），
+ *      已禁用账号一律不发请求；失败的行单独报错，不影响其它行（第 3 轮审查 B1 / B2）。
  */
-import { http } from './http'
+import { ApiError, http } from './http'
 import { fmtCredit, fmtInt } from '@/utils/format'
 
 /* -------------------------------------------------------------------------- */
@@ -247,7 +248,8 @@ export interface GrowthTaskStatus {
 export function taskStatusOf(task: GrowthTask | null | undefined): GrowthTaskStatus {
   const status = String(task?.accept_status || '').toLowerCase()
   if (status === 'completed') return { label: '可领取', tone: 'warn' }
-  if (status === 'claimed') return { label: '已领取', tone: 'ok' }
+  // 已领取是常态：灰色，只有「可领取 / 进行中」才用彩色（第 2 轮审查 P2 成长计划）。
+  if (status === 'claimed') return { label: '已领取', tone: 'neutral' }
   if (status === 'not_accepted') return { label: '未参与', tone: 'neutral' }
   if (status === 'accepted') return { label: '进行中', tone: 'brand' }
   if (String(task?.level || '') === 'skip') return { label: '已跳过', tone: 'neutral' }
@@ -309,6 +311,8 @@ export interface GrowthCard {
   claimableCredit: number
   canRun: boolean
   disabled: boolean
+  /** 任务清单已经拿到（payload 存在）。 */
+  loaded: boolean
   loading: boolean
   error: string
 }
@@ -340,13 +344,59 @@ export function toGrowthCards(
       claimableCredit: Number(summary.claimable_credit) || 0,
       canRun: !disabled && tasks.some((task) => task.actionable && String(task.accept_status || '') !== 'claimed'),
       disabled,
+      loaded: Boolean(payload),
       loading: Boolean(loading[account.id]) && !payload,
       error: String(errors[account.id] || ''),
     }
   })
 }
 
-export type GrowthStateFilter = 'all' | 'claimable' | 'runnable' | 'disabled'
+/**
+ * 行排序：可操作（active）的账号在前，已禁用的沉到后面；同组保持后端顺序。
+ * 这样默认第一页就是能操作的账号，不会被几十个灰掉的禁用号占满（第 2 轮审查 P2）。
+ */
+export function sortGrowthCards(cards: GrowthCard[]): GrowthCard[] {
+  return cards
+    .map((card, index) => ({ card, index }))
+    .sort((a, b) => Number(a.card.disabled) - Number(b.card.disabled) || a.index - b.index)
+    .map((entry) => entry.card)
+}
+
+/**
+ * 当前页需要拉任务清单的账号 id（第 3 轮审查 B1/B2）。
+ *
+ *   · 只看传进来的这些行（页面传当前页），不再给全部 194 个账号排队；
+ *   · 已禁用账号永远不请求（凭证多半已失效，打上游只会 502 还带风控风险）；
+ *   · 默认跳过已加载 / 正在加载 / 已失败的行（失败的行由行内「重试」单独重拉）；
+ *     force=true（做任务 / 领奖之后）时已加载与已失败的也重拉，但仍跳过正在加载的。
+ */
+export function pendingTaskIds(cards: GrowthCard[], force = false): number[] {
+  return cards
+    .filter((card) => !card.disabled && !card.loading && (force || (!card.loaded && !card.error)))
+    .map((card) => card.account.id)
+}
+
+/**
+ * 这次失败算不算「上游 / 网关整体不可用」的信号（用于连续失败熔断）。
+ *
+ * 4xx（凭证缺失 409 / 422、账号不存在 404 …）说明后端是通的、只是这个账号有问题 ——
+ * 不计入熔断，否则 8 个凭证失效的账号就能把整页停掉。408 / 429 与 5xx、网络错误才算。
+ */
+export function isOutageError(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    const status = Number(error.status) || 0
+    if (status === 408 || status === 429) return true
+    if (status >= 400 && status < 500) return false
+    return true
+  }
+  return true
+}
+
+/**
+ * 状态筛选。`active`（可操作）是页面默认值：已禁用账号既不请求任务清单、也没有可点的按钮，
+ * 默认就把它们收起来（第 2 轮审查 P2「默认筛可操作的账号」）；`all` 与空串都表示全部。
+ */
+export type GrowthStateFilter = 'all' | 'active' | 'claimable' | 'runnable' | 'disabled'
 
 /** 搜索 + 状态筛选（账号名 / 状态）。 */
 export function filterGrowthCards(
@@ -356,6 +406,7 @@ export function filterGrowthCards(
   const keyword = String(options.q || '').trim().toLowerCase()
   const state = (options.state || 'all') as GrowthStateFilter
   return cards.filter((card) => {
+    if (state === 'active' && card.disabled) return false
     if (state === 'claimable' && card.claimable <= 0) return false
     if (state === 'runnable' && !card.canRun) return false
     if (state === 'disabled' && !card.disabled) return false
@@ -386,11 +437,88 @@ export function growthStats(cards: GrowthCard[], excludedEnterprise = 0): Growth
       foot: excludedEnterprise > 0 ? '已排除 ' + excludedEnterprise + ' 个企业版账号' : '成长任务账号',
     },
     { label: '任务总数', value: fmtInt(total) },
-    { label: '已完成', value: fmtInt(done), tone: 'ok' },
+    // 「已完成」不是状态，不着色（第 1 轮审查 P1-2：状态色只表达状态）。
+    { label: '已完成', value: fmtInt(done) },
     { label: '可领奖励', value: fmtInt(claimable), tone: claimable > 0 ? 'warn' : 'default' },
     { label: '可领积分', value: fmtCredit(credit), tone: credit > 0 ? 'warn' : 'default' },
     { label: '能量合计', value: fmtInt(energy) },
   ]
+}
+
+/** KPI 行的原始数值（文案由页面按 i18n key 取；这里只算数）。 */
+export interface GrowthKpis {
+  /** 全部成长账号（WorkBuddy，后端已排除企业版）。 */
+  accounts: number
+  /** 其中可操作（status=active）的账号。 */
+  active: number
+  /** 可操作账号里已经拿到任务清单的数量。 */
+  loadedActive: number
+  tasksTotal: number
+  tasksDone: number
+  claimable: number
+  claimableCredit: number
+  /** 能量合计；没有任何账号带能量快照时为 null（显示 —，不显示 0）。 */
+  energy: number | null
+  /** 任务类数字是否只覆盖了部分账号（只拉了当前页）。 */
+  partial: boolean
+}
+
+/**
+ * KPI 行：任务类数字只来自已加载的账号，`partial` 为真时页面要写明口径
+ * （第 2 轮审查 P0-17：边加载边跳的数字会被误读成总数）。
+ */
+export function growthKpis(cards: GrowthCard[]): GrowthKpis {
+  let active = 0
+  let loadedActive = 0
+  let tasksTotal = 0
+  let tasksDone = 0
+  let claimable = 0
+  let claimableCredit = 0
+  let energy = 0
+  let energyKnown = false
+  for (const card of cards) {
+    if (!card.disabled) {
+      active += 1
+      if (card.loaded) loadedActive += 1
+    }
+    tasksTotal += Number(card.summary.total || 0)
+    tasksDone += Number(card.summary.done || 0)
+    claimable += Number(card.claimable || 0)
+    claimableCredit += Number(card.claimableCredit || 0)
+    const value = card.account.energy
+    if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+      energy += Number(value)
+      energyKnown = true
+    }
+  }
+  return {
+    accounts: cards.length,
+    active,
+    loadedActive,
+    tasksTotal,
+    tasksDone,
+    claimable,
+    claimableCredit,
+    energy: energyKnown ? energy : null,
+    partial: loadedActive < active,
+  }
+}
+
+/**
+ * 任务清单请求失败 → 行内文案的分类。
+ *   · 409 / 422：后端说「凭证缺失 / 账号状态不允许」，不是网络问题，行内写「凭证缺失」；
+ *   · 400：非 WorkBuddy 账号（数据隔离 D2 之后后端直接拒绝）；
+ *   · 其它：保持原来的「加载任务清单失败：原因」。
+ */
+export type TaskErrorKind = 'credential' | 'unsupported' | 'other'
+
+export function taskErrorKind(error: unknown): TaskErrorKind {
+  if (error instanceof ApiError) {
+    const status = Number(error.status) || 0
+    if (status === 409 || status === 422) return 'credential'
+    if (status === 400) return 'unsupported'
+  }
+  return 'other'
 }
 
 export interface ClaimSummary {

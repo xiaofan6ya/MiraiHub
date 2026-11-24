@@ -124,6 +124,23 @@ describe('toChannelViews：GET channels[] → 渠道列表', () => {
   })
 })
 
+describe('r3：target_masked 只用于展示', () => {
+  it('有 target_masked 时 targetMasked 用它，target 仍是原值（编辑 / 保存用）', () => {
+    const payload = samplePayload()
+    payload.channels[0].target_masked = 'https://open.feishu.cn/open-apis/bot/v2/hook/ab***23'
+    const [row] = toChannelViews(payload)
+    expect(row.targetMasked).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/ab***23')
+    expect(row.target).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/abc123')
+    const body = buildAlertConfigBody(alertFormFromPayload(payload))
+    expect(body.channels?.[0]?.target).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/abc123')
+  })
+
+  it('老后端没有 target_masked：退回 target', () => {
+    const [row] = toChannelViews(samplePayload())
+    expect(row.targetMasked).toBe(row.target)
+  })
+})
+
 describe('alertFormFromPayload：GET → 表单初值（密码不回显）', () => {
   it('掩码字段不落到输入框，只保留 has_* 供 placeholder 使用', () => {
     const payload = samplePayload()
@@ -195,11 +212,11 @@ describe('buildAlertConfigBody：表单 → PUT 全量请求体', () => {
   it('停用渠道与「默认收件邮箱」派生渠道都不写回；空 target 跳过；重复去除', () => {
     const form = sampleForm()
     form.channels = [
-      { key: channelKey('feishu', 'https://a'), type: 'feishu', label: '飞书', target: 'https://a', enabled: true, auto: false },
-      { key: channelKey('feishu', 'https://a'), type: 'feishu', label: '飞书', target: 'https://a', enabled: true, auto: false },
-      { key: channelKey('qqbot', 'https://b'), type: 'qqbot', label: 'QQ', target: 'https://b', enabled: false, auto: false },
-      { key: channelKey('email', 'me@qq.com'), type: 'email', label: '邮件', target: 'me@qq.com', enabled: true, auto: true },
-      { key: channelKey('email', ''), type: 'email', label: '邮件', target: '  ', enabled: true, auto: false },
+      { key: channelKey('feishu', 'https://a'), type: 'feishu', label: '飞书', target: 'https://a', targetMasked: 'https://a', enabled: true, auto: false },
+      { key: channelKey('feishu', 'https://a'), type: 'feishu', label: '飞书', target: 'https://a', targetMasked: 'https://a', enabled: true, auto: false },
+      { key: channelKey('qqbot', 'https://b'), type: 'qqbot', label: 'QQ', target: 'https://b', targetMasked: 'https://b', enabled: false, auto: false },
+      { key: channelKey('email', 'me@qq.com'), type: 'email', label: '邮件', target: 'me@qq.com', targetMasked: 'me@qq.com', enabled: true, auto: true },
+      { key: channelKey('email', ''), type: 'email', label: '邮件', target: '  ', targetMasked: '  ', enabled: true, auto: false },
     ]
     expect(buildAlertConfigBody(form).channels).toEqual([{ type: 'feishu', target: 'https://a' }])
   })

@@ -11,18 +11,14 @@
  */
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import {
-  ApiError,
-  CSRF_COOKIE_NAME,
-  CSRF_HEADER_NAME,
-  filenameFromContentDisposition,
-  http,
-  messageFromPayload,
-  readCookie,
-  resolveUrl,
-  type DownloadResult,
-} from './http'
+import { fetchBlob, http, type DownloadResult } from './http'
+import { EXPORT_CONFIRM_HEADER, EXPORT_CONFIRM_VALUE, isExportConfirmRequired } from './platforms-admin'
 import { FMT_EMPTY, fmtTime } from '@/utils/format'
+import { t, type MessageKey } from '@/i18n'
+
+function tx(key: string, params?: Record<string, string | number>): string {
+  return t(key as MessageKey, params)
+}
 
 /* ------------------------------------------------------------------ *
  * 类型（字段名与后端保持一致，snake_case 原样保留）
@@ -166,10 +162,8 @@ export function restartService(): Promise<{ ok: boolean; message: string }> {
  * 备份下载：POST + blob
  * ------------------------------------------------------------------ *
  * http.download() 只会发 GET，而 /api/maintenance/backup 只接受 POST
- * （maintenance.py:backup 用 FileResponse 回二进制）。api/http.ts 不在本任务改动
- * 范围内，所以在这里补一个 POST 版下载助手：复用 http.ts 的
- * resolveUrl / readCookie / CSRF 常量 / 文件名解析 / 错误文案，
- * 页面仍然不直接 fetch（05-patterns §1）。
+ * （maintenance.py:backup 用 FileResponse 回二进制）。改用 http.ts 的 fetchBlob()，
+ * 本文件不再直接 fetch（review_notes 待优化清单第 6 条）。
  */
 
 /** 一次备份的结果：blob 留在内存里供列表里的「下载」再存一次。 */
@@ -183,34 +177,9 @@ export interface BackupRecord extends BackupFile {
   id: string
 }
 
-async function postBlob(path: string): Promise<{ blob: Blob; filename: string }> {
-  const headers = new Headers({ Accept: 'application/octet-stream' })
-  const token = readCookie(CSRF_COOKIE_NAME)
-  if (token) headers.set(CSRF_HEADER_NAME, token)
-  const response = await fetch(resolveUrl(path), {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers,
-  })
-  if (!response.ok) {
-    let text = ''
-    try {
-      text = await response.text()
-    } catch {
-      text = ''
-    }
-    let payload: Record<string, unknown> | string | null = null
-    if (text.trim()) {
-      try {
-        payload = JSON.parse(text) as Record<string, unknown>
-      } catch {
-        payload = text
-      }
-    }
-    throw new ApiError(response.status, messageFromPayload(response.status, payload), payload ?? text)
-  }
-  const blob = await response.blob()
-  return { blob, filename: filenameFromContentDisposition(response.headers.get('content-disposition')) }
+async function postBlob(path: string, extraHeaders: Record<string, string> = {}): Promise<{ blob: Blob; filename: string }> {
+  // 走 http.ts：CSRF / X-Platform / 错误文案 / 401 跳登录与其他接口完全一致。
+  return fetchBlob('POST', path, { headers: { Accept: 'application/octet-stream', ...extraHeaders } })
 }
 
 /** 后端备份文件名的口径（UTC，workbuddy-backup-YYYYmmdd-HHMMSS.db）。 */
@@ -243,12 +212,46 @@ export function saveBlob(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(href), 0)
 }
 
-/** 立即备份：POST /api/maintenance/backup → 二进制 → 触发下载。 */
-export async function downloadBackup(filename?: string): Promise<BackupFile> {
-  const { blob, filename: fromHeader } = await postBlob('/api/maintenance/backup')
+/**
+ * 立即备份：POST /api/maintenance/backup → 二进制 → 触发下载。
+ *
+ * 第 5 轮：整库备份含全部凭证 / API Key，后端（r5_be）接入 export_guard 后，没带
+ * `X-Export-Confirm: include-secrets` 会回 428 `export_confirm_required`。
+ * `confirmed=true` 时带上确认头；老后端忽略这个头，行为不变（新老后端都兼容）。
+ */
+export async function downloadBackup(filename?: string, confirmed = false): Promise<BackupFile> {
+  const { blob, filename: fromHeader } = await postBlob(
+    '/api/maintenance/backup',
+    confirmed ? { [EXPORT_CONFIRM_HEADER]: EXPORT_CONFIRM_VALUE } : {},
+  )
   const name = filename || fromHeader || backupFilename()
   saveBlob(blob, name)
   return { blob, filename: name, size: blob.size, createdAt: new Date().toISOString() }
+}
+
+/** 后端要求先确认才肯给整库备份（428 + export_confirm_required）。 */
+export const isBackupConfirmRequired = isExportConfirmRequired
+
+/**
+ * 带确认的整库备份流程（维护页「立即备份」用，单测覆盖）：
+ *   1. 先 `ask()` 弹危险确认（说明含全部凭证）；取消 → 返回 null，不发请求；
+ *   2. 确认后带确认头请求；
+ *   3. 仍收到 428（例如代理剥掉了自定义头、或后端口径变化）→ 再 `ask()` 一次，确认后重发**一次**；
+ *      第二次再 428 就把错误抛给调用方，不无限循环。
+ * 其它错误原样抛出。
+ */
+export async function backupWithConfirm(
+  ask: (retry: boolean) => Promise<boolean>,
+  filename?: string,
+): Promise<BackupFile | null> {
+  if (!(await ask(false))) return null
+  try {
+    return await downloadBackup(filename, true)
+  } catch (caught) {
+    if (!isBackupConfirmRequired(caught)) throw caught
+    if (!(await ask(true))) return null
+    return downloadBackup(filename, true)
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -258,10 +261,10 @@ export async function downloadBackup(filename?: string): Promise<BackupFile> {
 export type DeployMethod = 'docker' | 'source' | 'exe' | 'apk'
 
 export const DEPLOY_LABELS: Record<DeployMethod, string> = {
-  docker: 'Docker 容器',
-  source: '源码部署',
-  exe: 'EXE 桌面版',
-  apk: 'APK 安卓版',
+  get docker() { return tx('page.maintenance.deploy.docker') },
+  get source() { return tx('page.maintenance.deploy.source') },
+  get exe() { return tx('page.maintenance.deploy.exe') },
+  get apk() { return tx('page.maintenance.deploy.apk') },
 }
 
 export const DEPLOY_METHODS: DeployMethod[] = ['docker', 'source', 'exe', 'apk']
@@ -296,20 +299,20 @@ export function detectDeployMethod(input: DeployDetectInput = {}): DeployDetectR
     return {
       method: 'exe',
       detected: true,
-      hint: '检测到桌面客户端外壳（EXE）：可以直接下载、校验并安装更新。',
+      hint: tx('page.maintenance.detect.exe'),
     }
   }
   if (input.mobile) {
     return {
       method: 'apk',
       detected: true,
-      hint: '检测到安卓外壳（APK）：只能下载安装包，安装由系统确认。',
+      hint: tx('page.maintenance.detect.apk'),
     }
   }
   return {
     method: 'docker',
     detected: false,
-    hint: '浏览器里无法自动区分容器与源码部署，请按实际部署方式选择对应命令。',
+    hint: tx('page.maintenance.detect.browser'),
   }
 }
 
@@ -339,7 +342,12 @@ export type CommandTab = 'docker' | 'linux'
 /** 后端 commands 的两个键：docker（容器）与 linux（源码）。 */
 export const COMMAND_TABS: Array<{ value: CommandTab; label: string }> = [
   { value: 'docker', label: 'Docker Compose' },
-  { value: 'linux', label: 'Linux 源码' },
+  {
+    value: 'linux',
+    get label() {
+      return tx('page.maintenance.tab.linux')
+    },
+  },
 ]
 
 /** 该份 update 里实际有哪些命令页签。 */
@@ -418,20 +426,20 @@ export function combineUpdateState(
   const notesHtml = latest ? renderReleaseNotes(latest.body) : ''
 
   let statusTone: UpdateStatusTone = 'neutral'
-  let statusText = '暂无新版本'
+  let statusText = tx('page.maintenance.status.none')
   if (!latestTag) {
     statusTone = 'warn'
-    statusText = '版本检查未完成'
+    statusText = tx('page.maintenance.status.unchecked')
   } else if (available) {
     statusTone = 'brand'
-    statusText = '有新版本可升级'
+    statusText = tx('page.maintenance.status.available')
   }
 
   const notesEmptyText = latest
     ? ''
     : warning
-      ? '当前部署没有提供发布说明：' + warning
-      : '该部署没有提供发布说明，可在 Releases 查看。'
+      ? tx('page.maintenance.notes.missingWithReason', { reason: warning })
+      : tx('page.maintenance.notes.missing')
 
   const platform = String(releases?.platform || '')
   return {
@@ -446,7 +454,7 @@ export function combineUpdateState(
     notesEmptyText,
     // 只认安装包地址：下载按钮写的是「下载最新版 EXE/APK」，退化到 Releases 首页会误导。
     downloadUrl: String(latest?.asset?.browser_download_url || ''),
-    downloadLabel: platform === 'android' ? '下载最新版 APK' : '下载最新版 EXE',
+    downloadLabel: platform === 'android' ? tx('page.maintenance.download.apk') : tx('page.maintenance.download.exe'),
     installable: Boolean(latest?.installable),
     releaseId: latest && Number.isFinite(Number(latest.id)) ? Number(latest.id) : null,
     releasesUrl: String(update?.releases_url || releases?.releases_url || ''),

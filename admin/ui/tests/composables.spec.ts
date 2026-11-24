@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, effectScope, nextTick } from 'vue'
+import { createApp, defineComponent, effectScope, nextTick, watch } from 'vue'
 import { flushPromises } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { copyText, fallbackCopy, useCopy } from '@/composables/useCopy'
@@ -180,6 +180,140 @@ describe('useTableQuery（分页/排序/筛选 ↔ 路由 query）', () => {
 
     expect(api.state.filters.platform).toBe('trae')
     expect(api.state.page).toBe(4)
+    app.unmount()
+  })
+})
+
+describe('useTableQuery × KeepAlive（第 5 轮 P1：只在本页路由读写 query）', () => {
+  async function mountOnLogs(initial: string) {
+    const Blank = defineComponent({ render: () => null })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/logs', name: 'logs', component: Blank },
+        { path: '/stats', name: 'stats', component: Blank },
+      ],
+    })
+    await router.push(initial)
+    await router.isReady()
+
+    let api: ReturnType<typeof useTableQuery> | null = null
+    const changes = vi.fn()
+    const app = createApp(
+      defineComponent({
+        setup() {
+          api = useTableQuery('logs', { filters: { platform: '', q: '' } })
+          // 模拟页面：筛选一变就重拉
+          watch(() => api!.query.value, changes, { deep: true })
+          return () => null
+        },
+      }),
+    )
+    app.use(router)
+    app.mount(document.createElement('div'))
+    return { router, app, changes, api: api as unknown as ReturnType<typeof useTableQuery> }
+  }
+
+  async function settle() {
+    await nextTick()
+    await flushPromises()
+  }
+
+  it('缓存期间不读入其它页面的同名参数，也不触发页面重拉', async () => {
+    const { api, router, app, changes } = await mountOnLogs('/logs?platform=qoder')
+    await router.push('/stats?platform=trae&page=5&q=abc')
+    await settle()
+    expect(api.state.filters).toEqual({ platform: 'qoder', q: '' })
+    expect(api.state.page).toBe(1)
+    expect(changes).not.toHaveBeenCalled()
+    app.unmount()
+  })
+
+  it('缓存期间 setXxx 不写地址栏；侧栏回来（无本表格的键）把缓存状态写回地址栏', async () => {
+    const { api, router, app, changes } = await mountOnLogs('/logs?platform=qoder&page=3')
+    await router.push('/stats?days=7')
+    await settle()
+    api.setFilter('q', 'kw')
+    await settle()
+    expect(router.currentRoute.value.fullPath).toBe('/stats?days=7')
+
+    changes.mockClear()
+    await router.push('/logs')
+    await settle()
+    expect(router.currentRoute.value.query).toEqual({ platform: 'qoder', q: 'kw' })
+    expect(api.state.filters).toEqual({ platform: 'qoder', q: 'kw' })
+    // 状态没变 → 不重拉（回访刷新交给 useRevisit）
+    expect(changes).not.toHaveBeenCalled()
+    app.unmount()
+  })
+
+  it('深链回来（带本表格的键）按地址栏读取', async () => {
+    const { api, router, app } = await mountOnLogs('/logs?platform=qoder')
+    await router.push('/stats')
+    await settle()
+    await router.push('/logs?platform=trae&page=2')
+    await settle()
+    expect(api.state.filters.platform).toBe('trae')
+    expect(api.state.page).toBe(2)
+    app.unmount()
+  })
+
+  it('restoreOnReturn: false 时回来按地址栏重置', async () => {
+    const Blank = defineComponent({ render: () => null })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/logs', name: 'logs', component: Blank },
+        { path: '/stats', name: 'stats', component: Blank },
+      ],
+    })
+    await router.push('/logs?platform=qoder')
+    await router.isReady()
+    let api: ReturnType<typeof useTableQuery> | null = null
+    const app = createApp(
+      defineComponent({
+        setup() {
+          api = useTableQuery('logs', { filters: { platform: '' }, restoreOnReturn: false })
+          return () => null
+        },
+      }),
+    )
+    app.use(router)
+    app.mount(document.createElement('div'))
+    await router.push('/stats')
+    await settle()
+    await router.push('/logs')
+    await settle()
+    expect(api!.state.filters.platform).toBe('')
+    expect(router.currentRoute.value.query).toEqual({})
+    app.unmount()
+  })
+
+  it('同一页两个实例同一拍写入，互不覆盖', async () => {
+    const Blank = defineComponent({ render: () => null })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/ip', name: 'ip', component: Blank }],
+    })
+    await router.push('/ip')
+    await router.isReady()
+    let a: ReturnType<typeof useTableQuery> | null = null
+    let b: ReturnType<typeof useTableQuery> | null = null
+    const app = createApp(
+      defineComponent({
+        setup() {
+          a = useTableQuery('ip.a', { filters: { ip: '' } })
+          b = useTableQuery('ip.b', { filters: { device: '' } })
+          return () => null
+        },
+      }),
+    )
+    app.use(router)
+    app.mount(document.createElement('div'))
+    a!.setFilter('ip', '1.2.3.4')
+    b!.setFilter('device', 'd1')
+    await settle()
+    expect(router.currentRoute.value.query).toEqual({ ip: '1.2.3.4', device: 'd1' })
     app.unmount()
   })
 })
