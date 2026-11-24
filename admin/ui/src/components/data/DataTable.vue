@@ -850,7 +850,9 @@ defineExpose({ clearSelection, toggleDensity })
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--sp-2);
+  min-width: 0;
   min-height: var(--ctl-h);
 }
 
@@ -1033,6 +1035,7 @@ defineExpose({ clearSelection, toggleDensity })
 .mh-cards {
   display: grid;
   gap: var(--sp-2);
+  min-width: 0;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
