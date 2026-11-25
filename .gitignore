@@ -273,7 +273,9 @@ TICKET_workbuddy_logout_p0.md
 # ===== Marvis uskey 免客户端方案�?026-11-18�?====
 # 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不�?uskey�?
 # 网关只能降级随机填充，上游必�?4100404）。两�?DLL 合计�?4.6 MB�?
-!vendor/beacon/*.dll
+# 2026-11-25: vendor DLLs removed from git (4.6 MB binaries; Wine-free no longer needs them).
+# Offline signer hosts: fetch from GitHub Release into vendor/beacon/, or set
+# MARVIS_BEACON_DLL to an absolute path. Missing -> uskey falls back to local mint.
 # 签名缓存是运行时产物，每台机器不同，不入�?
 vendor/beacon/uskey_cache.json
 vendor/beacon/uskey_cache.json.bak
