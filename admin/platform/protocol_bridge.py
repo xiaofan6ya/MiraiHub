@@ -301,8 +301,44 @@ def _anthropic_image_url(source: dict) -> str | None:
     return None
 
 
-def anthropic_to_openai(body: dict) -> dict:
+#: G4：Anthropic `thinking` → OpenAI `reasoning_effort` 的通用映射开关。
+#:
+#: 默认**关**：这个桥被多个平台共用，各家上游是否认 `reasoning_effort` 没逐个
+#: 实测过（不认的会回 400）。单个平台要保留 thinking 时传 `keep_thinking=True`
+#: （Marvis 就是这样接的），不受这个开关影响。
+THINKING_EFFORT_ENV = "MIRAIHUB_BRIDGE_THINKING_EFFORT"
+
+
+def anthropic_thinking_effort(thinking) -> str | None:
+    """Anthropic `thinking` → OpenAI 档位：disabled/缺省 → None；
+    budget ≤4096 → low、≤16384 → medium、更大 → high；enabled 无预算 / adaptive → medium。"""
+    if not isinstance(thinking, dict):
+        return None
+    kind = str(thinking.get("type") or "").lower()
+    if kind not in ("enabled", "adaptive"):
+        return None
+    budget = thinking.get("budget_tokens")
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+        return "medium"
+    if budget <= 4096:
+        return "low"
+    if budget <= 16384:
+        return "medium"
+    return "high"
+
+
+def _thinking_effort_enabled() -> bool:
+    return str(os.getenv(THINKING_EFFORT_ENV) or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def anthropic_to_openai(body: dict, *, keep_thinking: bool = False) -> dict:
     """Anthropic 请求体 → OpenAI 请求体（工具双向全量映射）。
+
+    `keep_thinking=True`（G4）：assistant 历史里的 `thinking` 块拼成该条消息的
+    `reasoning_content`（DeepSeek 等思考模型的回传字段；`redacted_thinking` 是密文，
+    仍丢弃），请求级 `thinking` 映射成 `reasoning_effort`（见
+    `anthropic_thinking_effort`）。默认 False 保持各平台原行为。
 
     ## 为什么 tool_result 必须拆成独立 role=tool 消息
 
@@ -332,6 +368,7 @@ def anthropic_to_openai(body: dict) -> dict:
             images: list[dict] = []
             tool_uses: list[dict] = []
             tool_results: list[dict] = []
+            reasoning: list[str] = []
             for block in content:
                 if isinstance(block, str):
                     texts.append(block)
@@ -350,7 +387,10 @@ def anthropic_to_openai(body: dict) -> dict:
                     # assistant 发起的工具调用 → OpenAI tool_calls
                     args = block.get("input")
                     tool_uses.append({
-                        "id": str(block.get("id") or ("call_%d" % len(tool_uses))),
+                        # 兜底 id 必须在整段历史里唯一：以前每条消息都从
+                        # `call_0` 数起，不同轮次必然相撞（重复 id → 上游 400）。
+                        "id": str(block.get("id")
+                                  or ("toolu_gw_%d_%d" % (len(messages), len(tool_uses)))),
                         "type": "function",
                         "function": {
                             "name": str(block.get("name") or "unknown"),
@@ -372,7 +412,9 @@ def anthropic_to_openai(body: dict) -> dict:
                     # 工具结果里的图片（Claude Code `Read` 读图）：
                     # 提升到紧随其后的 user 消息顶层，不能丢。
                     images.extend(_tool_result_images(raw))
-                # thinking / redacted_thinking / server_tool_use 等块：
+                elif btype == "thinking" and keep_thinking:
+                    reasoning.append(str(block.get("thinking") or ""))
+                # thinking（keep_thinking=False 时）/ redacted_thinking / server_tool_use 等块：
                 # 上游不可复用，丢弃（下一轮历史里保留会破坏上游配对）。
             text = "".join(texts)
             if tool_results and role == "user":
@@ -392,11 +434,18 @@ def anthropic_to_openai(body: dict) -> dict:
                         user_msg["content"].extend(images)
                     messages.append(user_msg)
                 continue
+            keep_reasoning = keep_thinking and role == "assistant" and bool(reasoning)
             if tool_uses:
                 msg: dict = {"role": "assistant" if role != "user" else "assistant"}
                 msg["content"] = text if text.strip() else None
                 msg["tool_calls"] = tool_uses
+                if keep_reasoning:
+                    msg["reasoning_content"] = "".join(reasoning)
                 messages.append(msg)
+                continue
+            if keep_reasoning and not images:
+                messages.append({"role": "assistant", "content": text,
+                                 "reasoning_content": "".join(reasoning)})
                 continue
             if text.strip() or images:
                 if images:
@@ -424,19 +473,123 @@ def anthropic_to_openai(body: dict) -> dict:
     choice = anthropic_tool_choice_to_openai(body.get("tool_choice"))
     if choice is not None:
         out["tool_choice"] = choice
+    if keep_thinking or _thinking_effort_enabled():
+        effort = anthropic_thinking_effort(body.get("thinking"))
+        if effort:
+            out["reasoning_effort"] = effort
     return out
 
 
 # ---------------------------------------------------------------------------
 # Responses 请求 → OpenAI 请求
 # ---------------------------------------------------------------------------
+#: G3：Responses 的非 function 工具怎么处理。
+#:
+#:   · `function`（默认）：`custom`（Codex 的 freeform `apply_patch` 等）、
+#:     `local_shell` / `shell`、`apply_patch` 这几类**转成等价的 function 工具**：
+#:       - custom / apply_patch → `{name, parameters: {input: string}}`，模型把原始
+#:         文本放进 `input`；
+#:       - local_shell / shell → `shell`，参数 `{command: string[], workdir?, timeout_ms?}`
+#:         （与 Codex 的 function 版 shell 工具同一形状）。
+#:     回程是普通 `function_call`（arguments 是 JSON），Codex 的 apply_patch / shell
+#:     处理器同时接受 function 形态；历史里的 `custom_tool_call` / `local_shell_call`
+#:     （及其 `_output`）同样折叠成 tool_calls / tool 消息，工具循环不断。
+#:   · `drop`：旧行为，非 function 工具一律丢弃。
+#:
+#: web_search / file_search / computer_use / mcp / image_generation 等托管工具
+#: 上游 chat 协议无法承载，两种模式下都丢弃。
+RESPONSES_CUSTOM_TOOLS_ENV = "MIRAIHUB_RESPONSES_CUSTOM_TOOLS"
+
+_FREEFORM_TOOL_TYPES = frozenset({"custom", "apply_patch"})
+_SHELL_TOOL_TYPES = frozenset({"local_shell", "shell"})
+
+_SHELL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "command": {"type": "array", "items": {"type": "string"},
+                    "description": "The command to execute, as argv."},
+        "workdir": {"type": "string",
+                    "description": "Working directory for the command."},
+        "timeout_ms": {"type": "number",
+                       "description": "Timeout in milliseconds."},
+    },
+    "required": ["command"],
+}
+
+
+def _custom_tools_mode() -> str:
+    raw = str(os.getenv(RESPONSES_CUSTOM_TOOLS_ENV) or "function").strip().lower()
+    return "drop" if raw in ("drop", "0", "off", "false", "no") else "function"
+
+
+def _freeform_parameters(item: dict) -> dict:
+    hint = "Raw text input for this tool (do not wrap it in JSON)."
+    fmt = item.get("format")
+    if isinstance(fmt, dict) and fmt.get("type") == "grammar":
+        hint += " The text must follow the tool's %s grammar." % (
+            str(fmt.get("syntax") or "").strip() or "declared")
+    return {"type": "object",
+            "properties": {"input": {"type": "string", "description": hint}},
+            "required": ["input"]}
+
+
+def _non_function_tool_to_openai(item: dict, kind: str) -> dict | None:
+    """custom / apply_patch / local_shell / shell → 等价 function 工具（见上）。"""
+    if _custom_tools_mode() == "drop":
+        return None
+    if kind in _SHELL_TOOL_TYPES:
+        fn: dict = {"name": "shell", "parameters": _SHELL_PARAMETERS,
+                    "description": str(item.get("description") or "").strip()
+                    or "Runs a shell command and returns its output."}
+        return {"type": "function", "function": fn}
+    if kind in _FREEFORM_TOOL_TYPES:
+        name = str(item.get("name") or ("apply_patch" if kind == "apply_patch" else "")).strip()
+        if not name:
+            return None
+        fn = {"name": name, "parameters": _freeform_parameters(item)}
+        if isinstance(item.get("description"), str) and item["description"].strip():
+            fn["description"] = item["description"]
+        return {"type": "function", "function": fn}
+    return None
+
+
+def _responses_call_as_function(item: dict, kind: str) -> dict:
+    """历史里的 custom_tool_call / local_shell_call / shell_call / apply_patch_call → function_call 形状。"""
+    call_id = item.get("call_id") or item.get("id")
+    if kind in ("local_shell_call", "shell_call"):
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        args = {"command": action.get("command") or item.get("command") or []}
+        workdir = action.get("working_directory") or action.get("workdir")
+        if workdir:
+            args["workdir"] = workdir
+        if action.get("timeout_ms"):
+            args["timeout_ms"] = action["timeout_ms"]
+        name = "shell"
+    else:
+        raw = item.get("input")
+        if raw is None and item.get("operation") is not None:
+            raw = json.dumps(item.get("operation"), ensure_ascii=False)
+        args = {"input": "" if raw is None else str(raw)}
+        name = str(item.get("name") or ("apply_patch" if kind == "apply_patch_call" else "unknown"))
+    return {"type": "function_call", "call_id": call_id, "name": name,
+            "arguments": json.dumps(args, ensure_ascii=False)}
+
+
+_CALL_KINDS = frozenset({"custom_tool_call", "local_shell_call", "shell_call",
+                         "apply_patch_call"})
+_CALL_OUTPUT_KINDS = frozenset({"custom_tool_call_output", "local_shell_call_output",
+                                "shell_call_output", "apply_patch_call_output"})
+
+
 def _responses_tool_to_openai(item) -> dict | None:
-    """Responses 工具定义 → OpenAI 工具定义。非 function 类型丢弃。"""
+    """Responses 工具定义 → OpenAI 工具定义（非 function 类型见 `RESPONSES_CUSTOM_TOOLS_ENV`）。"""
     if not isinstance(item, dict):
         return None
-    if str(item.get("type") or "function") != "function":
-        # web_search / computer_use / custom 等上游 chat 协议无法承载
-        return None
+    kind = str(item.get("type") or "function")
+    if kind != "function":
+        # custom / shell / apply_patch 转成等价 function；web_search / computer_use
+        # 等托管工具上游 chat 协议无法承载，丢弃。
+        return _non_function_tool_to_openai(item, kind)
     name = str(item.get("name") or "").strip()
     if not name:
         return None
@@ -464,6 +617,7 @@ def responses_input_to_messages(items) -> list[dict]:
     工具结果 —— 两种都会让 Codex 系客户端的工具循环中断。
     """
     messages: list[dict] = []
+    fallback_seq = 0             # 没带 call_id 的调用：兜底 id 的序号（整段唯一）
     if isinstance(items, str):
         return [{"role": "user", "content": items}]
     if not isinstance(items, list):
@@ -475,6 +629,12 @@ def responses_input_to_messages(items) -> list[dict]:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("type") or "message")
+        if _custom_tools_mode() == "function":
+            if kind in _CALL_KINDS:
+                item = _responses_call_as_function(item, kind)
+                kind = "function_call"
+            elif kind in _CALL_OUTPUT_KINDS:
+                kind = "function_call_output"
         if kind == "message":
             role = str(item.get("role") or "user").lower()
             content = item.get("content")
@@ -506,19 +666,31 @@ def responses_input_to_messages(items) -> list[dict]:
                 messages.append({"role": role, "content": "".join(texts)})
             continue
         if kind == "function_call":
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": str(item.get("call_id") or item.get("id")
-                               or ("call_%d" % len(messages))),
-                    "type": "function",
-                    "function": {
-                        "name": str(item.get("name") or "unknown"),
-                        "arguments": str(item.get("arguments") or "{}"),
-                    },
-                }],
-            })
+            fallback_seq += 1
+            call = {
+                # 兜底 id 以前是 `call_%d % len(messages)`：并进同一条 assistant 的
+                # 并行调用 len 不变，会撞成同一个 id。
+                "id": str(item.get("call_id") or item.get("id")
+                           or ("call_gw_%d" % fallback_seq)),
+                "type": "function",
+                "function": {
+                    "name": str(item.get("name") or "unknown"),
+                    "arguments": str(item.get("arguments") or "{}"),
+                },
+            }
+            # 并行工具调用：Responses 协议把同一轮的 N 个调用拆成 N 个
+            # 相邻的 function_call 项（Codex「Ran code and ran commands」
+            # 就是这种形态）。逐个转成 N 条 assistant 消息会得到
+            #     assistant(tc1) → assistant(tc2) → tool(1) → tool(2)
+            # 这是非法的 chat 序列（tool_calls 之后必须紧跟它的 tool 结果），
+            # Marvis 上游直接回 400 3000101 invalid parameter。
+            # 所以：紧挨着的上一条是 assistant（含前面那句说明文字）就并进去。
+            last = messages[-1] if messages else None
+            if isinstance(last, dict) and last.get("role") == "assistant":
+                last.setdefault("tool_calls", []).append(call)
+            else:
+                messages.append({"role": "assistant", "content": None,
+                                 "tool_calls": [call]})
             continue
         if kind == "function_call_output":
             out = item.get("output")
@@ -536,7 +708,239 @@ def responses_input_to_messages(items) -> list[dict]:
             continue
         # reasoning / local_shell_call / web_search_call / item_reference 等：
         # 上游 chat 协议不可承载，丢弃。
-    return messages
+    return repair_tool_pairing(messages)
+
+
+def _merge_content(first, second):
+    """合并两段 assistant 正文（拆开的并行调用合并时用），两段都保留。"""
+    if second is None or second == "" or second == []:
+        return first
+    if first is None or first == "" or first == []:
+        return second
+    if isinstance(first, str) and isinstance(second, str):
+        return first + "\n" + second
+    head = first if isinstance(first, list) else [{"type": "text", "text": str(first)}]
+    tail = second if isinstance(second, list) else [{"type": "text", "text": str(second)}]
+    return list(head) + list(tail)
+
+
+def _renumber_tool_ids(messages: list, stats: dict) -> list:
+    """重复 / 空的 tool_call id 重新编号，并把后面的结果**按出现顺序**改到新 id 上。
+
+    为什么需要：`pending` 是 `id -> owner` 的映射，同一 id 出现两次只占一个位置，
+    第二个结果会被当孤儿丢掉而两个调用都保留 —— 序列仍然非法（上游 3000101）。
+    重复 id 的常见来源是兜底 id（每条消息从 `call_0` 数起，不同轮次必然相撞）。
+
+    新 id 是**确定性**的（`<原 id>_dup<n>`），不用随机数：同一段历史每轮都会被
+    重新整理一遍，随机 id 会让每轮的前缀都不一样，上游前缀缓存全部失效。
+    已合法（无重复、无空 id）的历史原样返回同一个列表对象。
+    """
+    all_ids = set()
+    for raw in messages:
+        if isinstance(raw, dict) and raw.get("role") == "assistant":
+            for tc in raw.get("tool_calls") or []:
+                if isinstance(tc, dict) and tc.get("id"):
+                    all_ids.add(str(tc.get("id")))
+    seen: set = set()
+    queues: dict = {}
+    out = None
+    counter = 0
+    for index, raw in enumerate(messages):
+        if not isinstance(raw, dict):
+            continue
+        role = raw.get("role")
+        if role == "assistant" and isinstance(raw.get("tool_calls"), list):
+            calls = raw["tool_calls"]
+            new_calls = None
+            for pos, tc in enumerate(calls):
+                if not isinstance(tc, dict):
+                    continue
+                cid = str(tc.get("id") or "")
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    queues.setdefault(cid, []).append(cid)
+                    continue
+                counter += 1
+                fresh = "%s_dup%d" % (cid or "call_gw", counter)
+                while fresh in all_ids or fresh in seen:
+                    counter += 1
+                    fresh = "%s_dup%d" % (cid or "call_gw", counter)
+                seen.add(fresh)
+                queues.setdefault(cid, []).append(fresh)
+                if new_calls is None:
+                    new_calls = list(calls)
+                new_calls[pos] = dict(tc, id=fresh)
+                stats["renamed"] = stats.get("renamed", 0) + 1
+            if new_calls is not None:
+                if out is None:
+                    out = list(messages)
+                out[index] = dict(raw, tool_calls=new_calls)
+            continue
+        if role == "tool":
+            tid = str(raw.get("tool_call_id") or "")
+            queue_ = queues.get(tid)
+            if queue_:
+                target = queue_.pop(0)
+                if target != tid:
+                    if out is None:
+                        out = list(messages)
+                    out[index] = dict(raw, tool_call_id=target)
+    return out if out is not None else messages
+
+
+def repair_tool_pairing(messages: list, stats: dict | None = None) -> list:
+    """把 OpenAI messages 里的工具调用整理成上游一定认的合法序列。
+
+    严格的 chat 后端（Marvis / DeepSeek 系）要求：带 `tool_calls` 的 assistant
+    之后**紧跟**它每个 id 的 `role=tool` 结果，中间不能插别的消息；`tool`
+    结果也必须有前置的调用。任何一条不满足都整条 400（Marvis 回
+    `3000101 invalid parameter`，不说是哪条）。客户端历史里常见的破坏形态：
+
+      1. 调用与结果之间插进了 user / system 消息（Codex 的子代理完成通知、
+         环境上下文、用户在工具执行中追加的话）；
+      2. 结果的调用被丢了（`local_shell_call` 等不可承载项被丢弃，但它的
+         `function_call_output` 还在）——孤儿结果；
+      3. 调用没有结果（客户端中断 / 截断历史）——悬空调用；
+      4. 相邻两条 assistant 各带一部分 tool_calls（并行调用被拆开）；
+      5. 重复 / 空的调用 id（兜底 id 在不同轮次相撞）；
+      6. 结果出现在它的调用**之前**（客户端历史顺序乱了）。
+
+    处置：插队的消息**挪到**这组结果之后（不丢内容）；重复 / 空 id 按出现顺序
+    重新编号（见 `_renumber_tool_ids`）；提前出现的结果先存着，等它的调用出现、
+    且这组调用收尾时还缺它，再补到调用之后；真正的孤儿结果丢掉；悬空调用从
+    tool_calls 里摘掉（assistant 正文保留，摘空就去掉键）；相邻 assistant 的
+    tool_calls 合并，**两段正文都保留**。已合法的序列原样返回同一个列表对象。
+
+    `stats`（可选）由调用方传入一个 dict，返回时填上各类修复的计数
+    （renamed / merged / moved / early / orphans / dangling），只记数字，
+    供日志与诊断使用。
+    """
+    stats = stats if isinstance(stats, dict) else {}
+    if not isinstance(messages, list) or not messages:
+        return messages
+    has_tools = any(isinstance(m, dict) and (m.get("role") == "tool" or m.get("tool_calls"))
+                    for m in messages)
+    if not has_tools:
+        return messages
+
+    source = _renumber_tool_ids(messages, stats)
+    out: list = []
+    deferred: list = []          # 调用与结果之间插队的消息
+    pending: dict = {}           # 待回结果的 call id -> 所属 assistant
+    early: dict = {}             # 结果先于调用出现：call id -> [tool 消息]
+    owner = None                 # 当前这组调用所属的 assistant 消息（out 里的对象）
+    changed = source is not messages
+
+    def bump(name: str, count: int = 1) -> None:
+        stats[name] = stats.get(name, 0) + count
+
+    def close_group() -> None:
+        nonlocal owner, changed
+        if owner is not None and pending:
+            # 6. 结果出现在调用之前：这组收尾时还缺的，先从提前到的结果里补
+            for tc in owner.get("tool_calls") or []:
+                cid = str(tc.get("id") or "") if isinstance(tc, dict) else ""
+                if cid in pending and early.get(cid):
+                    out.append(early[cid].pop(0))
+                    if not early[cid]:
+                        early.pop(cid, None)
+                    pending.pop(cid, None)
+                    bump("early")
+                    changed = True
+        if owner is not None and pending:
+            keep = [tc for tc in owner.get("tool_calls") or []
+                    if not (isinstance(tc, dict) and str(tc.get("id") or "") in pending)]
+            bump("dangling", len(pending))
+            if keep:
+                owner["tool_calls"] = keep
+            else:
+                owner.pop("tool_calls", None)
+                if not owner.get("content"):
+                    # 摘空了又没有正文：整条去掉（空 assistant 同样会被严格后端拒）
+                    for index in range(len(out) - 1, -1, -1):
+                        if out[index] is owner:
+                            del out[index]
+                            break
+            changed = True
+        pending.clear()
+        owner = None
+        if deferred:
+            out.extend(deferred)
+            deferred.clear()
+
+    for raw in source:
+        if not isinstance(raw, dict):
+            (deferred if pending else out).append(raw)
+            continue
+        role = raw.get("role")
+        if role == "assistant" and raw.get("tool_calls"):
+            calls = [tc for tc in raw.get("tool_calls") or [] if isinstance(tc, dict)]
+            if pending and not deferred and owner is not None and owner is out[-1]:
+                # 4. 相邻 assistant 各带一部分并行调用：并进上一条，正文两段都留
+                owner["tool_calls"] = list(owner.get("tool_calls") or []) + calls
+                merged = _merge_content(owner.get("content"), raw.get("content"))
+                if merged is not owner.get("content"):
+                    owner["content"] = merged
+                if raw.get("reasoning_content"):
+                    owner["reasoning_content"] = _merge_content(
+                        owner.get("reasoning_content"), raw.get("reasoning_content"))
+                for tc in calls:
+                    pending[str(tc.get("id") or "")] = owner
+                bump("merged")
+                changed = True
+                continue
+            close_group()
+            msg = dict(raw, tool_calls=calls)
+            out.append(msg)
+            owner = msg
+            for tc in calls:
+                pending[str(tc.get("id") or "")] = msg
+            continue
+        if role == "tool":
+            tid = str(raw.get("tool_call_id") or "")
+            if tid and tid in pending:
+                pending.pop(tid, None)
+                out.append(raw)
+                if deferred:
+                    changed = True
+                if not pending:
+                    close_group()
+                continue
+            # 2 / 6. 没有前置调用：先存着，后面若出现它的调用再补回去
+            early.setdefault(tid, []).append(raw)
+            changed = True
+            continue
+        if pending:
+            # 1. 插队消息：先存着，等这组结果回齐再放
+            deferred.append(raw)
+            bump("moved")
+            continue
+        out.append(raw)
+    close_group()
+    leftover = sum(len(items) for items in early.values())
+    if leftover:
+        # 真正的孤儿结果（始终没有等到它的调用）：丢掉
+        bump("orphans", leftover)
+    return out if changed else messages
+
+
+#: Responses 入口客户端没传 `max_output_tokens` 时补的默认输出上限。
+#:
+#: 历史默认 4096：Codex 默认不传，长输出 / 大 patch（tool 参数）会被截断
+#: （网关复核 5.1）。`MIRAIHUB_RESPONSES_DEFAULT_MAX_TOKENS=0` = 不补，交给上游
+#: 默认值。默认仍是 4096 —— 各平台上游是否必须带这个参数没有逐个实测，先保持
+#: 原行为；Marvis 在自己的入口里已改成「不传就不设」。
+RESPONSES_DEFAULT_MAX_TOKENS_ENV = "MIRAIHUB_RESPONSES_DEFAULT_MAX_TOKENS"
+
+
+def _responses_default_max_tokens() -> int:
+    raw = str(os.getenv(RESPONSES_DEFAULT_MAX_TOKENS_ENV) or "").strip()
+    if not raw:
+        return 4096
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return 4096
 
 
 def responses_to_openai(body: dict) -> dict:
@@ -587,7 +991,12 @@ def responses_to_openai(body: dict) -> dict:
     elif isinstance(choice, str) and choice in ("auto", "none", "required"):
         normalized["tool_choice"] = choice
 
-    normalized.setdefault("max_tokens", body.get("max_output_tokens") or 4096)
+    if body.get("max_output_tokens"):
+        normalized.setdefault("max_tokens", body["max_output_tokens"])
+    else:
+        default_cap = _responses_default_max_tokens()
+        if default_cap > 0:
+            normalized.setdefault("max_tokens", default_cap)
     return normalized
 
 
@@ -801,14 +1210,330 @@ async def _relay_with_cleanup(source, inner):
             await _safe_aclose(inner.body_iterator)
 
 
-class _RelayStreamingResponse(StreamingResponse):
-    """Close the relay iterator when the client disconnects mid-response."""
+#: 内层响应可以提供的兜底钩子名：中继从没开始读内层 body（例如响应头发送失败、
+#: 客户端在第一帧前就走了）时，内层生成器的 finally 不会执行，账号租约 / 记账
+#: 只能靠这个钩子。钩子必须幂等，且自己判断「内层是否已经被迭代过」。
+UNSTARTED_HOOK = "release_if_unstarted"
+
+
+def _call_unstarted_hook(inner) -> None:
+    hook = getattr(inner, UNSTARTED_HOOK, None) if inner is not None else None
+    if not callable(hook):
+        return
+    try:
+        hook()
+    except Exception:  # noqa: BLE001 - 兜底清理不能覆盖中继结果
+        import logging
+
+        logging.getLogger("admin.platform.protocol_bridge").exception(
+            "中继兜底清理（内层未开始）失败")
+
+
+class _StartTrackedBody:
+    """包住内层 body 迭代器，记录「是否被拉过第一帧」；aclose 透传给原迭代器。"""
+
+    __slots__ = ("_source", "started")
+
+    def __init__(self, source):
+        self._source = source
+        self.started = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        self.started = True
+        return await self._source.__anext__()
+
+    async def aclose(self):
+        await _safe_aclose(self._source)
+
+
+def guard_unstarted(response, release):
+    """给要交给中继的**内层**流式响应挂 `release_if_unstarted` 钩子（r3 第 3 项）。
+
+    `release` 是「内层生成器从未启动时」的收尾（释放账号租约、关上游、记账等），
+    只会在 body 一帧都没被拉过时执行，且最多一次（线程安全）；body 已经开始
+    迭代时由内层生成器自己的 finally 负责，钩子什么都不做。内层已自带钩子
+    （例如 Qoder `_OwnedStream`）时不重复包装。返回原 response，便于链式调用。
+    """
+    if response is None or release is None or callable(getattr(response, UNSTARTED_HOOK, None)):
+        return response
+    body = getattr(response, "body_iterator", None)
+    if body is None or not hasattr(body, "__anext__"):
+        return response
+    tracked = _StartTrackedBody(body)
+    response.body_iterator = tracked
+    lock = threading.Lock()
+    done: list = []
+
+    def release_if_unstarted() -> bool:
+        with lock:
+            if done or tracked.started:
+                return False
+            done.append(1)
+        release()
+        return True
+
+    setattr(response, UNSTARTED_HOOK, release_if_unstarted)
+    return response
+
+
+#: 第 5 轮 r5_be：兜底收尾的并发上限。以前每个「内层未启动」的响应都新起一条
+#: 守护线程，断连风暴（上游排队时大量客户端同时取消）下线程数不受控；现在最多
+#: `PROTOCOL_BRIDGE_DETACHED_MAX`（默认 16）条工作线程，多出来的任务排队，由
+#: 已有工作线程跑完当前任务后顺序领取。
+_DETACHED_LOCK = threading.Lock()
+_DETACHED_PENDING: "list" = []
+_DETACHED_STATE = {"active": 0, "peak": 0, "queued_total": 0, "failed": 0, "done": 0}
+
+
+def _detached_cap() -> int:
+    try:
+        value = int(os.getenv("PROTOCOL_BRIDGE_DETACHED_MAX", "16") or 16)
+    except ValueError:
+        value = 16
+    return max(1, value)
+
+
+class _DetachedJob:
+    """`run_detached` 的返回值：可 `join(timeout)` / `is_alive()`（与旧版返回的线程兼容）。"""
+
+    __slots__ = ("function", "name", "_done")
+
+    def __init__(self, function, name: str):
+        self.function = function
+        self.name = name
+        self._done = threading.Event()
+
+    def run(self) -> None:
+        try:
+            self.function()
+        except Exception:  # noqa: BLE001 - 兜底清理只记日志，不吞到无声
+            with _DETACHED_LOCK:
+                _DETACHED_STATE["failed"] += 1
+            import logging
+
+            logging.getLogger("admin.platform.protocol_bridge").exception(
+                "中继兜底清理（%s）失败", self.name)
+        finally:
+            with _DETACHED_LOCK:
+                _DETACHED_STATE["done"] += 1
+            self._done.set()
+
+    def join(self, timeout: float | None = None) -> bool:
+        return self._done.wait(timeout)
+
+    def is_alive(self) -> bool:
+        return not self._done.is_set()
+
+
+def _detached_worker(job: "_DetachedJob") -> None:
+    while job is not None:
+        job.run()
+        with _DETACHED_LOCK:
+            if _DETACHED_PENDING:
+                job = _DETACHED_PENDING.pop(0)
+            else:
+                job = None
+                _DETACHED_STATE["active"] -= 1
+
+
+def detached_stats() -> dict:
+    """兜底收尾线程统计（测试 / 排障用）。"""
+    with _DETACHED_LOCK:
+        return {**_DETACHED_STATE, "pending": len(_DETACHED_PENDING), "cap": _detached_cap()}
+
+
+def run_detached(function, name: str = "relay-unstarted-release"):
+    """在守护线程里跑同步收尾（关上游 / 放账号 / 同步 DB 记账），不占事件循环。
+
+    `release_if_unstarted` 钩子是在中继 `__call__` 的 finally 里**同步**调用的
+    （取消状态下不能 await），收尾里有同步 DB 写，直接跑会卡事件循环。
+    返回 `_DetachedJob`（可 join）。第 5 轮：工作线程数有上限（见 `_detached_cap`），
+    异常记 ERROR 日志并计数（`detached_stats()["failed"]`）；起线程失败时就地执行，
+    宁可短暂占用事件循环也不泄漏账号租约。
+    """
+    job = _DetachedJob(function, name)
+    with _DETACHED_LOCK:
+        if _DETACHED_STATE["active"] < _detached_cap():
+            _DETACHED_STATE["active"] += 1
+            _DETACHED_STATE["peak"] = max(_DETACHED_STATE["peak"], _DETACHED_STATE["active"])
+            spawn = True
+        else:
+            _DETACHED_PENDING.append(job)
+            _DETACHED_STATE["queued_total"] += 1
+            spawn = False
+    if spawn:
+        try:
+            threading.Thread(target=_detached_worker, args=(job,), name=name,
+                             daemon=True).start()
+        except RuntimeError:
+            with _DETACHED_LOCK:
+                _DETACHED_STATE["active"] -= 1
+            job.run()
+    return job
+
+
+def guard_unstarted_detached(response, release, name: str = "relay-unstarted-release"):
+    """`guard_unstarted` + 收尾放进守护线程（第 4 轮，给 minimax / codar / krowork 等用）。"""
+    return guard_unstarted(response, lambda: run_detached(release, name))
+
+
+class _GuardedStreamingResponse(StreamingResponse):
+    """直接返回给客户端的流式响应：结束时同步调用**自身**的 `release_if_unstarted`。
+
+    第 5 轮 r5_be（第 4 轮 A6）：普通 `StreamingResponse` 在发送响应头那一刻失败
+    （客户端已断开）时，body 一帧都不拉，生成器 finally 不执行，`background`
+    也不会跑（异常直接从 `__call__` 抛出）→ 账号租约 / 上游连接 / 记账全部悬空。
+    钩子放在任何 await 之前（取消状态下 finally 里的 await 会立刻再抛）；已经
+    开始迭代时钩子是空操作，由生成器自己的 finally 收尾。
+    """
 
     async def __call__(self, scope, receive, send):
         try:
             await super().__call__(scope, receive, send)
         finally:
+            _call_unstarted_hook(self)
             await _safe_aclose(self.body_iterator)
+
+
+def guarded_stream_response(content, release, *, name: str = "direct-unstarted-release",
+                            media_type: str = "text/event-stream", headers=None,
+                            background=None) -> StreamingResponse:
+    """构造直连流式响应并挂「未启动兜底」（收尾在受限守护线程里跑）。
+
+    同一个响应被交给中继（anthropic / responses relay）时，中继也会调用这个钩子，
+    行为与 `guard_unstarted_detached` 相同；`release` 必须幂等。
+    """
+    response = _GuardedStreamingResponse(content, media_type=media_type, headers=headers,
+                                         background=background)
+    return guard_unstarted_detached(response, release, name)
+
+
+class _OwnedBody:
+    """`owned_stream_response` 的 body：迭代委托给 owner 的流，关闭一律交给 `owner.aclose()`。
+
+    和 async generator 不同：① 没开始迭代也能 aclose（会真正收尾）；② 另一个任务
+    正卡在 `__anext__` 时 aclose 不会抛「generator already running」，而是排在 owner
+    的单工作线程后面等读完再收尾；③ 自然读完（StopAsyncIteration）时自动收尾。
+    owner 需要提供幂等的 `async aclose()`（Loomy `_StreamLease`）。
+    """
+
+    def __init__(self, stream, owner):
+        self._stream = stream
+        self._owner = owner
+        self.started = False
+        self._closed = False
+        self._close_task = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        self.started = True
+        try:
+            return await self._stream.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            try:
+                await self.aclose()
+            except BaseException:  # noqa: BLE001 - 原始异常优先
+                pass
+            raise
+
+    async def aclose(self):
+        first = not self._closed
+        self._closed = True
+        try:
+            await self._owner.aclose()
+        finally:
+            if first:
+                close = getattr(self._stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception:  # noqa: BLE001 - 另一任务仍在迭代等情况
+                        pass
+
+    def release_if_unstarted(self) -> bool:
+        """同步钩子：从没迭代过 → 在事件循环上排一个 owner.aclose() 任务。"""
+        if self.started or self._closed:
+            return False
+        self._closed = True
+        try:
+            import asyncio
+
+            self._close_task = asyncio.get_running_loop().create_task(self._owner.aclose())
+        except RuntimeError:
+            return False
+        return True
+
+
+class _OwnedStreamingResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            body = self.body_iterator
+            hook = getattr(body, "release_if_unstarted", None)
+            if callable(hook):
+                hook()
+            try:
+                await body.aclose()
+            except BaseException:  # noqa: BLE001 - 收尾不覆盖响应结果
+                pass
+
+
+def owned_stream_response(stream, owner, *, headers=None,
+                          media_type: str = "text/event-stream") -> StreamingResponse:
+    """把「拥有自己资源」的流（owner 负责关上游 / 放账号 / 记账）包成流式响应。
+
+    第 4 轮 R4-BE-04：Loomy `_forward_stream` 一直调用这个函数，但 protocol_bridge
+    里**从来没有定义它**（HEAD 与工作区都没有）→ Loomy 所有流式请求 AttributeError，
+    `_forward_stream` 收尾后 500。按 `tests/test_loomy_stream_ownership.py` 的契约补上：
+      * 未开始就 aclose → owner.aclose()（释放账号、关会话、记 error 账）；
+      * 读完 → 自动 owner.aclose()；aclose 可重复调用；
+      * 交给中继时，中继 finally 里同步调 `release_if_unstarted`、再 aclose body。
+    """
+    hdrs = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    hdrs.update(headers or {})
+    body = _OwnedBody(stream, owner)
+    response = _OwnedStreamingResponse(body, media_type=media_type, headers=hdrs)
+    setattr(response, UNSTARTED_HOOK, body.release_if_unstarted)
+    return response
+
+
+class _RelayStreamingResponse(StreamingResponse):
+    """Close the relay iterator when the client disconnects mid-response.
+
+    r3：传了 `inner` 时，结束时还会 aclose 内层 body，并调用内层的
+    `release_if_unstarted()`（若有）。以前中继 body 一帧都没跑时，
+    `_relay_with_cleanup` 的 finally 不执行，内层从没被迭代，账号不释放。
+    钩子是同步调用、放在任何 await 之前：取消状态下 finally 里的 await 会
+    立即再抛 CancelledError，放后面就可能被跳过。
+    """
+
+    def __init__(self, content, *args, inner=None, **kwargs):
+        super().__init__(content, *args, **kwargs)
+        self._relay_inner = inner
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            inner = getattr(self, "_relay_inner", None)
+            _call_unstarted_hook(inner)
+            # 第 4 轮：中继自身也可能被 guard_unstarted 挂了钩子（直接返回给客户端、
+            # 响应头就发送失败时 body 一帧没跑，生成器 finally 不执行）。
+            _call_unstarted_hook(self)
+            try:
+                await _safe_aclose(self.body_iterator)
+            finally:
+                if inner is not None:
+                    await _safe_aclose(getattr(inner, "body_iterator", None))
 
 
 async def _iter_sse_lines(inner) -> "object":
@@ -1042,7 +1767,7 @@ def anthropic_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
         yield sse({"type": "message_stop"})
 
     return _RelayStreamingResponse(
-        _relay_with_cleanup(relay(), inner), media_type="text/event-stream",
+        _relay_with_cleanup(relay(), inner), media_type="text/event-stream", inner=inner,
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1072,9 +1797,19 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
         output: list[dict] = []
         next_output_index = 0
 
+        seq = {"n": 0}
+
         def event(name: str, data: dict) -> bytes:
+            # data 里必须带 `type`：Codex（codex-rs）与 OpenAI SDK 按 data.type
+            # 反序列化，只在 `event:` 行带名字的帧会被当解析失败跳过 —— 以前
+            # message / reasoning 的 output_item.done 就是这样丢的，Codex 下一轮
+            # 历史里没有自己上一轮的话。sequence_number 按官方语义单调递增。
+            payload = dict(data)
+            payload["type"] = name
+            payload["sequence_number"] = seq["n"]
+            seq["n"] += 1
             return ("event: %s\ndata: %s\n\n"
-                    % (name, json.dumps(data, ensure_ascii=False))).encode()
+                    % (name, json.dumps(payload, ensure_ascii=False))).encode()
 
         def _close_text() -> list[bytes]:
             if not text_state["added"]:
@@ -1090,6 +1825,9 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
                                         "annotations": [],
                                         "text": final_text}]})
             return [
+                event("response.output_text.done", {
+                    "item_id": item_id, "output_index": idx,
+                    "content_index": 0, "text": final_text}),
                 event("response.content_part.done", {
                     "item_id": item_id, "output_index": idx,
                     "content_index": 0,
@@ -1115,6 +1853,15 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
                            "summary": [{"type": "summary_text",
                                         "text": final_buf}]})
             return [
+                event("response.reasoning_summary_text.done", {
+                    "item_id": item_id,
+                    "output_index": reasoning_state.get("output_index", 0),
+                    "summary_index": 0, "text": final_buf}),
+                event("response.reasoning_summary_part.done", {
+                    "item_id": item_id,
+                    "output_index": reasoning_state.get("output_index", 0),
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": final_buf}}),
                 event("response.output_item.done", {
                     "output_index": reasoning_state.get("output_index", 0),
                     "item": {"type": "reasoning", "id": item_id,
@@ -1272,6 +2019,10 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
         # 冲刷没等到名字的工具块
         for idx in sorted(tools):
             slot = tools[idx]
+            if not slot["call_id"]:
+                # 兜底 call_id 只生成一次：以前 added / done / output 三处各自
+                # 现生成一个随机 id，同一个调用在客户端眼里有三个 id。
+                slot["call_id"] = "call_%d_%s" % (idx, uuid.uuid4().hex[:8])
             if not slot["added"]:
                 for piece in _close_text():
                     yield piece
@@ -1288,11 +2039,19 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
                              or ("call_%d_%s" % (idx, uuid.uuid4().hex[:8])),
                              "name": slot["name"] or "unknown",
                              "arguments": "", "status": "in_progress"}})
-            if slot["buf"]:
+            # 只补**还没下发**的那段参数：已经流式下发过的槽位再发一遍整段，
+            # 客户端按 delta 拼接就得到 `{..}{..}`（以前这帧缺 `type`，被客户端
+            # 当解析失败跳过才没暴露；data 补上 type 之后必须一起修）。
+            if len(slot["buf"]) > int(slot.get("flushed") or 0):
                 yield event("response.function_call_arguments.delta", {
                     "item_id": slot["item_id"],
                     "output_index": slot["output_index"],
-                    "delta": slot["buf"]})
+                    "delta": slot["buf"][int(slot.get("flushed") or 0):]})
+                slot["flushed"] = len(slot["buf"])
+            yield event("response.function_call_arguments.done", {
+                "item_id": slot["item_id"],
+                "output_index": slot["output_index"],
+                "arguments": slot["buf"]})
             yield event("response.output_item.done", {
                 "type": "response.output_item.done",
                 "output_index": slot["output_index"],
@@ -1333,7 +2092,7 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
                         {"type": "response.completed", "response": base})
 
     return _RelayStreamingResponse(
-        _relay_with_cleanup(relay(), inner), media_type="text/event-stream",
+        _relay_with_cleanup(relay(), inner), media_type="text/event-stream", inner=inner,
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1695,6 +2454,10 @@ def anthropic_upstream_stream_relay(inner, model: str, *, prefix: str = "gw") ->
         for piece in aggregator.finish():
             yield piece
 
-    return StreamingResponse(
-        relay(), media_type="text/event-stream",
+    # 与另外两个中继一致：客户端断开 / 收到 message_stop 提前结束时，**立即**
+    # aclose 内层流（内层 finally 才会释放账号租约、关闭上游连接、记账），
+    # 不能等 GC。以前这里是裸 StreamingResponse，minimax / codar / krowork 的
+    # OpenAI 入口断开后租约要等上游自然结束才归还。
+    return _RelayStreamingResponse(
+        _relay_with_cleanup(relay(), inner), media_type="text/event-stream", inner=inner,
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

@@ -107,7 +107,7 @@ class ImportLocalIn(BaseModel):
 
 
 @router.get("/export")
-def export(realm: str = "", mode: str = "", reveal: int = 0,
+def export(request: Request, realm: str = "", mode: str = "", reveal: int = 0,
            _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     """导出号池（issue #25：Loomy 之前只有导入、没有导出）。
 
@@ -125,7 +125,12 @@ def export(realm: str = "", mode: str = "", reveal: int = 0,
     """
     from admin.platform.loomy.services import accounts as loomy_accounts
 
-    full = bool(reveal) or str(mode or "").strip().lower() == "backup"
+    from admin import export_guard
+
+    # 完整凭证需二次确认（2026-11-24 第 3 轮，S-4）
+    full = export_guard.guard_secret_export(
+        request, "loomy export",
+        bool(reveal) or str(mode or "").strip().lower() == "backup")
     rows = loomy_accounts.accounts_for(db, _realm_or_400(realm))
     records: list[dict] = []
     for account in rows:

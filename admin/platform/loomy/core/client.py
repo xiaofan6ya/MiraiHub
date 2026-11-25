@@ -24,6 +24,7 @@ import json
 import time
 import logging
 import re
+import threading
 import urllib.error
 import urllib.request
 
@@ -506,6 +507,47 @@ def chat_completions(token: str, realm: str, body: dict, *,
                         token, session_id=_chat_session_id(account_id, body)))
 
 
+class _OwnedChatStream:
+    """Own the opened response even before the parsing generator starts.
+
+    Serialize next/close: closing waits for a blocking read to finish or time
+    out, rather than closing an executing generator from a different thread.
+    This iterator does not provide an asynchronous transport-abort operation.
+    """
+
+    def __init__(self, source, close_response):
+        self._source = source
+        self._close_response = close_response
+        self._lock = threading.RLock()
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self._lock:
+            if self._closed:
+                raise StopIteration
+            try:
+                return next(self._source)
+            except BaseException as original:
+                try:
+                    self.close()
+                except BaseException as cleanup:
+                    raise original from cleanup
+                raise
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._source.close()
+            finally:
+                self._close_response()
+
+
 def chat_stream(token: str, realm: str, body: dict, *,
                 account_id: int = 0, timeout: float = DEFAULT_TIMEOUT,
                 stats: dict | None = None):
@@ -547,11 +589,28 @@ def chat_stream(token: str, realm: str, body: dict, *,
             payload = exc.read().decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             pass
+        finally:
+            try:
+                exc.close()
+            except Exception:  # noqa: BLE001 - keep the original HTTP classification
+                pass
         _raise_http_error(exc.code, payload, realm, account_id)
     except Exception as exc:  # noqa: BLE001
         note_sentinel(realm, account_id, "network", detail=str(exc)[:200])
         raise UpstreamError("网络失败", status=0, kind="network",
                             detail=str(exc)[:200]) from exc
+
+    response_closed = False
+
+    def close_response():
+        nonlocal response_closed
+        if response_closed:
+            return
+        response_closed = True
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001 - cleanup must not replace a read failure
+            pass
 
     def gen():
         first_at = None       # 首个 chunk（含 reasoning）到达
@@ -647,10 +706,7 @@ def chat_stream(token: str, realm: str, body: dict, *,
                                     status=0, kind="bad_response",
                                     detail="content-type=%s, chunks=0" % ctype)
         finally:
-            try:
-                resp.close()
-            except Exception:  # noqa: BLE001
-                pass
+            close_response()
             # 分段耗时写 contextvar（并发安全）。
             # `LAST_TTFB_MS` = **首个正文字**到达（TTFT）
             # `LAST_TOTAL_MS` = **最后一个正文字**到达（解码段终点）
@@ -672,7 +728,7 @@ def chat_stream(token: str, realm: str, body: dict, *,
                 stats["ttfb_ms"] = _ttft
                 stats["total_ms"] = _end
 
-    return gen()
+    return _OwnedChatStream(gen(), close_response)
 
 
 def fetch_points_balance(token: str, realm: str = "cn",

@@ -25,11 +25,13 @@ Loomy 上游只有非流式接口。`stream: true` 时把完整结果**合成为
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -990,6 +992,38 @@ async def chat_completions(request):
     return await _forward_stream(body, request)
 
 
+class _PeekedStream:
+    """Replay peeked chunks while retaining explicit ownership of the source."""
+    def __init__(self, prefix, source):
+        self.iterator = itertools.chain(prefix, source)
+        self.source = source
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.closed:
+            raise StopIteration
+        return next(self.iterator)
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            close = getattr(self.source, "close", None)
+            if close is not None:
+                close()
+
+
+def _close_chunks(chunks):
+    try:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
+    except Exception:  # Cleanup must not hide the original upstream failure.
+        logger.warning("Loomy 流关闭失败", exc_info=True)
+
+
 def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                  model: str):
     """选号 + 租约 + 上游建连（**同步阻塞，必须跑在工作线程里**）。
@@ -1061,10 +1095,12 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                 chunks = None
                 continue
             if peeked:
-                chunks = itertools.chain(peeked, chunks)
+                chunks = _PeekedStream(peeked, chunks)
             served_model = served
             break
         except client.UpstreamError as exc:
+            _close_chunks(chunks)
+            chunks = None
             shared.release(account)
             # 与 `_attempt` 同口径：402 先复核余额，别把「当日额度用尽」判死。
             zero_balance = exc.kind == "quota_exceeded"
@@ -1109,6 +1145,8 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
                 if attempt_idx < MAX_ATTEMPTS - 1:
                     time.sleep(_backoff_seconds(fail_step))
         except Exception as exc:  # noqa: BLE001
+            _close_chunks(chunks)
+            chunks = None
             shared.release(account)
             logger.exception("Loomy 流式调用失败 acc=%s", account.id)
             last_error = client.UpstreamError(str(exc), kind="network")
@@ -1120,9 +1158,120 @@ def _open_stream(db, request, key, body: dict, realm: str, stats: dict,
     return chunks, account, last_error, started, served_model
 
 
+class _StreamLease:
+    """One worker owns the session, synchronous reads, and final cleanup.
+
+    A running urllib read cannot be cancelled by cancelling an asyncio task.
+    Cleanup is queued behind that read, so it never closes a generator or DB
+    while the worker is still using it. The upstream read timeout still bounds
+    a blocked read; heartbeats wait on the same future without reading ahead.
+    """
+    def __init__(self, body, request):
+        self.body, self.request = body, request
+        self.model = str(body.get("model") or "")
+        self.realm = _realm(request)
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="loomy-stream")
+        self.db = self.key = self.account = self.chunks = self.frames = None
+        self.started = None
+        self.served_model = ""
+        self.stats, self.holder = {}, {}
+        self.finished = False
+        self.closing = False
+        self.close_future = None
+        self.end = object()
+
+    def submit(self, function):
+        context = contextvars.copy_context()
+        pending = asyncio.get_running_loop().run_in_executor(self.executor, context.run, function)
+        # Cancelling a shielded consumer can leave a late open/read failure
+        # unclaimed. Observe it without changing what an awaiting caller gets.
+        pending.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return pending
+
+    def open(self):
+        from admin.db import SessionLocal
+
+        self.db = SessionLocal()
+        self.key = shared.authenticate(self.db, self.request, platform=_public(self.request))
+        (self.chunks, account, last_error, self.started,
+         self.served_model) = _open_stream(
+            self.db, self.request, self.key, self.body, self.realm, self.stats, self.model)
+        if self.chunks is None:
+            if last_error is None:
+                raise _no_account_error(self.db, self.realm)
+            rejected = _exhausted_rejection(last_error)
+            if rejected is not None:
+                raise rejected
+            return _fail(last_error)
+        self.account = account
+        self.frames = _sse_from_chunks(self.chunks, self.served_model or self.model, self.holder)
+        return None
+
+    def read(self):
+        if self.closing:
+            return self.end
+        try:
+            piece = next(self.frames, self.end)
+        except client.UpstreamError as exc:
+            self.holder["error"] = exc.kind or "upstream_error"
+            return ("data: %s\n\n" % json.dumps(
+                {"error": {"message": exc.message, "type": exc.kind}},
+                ensure_ascii=False)).encode()
+        except BaseException:
+            self.holder["error"] = "stream_interrupted"
+            raise
+        if piece is self.end:
+            self.finished = True
+        return piece
+
+    async def stream(self):
+        while not self.closing:
+            pending = self.submit(self.read)
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=max(0.05, bridge.PING_INTERVAL_S))
+                if done:
+                    break
+                yield bridge.CHAT_PING
+            piece = pending.result()
+            if piece is self.end or self.closing:
+                return
+            yield piece
+
+    def finish(self):
+        try:
+            _close_chunks(self.frames)
+            _close_chunks(self.chunks)
+            if self.account is not None:
+                error = str(self.holder.get("error") or ("" if self.finished else "client_disconnected"))
+                try:
+                    shared.release(self.account)
+                    if not error:
+                        shared.note_success(self.account)
+                    self.db.commit()
+                except Exception:
+                    try:
+                        self.db.rollback()
+                    except Exception:
+                        pass
+                _bill(self.key, self.account, self.model,
+                      {"usage": self.holder.get("usage") or {}},
+                      request=self.request, started=self.started, stats=self.stats, error=error)
+        finally:
+            try:
+                if self.db is not None:
+                    self.db.close()
+            finally:
+                self.executor.shutdown(wait=False)
+
+    async def aclose(self):
+        if self.close_future is None:
+            self.closing = True
+            self.close_future = self.submit(self.finish)
+        await asyncio.shield(self.close_future)
+
+
 async def _forward_stream(body: dict, request):
-    """真流式：选号 -> 上游 SSE -> 逐帧转发 -> 收尾记账。"""
-    from admin.db import SessionLocal
+    """Forward SSE with explicit ownership before its first byte is consumed."""
 
     # **强制要 usage 尾帧**：客户端没带 `stream_options.include_usage` 时
     # 上游不发 usage —— `_bill` 记到 0 token，客户端的「消耗积分」
@@ -1131,74 +1280,23 @@ async def _forward_stream(body: dict, request):
             (body.get("stream_options") or {}).get("include_usage"), bool):
         body = {**body, "stream_options": {"include_usage": True}}
 
-    realm = _realm(request)
-    db = SessionLocal()
-    key = await asyncio.to_thread(
-        shared.authenticate, db, request, platform=_public(request))
-    model = str(body.get("model") or "")
-    # 分段耗时容器：**必须在调用 client.chat_stream 之前定义**。
-    # 它由上游流式读取器填 ttfb/total，再交给 _bill 记账。
-    stats: dict = {}
-    (chunks, account, last_error, started,
-     served_model) = await asyncio.to_thread(
-        _open_stream, db, request, key, body, realm, stats, model)
-
-    if chunks is None:
-        # **先算提示文案，再关会话** —— `_no_account_error` 要查库。
-        # 顺序写反会在关闭后的 Session 上查询，异常被上层吞成
-        # 一个没有信息的 500。
-        exhausted = _no_account_error(db, realm) if last_error is None else None
-        db.close()
-        if last_error is not None:
-            # 与 `_attempt` 的耗尽处理**同口径**（见 `_exhausted_rejection`）。
-            # ⚠️ 流式路径没有 `_forward` 那层 `except client.UpstreamError`，
-            # 所以非上游 / 网络类失败必须继续走 `_fail()` 转成响应，
-            # 不能直接抛出去（那会变成未处理异常 / 500）。
-            rejected = _exhausted_rejection(last_error)
-            if rejected is not None:
-                raise rejected
-            return _fail(last_error)
-        raise exhausted
-
-    holder: dict = {}
-
-    def generator():
+    owner = _StreamLease(body, request)
+    try:
+        failure = await asyncio.shield(owner.submit(owner.open))
+        if failure is not None:
+            await owner.aclose()
+            return failure
+        resp_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        if owner.served_model and _model_mismatch(owner.model, owner.served_model):
+            # 替换幸存（所有号都不提供该模型）：响应头明示真正服务的模型。
+            resp_headers["x-upstream-substituted-model"] = owner.served_model
+        return bridge.owned_stream_response(owner.stream(), owner, headers=resp_headers)
+    except BaseException as original:
         try:
-            # 帧里的 model 用**上游真正服务的模型**：全部候选号都被静默
-            # 替换时，回答确实来自另一个模型，客户端有权看到事实
-            # （非流式路径本来就透传上游回包，行为一致）。
-            yield from _sse_from_chunks(chunks, served_model or model, holder)
-        except client.UpstreamError as exc:
-            yield ("data: %s\n\n" % json.dumps(
-                {"error": {"message": exc.message, "type": exc.kind}},
-                ensure_ascii=False)).encode()
-        finally:
-            try:
-                shared.release(account)
-                shared.note_success(account)
-                db.commit()
-            except Exception:  # noqa: BLE001
-                try:
-                    db.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-            _bill(key, account, model, {"usage": holder.get("usage") or {}},
-                  request=request, started=started, stats=stats)
-            db.close()
-
-    # **空闲心跳**：上游排队/限流/慢思考时整条流可能几十秒无字节，
-    # 客户端只能干等。每 8 秒发一帧**空增量 data 帧**（真实事件，
-    # 会被解析并重置客户端 idle 计时器；旧注释帧已被证明无效，
-    # 可用 MIRAIHUB_KEEPALIVE_DATA_FRAME=0 回退）。
-    safe_gen = bridge.with_pings(generator(), ping=bridge.CHAT_PING)
-
-    resp_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    if served_model and _model_mismatch(model, served_model):
-        # 替换幸存（所有号都不提供该模型）：响应头明示真正服务的模型。
-        resp_headers["x-upstream-substituted-model"] = served_model
-    return StreamingResponse(
-        safe_gen, media_type="text/event-stream",
-        headers=resp_headers)
+            await owner.aclose()
+        except BaseException as cleanup:
+            raise original from cleanup
+        raise
 
 
 def _sse_from_chunks(chunks, model: str, holder: dict):
@@ -1242,6 +1340,7 @@ def _sse_from_chunks(chunks, model: str, holder: dict):
     for chunk in chunks:
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
             usage_acc.update(chunk["usage"])
+            holder["usage"] = dict(usage_acc)
         # **流内错误帧**（2026-11-13）：上游会把审核 / 风控 / 停用这类错误
         # 塞进 HTTP 200 的 SSE 里，形如
         #   data: {"error":{"message":"内容可能包含敏感信息，无法处理",

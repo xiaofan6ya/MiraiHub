@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from admin.db import get_db
@@ -145,12 +145,15 @@ def delete_account(account_id: int, _: bool = Depends(require_admin),
 
 
 @router.get("/export")
-def export_accounts(mode: str = "safe", _: bool = Depends(require_admin),
+def export_accounts(request: Request, mode: str = "safe", _: bool = Depends(require_admin),
                     db=Depends(get_db)):
     from admin.platform.krowork.platform_gateway import KroworkAccountOps
+    from admin import export_guard
 
+    full = export_guard.guard_secret_export(request, "krowork export",
+                                            export_guard.wants_secrets(mode == "backup"))
     ops = KroworkAccountOps()
-    ops.mode = "backup" if mode == "backup" else ""
+    ops.mode = "backup" if full else ""
     return ops.export(db)
 
 

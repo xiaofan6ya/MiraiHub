@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from admin.platform.astudio.core import client, paths
@@ -187,9 +187,13 @@ def checkin_all(_: bool = Depends(require_admin), db=Depends(get_db)):
 
 
 @router.get("/export")
-def export_accounts(mode: str = "backup", _: bool = Depends(require_admin),
+def export_accounts(request: Request, mode: str = "plain", _: bool = Depends(require_admin),
                     db=Depends(get_db)):
-    """导出（backup=含凭证 / plain=脱敏清单），前端通用导出弹窗用。"""
+    """导出（backup=含凭证，需二次确认 / plain=脱敏清单，默认），前端通用导出弹窗用。"""
+    from admin import export_guard
+    full = export_guard.guard_secret_export(request, "astudio export",
+                                            export_guard.wants_secrets(mode == "backup"))
+    mode = "backup" if full else "plain"
     from admin.platform.astudio.platform_gateway import AStudioAccountOps
 
     ops = AStudioAccountOps()
