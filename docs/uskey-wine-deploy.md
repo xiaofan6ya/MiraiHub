@@ -81,6 +81,12 @@ ExecStart=/usr/bin/script -qfc "/usr/bin/wine /opt/marvis-sign/py/python.exe /op
 
 ```bash
 # Alibaba Cloud Linux 3 / RHEL 8 系
+
+> **2026-11-25：vendor DLL 已移出仓库。** 两个 `vendor/beacon/*.dll`（合计 4.6 MB）不再入库；
+> Wine-free 路径下 uskey 由 `admin/platform/marvis/core/uskey_local.py` 纯 Python mint，不需要它们。
+> 仅离线签名机器需要时：从 GitHub Release 下载放到 `vendor/beacon/`，或用 `MARVIS_BEACON_DLL` 指向绝对路径；
+> 缺失时 `uskey_signer` 会 `SignerUnavailable` 降级，不会在 import 期崩溃。
+
 dnf install -y --setopt=keepcache=0 wine-core
 
 # 验证
