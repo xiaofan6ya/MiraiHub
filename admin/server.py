@@ -277,7 +277,18 @@ async def _security_headers(request: Request, call_next):
     _script_src = ("script-src 'self' 'unsafe-inline' 'unsafe-eval'"
                    if _desktop_shell else "script-src 'self' 'unsafe-inline'")
     if _is_html_doc:
-        response.headers.setdefault("Content-Security-Policy", _ADMIN_CSP)
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            + _script_src + "; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "connect-src 'self'; "
+            "media-src 'self' blob:; "
+            "object-src 'none'; base-uri 'self'; "
+            "frame-ancestors 'none'; form-action 'self'",
+        )
     return response
 
 
