@@ -12,6 +12,15 @@ from admin.platform import protocol_bridge as bridge
 from admin.platform.loomy import gateway
 
 
+def _wait_for_flag(flag, timeout=2.0):
+    """3.10 兼容：等 Event 置位，超时抛 AssertionError（替掉 3.11 才有的 asyncio.timeout）。"""
+    deadline = time.monotonic() + timeout
+    while not flag.is_set():
+        if time.monotonic() >= deadline:
+            raise AssertionError("等待事件置位超时")
+        time.sleep(0.005)
+
+
 class Database:
     def __init__(self):
         self.closed = 0
@@ -176,9 +185,7 @@ def test_close_during_blocked_next_waits_then_stops_without_more_reads(setup):
         result = await gateway._forward_stream({"model": "m", "stream": True}, request())
         reader = asyncio.create_task(result.body_iterator.__anext__())
         try:
-            async with asyncio.timeout(2):
-                while not entered.is_set():
-                    await asyncio.sleep(0)
+            await asyncio.to_thread(_wait_for_flag, entered)
             closing = asyncio.create_task(result.body_iterator.aclose())
             await asyncio.sleep(0.02)
             assert not closing.done()
@@ -211,9 +218,7 @@ def test_cancel_during_open_reclaims_late_result_on_same_worker(setup, monkeypat
     async def run():
         task = asyncio.create_task(gateway._forward_stream({"model": "m", "stream": True}, request()))
         try:
-            async with asyncio.timeout(2):
-                while not entered.is_set():
-                    await asyncio.sleep(0)
+            await asyncio.to_thread(_wait_for_flag, entered)
             task.cancel()
             await asyncio.sleep(0.02)
             assert not setup.db.closed

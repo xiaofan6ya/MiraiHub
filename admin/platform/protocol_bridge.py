@@ -1210,6 +1210,43 @@ async def _relay_with_cleanup(source, inner):
             await _safe_aclose(inner.body_iterator)
 
 
+class _CloseOnce:
+    """幂等 close 包装：内层 body 只关一次。
+
+    中继有两条收尾路径都会 aclose 内层 body：`_relay_with_cleanup` 的 finally
+    （body 跑过）和 `_RelayStreamingResponse.__call__` 的 finally（兜底「body
+    一帧没跑、finally 不执行」）。内层的 aclose 会释放账号租约、关上游会话、
+    结算，重入等于重复释放，所以包装一层把两次收敛成一次。
+    """
+
+    __slots__ = ("_source", "_closed")
+
+    def __init__(self, source):
+        self._source = source
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self._source.__anext__()
+
+    async def aclose(self):
+        if self._closed:
+            return
+        self._closed = True
+        await _safe_aclose(self._source)
+
+
+def _close_once(inner):
+    """把内层 body 换成 `_CloseOnce`（`inner` 没有 body_iterator 时原样返回）。"""
+    body = getattr(inner, "body_iterator", None)
+    if body is None or isinstance(body, _CloseOnce):
+        return inner
+    inner.body_iterator = _CloseOnce(body)
+    return inner
+
+
 #: 内层响应可以提供的兜底钩子名：中继从没开始读内层 body（例如响应头发送失败、
 #: 客户端在第一帧前就走了）时，内层生成器的 finally 不会执行，账号租约 / 记账
 #: 只能靠这个钩子。钩子必须幂等，且自己判断「内层是否已经被迭代过」。
@@ -1583,6 +1620,8 @@ def anthropic_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
       客户端挂死。
     """
 
+    inner = _close_once(inner)
+
     async def relay():
         msg_id = "msg_%s_%s" % (prefix, uuid.uuid4().hex[:20])
         started = False
@@ -1782,6 +1821,8 @@ def responses_stream_relay(inner, model: str, *, prefix: str = "gw") -> Streamin
     incomplete_details），错误发 `response.failed` —— Codex 才能区分
     「模型想继续但被截断」与「上游报错」，而不是显示成正常完成。
     """
+
+    inner = _close_once(inner)
 
     async def relay():
         resp_id = "resp_%s_%s" % (prefix, uuid.uuid4().hex[:20])

@@ -796,8 +796,9 @@ async def responses(request: Request):
         return await _forward_stream(body, request, chat_relay=False,
                                      model=model)
     result, account, started, key = await _forward(body, request)
-    await asyncio.to_thread(_bill, key, account, model, _usage_to_chat(result.get("usage")),
-          request=request, started=started)
+    usage = _usage_to_chat(result.get("usage"))
+    await asyncio.to_thread(_bill, key, account, model, usage,
+                            request=request, started=started)
     return JSONResponse(result)
 
 
