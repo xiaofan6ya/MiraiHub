@@ -379,3 +379,24 @@ admin/ui/node_modules/
 !docs/ui-v2/**
 # �°澲̬����ع�������
 !tests/test_ui_v2_serving.py
+
+# ---- 开发/测试产物（2026-11-25 补：防止误提交）----
+# 前端：覆盖率报告、TS 增量缓存、Vite/Playwright 产物
+admin/ui/coverage/
+admin/ui/tsconfig.tsbuildinfo
+*.tsbuildinfo
+admin/ui/.vite/
+admin/ui/playwright-report/
+admin/ui/test-results/
+# 临时审查/巡检产物（QA 子代理、axe/Lighthouse 报告）
+.qa-routes/
+.lighthouse/
+# 通用编辑器/系统垃圾
+*.orig
+*.rej
+*.swp
+.DS_Store
+Thumbs.db
+
+# `tools/*` 默认忽略；上线前只读自查脚本需要入库。
+!tools/preflight_mysql.sql
