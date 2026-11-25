@@ -37,6 +37,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 
+from admin import http_shared
 from admin.platform import protocol_bridge as bridge
 from admin.platform import shared
 from admin.platform.astudio.core import client, endpoints
@@ -633,7 +634,7 @@ async def _forward_stream(body: dict, request, *, chat_relay: bool,
     upstream = None
     last_error: client.UpstreamError | None = None
     for _ in range(MAX_ATTEMPTS):
-        account = shared.select_account(
+        account = await asyncio.to_thread(shared.select_account,
             db, storage=STORAGE, realm=realm, key=key,
             model=model, exclude_ids=exclude)
         if account is None:
@@ -644,12 +645,13 @@ async def _forward_stream(body: dict, request, *, chat_relay: bool,
         try:
             token = astudio_accounts.token_of(
                 astudio_accounts.credentials_of(account))
-            upstream = client.open_responses_stream(
-                token, body, account_id=int(account.id or 0), stats=stats)
+            upstream = await http_shared.run_blocking(client.open_responses_stream,
+                token, body, account_id=int(account.id or 0), stats=stats,
+                           on_orphan=http_shared.close_quietly)
             break
         except client.UpstreamError as exc:
             shared.release(account)
-            shared.note_failure(
+            await asyncio.to_thread(shared.note_failure,
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
                 code=exc.code,
@@ -676,6 +678,38 @@ async def _forward_stream(body: dict, request, *, chat_relay: bool,
             headers={"Retry-After": "3"})
 
     holder: dict = {}
+    finish_lock = threading.Lock()
+    finished: list = []
+
+    def _finish():
+        # 第 4 轮 R4-BE-05：原 finally 抽出来，生成器 finally 与「内层未启动」钩子共用，
+        # 加锁只执行一次。
+        with finish_lock:
+            if finished:
+                return
+            finished.append(1)
+        client.close_stream(upstream)
+        try:
+            shared.release(account)
+            # 流内错误不是「调用成功」：别把坏响应记成绿勾
+            if not holder.get("error"):
+                shared.note_success(account)
+            db.commit()
+        except Exception:  # noqa: BLE001
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            _bill(key, account, model, holder.get("usage") or {},
+                  request=request, started=started, stats=stats,
+                  error=str(holder.get("error") or ""))
+        finally:
+            db.close()
+
+    def _release_unstarted():
+        holder.setdefault("error", "client_disconnected")
+        _finish()
 
     def generator():
         try:
@@ -713,27 +747,17 @@ async def _forward_stream(body: dict, request, *, chat_relay: bool,
             logger.warning("AStudio 流中断 acc=%s: %s",
                            getattr(account, "id", ""), str(exc)[:200])
         finally:
-            client.close_stream(upstream)
-            try:
-                shared.release(account)
-                # 流内错误不是「调用成功」：别把坏响应记成绿勾
-                if not holder.get("error"):
-                    shared.note_success(account)
-                db.commit()
-            except Exception:  # noqa: BLE001
-                try:
-                    db.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-            _bill(key, account, model, holder.get("usage") or {},
-                  request=request, started=started, stats=stats,
-                  error=str(holder.get("error") or ""))
-            db.close()
+            _finish()
 
     ping = bridge.CHAT_PING if chat_relay else bridge.RESPONSES_PING
-    safe = bridge.with_pings(generator(), ping=ping)
-    return StreamingResponse(
-        safe, media_type="text/event-stream",
+    # P4：异步桥（不占 anyio 令牌；断连后停读上游并 close 生成器）
+    safe = http_shared.async_stream(generator(), ping=ping)
+    # /v1/messages 会把它交给 anthropic_stream_relay：中继一帧没读时 generator
+    # 不会启动，钩子在守护线程里收尾（释放账号 + 记 client_disconnected）。
+    # 第 5 轮（A6）：chat / responses 直连返回时，响应头发送失败同样一帧不读 ——
+    # `guarded_stream_response` 在自身 __call__ 的 finally 里也调这个钩子。
+    return bridge.guarded_stream_response(
+        safe, _release_unstarted, name="astudio-unstarted",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -759,7 +783,7 @@ async def chat_completions(request: Request):
         chat = _responses_to_chat(result, model)
     except client.UpstreamError as exc:
         return _fail(exc)
-    _bill(key, account, model, chat.get("usage") or {},
+    await asyncio.to_thread(_bill, key, account, model, chat.get("usage") or {},
           request=request, started=started)
     return JSONResponse(chat)
 
@@ -772,8 +796,9 @@ async def responses(request: Request):
         return await _forward_stream(body, request, chat_relay=False,
                                      model=model)
     result, account, started, key = await _forward(body, request)
-    _bill(key, account, model, _usage_to_chat(result.get("usage")),
-          request=request, started=started)
+    usage = _usage_to_chat(result.get("usage"))
+    await asyncio.to_thread(_bill, key, account, model, usage,
+                            request=request, started=started)
     return JSONResponse(result)
 
 
@@ -802,7 +827,7 @@ async def messages(request: Request):
         anthropic = bridge.openai_to_anthropic(chat, model)
     except client.UpstreamError as exc:
         return anthropic_fail(exc)
-    _bill(key, account, model, chat.get("usage") or {},
+    await asyncio.to_thread(_bill, key, account, model, chat.get("usage") or {},
           request=request, started=started)
     return JSONResponse(anthropic)
 
@@ -908,7 +933,7 @@ async def list_models(request: Request):
     with SessionLocal() as db:
         shared.authenticate(db, request, platform=PUBLIC)
         realm = _realm(request)
-        account = shared.select_account(
+        account = await asyncio.to_thread(shared.select_account,
             db, storage=STORAGE, realm=realm,
             key=shared.key_row(db, request))
         if account is None:
@@ -928,7 +953,7 @@ async def balance(request: Request):
     with SessionLocal() as db:
         shared.authenticate(db, request, platform=PUBLIC)
         realm = _realm(request)
-        account = shared.select_account(
+        account = await asyncio.to_thread(shared.select_account,
             db, storage=STORAGE, realm=realm,
             key=shared.key_row(db, request))
         if account is None:
@@ -937,7 +962,7 @@ async def balance(request: Request):
                                  "note": "号池没有可用 AStudio 账号"},
                                 status_code=503)
         try:
-            quota = astudio_accounts.sync_quota(db, account)
+            quota = await asyncio.to_thread(astudio_accounts.sync_quota, db, account)
         except client.UpstreamError as exc:
             return _fail(exc)
         if not quota.get("ok"):

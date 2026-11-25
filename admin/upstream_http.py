@@ -102,7 +102,7 @@ def build_opener(trust_env: bool | None = None, *extra_handlers,
     """
     if trust_env is None:
         trust_env = upstream_trust_env()
-    handlers = [urllib.request.HTTPSHandler(context=ssl_context())]
+    handlers = [_split_timeout_https_handler()]
     proxy_url = str(proxy or "").strip()
     if proxy_url:
         # 显式代理（按平台或按账号配的）：http / https 都走它。
@@ -114,6 +114,13 @@ def build_opener(trust_env: bool | None = None, *extra_handlers,
     for handler in extra_handlers:
         handlers.append(handler)
     return urllib.request.build_opener(*handlers)
+
+
+def _split_timeout_https_handler():
+    """带「建连短超时」的 HTTPS 处理器（关闭开关时退回标准处理器）。"""
+    if connect_timeout() <= 0:
+        return urllib.request.HTTPSHandler(context=ssl_context())
+    return _SplitTimeoutHTTPSHandler(context=ssl_context())
 
 
 _opener = None
@@ -186,6 +193,94 @@ _ssl_lock = threading.Lock()
 
 #: `install_ssl_defaults()` 是否已经接管过默认上下文（幂等标记）。
 _SSL_DEFAULT_INSTALLED = False
+
+
+# ---------------------------------------------------------------------------
+# 建连超时与读超时分离（P3）
+# ---------------------------------------------------------------------------
+#
+# urllib 只有一个 `timeout`：它同时是建连（TCP + CONNECT + TLS）超时和每次读的超时。
+# 平台客户端为了等长生成传 600 秒，于是上游节点一挂，**建连也能等 600 秒**，
+# 一个请求占着一个线程干等 10 分钟。这里让 `build_opener()` 出来的 opener 在建连
+# 阶段用 `ADMIN_UPSTREAM_CONNECT_TIMEOUT`（默认 10 秒，0 = 关闭、沿用调用方的
+# timeout），连上之后把 socket 改回调用方给的读超时 —— 读超时语义完全不变。
+
+import http.client as _http_client  # noqa: E402
+import socket as _socket  # noqa: E402
+
+
+def connect_timeout() -> float:
+    """上游建连超时（秒）；0 表示不单独限制。
+
+    与 httpx 侧（`http_shared.cap_timeout`）共用同一个值：`ADMIN_UPSTREAM_CONNECT_TIMEOUT`，
+    默认 10 秒。
+    """
+    from admin import http_shared
+
+    return http_shared.connect_timeout()
+
+
+class _SplitTimeoutHTTPSConnection(_http_client.HTTPSConnection):
+    """建连用短超时、读用调用方超时的 HTTPSConnection。"""
+
+    def connect(self):
+        read_timeout = self.timeout
+        limit = connect_timeout()
+        default = read_timeout is _socket._GLOBAL_DEFAULT_TIMEOUT
+        if limit and (default or read_timeout is None or read_timeout > limit):
+            self.timeout = limit
+        try:
+            super().connect()
+        finally:
+            self.timeout = read_timeout
+        if self.sock is not None:
+            self.sock.settimeout(_socket.getdefaulttimeout() if default else read_timeout)
+
+
+class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        kwargs = {"context": self._context}
+        check = getattr(self, "_check_hostname", None)
+        if check is not None and sys.version_info < (3, 12):
+            kwargs["check_hostname"] = check
+        return self.do_open(_SplitTimeoutHTTPSConnection, req, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 共享的同步 httpx 连接池（P3）→ 见 `admin/http_shared.py`
+# ---------------------------------------------------------------------------
+#
+# 上一轮放在这里的 `shared_sync_transport()` 用 `httpx.Client(transport=...)` 接入，
+# 而 httpx 在传了 `transport=` 时**不再读环境代理**（HTTPS_PROXY / Windows 系统代理），
+# 依赖环境代理出网的部署会直连失败；它还给每个平台加了 64 条的新并发上限。
+# 现已移到 `http_shared.client_kwargs()`（`mounts=` 接入，代理语义与改动前一致）。
+
+
+def tune_thread_limiter() -> int | None:
+    """调大 anyio 默认线程令牌（P4）：默认 40 个，被流式请求占满后所有同步接口排队。
+
+    Starlette 的同步 `def` 接口、`Depends(get_db)`、同步生成器的 StreamingResponse
+    都走 anyio 的默认 CapacityLimiter；非 Marvis 平台每条流整个生命周期占一个令牌，
+    并发约 40 条流时管理台和主链路一起卡住。默认调到 160，可用
+    `ADMIN_ANYIO_THREAD_TOKENS` 覆盖（只会调大，不会调小）。
+
+    **必须在事件循环线程上调用**（limiter 绑定在事件循环上）。返回生效值；失败 None。
+    """
+    raw = (os.environ.get("ADMIN_ANYIO_THREAD_TOKENS", "") or "").strip()
+    try:
+        tokens = int(raw) if raw else 160
+    except ValueError:
+        tokens = 160
+    tokens = max(40, min(1000, tokens))
+    try:
+        import anyio.to_thread
+
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        if limiter.total_tokens < tokens:
+            limiter.total_tokens = tokens
+        return int(limiter.total_tokens)
+    except Exception:  # noqa: BLE001 - 不在事件循环里 / anyio 版本差异：不调
+        return None
 
 
 def ssl_context():
@@ -271,6 +366,14 @@ def install_ssl_defaults() -> bool:
     `build_opener()`）完全不受影响。
     """
     global _SSL_DEFAULT_INSTALLED
+    # 顺带调大 anyio 线程令牌（P4）：本函数由 server 的 **async** 启动钩子调用，
+    # 正好在事件循环线程上 —— limiter 只能在这里设置。
+    try:
+        tokens = tune_thread_limiter()
+        if tokens:
+            _logger.info("anyio 线程令牌 %d 个（同步接口不再被流式请求挤占）", tokens)
+    except Exception:  # noqa: BLE001
+        pass
     original = getattr(ssl, "_create_default_https_context", None)
     if original is None:            # 非 CPython / 被裁剪的解释器：不需要补
         return False
@@ -299,10 +402,22 @@ class _BorrowedTransport(httpx.AsyncBaseTransport):
         self.private = []
         self.scope = scope if scope is not None else {}
 
+    def _pick(self):
+        """按账号复用连接池时，按本次请求的上游账号取池；取不到退回本请求私有池。"""
+        if not isinstance(self.transport, _AccountPools):
+            return self.transport
+        picked = self.transport.for_key(self.scope.get('_upstream_account_key'))
+        if picked is not None:
+            return picked
+        fresh = httpx.AsyncHTTPTransport(limits=self.limits, verify=ssl_context(),
+                                         trust_env=upstream_trust_env())
+        self.private.append(fresh)
+        return fresh
+
     async def handle_async_request(self, request):
         captured = await _prepare_upload(request, self.scope)
         try:
-            response = await self.transport.handle_async_request(request)
+            response = await self._pick().handle_async_request(request)
             if captured is not None:
                 captured['http_status'] = response.status_code
             request_metrics.mark_upstream_response(response.status_code)
@@ -353,6 +468,140 @@ class _BorrowedTransport(httpx.AsyncBaseTransport):
         for transport in self.private:
             await transport.aclose()
         self.private.clear()
+
+
+# ---------------------------------------------------------------------------
+# WorkBuddy 主链路：按上游账号复用连接（perf 审计 R2 #23 / R1 B9，默认关闭）
+# ---------------------------------------------------------------------------
+#
+# 服务器部署时 `client()` 每个请求都新建 `AsyncHTTPTransport`、用完 aclose：首字前
+# 必付一次 DNS + TCP + TLS（悉尼到上游估 100–300 ms）。安卓版在 startup 建了共享池。
+# 服务器上多个账号共用一条连接是风控特征，所以这里**按账号**建池（键 = 请求 scope 的
+# `_upstream_account_key`，见 `select_account`），LRU 上限 `ADMIN_WB_KEEPALIVE_ACCOUNTS`
+# （默认 64）；被淘汰的池等在途请求结束后才关，不会掐断正在跑的流。
+# 建连前断开的复用连接由 `_BorrowedTransport` 原有的「换新池重发一次」兜底。
+#
+# `ADMIN_WB_KEEPALIVE=1` 开启（默认 0 = 旧行为）。先灰度：观察 4xx/风控与
+# `request_metrics` 的 connection_recovery 次数再全量。
+
+def _wb_keepalive_enabled() -> bool:
+    return os.environ.get("ADMIN_WB_KEEPALIVE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    raw = (os.environ.get(name, "") or "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        value = default
+    return max(low, min(high, value))
+
+
+class _CountedStream(httpx.AsyncByteStream):
+    """响应体关闭时把所属池的在途计数减一（淘汰的池要等它归零才关）。"""
+
+    def __init__(self, stream, done):
+        self._stream = stream
+        self._done = done
+
+    async def __aiter__(self):
+        async for chunk in self._stream:
+            yield chunk
+
+    async def aclose(self):
+        try:
+            await self._stream.aclose()
+        finally:
+            done, self._done = self._done, None
+            if done is not None:
+                done()
+
+
+class _AccountPool(httpx.AsyncBaseTransport):
+    def __init__(self, owner, transport):
+        self.owner = owner
+        self.transport = transport
+        self.inflight = 0
+        self.retired = False
+
+    async def handle_async_request(self, request):
+        self.inflight += 1
+        try:
+            response = await self.transport.handle_async_request(request)
+        except BaseException:
+            self._release()
+            raise
+        return httpx.Response(status_code=response.status_code, headers=response.headers,
+                              stream=_CountedStream(response.stream, self._release),
+                              extensions=response.extensions)
+
+    def _release(self):
+        self.inflight = max(0, self.inflight - 1)
+        if self.retired and self.inflight == 0:
+            self.owner.close_later(self.transport)
+
+
+class _AccountPools(httpx.AsyncBaseTransport):
+    """按上游账号键的 `AsyncHTTPTransport` LRU（只在事件循环线程上使用）。"""
+
+    def __init__(self, limits, loop):
+        from collections import OrderedDict
+
+        self.loop = loop
+        self.limits = httpx.Limits(
+            max_connections=limits.max_connections,
+            max_keepalive_connections=_env_int("ADMIN_WB_KEEPALIVE_PER_ACCOUNT", 2, 1, 16),
+            keepalive_expiry=float(_env_int("ADMIN_WB_KEEPALIVE_EXPIRY", 30, 1, 300)))
+        self.max_accounts = _env_int("ADMIN_WB_KEEPALIVE_ACCOUNTS", 64, 1, 1024)
+        self.pools = OrderedDict()
+        self.closing = set()
+
+    def for_key(self, key):
+        if not key:
+            return None
+        pool = self.pools.get(key)
+        if pool is None:
+            pool = _AccountPool(self, httpx.AsyncHTTPTransport(
+                limits=self.limits, verify=ssl_context(), trust_env=upstream_trust_env()))
+            self.pools[key] = pool
+            while len(self.pools) > self.max_accounts:
+                _old_key, old = self.pools.popitem(last=False)
+                old.retired = True
+                if old.inflight == 0:
+                    self.close_later(old.transport)
+        else:
+            self.pools.move_to_end(key)
+        return pool
+
+    def close_later(self, transport):
+        try:
+            task = self.loop.create_task(transport.aclose())
+        except RuntimeError:            # 事件循环已关闭
+            return
+        self.closing.add(task)
+        task.add_done_callback(self.closing.discard)
+
+    async def handle_async_request(self, request):  # 只经 _BorrowedTransport._pick 使用
+        raise RuntimeError("_AccountPools 需要经 _BorrowedTransport 按账号路由")
+
+    async def aclose(self):
+        pools = list(self.pools.values())
+        self.pools.clear()
+        for pool in pools:
+            try:
+                await pool.transport.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _account_pools(state, limits):
+    loop = asyncio.get_running_loop()
+    pools = getattr(state, 'upstream_account_pools', None)
+    if pools is None or pools.loop is not loop:
+        pools = _AccountPools(limits, loop)
+        state.upstream_account_pools = pools
+    return pools
 
 
 def select_account(scope, account):
@@ -425,6 +674,10 @@ async def stop(app):
     app.state.upstream_transport = None
     if transport is not None:
         await transport.aclose()
+    pools = getattr(app.state, 'upstream_account_pools', None)
+    app.state.upstream_account_pools = None
+    if pools is not None:
+        await pools.aclose()
 
 
 @asynccontextmanager
@@ -436,6 +689,11 @@ async def client(request, timeout, limits, *, retry_budget=None):
     scope = getattr(request, 'scope', {})
     recovery = scope.setdefault('_upstream_recovery', {'used': False})
     owned = transport is None
+    state = getattr(app, 'state', None)
+    if owned and state is not None and _wb_keepalive_enabled():
+        # 服务器部署按账号复用连接（默认关，见 `_AccountPools`）；不归本请求所有
+        transport = _account_pools(state, limits)
+        owned = False
     if owned:
         transport = httpx.AsyncHTTPTransport(limits=limits, verify=ssl_context(),
                                              trust_env=upstream_trust_env())

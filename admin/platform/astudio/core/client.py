@@ -140,8 +140,9 @@ def _request_json(url: str, *, headers: dict, json_body=None, params=None,
     """发一次 JSON 请求，返回 (status, text)。网络错误转 UpstreamError。"""
     method = "POST" if json_body is not None else "GET"
     try:
-        with httpx.Client(timeout=timeout,
-                          follow_redirects=follow_redirects) as client:
+        from admin import http_shared
+        with httpx.Client(follow_redirects=follow_redirects,
+                          **http_shared.client_kwargs("astudio", timeout=timeout)) as client:  # P3：共享连接池 + 共享 TLS 上下文 + 建连 10s（cookie 仍按请求隔离）
             resp = client.request(method, url, headers=headers,
                                   json=json_body, params=params)
     except httpx.HTTPError as exc:
@@ -198,7 +199,8 @@ def open_responses_stream(token: str, body: dict, *, account_id=None,
     url = endpoints.responses_url()
     tag = "%s#%s" % (PUBLIC, account_id if account_id is not None else "-")
     started = time.perf_counter()
-    client = httpx.Client(timeout=GATEWAY_TIMEOUT)
+    from admin import http_shared
+    client = httpx.Client(**http_shared.client_kwargs("astudio", timeout=GATEWAY_TIMEOUT))  # P3：共享连接池 + 共享 TLS 上下文 + 建连 10s（cookie 仍按请求隔离）
     try:
         resp = client.send(client.build_request(
             "POST", url, headers=_gateway_headers(token, stream=True),
@@ -403,7 +405,9 @@ def fetch_catalog(token: str, *, account_id=None) -> list:
     """
     tag = "%s#%s" % (PUBLIC, account_id if account_id is not None else "-")
     try:
-        with httpx.Client(timeout=STUDIO_TIMEOUT) as client:
+        from admin import http_shared
+
+        with httpx.Client(**http_shared.client_kwargs("astudio", timeout=STUDIO_TIMEOUT)) as client:
             resp = client.get(MODEL_MANAGER_URL, headers={
                 "Authorization": "Bearer " + str(token or ""),
                 "Accept": "application/json"})

@@ -246,15 +246,18 @@ class LoomyAccountOps:
                 points = client.fetch_points_balance(token, realm, account.id)
             except client.UpstreamError as exc:
                 if exc.kind == "auth":
-                    # session 真的废了：禁用，别再让它进候选
-                    account.status = "disabled"
-                    account.last_err_msg = (exc.message or "")[:255]
+                    # D7-6.4：先冷却、连续达到阈值才停用（ban_recheck 复核恢复）
+                    from admin import account_health
+                    account_health.note_auth_failure(session, account,
+                                                     str(exc.message or "")[:150])
                     session.commit()
                 return {"account_id": account.id, "account": account.name,
                         "ok": False, "auth_dead": exc.kind == "auth",
                         "renewed": renewed,
                         "error": exc.message[:120]}
             # ② 活着：同步余额（保活跑完前端数字就是新的）
+            from admin import account_health
+            account_health.clear_auth_failure(account)
             quota_ok = False
             try:
                 loomy_accounts.apply_quota(account, points)

@@ -215,7 +215,10 @@ def sync_quota(db: Session, account: Account, *,
     except client.UpstreamError as exc:
         account.last_err_msg = str(exc.message or "")[:500]
         if exc.kind == "auth":
-            account.status = "disabled"
+            # D7-6.4：一次 401 不再永久停用 —— 先冷却，连续达到阈值才停用，
+            # 停用后由 ban_recheck 用平台健康检查复核恢复。
+            from admin import account_health
+            account_health.note_auth_failure(db, account, str(exc.message or exc)[:150])
         elif exc.kind == "quota_exceeded":
             # 402 不是坏号，是暂时没钱。冷却一段时间把它从选号队列里挪开，
             # 比留在池子里被反复选中、反复 402 好得多。
@@ -230,6 +233,8 @@ def sync_quota(db: Session, account: Account, *,
             quota["models"] = len(models)
         except client.UpstreamError:
             quota.setdefault("models", 0)
+    from admin import account_health
+    account_health.clear_auth_failure(account)   # 积分接口 200：登录态有效，清 401 计数
     apply_quota(account, quota)
     # 余额为 0 的号**主动冷却**：它的凭证是好的（积分接口 200），但发对话
     # 一定被上游 402 打回。留在选号队列里只会让请求先失败一次再换号 ——
