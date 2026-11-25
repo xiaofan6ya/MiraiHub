@@ -576,7 +576,7 @@ Content-Type: application/json
 - CustomEvent `wb-platform-change` 由 platform-switch.js 发送
 
 ### 5.2 导航跳转
-- 点击账号行 → 可跳转到「日志」（P13）查��该账号的使用记录
+- 点击账号行 → 可跳转到「日志」（P13）查看该账号的使用记录
 - 点击「性能基准」中的平台行 → 可跳转到「缓存分析」（P24，如支持）
 - 右侧摘要中的「启用 / 禁用」数字 → 可跳转到「账号管理」（P13）
 

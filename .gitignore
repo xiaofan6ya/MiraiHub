@@ -11,29 +11,26 @@ __pycache__/
 *.egg-info/
 .eggs/
 
-# ===== 密钥 / 本地配置（绝不能上传�?=====
+# ===== 密钥 / 本地配置（绝不能上传） =====
 .env
 .env.docker
 .env.local
 .env.*.local
 
-# ===== 运行日志 / 运行时产�?=====
+# ===== 运行日志 / 运行时产物 =====
 *.log
 logs/
-# admin/ui/src/pages/logs is SOURCE CODE; keep it out of the logs/ ignore.
-!admin/ui/src/pages/logs/
-!admin/ui/src/pages/logs/**
 *.pid
 .tmp_srv.err
 .tmp_srv.out
 
 
-# ===== 压缩包备�?=====
+# ===== 压缩包备份 =====
 *.zip
 *.tar.gz
 *.rar
 
-# ===== IDE / 编辑�?=====
+# ===== IDE / 编辑器 =====
 .idea/
 .vscode/
 *.swp
@@ -42,9 +39,9 @@ logs/
 .workbuddy/
 
 # ===== 构建产物与本机环境（不入库）=====
-# dist/ 是双端安装包（几�?MB，走 GitHub Release 而不�?Git），
-# build/ �?.desktop-build/ 是打包中间物和独�?venv�?
-# android 的两�?build/ �?Gradle 产物。它们都能由源码重建�?
+# dist/ 是双端安装包（几十 MB，走 GitHub Release 而不是 Git），
+# build/ 与 .desktop-build/ 是打包中间物和独立 venv，
+# android 的两个 build/ 是 Gradle 产物。它们都能由源码重建。
 dist/
 build/
 .desktop-build/
@@ -56,8 +53,8 @@ android/.gradle/
 admin/config.py.bak-*
 .htaccess
 
-# ===== 本地部署 / SSH 快捷脚本（含服务�?IP 与密码，禁止提交�?=====
-# 这些只是本机往线上推的快捷脚本，保留在本地即可，切勿上传�?
+# ===== 本地部署 / SSH 快捷脚本（含服务器 IP 与密码，禁止提交） =====
+# 这些只是本机往线上推的快捷脚本，保留在本地即可，切勿上传。
 ssh_exec.py
 ssh_run.py
 ssh_sync.py
@@ -69,31 +66,31 @@ sync_auth.bat
 start_admin.bat
 start_converter.bat
 
-# ===== 数据库备份（含真实账号凭�?token，禁止提交） =====
+# ===== 数据库备份（含真实账号凭据 token，禁止提交） =====
 backup_*.sql
 *.sql.gz
 
 # ===== 测试文件（不提交到仓库；本地可保留用于回归测试） =====
-# 回归测试保留在本地，不纳入发布仓库�?
+# 回归测试保留在本地，不纳入发布仓库。
 test_*.py
 tests/
 *_test.py
 test/
 
-# ===== 公开文档白名单：其余资料仅存仓库�?=====
+# ===== 公开文档白名单：其余资料仅存仓库外 =====
 docs/*
 !docs/RELEASE_NOTES_[0-9]*.[0-9]*.[0-9]*.md
 docs/RELEASE_NOTES_*[!0-9.]*.md
 !docs/PUBLICATION.md
 
-# ===== 逆向取证 / 本地诊断脚本（不提交�?=====
-# 默认忽略 Python 排障脚本；通用构建与用户工具在下方显式保留�?
+# ===== 逆向取证 / 本地诊断脚本（不提交） =====
+# 默认忽略 Python 排障脚本；通用构建与用户工具在下方显式保留。
 scripts/*.py
-# 例外：双端构建脚本属于产品代码，打包流程直接依赖它们�?
+# 例外：双端构建脚本属于产品代码，打包流程直接依赖它们。
 !scripts/build_desktop.py
 !scripts/build_android.py
-# 例外：Android 签名身份管理�?build_android.py �?*硬依�?* —�?
-# 漏了它，全新克隆的仓库一打包�?ImportError（不再是「少个工具」）�?
+# 例外：Android 签名身份管理是 build_android.py 的**硬依赖** ——
+# 漏了它，全新克隆的仓库一打包就 ImportError（不再是「少个工具」）。
 !scripts/android_signing.py
 
 # ===== 强制保留（即便以点开头也要提交） =====
@@ -119,7 +116,7 @@ android/local.properties
 android/**/build/
 *.jks
 *.keystore
-# 安卓签名身份：私�?+ 口令，永不入库（build/ 会被打包脚本清掉，所以放在仓库根�?
+# 安卓签名身份：私钥 + 口令，永不入库（build/ 会被打包脚本清掉，所以放在仓库根）
 android-signing/
 
 
@@ -127,7 +124,7 @@ android-signing/
 workbuddy_admin.db
 workbuddy_admin.db-shm
 workbuddy_admin.db-wal
-/data/
+data/
 
 # Local credentials file
 登录密码.txt
@@ -140,23 +137,23 @@ research/
 evidence/
 images/
 
-# ===== 本地排障脚本 / 一次性探查（2026-11-02 归档�?=====
-# 根目录曾堆了 548 个文件，其中 500+ 是历史的 `_xxx.py` 调试脚本�?
+# ===== 本地排障脚本 / 一次性探查（2026-11-02 归档） =====
+# 根目录曾堆了 548 个文件，其中 500+ 是历史的 `_xxx.py` 调试脚本：
 # `_bin*.py`（二进制/分片实验）、`_probe_*.py`（接口探测）、`_fix_*.py`
-# （批量改文件的补丁脚本）、`_ops_*.py`（线上运维）、`_authjs/`（逆向产物）�?
-# 它们**没有一个被正式代码�?tests 引用**，全部移�?`_scratch/`�?
+# （批量改文件的补丁脚本）、`_ops_*.py`（线上运维）、`_authjs/`（逆向产物）。
+# 它们**没有一个被正式代码或 tests 引用**，全部移到 `_scratch/`。
 #
-# 规则只锚�?*根目�?*（`/_*.py` 带前导斜杠）。不能写�?`_*.py`�?
-# 那个模式会匹配任意深度的文件名，�?`admin/__init__.py` 这类包初始化文件
-# 虽然�?`__` 开头、不受影响，但将来任�?`_helper.py` 都会被误忽略 —�?
-# 「新加了文件却没进仓库」是最难察觉的一类事故�?
+# 规则只锚定**根目录**（`/_*.py` 带前导斜杠）。不能写成 `_*.py`：
+# 那个模式会匹配任意深度的文件名，而 `admin/__init__.py` 这类包初始化文件
+# 虽然以 `__` 开头、不受影响，但将来任何 `_helper.py` 都会被误忽略 ——
+# 「新加了文件却没进仓库」是最难察觉的一类事故。
 /_*.py
 /_*.html
 /_*.js
 /_authjs/
 /_scratch/
 
-# 智能体生成的媒体资产（运行时数据，不提交�?
+# 智能体生成的媒体资产（运行时数据，不提交）
 admin/data/agent_assets/
 .commit_msg.txt
 .tmp_*
@@ -166,15 +163,15 @@ admin/data/agent_assets/
 # 临时工作目录（asar 分析、外部项目副本），不入库
 tmp/
 
-# 本地放置的真�?SDK 二进制（4.6 MB PE），不进 git
+# 本地放置的真实 SDK 二进制（4.6 MB PE），不进 git
 /vendor/beacon/*.dll
 
-# ===== 旧项目产物（换名后不再上传，避免干扰�?====
+# ===== 旧项目产物（换名后不再上传，避免干扰）=====
 docs/**
-# 轮换 SOP 属于本次交付（部署方要照着做），必须入�?
+# 轮换 SOP 属于本次交付（部署方要照着做），必须入库
 !docs/marvis-qimei-rotation.md
-# 测试目录整体不入库（历史约定：本地私有的探针/样本太多）�?
-# �?*锁真�?bug 的回归用例必须入�?*，否则改动静默把它吞掉时毫无知觉�?
+# 测试目录整体不入库（历史约定：本地私有的探针/样本太多）。
+# 但**锁真实 bug 的回归用例必须入库**，否则改动静默把它吞掉时毫无知觉。
 !tests/
 tests/*
 !tests/test_android_signing.py
@@ -189,36 +186,27 @@ tests/*
 !tests/test_platform_rating.py
 !tests/test_workbuddy_credential_codec.py
 !tests/test_negative_credit_repair.py
-# gateway 可靠性长期回归（PERSISTENT REGRESSION TESTS，见各文件头�?
+# gateway 可靠性长期回归（PERSISTENT REGRESSION TESTS，见各文件头）
 !tests/test_gateway_reliability_pool.py
 !tests/test_gateway_reliability_dispatch.py
 !tests/test_gateway_reliability_models.py
-# 恢复�?026-11-23 队长误合并后回滚时误删的其他 team 白名单（这些文件在回滚前就已存在�?
-!tests/lifecycle-shell.test.cjs
-!tests/test_deploy_waiting_page.py
-!tests/test_desktop_lifecycle.py
-!tests/test_gateway_reliability_scheduling.py
-!tests/test_graceful_lifecycle.py
-!tests/test_lifecycle_control.py
-!tests/test_lifecycle_resume.py
-!tests/test_platform_model_routing.py
 scripts/build_trae_catalog.py
 scripts/build_trae_icube.py
 
-# 发布公告（只�?GitHub Release 正文使用�?
+# 发布公告（只在 GitHub Release 正文使用）
 RELEASE-*.md
 
-# 本地数据�?/ 截图（体积大，不进仓库）
+# 本地数据集 / 截图（体积大，不进仓库）
 backups/
 screenshots/
 
 
-# ===== 本地备份目录（改代码前的快照，勿入库�?=====
+# ===== 本地备份目录（改代码前的快照，勿入库） =====
 _backup_*/
 
-# 本地测试虚拟环境（依赖可复现安装，不入库�?
+# 本地测试虚拟环境（依赖可复现安装，不入库）
 _testenv/
-# 运行时生成的主机标识（与机器绑定，不应入库；�?QODER_MACHINE_ID 显式指定�?
+# 运行时生成的主机标识（与机器绑定，不应入库；用 QODER_MACHINE_ID 显式指定）
 admin/data/qoder_machine_id*
 
 # ===== 本地凭证备份 / 导入报告（含真实账号 token 与手机号，禁止提交）=====
@@ -248,7 +236,7 @@ wb_rt_probe.py
 PERFORMANCE_OPTIMIZATION_PLAN.md
 REPORT_workbuddy_cred_revoke.md
 TICKET_workbuddy_logout_p0.md
-# ===== 发版公告：只让规范命名的 release notes 进库（docs/ 整体忽略�?====
+# ===== 发版公告：只让规范命名的 release notes 进库（docs/ 整体忽略）=====
 !docs/RELEASE_NOTES_1.1.3.md
 # ===== 本轮新增的回归用例（锁真 bug，必须入库）=====
 !tests/test_marvis_token_ttl.py
@@ -267,24 +255,22 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_input_cleared.py
 # ===== PR-01 biz-code families: family marker + 402 quota_exhausted =====
 !tests/test_marvis_error_surface.py
-# SSE 帧对齐回归（心跳不得撕开半帧）：�?gateway._iter_upstream
+# SSE 帧对齐回归（心跳不得撕开半帧）：见 gateway._iter_upstream
 !tests/test_marvis_stream_framing.py
 !tests/test_marvis_headers.py
 !tests/test_marvis_risk_backoff.py
 !tests/test_marvis_quota_rotation.py
 
-# ===== Marvis uskey 免客户端方案�?026-11-18�?====
-# 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不�?uskey�?
-# 网关只能降级随机填充，上游必�?4100404）。两�?DLL 合计�?4.6 MB�?
-# 2026-11-25: vendor DLLs removed from git (4.6 MB binaries; Wine-free no longer needs them).
-# Offline signer hosts: fetch from GitHub Release into vendor/beacon/, or set
-# MARVIS_BEACON_DLL to an absolute path. Missing -> uskey falls back to local mint.
-# 签名缓存是运行时产物，每台机器不同，不入�?
+# ===== Marvis uskey 免客户端方案（2026-11-18）=====
+# 上下文：beacon_wrapper.dll / qimei.dll 进仓库（否则克隆下来签不出 uskey，
+# 网关只能降级随机填充，上游必回 4100404）。两个 DLL 合计约 4.6 MB。
+!vendor/beacon/*.dll
+# 签名缓存是运行时产物，每台机器不同，不入库
 vendor/beacon/uskey_cache.json
 vendor/beacon/uskey_cache.json.bak
 vendor/beacon/_backup/
 
-# 逆向过程产物：抓包、内存镜像、反汇编清单，体积大且不可复现，不入�?
+# 逆向过程产物：抓包、内存镜像、反汇编清单，体积大且不可复现，不入库
 *.mitm
 *.pcap
 *.raw
@@ -293,8 +279,8 @@ uskey_callgraph*.json
 # gateway 的历代手工备份（改代码前的快照，不入库）
 admin/platform/marvis/gateway.py.bak-*
 
-# tools/ 目录：只放行与「跑起来」直接相关的脚本�?
-# 逆向分析脚本（probe_* / hook_* / find_* / disasm_* 等）留在本地�?
+# tools/ 目录：只放行与「跑起来」直接相关的脚本，
+# 逆向分析脚本（probe_* / hook_* / find_* / disasm_* 等）留在本地。
 tools/*
 !tools/uskey_sign_service.py
 !tools/sync_vendor_dll.py
@@ -312,11 +298,11 @@ tools/*
 !docs/uskey-reverse-report.md
 !docs/marvis-4100404-postmortem.md
 
-# ===== 生产环境运维脚本：含服务器路�?/ 服务名，不入公开仓库 =====
-# 这些脚本是为特定部署环境写的（GW=/www/wwwroot/workbuddy2api�?
-# systemctl -u workbuddy2api），换一台机器就失效，属于环境特定物�?
-# 留在本地即可；仓库只保留与机器无关的 uskey_sign_service.py �?
-# sync_vendor_dll.py�?
+# ===== 生产环境运维脚本：含服务器路径 / 服务名，不入公开仓库 =====
+# 这些脚本是为特定部署环境写的（GW=/www/wwwroot/workbuddy2api、
+# systemctl -u workbuddy2api），换一台机器就失效，属于环境特定物。
+# 留在本地即可；仓库只保留与机器无关的 uskey_sign_service.py 和
+# sync_vendor_dll.py。
 tools/ctl.sh
 tools/status.sh
 tools/deploy_check.sh
@@ -333,15 +319,15 @@ tools/test_upstream.sh
 tools/inspect_model_configs.py
 tools/set_safe_context_limits.py
 
-# 服务器地址一律不进仓�?
+# 服务器地址一律不进仓库
 112.124.*
 
-# ===== 请求体上限（PR-09）：锁「默�?256MiB / 0 关闭 / 超限本地 413�?=====
+# ===== 请求体上限（PR-09）：锁「默认 256MiB / 0 关闭 / 超限本地 413」 =====
 !tests/test_marvis_body_limit.py
 
 # Persistent, synthetic QIMEI regression suites and literal SDK vectors.
 !tests/test_marvis_qimei_*.py
-# 部署开关（QIMEI 快照 / 受管身份 / 生成器路由）不能泄漏进测试进�?
+# 部署开关（QIMEI 快照 / 受管身份 / 生成器路由）不能泄漏进测试进程
 !tests/conftest.py
 !tests/qimei_*_sdk_vectors.json
 !tests/test_marvis_uskey_qimei_reload.py
@@ -359,51 +345,6 @@ findings.md
 progress.md
 .qimei-release-review.md
 .tmp-*
-!tests/test_dispatch_retry_degraded.py
-# ===== 计划交付物（2026-11-22 platform-scoped model resolution）：文档必须可入�?=====
-!docs/superpowers/plans/*.md
-!docs/superpowers/
-!docs/superpowers/plans/
-!docs/superpowers/plans/*.md
-# ===== 2026-11-22 platform-scoped model resolution: 持久回归与度量脚本必须可入库 =====
-!tests/test_platform_model_routing.py
-!tests/test_gateway_reliability_scheduling.py
-!tests/test_dispatch_retry_degraded.py
-!scripts/bench_dispatch_hotpath.py
-
-# ===== 优雅退出（任务 8）：端到端验收夹具是交付物，必须可入�?=====
-# �?tests/* 的默认忽略规则配套：只放行本功能的具体测试文件�?
-!tests/test_e2e_graceful.py
-
-# ===== �°����̨��Vue 3 + Vite��=====
-# Դ����⣬node_modules ����⣬dist ������⣨Docker/EXE/APK �������Ҫ Node����
-admin/ui/node_modules/
-# ��Ƹ�����ҳ������Լ��ִ�����������ݣ�������⡣
-!docs/ui-v2/
-!docs/ui-v2/**
-# �°澲̬����ع�������
-!tests/test_ui_v2_serving.py
-
-# ---- 开发/测试产物（2026-11-25 补：防止误提交）----
-# 前端：覆盖率报告、TS 增量缓存、Vite/Playwright 产物
-admin/ui/coverage/
-admin/ui/tsconfig.tsbuildinfo
-*.tsbuildinfo
-admin/ui/.vite/
-admin/ui/playwright-report/
-admin/ui/test-results/
-# 临时审查/巡检产物（QA 子代理、axe/Lighthouse 报告）
-.qa-routes/
-.lighthouse/
-# 通用编辑器/系统垃圾
-*.orig
-*.rej
-*.swp
-.DS_Store
-Thumbs.db
-
-# `tools/*` 默认忽略；上线前只读自查脚本需要入库。
-!tools/preflight_mysql.sql
 
 # ===== macOS 桌面端打包产物（由 scripts/build_desktop.py 从 app.svg / PyInstaller 生成）=====
 # .ico / .png / dist/ / build/ 上面已覆盖；这里补 macOS 独有的 .icns 与变体目录。
@@ -411,3 +352,38 @@ desktop/assets/app.icns
 desktop/assets/app.iconset/
 /dist-*/
 /build-*/
+
+# ===== 新版控制台 v2（admin/ui，Vue 3 + Vite）=====
+# 源码入库；node_modules 与 dist 不入库（Docker 镜像内构建，桌面 / APK 打包前先 npm run build）。
+admin/ui/node_modules/
+admin/ui/coverage/
+admin/ui/.vite/
+admin/ui/playwright-report/
+admin/ui/test-results/
+*.tsbuildinfo
+# 上面的 logs/ 与 data/ 规则会误伤前端源码目录，这里显式放行。
+!admin/ui/src/pages/logs/
+!admin/ui/src/pages/logs/**
+!admin/ui/src/components/data/
+!admin/ui/src/components/data/**
+# 设计与接口契约文档、v2 静态托管回归
+!docs/ui-v2/
+!docs/ui-v2/**
+!tests/test_ui_v2_serving.py
+
+# ===== 计划文档与持久回归（2026-11-22 平台口径模型解析 / 调度）=====
+!docs/superpowers/
+!docs/superpowers/plans/
+!docs/superpowers/plans/*.md
+!tests/test_platform_model_routing.py
+!tests/test_gateway_reliability_scheduling.py
+!tests/test_dispatch_retry_degraded.py
+!scripts/bench_dispatch_hotpath.py
+
+# ===== 本地巡检 / 合并残留 =====
+.qa-routes/
+.lighthouse/
+*.orig
+*.rej
+.DS_Store
+Thumbs.db

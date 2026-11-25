@@ -45,3 +45,6 @@ findings.md
 progress.md
 .qimei-release-review.md
 node_modules
+# 前端：镜像内 npm ci + build；宿主机的 node_modules（可能是 Windows 原生二进制）与旧 dist 不能进上下文
+admin/ui/node_modules
+admin/ui/dist

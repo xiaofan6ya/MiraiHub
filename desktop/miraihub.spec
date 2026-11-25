@@ -19,7 +19,10 @@ datas = [(str(root / 'admin/static'), 'admin/static'),
          # static directory and must be present in the desktop bundle too.
          (str(root / 'admin/console'), 'admin/console'),
          # 新版控制台（Vue 构建产物）。只打 dist，不打 node_modules/src。
-         (str(root / 'admin/ui/dist'), 'admin/ui/dist'),
+         # dist 不入库：没先 npm run build 时跳过（只带旧版控制台），
+         # 不让 PyInstaller 因 datas 路径不存在而整体失败。
+         *([(str(root / 'admin/ui/dist'), 'admin/ui/dist')]
+           if (root / 'admin/ui/dist/index.html').is_file() else []),
          # admin/data/ 是运行期用 read_text() 读的 JSON（上游错误文案表），
          # 漏打包会让 EXE/APK 启动即 FileNotFoundError：源码运行正常，只有产物才暴露。
          (str(root / 'admin/data'), 'admin/data'),
