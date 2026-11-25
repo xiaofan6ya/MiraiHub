@@ -375,7 +375,6 @@ progress.md
 # ===== 新版控制台（Vue 3 + Vite）=====
 # 源码入库，node_modules 不入库，dist 必须入库（Docker/EXE/APK 打包不需要 Node）。
 admin/ui/node_modules/
-!admin/ui/dist/
 # 设计稿与逐页功能契约是执行与验收依据，必须入库。
 !docs/ui-v2/
 !docs/ui-v2/**
