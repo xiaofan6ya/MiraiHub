@@ -1,4 +1,4 @@
-"""多平台转发中间件：网关层的唯一分叉点。
+﻿"""多平台转发中间件：网关层的唯一分叉点。
 
 为什么是中间件而不是在每个端点里加 if：`/v1/*` 现有 4 个端点（chat /
 responses / messages / models）各有自己的流式状态机，往每个里塞平台判断
@@ -33,6 +33,8 @@ workbuddy 的请求原样穿过，行为零变化。
 """
 from __future__ import annotations
 
+import os
+
 import contextlib
 import logging
 import re
@@ -61,7 +63,23 @@ _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 #: 越线就静默丢掉平台后缀 → 落到主应用 → 400 模型不存在。
 #: 提到 32MB 后，正常对话不会触发这条降级。
 _BODY_LIMIT = 262144  # 保留旧名，供外部引用
-_BODY_HARD_CAP = 32 * 1024 * 1024
+#: 环境变量 `MIRAIHUB_DISPATCH_PEEK_MAX_BYTES`：未设置 / 非法 → 32 MiB；
+#: **0 或负数 = 不设上限**（任何体积都预读、做后缀路由，chunked 也不 413）。
+PEEK_MAX_ENV = "MIRAIHUB_DISPATCH_PEEK_MAX_BYTES"
+_DEFAULT_BODY_HARD_CAP = 32 * 1024 * 1024
+
+
+def _peek_cap_from_env() -> int:
+    raw = str(os.environ.get(PEEK_MAX_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_BODY_HARD_CAP
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_BODY_HARD_CAP
+
+
+_BODY_HARD_CAP = _peek_cap_from_env()
 
 #: 这些状态表示「这个平台做不了」，值得换下一个平台再试。
 _RETRYABLE_STATUS = frozenset({404, 502, 503})
@@ -383,7 +401,7 @@ def _should_peek(request) -> bool:
                 size = int(raw)
                 # 超大请求体不预读（避免把内存打爆），但**必须留日志**，
                 # 否则又是一次「无缘无故 400」。
-                if size > _BODY_HARD_CAP:
+                if _BODY_HARD_CAP > 0 and size > _BODY_HARD_CAP:
                     logger.warning(
                         "请求体 %d 字节超过预读上限 %d，本次不做平台后缀路由"
                         "（model 里带 -平台 后缀会落到默认平台）", size, _BODY_HARD_CAP)
@@ -444,8 +462,8 @@ async def _read_body(receive, limit: int = _BODY_HARD_CAP) -> bytes:
         if chunk:
             chunks.append(chunk)
             total += len(chunk)
-            if total > limit:
-                # 越线即停：剩余 body 一个字节都不再读。
+            if limit > 0 and total > limit:
+                # 越线即停：剩余 body 一个字节都不再读。（limit <= 0 = 不设上限）
                 raise BodyTooLarge(total, limit)
         if not message.get("more_body"):
             break
