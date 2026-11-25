@@ -20,6 +20,9 @@ __pycache__/
 # ===== 运行日志 / 运行时产�?=====
 *.log
 logs/
+# admin/ui/src/pages/logs is SOURCE CODE; keep it out of the logs/ ignore.
+!admin/ui/src/pages/logs/
+!admin/ui/src/pages/logs/**
 *.pid
 .tmp_srv.err
 .tmp_srv.out
