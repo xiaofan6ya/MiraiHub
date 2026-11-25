@@ -318,26 +318,6 @@ from admin.abuse_guard import AbuseGuardMiddleware
 app.add_middleware(AbuseGuardMiddleware)
 
 
-class UIStaticGZipMiddleware:
-    """只给 /admin/v2 的静态资源开 gzip。
-
-    为什么不全局：`/v1`、`/gw` 的 SSE 长连接一旦被 gzip 缓冲，token 会被攒住，
-    流式体验直接坏掉。这里按路径分流，API/SSE 原样直通。
-    """
-
-    def __init__(self, app):
-        self.app = app
-        self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=6)
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http" and scope.get("path", "").startswith("/admin/v2/"):
-            await self.gzip(scope, receive, send)
-        else:
-            await self.app(scope, receive, send)
-
-
-app.add_middleware(UIStaticGZipMiddleware)
-
 
 @app.on_event("shutdown")
 async def _flush_ip_activity():
@@ -1356,6 +1336,29 @@ def console_asset(file_path: str, request: Request):
 # console_asset 服务（admin/console/ 下是手写 JS，改一次要全量自测），
 # 新版只读 `admin/ui/dist`，源码在 `admin/ui`（`npm run build` 产出）。
 # 好处是切换只影响这两条路由，旧版随时可以回退，见 docs/ui-v2/README.md。
+# 静态资源 gzip：只作用于 /admin/v2，定义放在 v2 专属区（与 #106 的生命周期
+# 接口插入点分开，避免两个 PR 在 server.py 同一位置冲突）。
+class UIStaticGZipMiddleware:
+    """只给 /admin/v2 的静态资源开 gzip。
+
+    为什么不全局：`/v1`、`/gw` 的 SSE 长连接一旦被 gzip 缓冲，token 会被攒住，
+    流式体验直接坏掉。这里按路径分流，API/SSE 原样直通。
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=6)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path", "").startswith("/admin/v2/"):
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(UIStaticGZipMiddleware)
+
+
 UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
 
 #: 入口 HTML（含 SPA 回退）的响应头：**一律不缓存**。
