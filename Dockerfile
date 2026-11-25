@@ -4,6 +4,18 @@
 #   docker compose --env-file .env.docker build \
 #     --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple admin
 ARG BASE_IMAGE=python:3.12-slim
+
+# ---- 前端构建（admin/ui 源码 → dist）--------------------------------------
+# dist/ 是构建产物，不入库；镜像在这里生成，避免仓库携带 175 个打包文件。
+FROM node:20-slim AS ui-build
+ARG NPM_REGISTRY=https://registry.npmjs.org
+WORKDIR /ui
+COPY admin/ui/package.json admin/ui/package-lock.json ./
+RUN npm ci --registry=${NPM_REGISTRY}
+COPY admin/ui ./
+RUN npm run build
+
+# ---- 运行时 ---------------------------------------------------------------
 FROM ${BASE_IMAGE}
 
 WORKDIR /app
@@ -16,6 +28,7 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} ${PIP_EXTRA_ARGS} -r requirem
 
 COPY converter.py responses_adapter.py responses_projection.py anthropic_adapter.py desensitize.py upstream_compat.py repository_instructions.py model_metadata.py wb_install.py wb_asar.py wb_envcheck.py turing_helper.js ./
 COPY admin ./admin
+COPY --from=ui-build /ui/dist ./admin/ui/dist
 COPY desktop/__init__.py desktop/common.py desktop/runtime.py desktop/updates.py desktop/version.json ./desktop/
 COPY desktop/assets ./desktop/assets
 
