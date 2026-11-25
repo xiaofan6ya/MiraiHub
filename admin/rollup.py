@@ -28,12 +28,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from admin.models import UsageLog, UsageRollup, UsageRollupState
@@ -47,9 +46,7 @@ _BACKFILL_CHUNK_HOURS = 48
 #: 单次 `ensure_coverage` 的最长时间预算（秒）。超了就留给后台线程。
 _BACKFILL_BUDGET = 2.0
 
-#: 可重入锁：读路径 `ensure_coverage(blocking=False)` 拿到锁后会一路持有到结束，
-#: 中途 `ensure_schema -> rebuild` 还要再拿一次（同线程），普通 Lock 会自锁。
-_lock = threading.RLock()
+_lock = threading.Lock()
 _thread = None
 _schema_ready = False
 
@@ -84,77 +81,7 @@ def ensure_schema(db: Session) -> None:
             except Exception:  # noqa: BLE001 - 状态表缺失时由下次回填自建
                 pass
         logger.info("usage_rollups 已补 tps 列，历史汇总已清空等待重算")
-    # 一次性重建（N1）：修 count 之前写进汇总表的行 count 恒为 1，必须重算。
-    # 标记落在 system_settings，所以每个库只重建一次；失败下次启动再试。
-    try:
-        if not _marker_done(db, REBUILD_MARKER):
-            rebuild(db, reason="count 列类型修复（N1）一次性重建")
-            _mark_done(db, REBUILD_MARKER)
-    except Exception as exc:  # noqa: BLE001 - 重建失败只影响看板精度，不影响启动
-        logger.warning("usage_rollups 一次性重建失败（下次启动重试）：%s", exc)
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
     _schema_ready = True
-
-
-#: 一次性重建的标记（`system_settings.key`）。版本号变了就会再重建一次。
-#: v2（2026-11-24 numbers 线）：在 count 修复之外，首字口径改为「只认流式样本」（N2），
-#: 汇总里旧口径的 ttfb_sum / ttfb_count 也必须重算。v1 从未上线，直接跳到 v2。
-REBUILD_MARKER = "migrate:usage_rollups:count_fix_v2"
-
-
-def _marker_done(db: Session, key: str) -> bool:
-    from admin.models import SystemSetting
-
-    row = db.get(SystemSetting, key)
-    return bool(row is not None and str(row.value or "") not in ("", "0"))
-
-
-def _mark_done(db: Session, key: str) -> None:
-    from admin.models import SystemSetting
-
-    row = db.get(SystemSetting, key)
-    if row is None:
-        row = SystemSetting(key=key)
-        db.add(row)
-    row.value = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    db.commit()
-
-
-def rebuild(db: Session, *, reason: str = "") -> dict:
-    """重建汇总表（幂等）：清掉「原表还在」的那段汇总行，水位退回，让回填重算。
-
-    * **只删 `hour >= 原表最早一条` 的行**：开了数据保留（retention）之后，更早的
-      原表行已经删了，那段汇总行是唯一的历史，不能一起丢；
-    * 水位退回到原表最早时刻，后台线程（或下一次 `ensure_coverage`）会按新口径
-      重新聚合。重算期间读路径自动降级走原表，数字是对的，只是慢一点；
-    * 多次调用结果一样（删的是可重算的部分），管理员可随时手动触发
-      （`POST /api/stats/rollup/rebuild`）。
-    """
-    with _lock:
-        earliest = _earliest_log(db)
-        table = UsageRollup.__table__
-        if earliest is None:
-            deleted = db.execute(table.delete()).rowcount
-        else:
-            deleted = db.execute(table.delete().where(table.c.hour >= earliest)).rowcount
-        older = db.query(func.min(UsageRollup.hour)).scalar()
-        state = _state(db)
-        if older is not None and earliest is not None:
-            # 更早的汇总行保留：覆盖区间从它们开始，尾部从原表最早小时续算。
-            state.covered_from = hour_start(older)
-            state.covered_to = earliest
-        else:
-            state.covered_from = None
-            state.covered_to = None
-        db.commit()
-    logger.info("usage_rollups 已重建：删除 %s 行，水位 %s ~ %s（%s）", deleted,
-                state.covered_from, state.covered_to, reason or "手动")
-    return {"deleted": int(deleted or 0),
-            "covered_from": state.covered_from.isoformat() if state.covered_from else None,
-            "covered_to": state.covered_to.isoformat() if state.covered_to else None}
 
 #: 汇总字段（同时用于 upsert 的加减、以及两段结果的合并）。
 _SUM_FIELDS = ("requests", "successes", "prompt_tokens", "completion_tokens",
@@ -170,13 +97,7 @@ def _request_tps(completion_tokens, latency_ms, ttfb_ms):
 
     分母是**纯解码段**（latency − ttfb），不是整段耗时；0.3 秒以下视为
     没有有效分段，300 t/s 以上视为整包突发（都不计入）。
-
-    `ttfb_ms is None`（非流式 / 没有首字时间）直接返回 None：SQL 侧 `_tps_expr`
-    里 `latency_ms - ttfb_ms` 遇 NULL 传播、该行被排除，两边口径必须一致
-    （以前按 `ttfb or 0` 会把「tokens / 总耗时」算进小时 tps_sum）。
     """
-    if ttfb_ms is None:
-        return None
     try:
         tokens = float(completion_tokens or 0)
         decode = float(latency_ms or 0) - float(ttfb_ms or 0)
@@ -258,7 +179,6 @@ def record(db: Session, *, platform: str, model: str, created_at: datetime,
     try:
         success = 1 if (error_kind or "") in OK_KINDS else 0
         tps = _request_tps(completion_tokens, latency_ms, ttfb_ms) if success else None
-        ttfb_ok = bool(success) and streamed_ttfb(ttfb_ms, latency_ms)
         values = {
             "hour": hour_start(created_at or datetime.utcnow()),
             "platform": (platform or "").lower(),
@@ -272,8 +192,8 @@ def record(db: Session, *, platform: str, model: str, created_at: datetime,
             "credits": float(credits or 0) if success else 0.0,
             "latency_sum": int(latency_ms or 0) if success else 0,
             "latency_count": 1 if (success and latency_ms is not None) else 0,
-            "ttfb_sum": int(ttfb_ms or 0) if ttfb_ok else 0,
-            "ttfb_count": 1 if ttfb_ok else 0,
+            "ttfb_sum": int(ttfb_ms or 0) if success else 0,
+            "ttfb_count": 1 if (success and ttfb_ms is not None) else 0,
             "tps_sum": float(tps) if tps else 0.0,
             "tps_count": 1 if tps else 0,
         }
@@ -337,88 +257,6 @@ def _earliest_log(db: Session) -> datetime | None:
     return hour_start(value) if value else None
 
 
-#: `ADMIN_TTFB_STREAM_ONLY=0` 回到旧口径（只要 ttfb 非空就计入首字统计）。
-#: 默认 1：只是统计口径，不影响记账；关掉只为对比新旧数字。
-_TTFB_STREAM_ONLY = (os.getenv("ADMIN_TTFB_STREAM_ONLY", "1") or "1").strip().lower() not in (
-    "0", "false", "no", "off")
-
-
-def streamed_ttfb(ttfb_ms, latency_ms) -> bool:
-    """这条请求的 ttfb 能不能算进「首字时间」统计（N2，纯函数）。
-
-    非流式请求没有「首字」：网关现在把它写成 `ttfb = latency`（Marvis `_bill`、
-    主应用 Responses / Anthropic 非流式），聚合模式甚至 ttfb ≥ latency；Marvis
-    非流式还会先写 0。这些样本混进平均值，「平均首字」就变成「平均总耗时」。
-    `usage_logs` 没有 is_stream 列，统计层用数据本身判断：
-
-      * ttfb 为空 / ≤ 0 —— 不算；
-      * latency 已知且 ttfb ≥ latency —— 视为非流式或口径失效，不算；
-      * 其余（流式，ttfb < latency）—— 算。
-    """
-    if ttfb_ms is None:
-        return False
-    try:
-        ttfb = int(ttfb_ms)
-    except (TypeError, ValueError):
-        return False
-    if not _TTFB_STREAM_ONLY:
-        return True
-    if ttfb <= 0:
-        return False
-    if latency_ms is None:
-        return True
-    try:
-        return ttfb < int(latency_ms)
-    except (TypeError, ValueError):
-        return True
-
-
-def ttfb_valid_clause():
-    """SQL 版 `streamed_ttfb`：首字统计（sum / count / avg）只认这些行。"""
-    if not _TTFB_STREAM_ONLY:
-        return UsageLog.ttfb_ms.isnot(None)
-    return and_(UsageLog.ttfb_ms.isnot(None), UsageLog.ttfb_ms > 0,
-                or_(UsageLog.latency_ms.is_(None), UsageLog.ttfb_ms < UsageLog.latency_ms))
-
-
-# ---------------------------------------------------------------------------
-# 统计用的「自然日」时区（N5）
-# ---------------------------------------------------------------------------
-#
-# 概览 / 看板 / 模型限额的「今日」都按同一个本地时区切日。原来三处各写各的
-# `+8`；现在统一从这里读，部署在别的时区时设一个环境变量就行：
-#   * ADMIN_STATS_TZ_OFFSET_HOURS —— 相对 UTC 的小时数（默认 8 = 北京时间，可为小数）
-#   * ADMIN_STATS_TZ_NAME         —— 只用于展示的名字（默认按偏移推断）
-# 用固定偏移而不是 zoneinfo：Windows / 精简镜像上常常没有 tzdata，北京时间也没有夏令时。
-
-
-def local_offset() -> timedelta:
-    raw = (os.getenv("ADMIN_STATS_TZ_OFFSET_HOURS", "") or "").strip()
-    try:
-        hours = float(raw) if raw else 8.0
-    except ValueError:
-        hours = 8.0
-    return timedelta(hours=max(-12.0, min(14.0, hours)))
-
-
-def local_tz_name() -> str:
-    name = (os.getenv("ADMIN_STATS_TZ_NAME", "") or "").strip()
-    if name:
-        return name
-    hours = local_offset().total_seconds() / 3600.0
-    if hours == 8:
-        return "Asia/Shanghai"
-    return "UTC%+g" % hours
-
-
-def local_day_start(days_back: int = 0, now: datetime | None = None) -> datetime:
-    """本地时区「今天 0 点」往前 `days_back` 天，换算成 UTC naive（与库里的值可比）。"""
-    offset = local_offset()
-    local = (now or datetime.utcnow()) + offset
-    midnight = datetime(local.year, local.month, local.day) - timedelta(days=max(0, int(days_back)))
-    return midnight - offset
-
-
 def _tps_expr():
     """SQL 侧的逐请求 t/s（纯解码段），与 Python 版 `_request_tps` 同公式。"""
     decode = UsageLog.latency_ms - UsageLog.ttfb_ms
@@ -445,19 +283,9 @@ def _raw_sum_columns():
         "cached_tokens": func.sum(case((ok, UsageLog.cached_tokens), else_=0)),
         "credits": func.sum(case((ok, UsageLog.credits), else_=0.0)),
         "latency_sum": func.sum(case((ok, UsageLog.latency_ms), else_=0)),
-        # ⚠ count 列的 THEN 必须是**整数 1**，不能是 `X.isnot(None)`（2026-11-24 N1）。
-        #
-        # `case()` 的结果类型取自 THEN 分支：写成布尔表达式时整列类型是
-        # Boolean，`func.sum` 原样继承。MySQL / SQLite 方言没有原生布尔，结果
-        # 处理器会把 SQL 正确算出的 `SUM = 523` 转成 `True`，`_coerce` 再转成
-        # **1** —— 每个（小时 × 平台 × 模型）桶的 count 恒为 1，而 sum 是完整的，
-        # 看板 / 模型广场的平均耗时、首字时间被放大成「每桶请求数」倍（约 1000 倍）。
-        "latency_count": func.sum(case((and_(ok, UsageLog.latency_ms.isnot(None)), 1),
-                                       else_=0)),
-        # 首字只认「流式样本」（N2）：非流式请求被网关写成 ttfb == latency，
-        # 混进来会把平均首字拉成平均总耗时。条件见 `ttfb_valid_clause()`。
-        "ttfb_sum": func.sum(case((and_(ok, ttfb_valid_clause()), UsageLog.ttfb_ms), else_=0)),
-        "ttfb_count": func.sum(case((and_(ok, ttfb_valid_clause()), 1), else_=0)),
+        "latency_count": func.sum(case((ok, UsageLog.latency_ms.isnot(None)), else_=0)),
+        "ttfb_sum": func.sum(case((ok, UsageLog.ttfb_ms), else_=0)),
+        "ttfb_count": func.sum(case((ok, UsageLog.ttfb_ms.isnot(None)), else_=0)),
         "tps_sum": func.sum(case((tps_ok, _tps_expr()), else_=0.0)),
         "tps_count": func.sum(case((tps_ok, 1), else_=0)),
     }
@@ -485,27 +313,12 @@ def _aggregate_raw(db: Session, start: datetime, end: datetime) -> list[dict]:
 
 
 def ensure_coverage(db: Session, *, until: datetime | None = None,
-                    budget: float = _BACKFILL_BUDGET,
-                    blocking: bool = True) -> tuple[datetime | None, datetime | None]:
+                    budget: float = _BACKFILL_BUDGET) -> tuple[datetime | None, datetime | None]:
     """补齐 `usage_logs` 到汇总表的缺口。**只补缺口，不重扫全表。**
 
     返回补完后的覆盖区间（半开）。超过 `budget` 就停手：剩下的交给后台线程，
     读请求先用「已完成的部分走汇总、剩下的走原表」照样能出数。
-
-    `blocking=False`（读路径用）：后台线程正握着锁回填时**不等**，直接返回现有
-    覆盖区间 —— 原来读请求会被 30 秒预算的后台回填整段挡住（重启 / 刚重建后
-    看板白屏半分钟）。
     """
-    if not blocking:
-        # 拿不到锁 = 后台线程正在回填：直接用现有水位。拿到了就**一直持有**到
-        # 结束（RLock，下面 `with _lock` 同线程可重入）—— 原来 acquire 后立刻
-        # release，再去阻塞式 `with _lock`，中间被后台线程抢走就照样等 30 秒。
-        if not _lock.acquire(blocking=False):
-            return coverage(db)
-        try:
-            return ensure_coverage(db, until=until, budget=budget, blocking=True)
-        finally:
-            _lock.release()
     deadline = time.monotonic() + max(0.0, budget)
     try:
         ensure_schema(db)
@@ -566,14 +379,6 @@ def start_backfill_thread(*, interval: float = 300.0) -> None:
                 logger.warning("用量汇总后台回填失败：%s", exc)
             finally:
                 db.close()
-            # 数据保留（默认关闭，ADMIN_RETENTION_ENABLED=1 打开）：每天最多一轮，
-            # 只删已被汇总表覆盖的明细，见 admin/retention.py。顺带在这个线程里跑，
-            # 不再多开一个常驻线程。
-            try:
-                from admin import retention
-                retention.maybe_run()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("数据保留后台任务失败：%s", exc)
             time.sleep(interval)
 
     _thread = threading.Thread(target=worker, name="usage-rollup-backfill", daemon=True)
@@ -776,35 +581,3 @@ def window_series(db: Session, start: datetime, end: datetime, granularity: str,
          "model": key[1], **{name: value for name, value in item.items() if name != "hour"}}
         for key, item in buckets.items()
     ]
-
-# ---------------------------------------------------------------------------
-# 命令行：python -m admin.rollup --rebuild   （N1：手动重建汇总表，幂等）
-# ---------------------------------------------------------------------------
-def _main(argv=None) -> int:
-    import argparse
-    import json
-
-    parser = argparse.ArgumentParser(description="usage_rollups 汇总表维护")
-    parser.add_argument("--rebuild", action="store_true",
-                        help="清掉原表仍在的那段汇总并退回水位（幂等，可重复执行）")
-    parser.add_argument("--budget", type=float, default=120.0,
-                        help="重建后立刻回填的时间预算（秒），剩下的交给服务里的后台线程")
-    args = parser.parse_args(argv)
-    from admin.db import SessionLocal
-
-    db = SessionLocal()
-    try:
-        out = {}
-        if args.rebuild:
-            out["rebuild"] = rebuild(db, reason="命令行")
-        covered = ensure_coverage(db, budget=max(0.0, args.budget))
-        out["covered_from"] = covered[0].isoformat() if covered[0] else None
-        out["covered_to"] = covered[1].isoformat() if covered[1] else None
-        print(json.dumps(out, ensure_ascii=False))
-        return 0
-    finally:
-        db.close()
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())

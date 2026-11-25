@@ -148,11 +148,8 @@ def _stable_window_start(start, days):
             parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
         except ValueError:
             return start
-        parsed = (parsed.astimezone(timezone.utc).replace(tzinfo=None)
-                  if parsed.tzinfo else parsed)
-        # 显式 start 也要取整到分钟：前端每次带的是秒级（甚至毫秒级）时间戳，
-        # 原样进缓存键就永远不命中、单飞也合并不了（P8 / R1 6.2，3.6 秒的那条）。
-        return parsed.replace(second=0, microsecond=0)
+        return (parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                if parsed.tzinfo else parsed)
     if not days or days <= 0:
         return None
     window = datetime.utcnow() - timedelta(days=min(days, 3650))
@@ -335,35 +332,6 @@ _STREAM_TICKET_LIMIT = 256              # 票据总量上限（纯内存结构�
 _ACTIVITY_STREAM_LIMIT = 16             # 同时最长连接数
 _activity_stream = {'now': 0}
 
-#: 排空收尾事件名。前端（任务 5 的 lifecycle.js）收到它就**暂停重连**：
-#: 服务正在换代码，重连只会撞 503/401，白白刷日志。
-DRAIN_EVENT = 'draining'
-
-
-def _drain_requested() -> bool:
-    """服务是否已经封口（draining 及以后）。
-
-    两条日志观察流**不计入**在途数（见 lifecycle 的豁免表），但它们的
-    `StreamingResponse` 会被 Uvicorn 一直等到结束 —— 只从计数里排除并不足以让
-    进程关掉。所以生成循环自己看阶段，排空后主动收尾。
-    """
-    try:
-        from admin.lifecycle import get_lifecycle
-
-        phase = get_lifecycle().snapshot()['phase']
-    except Exception:  # noqa: BLE001 - 生命周期读不到不该让观察流直接断
-        return False
-    return phase not in ('starting', 'ready')
-
-
-def _drain_frame() -> str:
-    """排空收尾帧：明确告诉前端「别再自动重连了」。"""
-    return ('event: %s\ndata: %s\n\n'
-            % (DRAIN_EVENT,
-               json.dumps({'reason': 'service_draining', 'retry': False},
-                          ensure_ascii=False)))
-
-
 _stream_tickets: dict[str, tuple[float, str]] = {}
 _stream_tickets_lock = threading.Lock()
 
@@ -489,15 +457,6 @@ def _activity_fetch(key: Optional[str], limit: int) -> dict:
         db.close()
 
 
-def _max_usage_id() -> int:
-    """usage_logs 最大 id（独立短会话；在线程池里跑，见 usage 推送流）。"""
-    from admin import db as admin_db
-
-    with admin_db.SessionLocal() as db:
-        row = db.query(UsageLog.id).order_by(UsageLog.id.desc()).first()
-        return int(row[0]) if row else 0
-
-
 @router.get('/requests/ticket')
 def request_activity_ticket(request: Request, _: bool = Depends(require_admin)):
     """用**请求头**换一张短票据，供 EventSource 拼进 URL。
@@ -547,10 +506,6 @@ async def usage_log_stream(
         last_beat = time.monotonic()
         yield "retry: 3000\n\n"
         while True:
-            if _drain_requested():
-                # 排空开始：观察流主动收尾（不计入在途，不能靠租约把它结束）。
-                yield _drain_frame()
-                return
             if await request.is_disconnected():
                 return
             now = time.monotonic()
@@ -559,10 +514,13 @@ async def usage_log_stream(
                 return
             rev = 0
             try:
-                # 只查最大 id（走主键索引，微秒级）—— 不扫表、不聚合。
-                # 第 4 轮 R4-BE-07：同步 DB 放进线程池（MySQL 每次一个网络往返，
-                # 每个打开的面板每 2 秒一次，原来都跑在事件循环上）。
-                rev = await run_in_threadpool(_max_usage_id)
+                # 只查最大 id（走主键索引，微秒级）—— 不扫表、不聚合
+                from admin.db import SessionLocal as _SL
+
+                with _SL() as db:
+                    row = db.query(UsageLog.id).order_by(
+                        UsageLog.id.desc()).first()
+                    rev = int(row[0]) if row else 0
             except Exception:  # noqa: BLE001 - 查不到就继续等下一拍
                 rev = None
             if rev is not None and rev != last_rev:
@@ -601,11 +559,7 @@ async def request_activity_stream(
     """
     header_token = request.headers.get('x-admin-token')
     if header_token:
-        # 与 require_admin 同一套规则（security 日志第 6 节第 7 条）：带 request、
-        # 会话绑了设备时要求设备匹配。原来只验签名，S2 的设备绑定在这条 SSE 上可被绕过。
-        from admin import security as _security
-        verify_admin_token(header_token, request=request,
-                           require_bind=_security._header_requires_bind())
+        verify_admin_token(header_token)
     elif not stream_ticket_valid(ticket, request):
         raise HTTPException(status_code=401, detail='推送票据无效或已过期')
     limit = max(1, min(100, int(limit or 40)))
@@ -627,10 +581,6 @@ async def request_activity_stream(
         last_check = 0.0
         try:
             while True:
-                if _drain_requested():
-                    # 观察流不是业务：排空时自己收尾，并明确告知前端暂停重连。
-                    yield _drain_frame()
-                    break
                 if await request.is_disconnected():
                     break
                 now = time.monotonic()
@@ -743,34 +693,17 @@ def _build_filters(q, *, key_id, account_ids, models, model, key, account,
     # 只按 account_id 收窄是**不够的**：没有账号的失败请求（准入拒绝 /
     # 无号 503 / 超时）同样属于某个平台，它们 account_id=0，
     # 以前会被平台筛选直接过滤掉 —— 表现就是「日志里没有 503」。
-    if platform:
-        # 允许直接传对外 id（`?platform=trae-intl`）：先归一成 (落库名, 区)。
-        parsed_platform, parsed_realm = platform_scope.parse(platform)
-        if parsed_platform:
-            platform = parsed_platform
-            realm = realm or parsed_realm
     scope_ids = platform_scope.account_ids(db, platform, realm)
     if platform:
         from admin.platform import registry
 
-        specs = [spec for spec in registry.all_platforms(enabled_only=False)
-                 if str(spec.storage() or "").lower() == platform]
-        if realm:
-            # 带区筛选时**不能**并 `platform='trae'`（落库名 = 两区合计），否则
-            # 区筛选失效、国际版看到国内版的数据（N4 / P1-6）。短期口径：
-            # 该区账号 + platform 列恰好写着该区对外 id 的行。
-            platform_values = {str(spec.id).lower() for spec in specs
-                               if (spec.realm or "") == realm
-                               and str(spec.id).lower() != platform}
-        else:
-            platform_values = {platform} | {str(spec.id).lower() for spec in specs}
-        clauses = []
-        if platform_values:
-            clauses.append(UsageLog.platform.in_(sorted(platform_values)))
+        platform_values = {platform}
+        for spec in registry.all_platforms():
+            if spec.storage() == platform:
+                platform_values.add(spec.id)
+        clauses = [UsageLog.platform.in_(platform_values)]
         if scope_ids:
             clauses.append(UsageLog.account_id.in_(scope_ids))
-        if not clauses:
-            return q, True
         q = q.filter(or_(*clauses))
     elif scope_ids is not None:
         if not scope_ids:

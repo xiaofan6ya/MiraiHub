@@ -19,7 +19,6 @@ from admin import backend, growth_plans, jobrunner
 from admin.config import settings
 from admin.db import SessionLocal, get_db
 from admin.models import Account
-from admin.platform.workbuddy import scoping as wb_scope
 from admin.security import require_admin
 
 # ⚠️ 必须整组挂 require_admin（安全审计「严重」项）。
@@ -157,9 +156,8 @@ def _pick_candidates(db: Session) -> list[Account]:
     拉取侧（growth_tasks）再按顺序逐个尝试，一个失败自动换下一个。
     """
     from admin.routers.proxy import _looks_login_dead
-    # 成长计划是 WorkBuddy 专属（D2）：别的平台的号拉不到任务列表，失败后还会
-    # 被 `maintenance.note_failure` 记失败、可能进冷却 —— 误伤其它平台账号。
-    rows = (wb_scope.filter_workbuddy(db.query(Account).filter(Account.status == "active"))
+    rows = (db.query(Account)
+            .filter(Account.status == "active")
             .order_by(Account.id.asc()).all())
     now = datetime.utcnow()
     healthy = [a for a in rows if not _looks_login_dead(a, now)
@@ -260,7 +258,6 @@ def _run_accept(acc: Account, codes: list[str]) -> dict:
 @router.post("/accept")
 def growth_accept(payload: AcceptIn, db: Session = Depends(get_db)):
     """批量参与任务（未参与的任务不会累计进度）。"""
-    wb_scope.require_workbuddy_ids(db, payload.account_ids, "成长任务")
     results = []
     for aid in payload.account_ids:
         acc = db.get(Account, aid)
@@ -352,9 +349,6 @@ def run_accounts(account_ids: list[int], task_codes: list[str] | None,
             acc_log.update(ok=False, msg="整批已用满本次时间预算，剩余账号留待下次")
         elif not acc:
             acc_log.update(ok=False, msg="账号不存在")
-        elif not wb_scope.is_workbuddy(acc):
-            # 兜底（D2）：入口已拒绝，这里防定时任务 / 旧调用方把别的平台的号塞进来
-            acc_log.update(ok=False, skipped=True, msg="非 WorkBuddy 账号，已跳过")
         else:
             if on_beat:
                 on_beat(acc_log["name"])
@@ -556,10 +550,6 @@ def claim_accounts(account_ids: list[int], task_codes: list[str] | None,
         if not acc:
             out.append({"account_id": aid, "ok": False, "msg": "账号不存在"})
             continue
-        if not wb_scope.is_workbuddy(acc):
-            out.append({"account_id": aid, "name": acc.name, "ok": False,
-                        "skipped": True, "msg": "非 WorkBuddy 账号，已跳过"})
-            continue
 
         acc_log = {"account_id": aid, "name": acc.name, "ok": True,
                    "claimed": [], "total_credit": 0, "total_energy": 0}
@@ -649,8 +639,6 @@ def growth_run(payload: RunIn, db: Session = Depends(get_db)):
     而 `/run-async` 的同一个参数却是「全部账号」—— 同一个字段两种语义，
     前端稍不注意就会「点了没反应」。
     """
-    if payload.account_ids:
-        wb_scope.require_workbuddy_ids(db, payload.account_ids, "成长任务")
     ids = _resolve_ids(payload.account_ids or None)
     return run_accounts(ids, payload.task_codes, db,
                         soft_budget=_SYNC_SOFT_BUDGET)
@@ -685,7 +673,7 @@ def _ordered_ids(ids: list[int], db: Session) -> list[int]:
 
 
 def _resolve_ids(payload_ids: list[int] | None) -> list[int]:
-    """把请求里的 ids 解析成实际要处理的账号 id 列表（空 = 全部 active 的 WorkBuddy 号）。
+    """把请求里的 ids 解析成实际要处理的账号 id 列表（空 = 全部 active）。
 
     返回顺序统一为**创建时间倒序（新 → 老）**，见 `_ordered_ids`。
     """
@@ -695,9 +683,8 @@ def _resolve_ids(payload_ids: list[int] | None) -> list[int]:
             return _ordered_ids(list(payload_ids), db)
         # 只取 id 列：几万账号时 `query(Account).all()` 会把每行的
         # auth_json 大字段一起反序列化出来，光「取个 id 列表」就要几百 MB。
-        # 「全部」= 全部 WorkBuddy 号（D2），不是全库。
-        rows = (wb_scope.filter_workbuddy(
-                    db.query(Account.id).filter(Account.status == "active"))
+        rows = (db.query(Account.id)
+                .filter(Account.status == "active")
                 .order_by(Account.created_at.desc(), Account.id.desc()).all())
         return [r[0] for r in rows]
     finally:
@@ -717,9 +704,6 @@ def growth_run_async(payload: RunIn):
     if running and running.status == "running":
         return {"reused": True, **running.snapshot()}
 
-    if payload.account_ids:
-        with SessionLocal() as check_db:
-            wb_scope.require_workbuddy_ids(check_db, payload.account_ids, "成长任务")
     # 统一按创建时间倒序（新 → 老），与 /run 的 id 解析口径一致
     ids = _resolve_ids(payload.account_ids or None)
     tasks = payload.task_codes
@@ -761,7 +745,6 @@ def growth_claim(payload: ClaimIn, db: Session = Depends(get_db)):
 
     task_codes 为空时，自动领取所有「已完成但未领取」（completed）的任务。
     """
-    wb_scope.require_workbuddy_ids(db, payload.account_ids, "成长任务")
     return claim_accounts(payload.account_ids, payload.task_codes, db)
 
 
@@ -785,7 +768,6 @@ def account_tasks(account_id: int, refresh: bool = False,
     acc = db.query(Account).get(account_id)
     if not acc:
         raise HTTPException(404, "账号不存在")
-    wb_scope.require_workbuddy(acc, "成长任务")
     try:
         with backend.AccountSession(acc.auth_json) as s:
             tasks = s.growth_tasks()

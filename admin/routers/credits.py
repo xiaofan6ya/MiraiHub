@@ -32,7 +32,6 @@ from admin.db import get_db
 from admin.models import Account, UsageLog
 from admin.platform import scope as platform_scope
 from admin.security import require_admin
-from admin import selection_order
 from admin.selection_order import ordered_accounts
 
 router = APIRouter(prefix="/api/credits", tags=["credits"])
@@ -299,15 +298,13 @@ def get_selection_policy(_: bool = Depends(require_admin), db: Session = Depends
 
 
 @router.put('/selection-policy')
-def save_selection_policy(body: SelectionPolicyIn, request: Request,
-                          _: bool = Depends(require_admin),
+def save_selection_policy(body: SelectionPolicyIn, _: bool = Depends(require_admin),
                           db: Session = Depends(get_db)):
     if body.mode not in routing_policy.MODE_IDS:
         raise HTTPException(400, '未知的账号调度模式')
-    # D5（fixlog_data_scoping 6.2）：只清**当前平台作用域**内账号的手动优先级。
-    # 原来清全库 —— 在 Trae 页保存一次策略，WorkBuddy 的手动顺序也没了。
-    scope_platform, scope_realm = platform_scope.from_request(request)
-    selection_order.clear_priorities(db, scope_platform, scope_realm)
+    accounts = db.query(Account).with_for_update().all()
+    for account in accounts:
+        account.selection_priority = None
     routing_policy.save_value(db, routing_policy.SELECTION_KEY, body.mode)
     routing_policy.save_value(db, routing_policy.INTERVAL_KEY, body.upstream_start_interval_ms)
     db.commit()
@@ -322,20 +319,21 @@ class SelectionOrderIn(BaseModel):
 
 
 @router.post('/selection-order')
-def save_selection_order(body: SelectionOrderIn, request: Request,
-                         _: bool = Depends(require_admin),
+def save_selection_order(body: SelectionOrderIn, _: bool = Depends(require_admin),
                          db: Session = Depends(get_db)):
     if not body.confirm:
         raise HTTPException(400, '请确认：此操作会改变真实账号的使用优先级')
-    # D5（fixlog_data_scoping 6.2）：在平台作用域内校验和保存。原来按全库比对
-    # expected_ids，而前端只拿得到本平台的账号 —— 「恢复自动选号」必定 409。
-    scope_platform, scope_realm = platform_scope.from_request(request)
-    try:
-        return selection_order.save_order(db, mode=body.mode, ids=body.ids,
-                                          expected_ids=body.expected_ids,
-                                          platform=scope_platform, realm=scope_realm)
-    except selection_order.SelectionOrderError as exc:
-        raise HTTPException(exc.status, exc.message)
+    accounts = db.query(Account).order_by(Account.id).with_for_update().all()
+    current = [a.id for a in ordered_accounts(accounts)]
+    if current != body.expected_ids:
+        raise HTTPException(409, '账号或排序已变化，请刷新后重试')
+    if body.mode == 'manual' and (len(body.ids) != len(current) or set(body.ids) != set(current)):
+        raise HTTPException(400, '排序必须包含全部账号且不能重复')
+    positions = {account_id: i for i, account_id in enumerate(body.ids)}
+    for account in accounts:
+        account.selection_priority = positions[account.id] if body.mode == 'manual' else None
+    db.commit()
+    return {'ok': True, 'mode': body.mode, 'ids': [a.id for a in ordered_accounts(accounts)]}
 
 
 @router.get("/usage")
@@ -386,17 +384,13 @@ def _credit_usage_payload(db: Session, days: int, account_id, top, request):
         func.coalesce(func.sum(UsageLog.credits), 0.0),
         func.coalesce(func.sum(UsageLog.total_tokens), 0),
     ).filter(UsageLog.created_at >= since)
-    # 账号 / 平台条件只构造一次，「按账号」与「按模型」两段共用 ——
-    # 原来按模型那段完全没收窄，切到某个平台后模型排行仍是全平台混算。
-    scope_filters = []
     if account_id is not None:
-        scope_filters.append(UsageLog.account_id == account_id)
+        q = q.filter(UsageLog.account_id == account_id)
     if scope_platform != platform_scope.ALL:
         # 先取该平台下的账号 id，再过滤日志（日志只存 account_id）
-        scoped_ids = [row[0] for row in platform_scope.filter_accounts(
-            db.query(Account.id), db, scope_platform, scope_realm).all()]
-        scope_filters.append(UsageLog.account_id.in_(scoped_ids or [-1]))
-    q = q.filter(*scope_filters)
+        scoped_ids = [a.id for a in platform_scope.filter_accounts(
+            db.query(Account), db, scope_platform, scope_realm).all()]
+        q = q.filter(UsageLog.account_id.in_(scoped_ids or [-1]))
     rows = (q.filter(ok_filter)
             .group_by(UsageLog.account_id)
             .order_by(func.coalesce(func.sum(UsageLog.credits), 0.0).desc())
@@ -425,7 +419,7 @@ def _credit_usage_payload(db: Session, days: int, account_id, top, request):
             func.count(UsageLog.id),
             func.coalesce(func.sum(UsageLog.credits), 0.0),
         )
-        .filter(UsageLog.created_at >= since, ok_filter, *scope_filters)
+        .filter(UsageLog.created_at >= since, ok_filter)
         .group_by(UsageLog.model)
         .order_by(func.coalesce(func.sum(UsageLog.credits), 0.0).desc())
         .limit(30)

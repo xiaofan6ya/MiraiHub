@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from admin.account_binding import validate_binding, validate_bindings
 from admin.db import get_db
 from admin.models import Account, ApiKey, BlockedIP, ModelGroup, UsageLog
-from admin.security import audit_secret_access, hash_key, require_admin, clean_display_name
+from admin.security import hash_key, require_admin, clean_display_name
 
 router = APIRouter(prefix="/api/keys", tags=["keys"])
 _OK_KINDS = ("", "success")
@@ -88,102 +88,16 @@ def _mask(key: str) -> str:
     return key[:10] + "****" + key[-4:] if len(key) > 16 else key[:6] + "****"
 
 
-#: key_full 密文前缀（与 admin/secret_box.MAGIC 相同）。
-_KEY_FULL_MAGIC = "enc:v1:"
-
-
 def _encode_key(raw: str) -> str:
-    """完整 key 落库：`secret_box` AES-GCM 加密（2026-11-24 第 3 轮，安全 P3）。
-
-    原来是 base64（任何能读库 / 备份的人都能直接还原全部 Key）。密钥由
-    ADMIN_JWT_SECRET 派生 —— 换 secret 后旧密文解不开，「查看完整 Key」会回 410，
-    Key 本身照常可用（鉴权走 key_hash）。
-    加密不可用（缺 cryptography）时退回旧 base64 并告警，保证创建 Key 不失败。
-    """
-    if not raw:
-        return ""
-    try:
-        from admin import secret_box
-        return secret_box.encrypt(raw, aad=secret_box.AAD_KEY_FULL)
-    except Exception:  # noqa: BLE001
-        import logging
-        logging.getLogger("admin.keys").error("key_full 加密不可用，退回 base64 存储")
-        return base64.b64encode(raw.encode()).decode()
+    """简单编码存储完整 key（base64，非加密；管理后台已有 JWT 保护）。"""
+    return base64.b64encode(raw.encode()).decode()
 
 
 def _decode_key(encoded: str) -> str:
-    """读取兼容：`enc:v1:` 密文 → 解密；其余按旧 base64 解。解不开返回空串。"""
-    text = str(encoded or "")
-    if not text:
-        return ""
-    if text.startswith(_KEY_FULL_MAGIC):
-        try:
-            from admin import secret_box
-            # 独立 AAD；第 3 轮用代理 AAD 写的旧密文由 secret_box 回落解开（R4-BE-03）
-            return secret_box.decrypt(text, aad=secret_box.AAD_KEY_FULL)
-        except Exception:  # noqa: BLE001
-            return ""
     try:
-        return base64.b64decode(text.encode(), validate=True).decode()
+        return base64.b64decode(encoded.encode()).decode()
     except Exception:
         return ""
-
-
-def key_full_needs_migration(value: str) -> bool:
-    """旧 base64（或其它非密文）且非空 → 需要迁移。"""
-    text = str(value or "")
-    return bool(text) and not text.startswith(_KEY_FULL_MAGIC)
-
-
-def migrate_key_full(db: Session, batch: int = 500) -> int:
-    """启动时幂等迁移：把 api_keys.key_full 的旧 base64 改写成 secret_box 密文。
-
-    已是密文的跳过；解不开的旧值（脏数据）原样保留不动。返回迁移条数。
-    """
-    migrated = 0
-    rows = (db.query(ApiKey).filter(ApiKey.key_full.isnot(None), ApiKey.key_full != "",
-                                    ~ApiKey.key_full.like(_KEY_FULL_MAGIC + "%")).all())
-    for row in rows:
-        raw = _decode_key(row.key_full)
-        if not raw:
-            continue
-        sealed = _encode_key(raw)
-        if not sealed.startswith(_KEY_FULL_MAGIC):
-            break  # 加密不可用：别把 base64 再写一遍
-        row.key_full = sealed
-        migrated += 1
-        if migrated % batch == 0:
-            db.commit()
-    if migrated:
-        db.commit()
-    # 第 4 轮 R4-BE-03：第 3 轮写入的密文用的是代理 URL 的 AAD，改写成 key_full 专用 AAD。
-    # 只动「能用旧 AAD 解开」的行，幂等；解不开的（换过 JWT_SECRET）原样保留。
-    try:
-        from admin import secret_box
-        enc_rows = (db.query(ApiKey).filter(
-            ApiKey.key_full.like(_KEY_FULL_MAGIC + "%")).all())
-        rewrapped = 0
-        for row in enc_rows:
-            if not secret_box.needs_rewrap(row.key_full, secret_box.AAD_KEY_FULL):
-                continue
-            raw = secret_box.decrypt(row.key_full, aad=secret_box.AAD_KEY_FULL)
-            if not raw:
-                continue
-            row.key_full = _encode_key(raw)
-            rewrapped += 1
-            if rewrapped % batch == 0:
-                db.commit()
-        if rewrapped:
-            db.commit()
-            migrated += rewrapped
-    except Exception:  # noqa: BLE001 - 改写失败不影响读取（仍可回落旧 AAD）
-        import logging
-        logging.getLogger("admin.keys").warning("key_full AAD 改写失败", exc_info=True)
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-    return migrated
 
 
 def _key_ip_summaries(db: Session, key_ids: list[int], *, days: int = 1) -> dict[int, dict]:
@@ -335,20 +249,14 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
 
 
 @router.get("/{key_id}/view")
-def view_key(key_id: int, request: Request, _: bool = Depends(require_admin),
-             db: Session = Depends(get_db)):
-    """查看 Key 完整值（创建后可再次查看）。
-
-    这就是 Key 的「显示明文」接口：列表接口只给掩码（`masked`），
-    明文只从这里拿，并且**每次查看都写一条审计**（2026-11-24，S5）。
-    """
+def view_key(key_id: int, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """查看 Key 完整值（创建后可再次查看）。"""
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
     raw = _decode_key(k.key_full)
     if not raw:
         raise HTTPException(status_code=410, detail="该 Key 创建于「查看功能」上线前，完整值未存储。建议重新生成一个新 Key。")
-    audit_secret_access(request, "api_key_view", "key#%s %s" % (k.id, k.key_prefix or ""))
     return {
         "id": k.id,
         "name": k.name,
@@ -372,9 +280,9 @@ def key_usage(key_id: int, _: bool = Depends(require_admin), db: Session = Depen
     return {
         "id": k.id,
         "name": k.name,
-        "credit_limit": limit,
-        "credit_used": round(used, 2),
-        "credit_remaining": (round(max(0, limit - used), 2) if not k.unlimited else None),
+        "credit_limit": k.credit_limit,
+        "credit_used": round(k.credit_used, 2),
+        "credit_remaining": (round(max(0, k.credit_limit - k.credit_used), 2) if not k.unlimited else None),
         "usage_percent": round(pct, 1) if pct is not None else None,
         "unlimited": bool(k.unlimited),
         "status": k.status,
@@ -442,10 +350,8 @@ def key_ips(
         return sorted(entries.values(), key=lambda e: (-(e.get("live_requests") or 0),
                                                        -e["requests"]))[:6]
     addresses = {row.ip for row in rows} | set(active)
-    _now = datetime.utcnow()
     blocked = {row.ip: row.id for row in db.query(BlockedIP).filter(
-        BlockedIP.enabled == 1, BlockedIP.ip.in_(addresses),
-        (BlockedIP.expires_at.is_(None)) | (BlockedIP.expires_at > _now)).all()} if addresses else {}
+        BlockedIP.enabled == 1, BlockedIP.ip.in_(addresses)).all()} if addresses else {}
     from admin.routers.ip_management import identity_items
     devices = identity_items(db, key_id=key_id, start=start)
     return {

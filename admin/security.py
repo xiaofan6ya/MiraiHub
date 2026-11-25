@@ -196,43 +196,20 @@ def csrf_ok(request: Request) -> bool:
     return bool(cookie and header) and hmac.compare_digest(cookie, header)
 
 
-#: 请求头令牌也要过设备绑定（2026-11-24，安全 S2）。
-#:
-#: 原来 `X-Admin-Token` 一律 `require_bind=False`：把浏览器会话 Cookie 的值
-#: 拷出来、改放进请求头，就能在任何机器上调用全部 `/api/*`，设备绑定形同虚设。
-#:
-#: 选的方案是「**会话行带 bind_hash 就无论哪个通道都要求设备匹配**」，而不是
-#: 「请求头只收专用 API 令牌」—— 因为：
-#:   * 本机运维脚本用 `create_admin_token()`（不传 sid）签票，会话行
-#:     `device_id=""` → `bind_hash` 为空，**不受影响**；
-#:   * 桌面 / 安卓壳的 `local_shell` 令牌在本地运行时直接放行，**不受影响**；
-#:   * 浏览器里把令牌放进请求头的旧前端（`/api/login/session` 兼容路径）是同源
-#:     请求，会自动带上 `wb_device` Cookie，**不受影响**。
-#: 只有「令牌被搬到另一台机器」这种情况会被拒（并按设备不匹配吊销该会话）。
-#: 紧急回退：ADMIN_HEADER_TOKEN_BIND=0。
-_HEADER_TOKEN_BIND = os.getenv("ADMIN_HEADER_TOKEN_BIND", "1").strip().lower() not in (
-    "0", "false", "no", "off")
-
-
-def _header_requires_bind() -> bool:
-    return bool(_HEADER_TOKEN_BIND and getattr(settings, "SESSION_BIND_DEVICE", True))
-
-
 def require_admin(request: Request,
                   x_admin_token: str = Header(default=None, alias="X-Admin-Token")):
     """FastAPI 依赖：校验令牌，Cookie 为浏览器主通道。
 
     鉴权来源决定后续策略：
-      * `X-Admin-Token` 头 —— 编程客户端 / 本地壳，不校验 CSRF（跨站请求带不上
-        自定义头，天然免疫 CSRF）；**会话行绑了设备时同样要求设备匹配**（S2）；
+      * `X-Admin-Token` 头 —— 编程客户端 / 本地壳，不做设备绑定、不校验 CSRF
+        （跨站请求带不上自定义头，天然免疫 CSRF）；
       * `admin_session` Cookie —— 浏览器，**必须**过设备绑定与 CSRF。
     """
     used_cookie = False
 
     if x_admin_token:
         try:
-            verify_admin_token(x_admin_token, request=request,
-                               require_bind=_header_requires_bind())
+            verify_admin_token(x_admin_token, request=request, require_bind=False)
             return True
         except HTTPException:
             # 浏览器刷新后可能只剩 Cookie（旧头已过期），继续走 Cookie 兜底。
@@ -281,110 +258,6 @@ def verify_password(pw: str, stored: str) -> bool:
         return hmac.compare_digest(cand, expected)
     except Exception:
         return False
-
-
-#: 常见弱口令（小写比较）。不求全，只拦最常被字典命中的那批。
-_COMMON_WEAK_PASSWORDS = frozenset({
-    "admin", "admin123", "admin888", "admin@123", "administrator", "root",
-    "password", "password1", "passw0rd", "p@ssw0rd", "123456", "1234567",
-    "12345678", "123456789", "1234567890", "111111", "000000", "888888",
-    "666666", "123123", "abc123", "qwerty", "qwerty123", "iloveyou",
-    "letmein", "welcome", "changeme", "workbuddy", "miraihub", "test", "test123",
-})
-
-
-def password_weakness(password: str, username: str = "") -> list[str]:
-    """返回密码的弱点列表（空列表 = 足够强）。只用于告警提示，不拦截。
-
-    规则（安全审查第 10 节）：至少 12 位、至少三类字符（小写/大写/数字/符号）、
-    不在常见弱口令表里、不包含用户名。
-    """
-    pw = str(password or "")
-    reasons: list[str] = []
-    if len(pw) < 12:
-        reasons.append("长度少于 12 位")
-    classes = sum((
-        any(c.islower() for c in pw),
-        any(c.isupper() for c in pw),
-        any(c.isdigit() for c in pw),
-        any(not c.isalnum() for c in pw),
-    ))
-    if classes < 3:
-        reasons.append("字符种类少于 3 类")
-    if pw.lower() in _COMMON_WEAK_PASSWORDS:
-        reasons.append("属于常见弱口令")
-    user = str(username or "").strip().lower()
-    if user and len(user) >= 3 and user in pw.lower():
-        reasons.append("包含用户名")
-    return reasons
-
-
-# ---------------------------------------------------------------------------
-# 敏感信息查看审计（2026-11-24，安全 S5）
-# ---------------------------------------------------------------------------
-#
-# 「显示明文」类接口（同步密钥、API Key 全文……）每调用一次就记一条：
-#   * `admin.audit` 日志（会落到 logs/ 下的后台日志文件）；
-#   * system_settings 里 `secret_access_audit` 环形缓冲（最近 200 条），
-#     日志轮转后仍可回查。
-# 记录失败只打日志，不影响接口本身。
-_AUDIT_SETTING_KEY = "secret_access_audit"
-_AUDIT_KEEP = 200
-
-
-def audit_secret_access(request: Request | None, action: str, target: str = "") -> None:
-    import json as _json
-
-    from admin.models import SystemSetting
-
-    ip = sid = ua = ""
-    try:
-        if request is not None:
-            from admin.client_ip import request_ip
-            ip = request_ip(request)
-            ua = (request.headers.get("user-agent") or "")[:120]
-            token = (request.cookies.get("admin_session")
-                     or request.headers.get("X-Admin-Token") or "")
-            if token:
-                try:
-                    sid = str(decode_admin_token(token).get("sid") or "")[:8]
-                except HTTPException:
-                    sid = ""
-    except Exception:  # noqa: BLE001
-        pass
-    entry = {"ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-             "action": str(action)[:64], "target": str(target)[:120],
-             "ip": ip, "sid": sid, "ua": ua}
-    logging.getLogger("admin.audit").warning(
-        "敏感信息查看 action=%s target=%s ip=%s sid=%s", entry["action"],
-        entry["target"], ip or "-", sid or "-")
-    db = None
-    try:
-        db = SessionLocal()
-        row = db.query(SystemSetting).filter(SystemSetting.key == _AUDIT_SETTING_KEY).first()
-        try:
-            items = _json.loads(row.value) if row and row.value else []
-            if not isinstance(items, list):
-                items = []
-        except ValueError:
-            items = []
-        items.append(entry)
-        value = _json.dumps(items[-_AUDIT_KEEP:], ensure_ascii=False)
-        if row:
-            row.value = value
-        else:
-            db.add(SystemSetting(key=_AUDIT_SETTING_KEY, value=value))
-        db.commit()
-    except Exception:  # noqa: BLE001 - 审计落库失败不影响业务
-        logging.getLogger("admin.audit").warning("敏感信息查看审计落库失败", exc_info=True)
-        if db is not None:
-            try:
-                db.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-    finally:
-        if db is not None:
-            db.close()
 
 
 def hash_key(key: str) -> str:

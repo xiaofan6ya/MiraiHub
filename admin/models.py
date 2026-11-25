@@ -15,7 +15,7 @@ def Money():
     **直接舍掉**，Key 限额永远到不了。MySQL / MariaDB 上改用 `DECIMAL(18,6)`；
     `asdecimal=False` 让 Python 侧仍拿到 float，业务代码不受影响。
     SQLite 的 REAL 本来就是双精度，保持 `Float` 不变（老库、新库都不受影响）。
-    已有 MySQL 库的列由 `admin.money_columns.migrate_money_columns()` 迁移一次。
+    已有 MySQL 库的 FLOAT 列不会自动改类型（读出仍是 float，不影响业务）；需要精度时手动 ALTER。
     """
     decimal = Numeric(18, 6, asdecimal=False)
     return Float().with_variant(decimal, "mysql").with_variant(decimal, "mariadb")
@@ -155,7 +155,7 @@ class ApiKey(Base):
     name = Column(String(120), default="")
     key_hash = Column(String(128), unique=True, nullable=False)
     key_prefix = Column(String(16), default="")  # 展示用前缀
-    key_full = Column(String(2048), default="")  # 完整密钥（仅管理后台查看用，secret_box 加密存储（兼容旧 base64））
+    key_full = Column(String(2048), default="")  # 完整密钥（仅管理后台查看用，base64 编码存储）
     credit_limit = Column(Money(), default=0)  # 限额（credits）；unlimited=True 时忽略
     credit_used = Column(Money(), default=0)
     unlimited = Column(Integer, default=1)  # New keys default to unlimited; existing limits are preserved.
@@ -867,10 +867,6 @@ class Schedule(Base):
     #: 平台一多就会把 Trae 的号也塞进 WorkBuddy 的签到/成长任务里，
     #: 轻则报错刷日志，重则把上游风控引到无辜账号上。
     platform = Column(String(24), default="workbuddy")
-    #: 任务绑定的区（`cn` / `intl`）；空 = 不限区（按账号自己的区跑，与原行为一致）。
-    #: N-9：调度器一直在读 `schedule.realm`，模型里却没有这一列（恒为空）。
-    #: 老库由 `db.init_db` 的 `_ensure_column("schedules", "realm", ...)` 补列。
-    realm = Column(String(16), default="")
     interval_minutes = Column(Integer, default=60)
     timing_config = Column(Text, default="")  # 空值保留系统预设；JSON 为用户执行周期
     enabled = Column(Integer, default=1)  # 0/1

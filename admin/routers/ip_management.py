@@ -3,12 +3,10 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
-import os
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -23,11 +21,10 @@ from admin.models import BlockedIP, IPRequestBucket, UsageLog, ClientIdentity, C
 from admin.client_ip import normalize_ip, request_ip
 from admin.ip_activity import flush
 from admin.money import money_avg
-from admin.security import audit_secret_access, require_admin
+from admin.security import require_admin
 
 
 router = APIRouter(prefix="/api/ip", tags=["ip-management"])
-_logger = logging.getLogger("admin.ip_management")
 _OK_KINDS = ("", "success")
 
 #: The activity view is an expensive UNION over usage history that admins page
@@ -187,156 +184,25 @@ def _normalize_ip(value: str) -> str:
         raise HTTPException(status_code=400, detail="请输入有效的 IPv4 或 IPv6 地址") from None
 
 
-# ---------------------------------------------------------------------------
-# 封禁到期（2026-11-24 第 3 轮）
-# ---------------------------------------------------------------------------
-# blocked_ips.expires_at 早已有列（db.py 幂等迁移 `_ensure_column`），检查侧
-# ip_access.is_blocked_ip 也已过滤过期记录；缺的是：接口收不到时长、列表不回字段、
-# 手动重新封禁会沿用上一次自动封禁留下的到期时间（手动封禁被悄悄变成限时）。
-
-#: 定时封禁最长 366 天（再长就该用永久）。
-_MAX_BLOCK_SECONDS = 366 * 86400
-#: 自动封禁（note 以 auto: 开头）过期多少天后从表里删掉；0 = 不删。
-_AUTO_PURGE_DAYS = max(0, int(os.getenv("IP_BLOCK_AUTO_PURGE_DAYS", "7") or 0))
-#: 「顺手清理」节流：列表接口最多每 60 秒做一次。
-_SWEEP_INTERVAL = 60.0
-_sweep_at = 0.0
-_sweep_lock = threading.Lock()
-AUTO_NOTE_PREFIX = "auto:"
-
-
-def to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
-    """带时区 → 去时区的 UTC；不带时区的按 UTC 理解（库里一律存 naive UTC）。"""
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
-
-
-def iso_utc(value: Optional[datetime]) -> Optional[str]:
-    """naive UTC → 带 Z 的 ISO 串（前端 new Date() 不会把它当本地时间）。"""
-    if value is None:
-        return None
-    return to_naive_utc(value).replace(microsecond=0).isoformat() + "Z"
-
-
-def resolve_expiry(expires_at: Optional[datetime], duration_seconds: Optional[int],
-                   now: datetime) -> Optional[datetime]:
-    """请求里的到期参数 → 落库的 naive UTC；None = 永久。
-
-    `duration_seconds` 优先于 `expires_at`。到期时间必须晚于 now、不超过 366 天，
-    否则 ValueError（中文原因）。
-    """
-    if duration_seconds is not None:
-        seconds = int(duration_seconds)
-        if seconds <= 0:
-            raise ValueError("封禁时长必须大于 0")
-        if seconds > _MAX_BLOCK_SECONDS:
-            raise ValueError("封禁时长不能超过 366 天，需要更久请选永久")
-        return now + timedelta(seconds=seconds)
-    value = to_naive_utc(expires_at)
-    if value is None:
-        return None
-    if value <= now:
-        raise ValueError("到期时间必须晚于当前时间")
-    if value - now > timedelta(seconds=_MAX_BLOCK_SECONDS):
-        raise ValueError("到期时间不能超过 366 天，需要更久请选永久")
-    return value
-
-
-def block_is_active(enabled, expires_at: Optional[datetime], now: datetime) -> bool:
-    """与 ip_access.is_blocked_ip 同一口径：启用 且（永久 或 未到期）。"""
-    if not enabled:
-        return False
-    value = to_naive_utc(expires_at)
-    return value is None or value > now
-
-
-def is_auto_note(note: Optional[str]) -> bool:
-    """风控自动封禁的备注：`auto:` 开头（忽略前导空白与大小写，与前端 isAutoBlock 一致）。"""
-    return str(note or "").strip().lower().startswith(AUTO_NOTE_PREFIX)
-
-
 class BlockedIPIn(BaseModel):
     ip: str = Field(min_length=1, max_length=64)
     note: str = Field(default="", max_length=255)
-    #: 到期时间（ISO，建议带 Z）。不传 / null = 永久。
-    expires_at: Optional[datetime] = None
-    #: 或者给时长（秒），优先于 expires_at。
-    duration_seconds: Optional[int] = Field(default=None, ge=1, le=_MAX_BLOCK_SECONDS)
 
 
 class BlockedIPPatch(BaseModel):
     enabled: Optional[bool] = None
     note: Optional[str] = Field(default=None, max_length=255)
-    expires_at: Optional[datetime] = None
-    duration_seconds: Optional[int] = Field(default=None, ge=1, le=_MAX_BLOCK_SECONDS)
-    #: true = 改成永久（清掉到期时间）。
-    permanent: Optional[bool] = None
 
 
-class BlockedBatchDeleteIn(BaseModel):
-    """批量删除：按 ids，或按来源（只认 `auto:` 前缀）。两者都给时取并集。"""
-    ids: list[int] = Field(default_factory=list)
-    note_prefix: Optional[str] = Field(default=None, max_length=16)
-    #: 只删已失效（已解除或已过期）的记录。
-    only_inactive: bool = False
-
-
-def _blocked_item(row: BlockedIP, now: Optional[datetime] = None) -> dict:
-    now = now or datetime.utcnow()
+def _blocked_item(row: BlockedIP) -> dict:
     return {
         "id": row.id,
         "ip": row.ip,
         "enabled": bool(row.enabled),
         "note": row.note or "",
-        "expires_at": iso_utc(row.expires_at),
-        "expired": bool(row.expires_at is not None and to_naive_utc(row.expires_at) <= now),
-        "active": block_is_active(row.enabled, row.expires_at, now),
-        "source": "auto" if is_auto_note(row.note) else "manual",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
-
-
-def _expiry_or_400(expires_at, duration_seconds, now):
-    try:
-        return resolve_expiry(expires_at, duration_seconds, now)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
-def _sweep_expired(db: Session, now: datetime, force: bool = False) -> None:
-    """顺手清理：过期的启用记录置为已解除；过期很久的自动封禁直接删除。
-
-    检查侧（is_blocked_ip）本来就过滤过期记录，这里只是让列表状态与实际一致、
-    不让自动封禁无限堆积。失败只打日志。
-    """
-    global _sweep_at
-    with _sweep_lock:
-        mono = time.monotonic()
-        if not force and mono < _sweep_at:
-            return
-        _sweep_at = mono + _SWEEP_INTERVAL
-    try:
-        changed = 0
-        expired = (db.query(BlockedIP)
-                   .filter(BlockedIP.expires_at.isnot(None), BlockedIP.expires_at <= now).all())
-        cutoff = now - timedelta(days=_AUTO_PURGE_DAYS) if _AUTO_PURGE_DAYS else None
-        for row in expired:
-            if cutoff is not None and is_auto_note(row.note) and row.expires_at <= cutoff:
-                db.delete(row)
-                changed += 1
-            elif row.enabled:
-                row.enabled = 0
-                changed += 1
-        if changed:
-            db.commit()
-            invalidate_ip_cache()
-    except Exception as exc:  # noqa: BLE001 - 清理失败不能影响列表
-        db.rollback()
-        _logger.warning("清理过期封禁失败：%s", exc)
 
 
 def _client_details(db: Session, ips: list[str], start: datetime) -> dict[str, dict]:
@@ -366,28 +232,20 @@ def _client_details(db: Session, ips: list[str], start: datetime) -> dict[str, d
 
 @router.get("/blocked")
 def list_blocked_ips(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    now = datetime.utcnow()
-    _sweep_expired(db, now)
     rows = db.query(BlockedIP).order_by(BlockedIP.enabled.desc(), BlockedIP.created_at.desc()).all()
-    return {"items": [_blocked_item(row, now) for row in rows], "expiry_supported": True,
-            "auto_purge_days": _AUTO_PURGE_DAYS}
+    return {"items": [_blocked_item(row) for row in rows]}
 
 
 @router.post("/blocked")
 def block_ip(body: BlockedIPIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     ip = _normalize_ip(body.ip)
-    now = datetime.utcnow()
-    # 每次封禁都按本次请求重设到期：不传 = 永久。原来不碰 expires_at，手动封禁一个
-    # 刚被风控自动封过的 IP 时会沿用自动封禁的到期时间，到点悄悄解封。
-    expires_at = _expiry_or_400(body.expires_at, body.duration_seconds, now)
     row = db.query(BlockedIP).filter(BlockedIP.ip == ip).first()
     if row is None:
-        row = BlockedIP(ip=ip, enabled=1, note=body.note.strip(), expires_at=expires_at)
+        row = BlockedIP(ip=ip, enabled=1, note=body.note.strip())
         db.add(row)
     else:
         row.enabled = 1
         row.note = body.note.strip()
-        row.expires_at = expires_at
     try:
         db.commit()
     except IntegrityError:
@@ -397,11 +255,10 @@ def block_ip(body: BlockedIPIn, _: bool = Depends(require_admin), db: Session = 
             raise HTTPException(status_code=409, detail="该 IP 状态发生冲突，请重试") from None
         row.enabled = 1
         row.note = body.note.strip()
-        row.expires_at = expires_at
         db.commit()
     db.refresh(row)
     invalidate_ip_cache(ip)
-    return {"item": _blocked_item(row, now)}
+    return {"item": _blocked_item(row)}
 
 
 @router.patch("/blocked/{blocked_id}")
@@ -410,22 +267,14 @@ def patch_blocked_ip(blocked_id: int, body: BlockedIPPatch,
     row = db.query(BlockedIP).filter(BlockedIP.id == blocked_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail="封禁记录不存在")
-    now = datetime.utcnow()
     if body.enabled is not None:
         row.enabled = int(body.enabled)
     if body.note is not None:
         row.note = body.note.strip()
-    if body.permanent:
-        row.expires_at = None
-    elif body.expires_at is not None or body.duration_seconds is not None:
-        row.expires_at = _expiry_or_400(body.expires_at, body.duration_seconds, now)
-    elif body.enabled and row.expires_at is not None and to_naive_utc(row.expires_at) <= now:
-        # 「重新封禁」一条已过期的记录：不清掉旧到期时间的话启用了也立刻失效。
-        row.expires_at = None
     db.commit()
     db.refresh(row)
     invalidate_ip_cache(row.ip)
-    return {"item": _blocked_item(row, now)}
+    return {"item": _blocked_item(row)}
 
 
 @router.delete("/blocked/{blocked_id}")
@@ -438,56 +287,6 @@ def delete_blocked_ip(blocked_id: int, _: bool = Depends(require_admin), db: Ses
     db.commit()
     invalidate_ip_cache(ip)
     return {"id": blocked_id, "ok": True}
-
-
-def select_batch_delete(rows, ids, note_prefix, only_inactive, now) -> list:
-    """批量删除要删哪些行（纯函数，便于单测）。"""
-    wanted = {int(i) for i in (ids or [])}
-    by_prefix = bool(note_prefix)
-    picked = []
-    for row in rows:
-        hit = row.id in wanted or (by_prefix and is_auto_note(row.note))
-        if not hit:
-            continue
-        if only_inactive and block_is_active(row.enabled, row.expires_at, now):
-            continue
-        picked.append(row)
-    return picked
-
-
-@router.post("/blocked/batch-delete")
-def batch_delete_blocked(body: BlockedBatchDeleteIn, request: Request,
-                         _: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    """一次删除多条封禁记录（「清理自动封禁」用，替代前端逐条 DELETE）。
-
-    `note_prefix` 只接受 `auto:`（大小写不敏感）：不提供「按任意前缀删」，
-    防止一个空串 / 常见词把手动封禁整表清掉。每次调用写一条审计。
-    """
-    prefix = (body.note_prefix or "").strip().lower()
-    if prefix and prefix != AUTO_NOTE_PREFIX:
-        raise HTTPException(status_code=400, detail="note_prefix 只支持 auto:（清理自动封禁）")
-    if len(body.ids) > 2000:
-        raise HTTPException(status_code=400, detail="一次最多删除 2000 条")
-    if not body.ids and not prefix:
-        raise HTTPException(status_code=400, detail="请提供要删除的 ids，或 note_prefix=auto:")
-    now = datetime.utcnow()
-    query = db.query(BlockedIP)
-    if not prefix:
-        query = query.filter(BlockedIP.id.in_(list({int(i) for i in body.ids})))
-    rows = select_batch_delete(query.all(), body.ids, prefix, body.only_inactive, now)
-    deleted = [row.id for row in rows]
-    active = sum(1 for row in rows if block_is_active(row.enabled, row.expires_at, now))
-    for row in rows:
-        db.delete(row)
-    db.commit()
-    invalidate_ip_cache()
-    missing = sorted({int(i) for i in body.ids} - set(deleted)) if body.ids else []
-    audit_secret_access(request, "ip_block_batch_delete",
-                        "deleted=%d active=%d prefix=%s ids=%s" % (
-                            len(deleted), active, prefix or "-",
-                            ",".join(str(i) for i in deleted[:20]) + ("…" if len(deleted) > 20 else "")))
-    return {"ok": True, "deleted": len(deleted), "deleted_ids": deleted,
-            "active_deleted": active, "not_found_ids": missing}
 
 
 @router.get("/activity")
@@ -541,10 +340,7 @@ def ip_activity(
     # Totals must reflect every active filter and ignore the page window.
     totals = db.query(func.count(), func.coalesce(func.sum(counts.c.requests), 0)) \
         .select_from(counts).filter(*conditions).one()
-    _now = datetime.utcnow()
-    blocked_rows = db.query(BlockedIP).filter(
-        BlockedIP.enabled == 1,
-        or_(BlockedIP.expires_at.is_(None), BlockedIP.expires_at > _now)).all()
+    blocked_rows = db.query(BlockedIP).filter(BlockedIP.enabled == 1).all()
     blocked_by_ip = {row.ip: row for row in blocked_rows}
     client_details = _client_details(db, [row.ip for row in rows], start)
     items = []

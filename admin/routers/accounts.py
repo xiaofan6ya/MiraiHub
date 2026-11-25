@@ -167,61 +167,10 @@ class ImportLocalIn(BaseModel):
     all: bool = False
 
 
-#: 导出格式。`backup`（auth_json 原文，可回灌）/ `client`（WorkBuddy 加密 .info）
-#: 都含完整凭证 → 必须过 export_guard 二次确认；`raw` 是前端 v2 用的别名（= backup）；
-#: `plain` = 递归脱敏清单（只用于核对，不能回灌，不需要确认）。
-_ExportFormat = Literal['backup', 'client', 'raw', 'plain']
-
-
-def _normalize_export_format(fmt: str | None) -> str:
-    fmt = (fmt or "backup").strip().lower()
-    return "backup" if fmt == "raw" else fmt
-
-
-def _guard_account_export(request, scope: str, fmt: str, include_secrets=None) -> str:
-    """账号池导出的凭证闸门（第 4 轮 R4-BE-01）。返回规范化后的格式。
-
-    * `plain` → 脱敏，不要确认；
-    * `backup` / `client`（含默认值）/ `include_secrets=true` → 要完整凭证：
-      没带 `X-Export-Confirm: include-secrets` 时 428 `export_confirm_required`，
-      前端 v2 据此弹确认框后重发（`EXPORT_SECRETS_REQUIRE_CONFIRM=0` 可回退）；
-    * `include_secrets=false` 显式要求脱敏 → 按 plain 处理。
-    """
-    from admin import export_guard
-
-    fmt = _normalize_export_format(fmt)
-    if include_secrets is False:
-        return "plain"
-    want = fmt in ("backup", "client") or bool(include_secrets)
-    if fmt == "plain" and include_secrets:
-        fmt = "backup"
-    full = export_guard.guard_secret_export(request, scope, export_guard.wants_secrets(want))
-    return fmt if full else "plain"
-
-
-def _plain_export_line(a) -> str | None:
-    """脱敏导出的一行：账号摘要 + 递归脱敏后的 auth（凭证字段整值 `***`）。"""
-    from admin import export_guard
-
-    raw = (getattr(a, "auth_json", None) or "").strip()
-    auth = None
-    if raw:
-        try:
-            auth = export_guard.sanitize(json.loads(raw))
-        except Exception:  # noqa: BLE001 - 损坏的 auth_json 不落盘原文
-            auth = None
-    return json.dumps({
-        "id": a.id, "platform": getattr(a, "platform", None) or "",
-        "name": a.name, "uid": a.uid, "status": a.status, "auth": auth,
-    }, ensure_ascii=False)
-
-
 class ExportIn(BaseModel):
     ids: list[int] = []      # 空 = 当前平台的全部
     include_disabled: bool = False
-    format: _ExportFormat = 'backup'
-    #: 显式开关：true = 要完整凭证（仍需确认头）；false = 强制脱敏。
-    include_secrets: Optional[bool] = None
+    format: Literal['backup', 'client'] = 'backup'
     #: 跨平台导出开关。默认 False = 只导当前平台（防止误把别的平台
     #: 凭证一起落盘）；显式 true 时导出**所有平台**的账号 ——
     #: 多平台部署下做整机迁移/全量备份时会用到。
@@ -237,8 +186,7 @@ class ExportAsyncIn(BaseModel):
     """
     ids: list[int] = []
     include_disabled: bool = False
-    format: _ExportFormat = 'backup'
-    include_secrets: Optional[bool] = None
+    format: Literal['backup', 'client'] = 'backup'
     all_platforms: bool = False
     status: Optional[str] = None   # 'active' | 'disabled' | None=按 include_disabled
     #: 关键字筛选（名称 / uid 子串），用于「只导某一批号」。
@@ -365,14 +313,8 @@ def _existing_uid_index(db: Session) -> dict[str, Account]:
 
     历史遗留的重复记录不影响导入：无论哪条都会命中，从而跳过重复导入。
     """
-    from admin.platform.workbuddy import scoping as wb_scope
-
     idx: dict[str, Account] = {}
-    # 只索引 WorkBuddy 账号（修复批次 3 · D1）：两个调用方（批量上传 / 导入本机）
-    # 只收 WorkBuddy 凭证。别的平台恰好有同 uid 的号时，原来会被当成「已存在」
-    # 而**用 WorkBuddy 凭证覆盖它的 auth_json**，`platform` 列却不变 —— 账号损坏。
-    query = wb_scope.filter_workbuddy(db.query(Account))
-    for a in query.order_by(Account.id.asc()).all():
+    for a in db.query(Account).order_by(Account.id.asc()).all():
         if not a.uid:
             continue
         idx.setdefault(a.uid, a)   # 先到先得 = id 最小
@@ -380,18 +322,12 @@ def _existing_uid_index(db: Session) -> dict[str, Account]:
 
 
 def _find_dup(db: Session, auth_json: str) -> Account | None:
-    """按 uid 查这个 **WorkBuddy** 凭据是否已在号池里。
-
-    只在 WorkBuddy 账号里找（D1）：`add_account` 收的是 WorkBuddy 凭证，
-    命中后会覆盖 `auth_json`；按裸 uid 跨平台匹配会把同 uid 的 Trae/Qoder 号写坏。
-    """
-    from admin.platform.workbuddy import scoping as wb_scope
-
+    """按 uid 查这个凭据是否已在号池里。"""
     uid = _uid_of(auth_json)
     if not uid:
         return None
     return (db.query(Account)
-            .filter(Account.uid == uid, wb_scope.workbuddy_cond())
+            .filter(Account.uid == uid)
             .order_by(Account.id.asc())
             .first())
 
@@ -417,9 +353,6 @@ def _export_items(rows: list[Account], format: str = 'backup') -> list[str]:
     """
     items: list[str] = []
     for a in rows:
-        if format == 'plain':
-            items.append(_plain_export_line(a))
-            continue
         raw = (a.auth_json or "").strip()
         if not raw:
             continue
@@ -457,8 +390,6 @@ def export_accounts(
     response.headers['Cache-Control'] = 'no-store'
     from admin.platform import scope as platform_scope
 
-    fmt = _guard_account_export(request, "accounts export", body.format,
-                                body.include_secrets)
     platform, realm = platform_scope.from_request(request)
     q = db.query(Account)
     # 先按平台收窄（含显式 ids 的情况：挡住「导出别的平台的号」）。
@@ -471,7 +402,7 @@ def export_accounts(
         q = q.filter(Account.status == "active")
     rows = q.order_by(Account.id).all()
 
-    items = _export_items(rows, fmt)
+    items = _export_items(rows, body.format)
     # 2026-11-02 事故的直接出口（7 次全量导出、最大 112043 字节）。
     # 每次导出都留一条可追溯的审计记录，包含条数与来源；不记录任何凭据内容。
     import logging as _logging
@@ -480,10 +411,10 @@ def export_accounts(
         "账号凭证导出 ip=%s ua=%s format=%s all_platforms=%s ids=%s count=%d",
         _ip,
         (request.headers.get("user-agent", "")[:160] if request is not None else ""),
-        fmt, bool(getattr(body, "all_platforms", False)),
+        body.format, bool(getattr(body, "all_platforms", False)),
         len(getattr(body, "ids", None) or []), len(items))
     return {
-        "format": fmt,
+        "format": body.format,
         "platform_scope": "all" if body.all_platforms else (platform or "all"),
         "total": len(rows),
         "count": len(items),
@@ -512,10 +443,6 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
     """
     from admin.platform import scope as platform_scope
 
-    # 闸门必须在「复用运行中任务」之前：否则未确认的请求能拿到别人确认过的任务快照
-    # （含 file_token）绕过确认（R4-BE-01）。
-    fmt = _guard_account_export(request, "accounts export-async", body.format,
-                                body.include_secrets)
     platform, realm = platform_scope.from_request(request)
     q = db.query(Account.id)
     if not body.all_platforms:
@@ -541,8 +468,7 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
     if not ids:
         raise HTTPException(status_code=400, detail="当前范围没有可导出的账号")
 
-    # 脱敏 / 完整两类任务分开占位，互不复用
-    key = "account-export:" + (platform or "all") + (":plain" if fmt == "plain" else "")
+    key = "account-export:" + (platform or "all")
     running = jobrunner.RUNNER.get(key)
     if running and running.status == "running":
         return {"reused": True, **running.snapshot()}
@@ -551,7 +477,7 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
     fd, path = tempfile.mkstemp(prefix="miraihub-export-", suffix=".jsonl")
     os.close(fd)
     stamp = time.strftime("%Y%m%d-%H%M")
-    filename = f"miraihub-accounts-{fmt}-{platform or 'all'}-{stamp}.jsonl"
+    filename = f"miraihub-accounts-{body.format}-{platform or 'all'}-{stamp}.jsonl"
 
     def worker(job: jobrunner.Job) -> dict:
         db2 = SessionLocal()
@@ -565,10 +491,6 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
                     chunk = ids[start:start + 500]
                     rows = db2.query(Account).filter(Account.id.in_(chunk)).all()
                     for a in rows:
-                        if fmt == "plain":
-                            fh.write(_plain_export_line(a) + "\n")
-                            written += 1
-                            continue
                         raw = (a.auth_json or "").strip()
                         if not raw:
                             skipped += 1
@@ -579,7 +501,7 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
                             skipped += 1
                             continue
                         line = raw
-                        if fmt == "client":
+                        if body.format == "client":
                             try:
                                 line = encrypt_credential(raw)
                             except CredentialDecodeError:
@@ -592,7 +514,7 @@ def export_accounts_async(body: ExportAsyncIn, request: Request = None,
                                  f"已导出 {written} 条（跳过 {skipped}）")
             token = _export_register(path, filename)
             return {"file_token": token, "count": written,
-                    "skipped": skipped, "total": total, "format": fmt}
+                    "skipped": skipped, "total": total, "format": body.format}
         except Exception:
             try:
                 os.remove(path)
@@ -625,12 +547,8 @@ def export_download(token: str, _: bool = Depends(require_admin)):
 
 
 @router.get("/job/{job_id}")
-def account_job(job_id: str, _: bool = Depends(require_admin)):
-    """查询账号相关后台任务进度（导出 / 导入）。
-
-    必须鉴权（审查 S-5）：快照里有账号名、失败原因、导出文件 token 等信息，
-    原来是本路由里唯一没挂 `require_admin` 的接口。
-    """
+def account_job(job_id: str):
+    """查询账号相关后台任务进度（导出 / 导入）。"""
     job = jobrunner.RUNNER.by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
@@ -1392,38 +1310,20 @@ def _active_model_limits(db: Session, now: datetime) -> dict:
 
 
 @router.get("/model-limits")
-def model_limits(request: Request, _: bool = Depends(require_admin),
-                 db: Session = Depends(get_db)):
-    """Observed account/model limits + gateway usage; no upstream polling.
-
-    N-8（隔离报告第 7 行）：按 `X-Platform` / `?platform=` 收窄 —— 账号、冷却、
-    今日用量、模型汇总、账号错误都只算当前平台（+区）。不带平台时与原来一致（全网关）。
-    """
-    from admin import rollup as _rollup
-    from admin.platform import scope as platform_scope
-
+def model_limits(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """Observed account/model limits + gateway usage; no upstream polling."""
     now = datetime.utcnow()
-    scope_platform, scope_realm = platform_scope.from_request(request)
-    account_query = db.query(Account)
-    if scope_platform:
-        account_query = platform_scope.filter_accounts(account_query, db, scope_platform, scope_realm)
-    rows = account_query.all()
-    row_ids = {a.id for a in rows}
+    rows = db.query(Account).all()
     limits = _active_model_limits(db, now)
-    if scope_platform:
-        limits = {aid: entries for aid, entries in limits.items() if aid in row_ids}
     public_ids = {a.id for a in scope_accounts(db.query(Account)).all()}
-    # 「今日」与概览同一时区来源（ADMIN_STATS_TZ_OFFSET_HOURS，默认 +8）
-    start = _rollup.local_day_start(0, now=now)
-    usage_query = db.query(
-        UsageLog.account_id, UsageLog.model, func.count(UsageLog.id),
-        func.sum(case((UsageLog.error_kind.in_(('', 'success')), 1), else_=0)),
-        func.sum(UsageLog.total_tokens)).filter(UsageLog.created_at >= start)
-    if scope_platform:
-        usage_query = usage_query.filter(UsageLog.account_id.in_(sorted(row_ids) or [-1]))
+    start = (now + timedelta(hours=8)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     usage = {(account_id, model): {"requests_today": count, "successes_today": int(successes or 0),
                                   "tokens_today": int(tokens) if tokens is not None else None}
-             for account_id, model, count, successes, tokens in usage_query
+             for account_id, model, count, successes, tokens in db.query(
+                 UsageLog.account_id, UsageLog.model, func.count(UsageLog.id),
+                 func.sum(case((UsageLog.error_kind.in_(('', 'success')), 1), else_=0)),
+                 func.sum(UsageLog.total_tokens))
+             .filter(UsageLog.created_at >= start)
              .group_by(UsageLog.account_id, UsageLog.model).all()}
     items = []
     for account in rows:
@@ -1436,10 +1336,7 @@ def model_limits(request: Request, _: bool = Depends(require_admin),
     from admin.pool import POOL
     from admin.routers.proxy import _looks_login_dead
     summary = []
-    config_query = db.query(ModelConfig).filter(ModelConfig.enabled == 1, ModelConfig.level == "system")
-    if scope_platform:
-        config_query = config_query.filter(ModelConfig.platform == scope_platform)
-    configs = {c.model_id: c for c in config_query.all()}
+    configs = {c.model_id: c for c in db.query(ModelConfig).filter(ModelConfig.enabled == 1, ModelConfig.level == "system").all()}
     for model in sorted(set(configs) | {e["model"] for e in items}):
         config = configs.get(model)
         free = config is not None and config.credit_multiplier == 0
@@ -1456,7 +1353,6 @@ def model_limits(request: Request, _: bool = Depends(require_admin),
     return {"items": items, "models": summary, "observed_at": now.isoformat() + "Z",
             "waf_remaining_seconds": POOL.waf.remaining(),
             "usage_scope": "gateway_only", "daily_quota_total": None,
-            "platform": scope_platform, "realm": scope_realm,
             "account_errors": [{"account_id": a.id, "account_name": a.name or a.uid,
                                 "gateway_state": _gateway_fields(a, now),
                                 "upstream_error": upstream_errors.stored_info(a.last_upstream_error, a.last_err_msg)}
@@ -1659,7 +1555,7 @@ def run_account_task(acc_id: int, body: dict,
             return {"ok": False, "supported": False, "task": action,
                     "reason": "%s 平台没有「活跃对话」任务" % (storage or "该")}
     except Exception as exc:  # noqa: BLE001 - 单号任务失败如实回，不 500
-        _logger.exception("单账号任务失败 acc=%s task=%s", acc_id, action)
+        logger.exception("单账号任务失败 acc=%s task=%s", acc_id, action)
         raise HTTPException(400, "%s 失败：%s" % (action, str(exc)[:160])) from exc
 
     raise HTTPException(400, "不支持的任务：%s" % action)
@@ -1718,49 +1614,31 @@ def bulk_mutate(body: AccountBulkIn, _: bool = Depends(require_admin),
                 account.cool_kind = ""
                 account.breaker_until = None
                 account.degrade_until = None
-            else:
-                # 与单个停用（PATCH /{id}）同口径（D7 / 审查 L-1）：人工停用**必须**
-                # 打 `manual_disabled`，否则带 11140 痕迹的号会被 `ban_recheck`
-                # 当成「风控临时禁用」在下一轮自动解封 —— 批量停用静默失效。
-                account.cool_kind = "manual_disabled"
             affected += 1
         db.commit()
 
     elif action == "delete":
-        # 与单个删除（DELETE /{id}）同口径（审查 L-4）：被 Key 独占绑定（单选
-        # `account_id` 或多选 `account_ids`）的号**跳过并报告**，不删。原来照删不误，
-        # Key 指向不存在的账号后 `scope_accounts` 把候选收窄成空集，Key 从此一直 503。
-        bound: dict[int, list[str]] = {}
+        # 绑定了 Key 的号删掉会让 Key 失去专属账号 —— 如实报告，不静默改绑定。
+        bound = {}
         try:
-            from admin.account_binding import _owned_pairs
+            from admin.models import ApiKey
 
-            owned = _owned_pairs(db)
-            key_names = ({k.id: (k.name or ("#%s" % k.id))
-                          for k in db.query(ApiKey).filter(ApiKey.id.in_(list(owned))).all()}
-                         if owned else {})
-            for key_id, acc_ids in owned.items():
-                for aid in acc_ids:
-                    if aid in found:
-                        bound.setdefault(aid, []).append(key_names.get(key_id, "#%s" % key_id))
-        except Exception:  # noqa: BLE001 - 读不到绑定时宁可整批不删
-            _logger.exception("批量删除：读取 API Key 绑定失败")
-            raise HTTPException(500, "读取 API Key 绑定失败，未删除任何账号")
+            for key in db.query(ApiKey).filter(ApiKey.account_id.in_(ids)).all():
+                bound.setdefault(int(key.account_id or 0), []).append(key.name or ("#%s" % key.id))
+        except Exception:  # noqa: BLE001 - 读不到绑定不影响删除
+            bound = {}
         for acc_id in ids:
             account = found.get(acc_id)
             if account is None:
                 continue
-            if acc_id in bound:
-                skipped.append("#%s 已绑定 API Key（%s），请先解除绑定再删除"
-                               % (acc_id, "、".join(bound[acc_id][:3])))
-                continue
             try:
-                db.query(AccountModelCooldown).filter(
-                    AccountModelCooldown.account_id == acc_id).delete(synchronize_session=False)
                 db.delete(account)
                 affected += 1
             except Exception as exc:  # noqa: BLE001
                 errors.append("#%s 删除失败：%s" % (acc_id, str(exc)[:80]))
         db.commit()
+        for acc_id, names in bound.items():
+            skipped.append("#%s 删除前被 Key 独占绑定：%s" % (acc_id, "、".join(names[:3])))
 
     else:  # refresh / check
         from admin.platform import registry
@@ -2023,60 +1901,22 @@ def _batch_add_core(body: AccountBatchIn, db: Session,
             "refreshing": len(needs_refresh)}
 
 
-def _dedupe_key(acc: Account) -> tuple[str, str, str]:
-    """查重 / 去重的分组键：`(落库平台, 区, uid)`（修复批次 3 · D1）。
-
-    原来只按 uid 分组、跨全部平台：Qoder / Trae 国内、国际两个区同一 uid 是
-    常态，「清理重复」会把另一个区的号**直接删掉**。
-
-    区取 `accounts.domain`：只有 `cn` / `intl` 才算区；WorkBuddy 的 domain 存的是
-    主机 / 企业域，不参与分组（记为空区）。空 domain 的号与带区的号**不归为一组**
-    —— 宁可少删，也不误删。
-    """
-    from admin.platform.workbuddy import scoping as wb_scope
-
-    platform = wb_scope.normalize_storage(acc.platform)
-    if platform in wb_scope.WORKBUDDY_STORAGES:
-        platform = "workbuddy"
-    domain = str(acc.domain or "").strip().lower()
-    realm = domain if domain in ("cn", "intl") else ""
-    return platform, realm, str(acc.uid or "")
-
-
-def _duplicate_groups(db: Session, request, *, lock: bool = False):
-    """按 `_dedupe_key` 分组；带 `X-Platform` 时只在当前平台作用域内找。"""
-    from admin.platform import scope as platform_scope
-
-    platform, realm = platform_scope.from_request(request)
-    query = db.query(Account)
-    if platform:
-        query = platform_scope.filter_accounts(query, db, platform, realm)
-    query = query.order_by(Account.id.asc())
-    if lock:
-        query = query.with_for_update()
-    rows = query.all()
-    groups: dict[tuple[str, str, str], list[Account]] = {}
+@router.get("/duplicates")
+def list_duplicates(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """列出 uid 重复的账号组（每组保留一条，其余是可清理的冗余）。"""
+    rows = db.query(Account).order_by(Account.id.asc()).all()
+    groups: dict[str, list[Account]] = {}
     for a in rows:
         if a.uid:
-            groups.setdefault(_dedupe_key(a), []).append(a)
-    return rows, groups
-
-
-@router.get("/duplicates")
-def list_duplicates(request: Request = None, _: bool = Depends(require_admin),
-                    db: Session = Depends(get_db)):
-    """列出 `(平台, 区, uid)` 重复的账号组（每组保留一条，其余是可清理的冗余）。"""
-    rows, groups = _duplicate_groups(db, request)
+            groups.setdefault(a.uid, []).append(a)
 
     out = []
-    for (platform, realm, uid), grp in groups.items():
+    for uid, grp in groups.items():
         if len(grp) < 2:
             continue
         keep = grp[0]                      # id 最小 = 最早创建，通常历史记录最全
         out.append({
             "uid": uid,
-            "platform": platform,
-            "realm": realm,
             "keep": {"id": keep.id, "name": keep.name,
                      "created_at": _dt(keep.created_at)},
             "remove": [{"id": a.id, "name": a.name,
@@ -2091,35 +1931,26 @@ def list_duplicates(request: Request = None, _: bool = Depends(require_admin),
 
 
 @router.post("/dedupe")
-def dedupe_accounts(request: Request = None, _: bool = Depends(require_admin),
-                    db: Session = Depends(get_db)):
-    """清理重复账号：同一 `(平台, 区, uid)` 只保留 id 最小（最早创建）的那条。
+def dedupe_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """清理重复账号：同一 uid 只保留 id 最小（最早创建）的那条。
 
     为什么保留最早的那条：使用记录（last_used_at）与既有关联数据都挂在
     老记录上，重复导入产生的新记录这些字段都是空的，删掉损失最小。
-
-    分组键见 `_dedupe_key`（D1）：不同平台、不同区的同 uid 账号**不是**重复。
-    带 `X-Platform` 时只在当前平台作用域内清理。被 API Key 绑定（单选或多选）
-    的号永不删除。
     """
-    from admin.account_binding import _owned_pairs
-
-    rows, groups = _duplicate_groups(db, request, lock=True)
+    rows = db.query(Account).order_by(Account.id.asc()).with_for_update().all()
+    groups: dict[str, list[Account]] = {}
+    for a in rows:
+        if a.uid:
+            groups.setdefault(a.uid, []).append(a)
 
     removed: list[dict] = []
-    db.query(ApiKey.id).with_for_update().all()   # 锁住 Key 行，防止删的同时有人绑定
-    bound_ids = {aid for acc_ids in _owned_pairs(db).values() for aid in acc_ids}
-    for (platform, realm, uid), grp in groups.items():
-        if len(grp) < 2:
-            continue
+    bound_ids = {k.account_id for k in db.query(ApiKey).filter(ApiKey.account_id.is_not(None)).with_for_update().all()}
+    for uid, grp in groups.items():
         keep = next((a for a in grp if a.id in bound_ids), grp[0])
         for a in grp:
             if a.id == keep.id or a.id in bound_ids:
                 continue
-            removed.append({"id": a.id, "name": a.name, "uid": uid,
-                            "platform": platform, "realm": realm})
-            db.query(AccountModelCooldown).filter(
-                AccountModelCooldown.account_id == a.id).delete(synchronize_session=False)
+            removed.append({"id": a.id, "name": a.name, "uid": uid})
             db.delete(a)
     db.commit()
     return {"removed": len(removed), "kept": len(groups), "items": removed}
@@ -2429,29 +2260,20 @@ def import_local(body: ImportLocalIn, _: bool = Depends(require_admin), db: Sess
 def export_one_account(
     acc_id: int,
     response: Response,
-    format: _ExportFormat = 'backup',
-    request: Request = None,
+    format: Literal['backup', 'client'] = 'backup',
     _: bool = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Export a single backup or official encrypted .info file.
-
-    第 4 轮 R4-BE-01：完整凭证同样要 `X-Export-Confirm: include-secrets`
-    （或 `?confirm=include-secrets`），否则 428；`format=plain` 回脱敏摘要。
 
     `format=client` 只对 WorkBuddy 系账号生效（加密 .info 是 WorkBuddy
     客户端的文件格式）；其它平台的凭据结构不同，自动落回 **backup 原文**
     （auth_json 原样，可直接再导入），响应里的 `format` 是**实际格式**。
     """
     response.headers['Cache-Control'] = 'no-store'
-    format = _guard_account_export(request, f"account export id={acc_id}", format)
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if format == 'plain':
-        return {"id": acc.id, "name": acc.name, "uid": acc.uid,
-                "platform": acc.platform, "format": "plain",
-                "item": json.loads(_plain_export_line(acc)).get("auth")}
     raw = (acc.auth_json or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="该账号没有可导出的凭据")
@@ -2999,12 +2821,8 @@ def sync_credits(_: bool = Depends(require_admin), db: Session = Depends(get_db)
     的节奏处理（这里返回逐号结果，供前端展示进度）。
     """
     from admin.config import settings
-    from admin.platform.workbuddy import scoping as wb_scope
 
-    # 只采集 WorkBuddy 账号（D2）：`backend.AccountSession` 是 WorkBuddy 协议，
-    # 拿别的平台凭证去打只会失败，而且下面会回写 `auth_json` —— 可能把它们写坏。
-    accounts = (wb_scope.filter_workbuddy(
-        db.query(Account).filter(Account.status == "active"))
+    accounts = (db.query(Account).filter(Account.status == "active")
                 .order_by(Account.id.asc()).all())
     ok = 0
     failed = 0
@@ -3058,12 +2876,9 @@ def request_usage(
     db: Session = Depends(get_db),
 ):
     """获取账号模型请求用量（对接 WorkBuddy 已有接口，不自建日志）。"""
-    from admin.platform.workbuddy import scoping as wb_scope
-
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
-    wb_scope.require_workbuddy(acc, "上游请求用量")
     # 默认今天
     if not start_time:
         start_time = datetime.now().strftime("%Y-%m-%d 00:00:00")
@@ -3086,13 +2901,9 @@ def cat_travel(acc_id: int, _: bool = Depends(require_admin), db: Session = Depe
     返回结构化分步结果，前端据此逐步提示「领养成功 +300」「领奖成功 +N」，
     无需再去积分明细核对。
     """
-    from admin.platform.workbuddy import scoping as wb_scope
-
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
-    # 猫猫旅行是 WorkBuddy 专属玩法（D2）：别的平台的号直接 400，不去打腾讯接口
-    wb_scope.require_workbuddy(acc, "猫猫旅行")
     try:
         with backend.AccountSession(acc.auth_json) as sess:
             result = sess.run_cat_travel()
@@ -3135,14 +2946,9 @@ def cat_travel_batch_async(
     if running and running.status == "running":
         return {"reused": True, **running.snapshot()}
 
-    from admin.platform.workbuddy import scoping as wb_scope
-
     db = SessionLocal()
     try:
-        # WorkBuddy 专属（D2）：显式点名了别的平台的号 -> 400；不点名 = 全部 WorkBuddy 号
-        if body.ids:
-            wb_scope.require_workbuddy_ids(db, body.ids, "猫猫旅行")
-        q = wb_scope.filter_workbuddy(db.query(Account).filter(Account.status == "active"))
+        q = db.query(Account).filter(Account.status == "active")
         if body.ids:
             q = q.filter(Account.id.in_(body.ids))
         ids = [a.id for a in q.order_by(Account.id).all()]
@@ -3216,12 +3022,7 @@ def cat_travel_batch(
     按结果分类统计，避免把「首次领养 +300」和「旅行到站返现 +7」混在一起 ——
     两者量级差几十倍，合并成一个总数会让人误以为执行无效。
     """
-    from admin.platform.workbuddy import scoping as wb_scope
-
-    # WorkBuddy 专属（D2）：同 batch-async
-    if body.ids:
-        wb_scope.require_workbuddy_ids(db, body.ids, "猫猫旅行")
-    q = wb_scope.filter_workbuddy(db.query(Account).filter(Account.status == "active"))
+    q = db.query(Account).filter(Account.status == "active")
     if body.ids:
         q = q.filter(Account.id.in_(body.ids))
     rows = q.order_by(Account.id).all()
