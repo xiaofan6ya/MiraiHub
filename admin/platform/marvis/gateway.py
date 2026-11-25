@@ -947,6 +947,163 @@ def rewrite_tencent_fingerprints(text: str) -> tuple[str, int]:
     return out, hits + identity_hits
 
 
+
+# ---------------------------------------------------------------------------
+# 多模态：图片段透传（2026-11-23）
+# ---------------------------------------------------------------------------
+#
+# ## 上游本来就是多模态的
+#
+# 2026-11-18 记下的「content 里带 image_url → 400 3000101 invalid parameter」，
+# 是一次**混淆变量**下的结论：同期另一条实测摆着 `developer` + 数组 content
+# 同样 400、而 `system` + 数组 content 是 200 —— 那条 400 是角色名踩的，
+# 不是图片本身。`_normalize_roles()` 把 developer 归一成 system 之后，
+# 图片这条防御就该撤掉了，但当时没跟着撤。
+#
+# 2026-11-23 同账号、同签名、同一个 data URL 直连上游重测：
+#
+#     main-auto（deepseek-v4-1-flash-261017）+ image_url -> 200
+#         问「左半和右半各是什么颜色」，答「红色，蓝色」
+#         （反向配色答反、无图时明确回「没有收到截图」—— 确实在看图）
+#     hunyuan-turbos-vision（HY-Vision-2.0-instruct）+ image_url -> 200
+#         答「红 蓝」
+#
+# 所以丢图等于把上游的能力关在网关里，用户看到的就是
+# 「deepseek-v4.1-flash 没有识图能力」。
+#
+# ## 分工
+#
+#   · 无图 → `_flatten_content()` 压成纯字符串（老行为，避开 400）；
+#   · 有图 → `_normalize_parts()` 规范成上游认的两类 part
+#     （`text` / `image_url`），原样发出去；
+#   · 上游仍然不吃图（换了路由后端 / 账号等级不够）→ `_strip_images()`
+#     去掉图片后同号重试一次，至少保住整条文本对话不被 400 打挂。
+#
+# 只放行 `data:` 与 `http(s)://` 两类 url：`file_id` 这种上游取不到的引用
+# 留着只会让整条请求 400。
+
+_IMAGE_KINDS = frozenset({"image_url", "input_image", "image"})
+_IMAGE_TEXT_KINDS = frozenset({"text", "input_text", "output_text"})
+
+
+def _image_url_of(segment: dict) -> str:
+    """从各种图片段形态里挖出可直传的 url。挖不到返回空串。"""
+    raw = segment.get("image_url")
+    if isinstance(raw, dict):
+        url = raw.get("url")
+    elif isinstance(raw, str):
+        url = raw
+    else:
+        url = None
+    if not url:
+        # Anthropic 形态：{"type":"image","source":{"type":"base64",...}}
+        source = segment.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64" and source.get("data"):
+            media = str(source.get("media_type") or "image/png")
+            url = "data:%s;base64,%s" % (media, source["data"])
+        elif isinstance(source, dict) and source.get("type") == "url":
+            url = source.get("url")
+        else:
+            url = segment.get("url")
+    if not isinstance(url, str) or not url:
+        return ""
+    lowered = url[:8].lower()
+    if lowered.startswith("data:") or lowered.startswith(("http://", "https://")):
+        return url
+    return ""
+
+
+def _normalize_parts(content: list) -> list | None:
+    """含图的 content 数组 → 上游认的 `[{type:text}|{type:image_url}]`。
+
+    **不含图时返回 `None`** —— 交给 `_flatten_content()` 走原来的压平路径。
+    两边的职责界限就是「有没有图」，这样纯文本请求的行为与改动前逐字节一致
+    （前缀缓存不会被无谓重建打掉）。
+    """
+    kept: list = []
+    has_image = False
+    for segment in content:
+        if isinstance(segment, str):
+            if segment:
+                kept.append({"type": "text", "text": segment})
+            continue
+        if not isinstance(segment, dict):
+            continue
+        kind = str(segment.get("type") or "")
+        if kind in _IMAGE_KINDS:
+            url = _image_url_of(segment)
+            if url:
+                kept.append({"type": "image_url", "image_url": {"url": url}})
+                has_image = True
+            continue
+        if kind in _IMAGE_TEXT_KINDS or not kind:
+            text = segment.get("text")
+            if isinstance(text, str) and text:
+                kept.append({"type": "text", "text": text})
+            continue
+        # audio / file 等：上游没有对应通道，丢弃（与改动前一致）
+    return kept if has_image else None
+
+
+def _texts_of_parts(content: list) -> list:
+    """从 parts 数组里取出全部文本段（去图时用来保住正文）。"""
+    texts: list = []
+    for segment in content:
+        if isinstance(segment, str):
+            texts.append(segment)
+            continue
+        if not isinstance(segment, dict):
+            continue
+        kind = str(segment.get("type") or "")
+        if kind in _IMAGE_TEXT_KINDS or not kind:
+            text = segment.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+    return texts
+
+
+def _body_has_images(body: dict) -> bool:
+    """这条请求体里有没有可直传的图片段。"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and _normalize_parts(content) is not None:
+            return True
+    return False
+
+
+def _strip_images(body: dict) -> dict | None:
+    """去掉全部图片段，返回新 body；本来没图则返回 `None`。
+
+    上游某些路由后端不认 image_url（400 3000101）时用它兜底：
+    宁可这一轮降级成纯文本，也不要整条请求失败。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return None
+    changed = False
+    out: list = []
+    for message in messages:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        content = message.get("content")
+        if not isinstance(content, list) or _normalize_parts(content) is None:
+            out.append(message)
+            continue
+        merged = "\n".join(t for t in _texts_of_parts(content) if t)
+        out.append(dict(message, content=merged or "[image]"))
+        changed = True
+    if not changed:
+        return None
+    return dict(body, messages=out)
+
+
+
 def _flatten_content(content) -> str | None:
     """把 OpenAI 多段 content 数组压成纯文本。压不出文本时返回 `None`。
 
@@ -978,7 +1135,8 @@ def _flatten_content(content) -> str | None:
             if isinstance(text, str):
                 parts.append(text)
             continue
-        # image_url / input_image / audio / file —— 上游不支持，丢弃
+        # image_url / input_image 已在进入本函数之前由 `_normalize_parts()`
+        # 处理（含图就不压平）；能走到这里的只剩上游确实不吃的 audio / file。
     return "\n".join(parts) if parts else ""
 
 
@@ -1010,9 +1168,15 @@ def _normalize_roles(messages: list) -> tuple[list, bool]:
 
         new_content = content
         if isinstance(content, list):
-            flat = _flatten_content(content)
-            if flat is not None and flat != content:
-                new_content = flat
+            # 有图就保留数组形态（上游多模态认它），无图才压平成字符串。
+            parts = _normalize_parts(content)
+            if parts is not None:
+                if parts != content:
+                    new_content = parts
+            else:
+                flat = _flatten_content(content)
+                if flat is not None and flat != content:
+                    new_content = flat
 
         if role == "developer" or new_content is not content:
             out.append(dict(message,
@@ -1854,6 +2018,7 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
     exclude: set[int] = set()
     last_error: client.UpstreamError | None = None
     dropped: set[str] = set()
+    images_dropped = 0
     # `MAX_ATTEMPTS` 数的是「换了几个号」；参数降级是**同一个号上的同一条
     # 请求**，单独记数，否则「三次机会」会被降级重试吃光。
     attempts = 0
@@ -2079,6 +2244,20 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
             # 上限单独计数（`param_retries`），不吃 `MAX_ATTEMPTS` 的换号预算；
             # 且每次只摘一个字段，摘到能过就出字 —— 见 `_DEGRADE_FIELDS`。
             if _is_param_error(exc):
+                # 先试「去图」：某些路由后端 / 账号等级不吃 image_url 时，
+                # 丢掉图片能保住整条对话，比挨个摘装饰字段更值得先做。
+                if images_dropped == 0 and _body_has_images(body):
+                    stripped = _strip_images(body)
+                    if stripped is not None:
+                        images_dropped = 1
+                        logger.warning(
+                            "Marvis 上游不吃图片，去掉图片段后重试 | acc=%s | %s",
+                            account.id,
+                            (exc.detail or exc.message or "")[:180])
+                        body = stripped
+                        last_error = exc
+                        attempts -= 1
+                        continue
                 degraded = _degrade_body(body, dropped)
                 if degraded is not None and param_retries < len(_DEGRADE_FIELDS):
                     param_retries += 1
@@ -2145,10 +2324,20 @@ def _attempt(db, request, key, body: dict, realm: str, *, stream: bool):
                     "Marvis 登录态已过期%s：请在控制台「授权登录」重新扫码（QQ / 微信）"
                     % extra, status=401, code="credential_expired", kind="auth",
                     detail=detail)
+            # 额度类失败（3000001 / 1000007）必须落一个「不可选」标记：
+            # `select_account` 只看 `balance_remain > 0 OR IS NULL`，而这类号
+            # 余额停在旧的正数、`last_used_at` 又因为从没成功过而恒排队首，
+            # 于是每条请求都先白撞它们一次（2026-11-24 线上实测单日 3582 次 402）。
+            # 交给 `note_failure` 按 `balance_total` 分流：有配额痕迹的号进
+            # 30 分钟降级窗口（`degrade_until`，可恢复），没有配额痕迹的才清零。
+            # `max_input_tokens`（3000100）是「该号 × 该模型」的当次预算问题，
+            # 已由 `account_model_cool` 单独处理，不能在这里清零整个号的余额。
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model, public_platform=PUBLIC,
-                cool_seconds=(600 if exc.kind in ("auth", "risk_control") else 0))
+                cool_seconds=(600 if exc.kind in ("auth", "risk_control") else 0),
+                zero_balance=(exc.kind == "quota_exceeded"),
+                code=str(exc.code or ""))
             last_error = exc
             exclude.add(account.id)
             # 参数类错误换号也没用，直接停
@@ -2783,11 +2972,17 @@ def _anthropic_to_openai(body: dict) -> dict:
         role = str(item.get("role") or "user")
         content = item.get("content")
         if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text") or ""))
-            content = "".join(parts)
+            # `/v1/messages` 的图片块：以前这里只收 type==text，
+            # 图片在**转换层**就被扔了，下游再想救也看不到。
+            normalized = _normalize_parts(content)
+            if normalized is not None:
+                content = normalized
+            else:
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(str(block.get("text") or ""))
+                content = "".join(parts)
         messages.append({"role": role, "content": content or ""})
 
     out = {

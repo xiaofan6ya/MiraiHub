@@ -402,3 +402,10 @@ Thumbs.db
 
 # `tools/*` 默认忽略；上线前只读自查脚本需要入库。
 !tools/preflight_mysql.sql
+
+# ===== macOS 桌面端打包产物（由 scripts/build_desktop.py 从 app.svg / PyInstaller 生成）=====
+# .ico / .png / dist/ / build/ 上面已覆盖；这里补 macOS 独有的 .icns 与变体目录。
+desktop/assets/app.icns
+desktop/assets/app.iconset/
+/dist-*/
+/build-*/

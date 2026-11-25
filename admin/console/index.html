@@ -1107,6 +1107,10 @@
   <link rel="stylesheet" href="/admin/assets/agent.css?v=20261027-agent-1" />
   <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
   <link rel="stylesheet" href="/admin/assets/desktop.css?v=20261102-ui1" />
+  <!-- 四处定向 UI 修正（#96）。**必须排在 desktop.css 之后**：里面的规则要压过
+       desktop.css 的 `.topbar-actions button` 基样式，文档顺序是最后一道保险。
+       见 ui-polish.css 文件头，为什么这里不重设设计令牌。 -->
+  <link rel="stylesheet" href="/admin/assets/ui-polish.css?v=20261124-issue96" />
   <script src="/admin/assets/boot-desktop.js?v=20261103-noinline1"></script>
 <script defer src="/static/phone-session.js"></script>
 <script defer src="/admin/assets/icons.js?v=20261026-lucide-1"></script>
@@ -1115,7 +1119,7 @@
 <script defer src="/admin/assets/model-icons.js?v=20261028-r9"></script>
 <script defer src="/admin/assets/model-metadata.js?v=20261023-image-types-2"></script>
 <script defer src="/admin/assets/usage-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/console-app.js?v=20261107-exp1"></script>
+<script defer src="/admin/assets/console-app.js?v=20261123-auth3"></script>
     <script defer src="/admin/assets/dashboard.js?v=20261112-stats1"></script>
     <script defer src="/admin/assets/market.js?v=20261112-market1"></script>
 <script defer src="/admin/assets/growth_center.js?v=20261105-ui3"></script>
@@ -1124,11 +1128,11 @@
 <script defer src="/static/vendor/marked-12.0.2.min.js"></script>
 <script defer src="/static/vendor/dompurify-3.4.17.min.js"></script>
 <script defer src="/admin/assets/release-notes.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/desktop.js?v=20261031-r2"></script>
+<script defer src="/admin/assets/desktop.js?v=20261123-bridge"></script>
 <script defer src="/admin/assets/profile-transfer.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/ip-management.js?v=20261031-r2"></script>
 <script defer src="/admin/assets/key-ip.js?v=20261031-r2"></script>
-<script defer src="/admin/assets/platform-icons.js?v=20261104-fix8"></script>
+<script defer src="/admin/assets/platform-icons.js?v=20261123-icons"></script>
 <!-- 平台动作表（扫描/导入/刷新…）：能力由后端 spec.actions 声明，前端只渲染。
      必须在 platform-switch.js **之前**加载 —— 后者要用 actionsFor()。 -->
 <script defer src="/admin/assets/traffic.js?v=20261029-r2"></script>

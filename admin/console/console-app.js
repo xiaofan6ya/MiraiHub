@@ -7642,6 +7642,273 @@ async function platformBeginAuth(spec, storage) {
     return;
   }
 
+  // 科搭 Codar：微信扫码授权（官方自己的扫码登录，换票后直接入库）。
+  //
+  // 二维码不是我们渲染的：上游 `POST /v1/wechat/login/qrcode` 回的是微信自己的
+  // 图片地址，后端代理取字节再回给控制台（`/api/codar/auth/qr.png`），
+  // 这样既不用在页面里引外链，也能只放行白名单主机。
+  if (id === "codar") {
+    let begin;
+    try {
+      begin = await api("/api/codar/auth/begin", { method: "POST" });
+    } catch (e) {
+      toast("发起扫码失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok: bok, data: bd } = await safeJson(begin);
+    if (!bok || !bd || !bd.auth_id) {
+      toast("发起扫码失败：" + ((bd && (bd.detail || bd.reason)) || "没有拿到扫码会话"), "err");
+      return;
+    }
+    const authId = bd.auth_id;
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · 科搭 Codar</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        用微信扫下面的码并确认，凭证会自动入库 —— 不需要密码，也不需要本机客户端。
+      </p>
+      <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+        <img src="/api/codar/auth/qr.png?auth_id=${esc(authId)}" alt="微信扫码登录"
+             width="200" height="200"
+             style="border-radius:12px;background:#fff;padding:6px;border:1px solid var(--border)">
+        <div style="flex:1;min-width:220px">
+          <p class="text-sm mb-2" style="color:var(--fg)"><b>操作步骤</b></p>
+          <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:18px;line-height:1.95">
+            <li>打开手机微信，扫左边的二维码</li>
+            <li>手机上点「确认登录」</li>
+            <li>这边会自动变成「授权成功」，不用再操作</li>
+          </ol>
+          <p class="text-xs mt-2" style="color:var(--fg-subtle);line-height:1.7">
+            二维码约 5 分钟有效；过期后点下面的「重新获取二维码」。
+          </p>
+        </div>
+      </div>
+      <form id="codarPwdForm" class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <p class="text-xs mb-1" style="color:var(--fg-muted)">
+          或者用科搭账号密码登录
+          <span style="color:var(--fg-subtle)">— 与扫码等价，密码只发一次、不落库</span>
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="codarPwdUser" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="账号（手机号）" autocomplete="username">
+          <input id="codarPwdPass" type="password" class="border rounded-lg px-3 py-2 text-sm" style="flex:1;min-width:140px"
+                 placeholder="密码" autocomplete="current-password">
+          <button type="submit" id="codarPwdBtn" class="console-btn primary">登录</button>
+        </div>
+        <p id="codarPwdErr" class="text-xs mt-1" style="color:var(--danger)"></p>
+      </form>
+      <p id="codarAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">等待扫码…</p>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:16px">
+        <button type="button" id="codarAuthRetry" class="console-btn" hidden>重新获取二维码</button>
+        <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
+      </div>`, "max-w-2xl");
+
+    const retryBtn = document.getElementById("codarAuthRetry");
+    if (retryBtn) retryBtn.addEventListener("click", () => {
+      closeModal();
+      platformBeginAuth(spec, storage);
+    });
+
+    // 账号密码登录：与扫码等价，上游同一个 /v1/login（短信登录也是把它当密码字段）
+    const pwdForm = document.getElementById("codarPwdForm");
+    if (pwdForm) pwdForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const errEl = document.getElementById("codarPwdErr");
+      const statusEl = document.getElementById("codarAuthStatus");
+      const btn = document.getElementById("codarPwdBtn");
+      const user = (document.getElementById("codarPwdUser").value || "").trim();
+      const pass = (document.getElementById("codarPwdPass").value || "");
+      if (errEl) errEl.textContent = "";
+      if (!user || !pass) { if (errEl) errEl.textContent = "账号和密码都要填"; return; }
+      const restore = btn ? btnBusy(btn, "登录中") : () => {};
+      try {
+        const r = await api("/api/codar/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, password: pass }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("科搭登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
+    });
+
+    for (let i = 0; i < 160; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const el = document.getElementById("codarAuthStatus");
+      if (!el) return;                       // 弹窗被关掉了
+      let poll;
+      try {
+        poll = await api("/api/codar/auth/poll?auth_id=" + encodeURIComponent(authId));
+      } catch (e) { continue; }
+      const { ok: pok, data: pd } = await safeJson(poll);
+      if (!pok || !pd) continue;
+      const status = pd.status || "";
+      if (status === "pending") { el.textContent = "等待扫码…"; el.style.color = "var(--fg-muted)"; continue; }
+      if (status === "scanned") { el.textContent = "已扫码，请在手机上确认"; el.style.color = "var(--brand)"; continue; }
+      if (status === "done") {
+        el.textContent = "授权成功，账号「" + (pd.account || pd.account_id) + "」已入库";
+        el.style.color = "var(--ok)";
+        toast("科搭授权成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+        return;
+      }
+      el.textContent = "授权未完成：" + (pd.error || "请重试");
+      el.style.color = "var(--danger)";
+      if (retryBtn) retryBtn.hidden = false;
+      return;
+    }
+    const el = document.getElementById("codarAuthStatus");
+    if (el) el.textContent = "等待超时，请重新获取二维码";
+    if (retryBtn) retryBtn.hidden = false;
+    return;
+  }
+
+  // AStudio（讯飞 Astron Studio）：授权登录 = 引导在本机桌面端登录一次，
+  // 登录态落盘后由后端自动导入。官方没有给第三方的设备码/OAuth，
+  // 网页登录的 Cookie 也只存在浏览器里 —— 这条是唯一不糊弄人的形态。
+  if (id === "astudio") {
+    let begin;
+    try {
+      begin = await api("/api/astudio/auth/begin", { method: "POST" });
+    } catch (e) {
+      toast("发起授权失败：" + (e && e.message ? e.message : e), "err");
+      return;
+    }
+    const { ok: bok, data: bd } = await safeJson(begin);
+    if (!bok || !bd || !bd.auth_id) {
+      toast("发起授权失败：" + ((bd && (bd.detail || bd.reason)) || "没有拿到授权会话"), "err");
+      return;
+    }
+    const authId = bd.auth_id;
+    const installed = bd.installed !== false;
+    openModal(`<h3 class="font-semibold text-lg mb-1">授权登录 · AStudio</h3>
+      <p class="text-xs mb-3" style="color:var(--fg-muted);line-height:1.7">
+        AStudio 的登录态由它自己的客户端保存在本机；在这里登录一次后，
+        网关会读取那份登录态并自动入库（不需要复制粘贴任何东西）。
+      </p>
+      <div style="padding:12px 14px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border)">
+        <ol class="text-xs m-0" style="color:var(--fg-muted);padding-left:18px;line-height:1.95">
+          ${installed
+            ? '<li>在本机的 <b>AStudio 桌面端</b>里登录一次（已登录就跳过）</li>'
+            : '<li>这台机器上还没有 AStudio 桌面端：先<a href="https://agent.xfyun.cn/" target="_blank" rel="noopener" style="color:var(--brand)">下载安装</a>并登录一次</li>'}
+          <li>登录完成的几秒内，这边会自动变成「授权成功」</li>
+          <li>不想装客户端：把 <code>modelBearerToken</code> 粘到「导入」里也能用</li>
+        </ol>
+      </div>
+      <p id="astudioAuthStatus" class="text-sm mt-3" style="color:var(--fg-muted)">
+        等待本机登录态…（${installed ? "请在本机桌面端登录" : "装好并登录后自动继续"}）
+      </p>
+
+      <details class="mt-3" style="border-top:1px dashed var(--border);padding-top:12px">
+        <summary class="text-xs" style="cursor:pointer;color:var(--fg-muted)">
+          没有桌面端？用浏览器登录（粘贴 Cookie 换票）
+        </summary>
+        <div class="mt-2">
+          <p class="text-xs mb-1" style="color:var(--fg-subtle);line-height:1.7">
+            在浏览器打开 <a href="https://agent.xfyun.cn/" target="_blank" rel="noopener"
+              style="color:var(--brand)">agent.xfyun.cn</a> 登录后，按 F12 → Network → 任选一条
+            <code>agent.xfyun.cn</code> 的请求 → 复制 Request Headers 里的整条 <code>Cookie</code>，
+            粘到下面。
+          </p>
+          <textarea id="astudioCookie" rows="3" class="w-full text-xs"
+            style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg)"
+            placeholder="token=...; account_id=...; ssoSessionId=..." spellcheck="false"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            <span id="astudioCookieErr" class="text-xs" style="color:var(--danger)"></span>
+            <button type="button" id="astudioCookieBtn" class="console-btn primary">用这段 Cookie 登录</button>
+          </div>
+        </div>
+      </details>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button type="button" onclick="closeModal()" class="console-btn">关闭</button>
+      </div>`, "max-w-lg");
+
+    const cookieBtn = document.getElementById("astudioCookieBtn");
+    if (cookieBtn) cookieBtn.addEventListener("click", async () => {
+      const input = document.getElementById("astudioCookie");
+      const errEl = document.getElementById("astudioCookieErr");
+      const statusEl = document.getElementById("astudioAuthStatus");
+      const value = (input && input.value || "").trim();
+      if (errEl) errEl.textContent = "";
+      if (!value) { if (errEl) errEl.textContent = "先把 Cookie 粘进来"; return; }
+      const restore = btnBusy(cookieBtn, "换票中");
+      try {
+        const r = await api("/api/astudio/auth/cookie", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cookie: value }),
+        });
+        const { ok, data } = await safeJson(r);
+        if (!ok) {
+          if (errEl) errEl.textContent = (data && (data.detail || data.message)) || "登录失败";
+          return;
+        }
+        if (statusEl) {
+          statusEl.textContent = "登录成功，账号「" + (data.account || data.account_id) + "」已入库";
+          statusEl.style.color = "var(--ok)";
+        }
+        toast("AStudio 登录成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+      } finally {
+        restore();
+      }
+    });
+
+    for (let i = 0; i < 160; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const el = document.getElementById("astudioAuthStatus");
+      if (!el) return;
+      let poll;
+      try {
+        poll = await api("/api/astudio/auth/poll?auth_id=" + encodeURIComponent(authId));
+      } catch (e) { continue; }
+      const { ok: pok, data: pd } = await safeJson(poll);
+      if (!pok || !pd) continue;
+      const status = pd.status || "";
+      if (status === "pending") continue;
+      if (status === "done") {
+        el.textContent = "授权成功，账号「" + (pd.account || pd.account_id) + "」已入库";
+        el.style.color = "var(--ok)";
+        toast("AStudio 授权成功，账号已入库");
+        setTimeout(() => {
+          closeModal();
+          loadAccounts();
+          loadPlatformOverview();
+          if (window.WBPlatform) window.WBPlatform.refreshCounts();
+        }, 900);
+        return;
+      }
+      el.textContent = "授权未完成：" + (pd.error || "请重试");
+      el.style.color = "var(--danger)";
+      return;
+    }
+    return;
+  }
+
   // 腾讯 Marvis：QQ / 微信 OAuth。
   //
   // 为什么不能走下面的通用「设备码」兜底：那条路要求**服务端**把凭证轮询回来，
@@ -11835,6 +12102,8 @@ function toggleApiShare(btn) {
   const open = box.classList.toggle('is-collapsed') === false;
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   try { localStorage.setItem('wb_api_share_open', open ? '1' : '0'); } catch (e) {}
+  // 分享卡展开的那一刻 #shareModels 才第一次有布局高度，量行数要等到这时候（#96）
+  if (open) scheduleShareModelsLayout();
 }
 
 /** 恢复上次的展开状态（首屏渲染时调用一次）。 */
@@ -11846,6 +12115,9 @@ function restoreApiShareState() {
   try { open = localStorage.getItem('wb_api_share_open') === '1'; } catch (e) {}
   box.classList.toggle('is-collapsed', !open);
   if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // 首屏恢复成展开态时也排一次量行数（#96）；面板此刻可能还 hidden，
+  // 量不到会自动跳过，等 activateTab 触发 loadShareInfo 时补上。
+  if (open) scheduleShareModelsLayout();
 }
 
 async function loadShareInfo() {
@@ -11926,9 +12198,117 @@ async function loadShareInfo() {
           }).join("")
         : '<span class="text-xs text-slate-400">未配置模型白名单（放行全部模型）</span>';
       // 复制事件由 document 上的委派处理器统一接管（见 copyRawText 附近的说明）
+
+      // 标签云渲染完之后再量行数（#96）。这里只是排一次 60ms 防抖；
+      // 面板还 hidden / 分享卡还收着时量不到，那一次会自己跳过，
+      // 由 activateTab 与 toggleApiShare 在真正可见时补量。
+      scheduleShareModelsLayout();
     }
   } catch (e) {}
 }
+
+/* ── 模型标签云折叠（#96） ──────────────────────────────────────────────────
+   为什么不用 CSS `max-height` + `overflow:hidden`：芯片浮层 `.model-chip-pop`
+   是 `position:absolute` 从芯片下缘展开的（console.css:4354），祖先一旦裁剪，
+   平台明细就看不到、`model_id` 也复制不到 —— 上一版 PR 正是栽在这里。
+
+   现在的做法是「行级隐藏」：量出每个芯片在容器内的 y 坐标分行，超过 5 行时
+   给第 6 行之后的芯片加 `.is-row-hidden`。容器本身**完全不裁剪**，浮层照常
+   向下展开。
+
+   阈值也改成实测行数，而不是 `groups.length > 20`：6~20 个模型在窄屏一样会
+   超过 5 行，写死数量就会出现「被截断但没有展开入口」。折叠类与展开按钮由
+   **同一个判定**产生 —— 按钮不在就不折叠，从结构上排掉那种状态。
+   ========================================================================== */
+const SHARE_MODELS_MAX_ROWS = 5;
+let _shareModelsLayoutTimer = 0;
+
+/** 60ms 防抖：一次渲染只量一次；隐藏态下量不到就跳过，等下次触发。 */
+function scheduleShareModelsLayout() {
+  clearTimeout(_shareModelsLayoutTimer);
+  _shareModelsLayoutTimer = setTimeout(layoutShareModelsCollapse, 60);
+}
+
+/** 展开/收起按钮：跟着 `#shareModels` 走，只建一次；重渲染时是兄弟节点，不受 innerHTML 影响。 */
+function ensureShareModelsToggle(box) {
+  let btn = $("#shareModelsToggle");
+  if (btn) return btn;
+  if (!box || !box.parentNode) return null;
+  btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = "shareModelsToggle";
+  btn.className = "share-models-toggle";
+  btn.hidden = true;
+  btn.setAttribute("aria-expanded", "false");
+  btn.addEventListener("click", () => {
+    const expanded = !box.classList.contains("is-expanded");
+    box.classList.toggle("is-expanded", expanded);
+    if (expanded) {
+      box.querySelectorAll(".is-row-hidden").forEach(el => el.classList.remove("is-row-hidden"));
+      syncShareModelsToggle(box, $("#shareModelsToggle"));
+    } else {
+      // 收起：重新量一次行数再按「第 5 行之后隐藏」放回去，比记旧集合稳
+      layoutShareModelsCollapse();
+    }
+  });
+  box.parentNode.insertBefore(btn, box.nextSibling);
+  return btn;
+}
+
+function syncShareModelsToggle(box, btn, total) {
+  if (!btn) return;
+  const expanded = box.classList.contains("is-expanded");
+  const count = total == null ? box.querySelectorAll(".model-chip-wrap").length : total;
+  btn.textContent = expanded ? "收起" : "展开全部 " + count + " 个模型";
+  btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+}
+
+function layoutShareModelsCollapse() {
+  const box = $("#shareModels");
+  if (!box) return;
+  const chips = Array.from(box.querySelectorAll(".model-chip-wrap"));
+  const btn = $("#shareModelsToggle");
+  // 先把上一轮的隐藏还原：隐藏项不占行，不还原就会越量行数越少
+  chips.forEach(el => el.classList.remove("is-row-hidden"));
+  const boxRect = box.getBoundingClientRect();
+  // 面板还 hidden / 分享卡还收着时高度是 0、所有芯片 top 都是 0。
+  // 这时候**什么都不做**，绝不用数量去猜一个阈值，等下次触发再量。
+  if (!chips.length || boxRect.height <= 0) {
+    if (btn) btn.hidden = true;
+    return;
+  }
+  // 一次性把坐标量完再动 DOM：边量边隐会触发重排，后面的测量值就废了
+  const tops = chips.map(el => Math.round(el.getBoundingClientRect().top - boxRect.top));
+  const rows = [];
+  tops.forEach(top => {
+    if (!rows.length || top - rows[rows.length - 1] > 2) rows.push(top);
+  });
+  if (rows.length <= SHARE_MODELS_MAX_ROWS) {
+    // 没超过 5 行：不需要展开入口，也就绝不能折叠
+    box.classList.remove("is-expanded");
+    if (btn) { btn.hidden = true; btn.setAttribute("aria-expanded", "false"); }
+    return;
+  }
+  const toggle = ensureShareModelsToggle(box);
+  if (!box.classList.contains("is-expanded")) {
+    const limit = rows[SHARE_MODELS_MAX_ROWS - 1];
+    chips.forEach((el, i) => { if (tops[i] > limit + 2) el.classList.add("is-row-hidden"); });
+  }
+  if (toggle) {
+    toggle.hidden = false;
+    syncShareModelsToggle(box, toggle, chips.length);
+  }
+}
+
+// 窗口宽度变化会改变「一行放得下几个芯片」，行数跟着变 —— 收起态下重新量一次。
+let _shareModelsResizeTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(_shareModelsResizeTimer);
+  _shareModelsResizeTimer = setTimeout(() => {
+    const box = $("#shareModels");
+    if (box && !box.classList.contains("is-expanded")) layoutShareModelsCollapse();
+  }, 150);
+});
 function renderShareAddress(origin) {
   // 两个 SDK 对 base_url 的约定不同，必须分别给出：
   //   OpenAI 系    -> origin + "/v1"（SDK 自己拼 /chat/completions）

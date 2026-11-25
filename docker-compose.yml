@@ -27,9 +27,11 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.docker}
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?Set ADMIN_JWT_SECRET in .env.docker}
       TZ: Asia/Shanghai
-      # 请求体兜底：应用层默认 256 MiB（268435456），0 或负数 = 关闭检查。
-      # 这里显式写出来是为了让「部署侧的取值」看得见；不写也等价于默认值。
-      MIRAIHUB_MARVIS_MAX_BODY_BYTES: ${MIRAIHUB_MARVIS_MAX_BODY_BYTES:-268435456}
+      # 请求体大小：2026-11-24 起默认**不限制**（0 = 关闭 Marvis 体积检查，
+      # dispatch 预读也不设上限）。要恢复兜底就在 .env 写正数字节数，
+      # 例如 MIRAIHUB_MARVIS_MAX_BODY_BYTES=6291456（6 MiB，旧默认）。
+      MIRAIHUB_MARVIS_MAX_BODY_BYTES: ${MIRAIHUB_MARVIS_MAX_BODY_BYTES:-0}
+      MIRAIHUB_DISPATCH_PEEK_MAX_BYTES: ${MIRAIHUB_DISPATCH_PEEK_MAX_BYTES:-0}
     command: ["python3", "-m", "uvicorn", "admin.server:app", "--host", "0.0.0.0", "--port", "8790"]
     restart: unless-stopped
     init: true
