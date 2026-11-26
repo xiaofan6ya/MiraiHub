@@ -1,0 +1,1290 @@
+<script setup lang="ts">
+/**
+ * S28 设置 /settings（模板 C：5 个区块，每卡独立保存）
+ *
+ * 契约：docs/ui-v2/contracts/settings.md（末尾「## 实现对照（S28）」）
+ * 设计稿：docs/ui-v2/06-pages-d.md P23
+ * 旧版：#panel-settings（2776–2926）+ console-app.js（loadRuntimeConfig 559 / saveRuntimeConfig 662 /
+ *       loadProxyNodes 699 / loadInvitation 781 / changePassword 15257 / app_source 15055+）
+ *
+ * 三条口径：
+ *   1. 运行配置的分组/类型/上下界/重启标记全部由后端 CATALOG 下发（不硬编码 attr 语义），只提交改动项；
+ *   2. 代理地址 API 永不返回明文（列表里 ***），修改必须整段重填；
+ *   3. 逆向产物在 ADMIN_DEV_TOOLS=0 时后端整路由 404（生产环境的正常状态）→ 整块连同目录项一起隐藏，
+ *      不报错、不轮询（第 3 轮审查 B3）；500 / 断网仍显示错误 + 重试。
+ *   4. 10-visual-refresh：运行配置与邀请码的保存统一走底部保存条（「有 N 项未保存　放弃　保存」）；
+ *      改密码、出口代理、逆向产物这些是即时动作，保留各自的按钮。
+ */
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { NInput, NInputNumber, NSelect, NSkeleton, NSwitch } from 'naive-ui'
+import { FileSearch, FolderOpen, PackageOpen, RefreshCw, ScanSearch, Trash2 } from 'lucide-vue-next'
+import SettingsLayout from '@/layout/SettingsLayout.vue'
+import SettingsCard from '@/layout/SettingsCard.vue'
+import Badge from '@/components/base/Badge.vue'
+import Btn from '@/components/base/Btn.vue'
+import ErrorBlock from '@/components/base/ErrorBlock.vue'
+import FormField from '@/components/overlay/FormField.vue'
+import KV from '@/components/base/KV.vue'
+import Meter from '@/components/data/Meter.vue'
+import Section from '@/components/base/Section.vue'
+import LanguageCard from '@/layout/LanguageCard.vue'
+import DataTable from '@/components/data/DataTable.vue'
+import Empty from '@/components/base/Empty.vue'
+import FormDrawer from '@/components/overlay/FormDrawer.vue'
+import type { TableColumn, TableRow } from '@/components'
+import { useConfirm, usePolling, useRevisit, useToast } from '@/composables'
+import { ApiError } from '@/api/http'
+import { failureText } from '@/utils/error'
+import { fmtTime } from '@/utils/format'
+import {
+  changePassword,
+  createProxy,
+  deleteProxy,
+  detectAppSource,
+  diffRuntimeFields,
+  filterProxies,
+  getAppSourceStatus,
+  getInvitation,
+  getRuntimeConfig,
+  getUnpackProgress,
+  groupRuntimeFields,
+  listProxies,
+  locateAppSource,
+  patchProxy,
+  planUnpack,
+  proxyStateOf,
+  proxySummaryText,
+  removeUnpackedSource,
+  restartPendingOf,
+  saveInvitation,
+  saveRuntimeConfig,
+  searchAppSource,
+  sourceStatusLines,
+  startUnpack,
+  unblockProxy,
+  unpackPercent,
+  validatePasswordChange,
+  validateProxyInput,
+  type AppSourceStatus,
+  type InvitationPayload,
+  type ProxyListPayload,
+  type ProxyNode,
+  type RuntimeField,
+  type SourceHit,
+  type UnpackProgress,
+} from '@/api/settings'
+import { useI18n } from '@/i18n'
+
+const toast = useToast()
+const { t, locale } = useI18n()
+const helpText = computed(() => t('page.settings.help'))
+const confirm = useConfirm()
+const router = useRouter()
+
+const sections = computed(() => [
+  { id: 'settings-language', title: t('page.settings.sections.language') },
+  { id: 'settings-runtime', title: t('page.settings.sections.runtime') },
+  { id: 'settings-proxies', title: t('page.settings.sections.proxies') },
+  { id: 'settings-invitation', title: t('page.settings.sections.invitation') },
+  { id: 'settings-password', title: t('page.settings.sections.password') },
+  // 本部署没有逆向产物接口（生产环境）时整块隐藏，目录里也不留这一项。
+  ...(sourceMissing.value ? [] : [{ id: 'settings-appsource', title: t('page.settings.sections.appsource') }]),
+])
+
+
+
+/* ------------------------------------------------------------------ *
+ * 运行配置
+ * ------------------------------------------------------------------ */
+
+const runtimeLoading = ref(false)
+const runtimeSaving = ref(false)
+const runtimeError = ref('')
+const runtimeFields = ref<RuntimeField[]>([])
+const runtimeDraft = reactive<Record<string, string | number | boolean | null>>({})
+const restartPending = ref<RuntimeField[]>([])
+
+const runtimeGroups = computed(() => groupRuntimeFields(runtimeFields.value, t))
+
+function setRuntimeDraft(attr: string, value: string | number | boolean | null): void {
+  runtimeDraft[attr] = value
+}
+
+function runtimeText(attr: string): string {
+  const value = runtimeDraft[attr]
+  return value === null || value === undefined ? '' : String(value)
+}
+
+function runtimeNumber(attr: string): number | null {
+  const value = runtimeDraft[attr]
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+const runtimeUpdates = computed(() => diffRuntimeFields(runtimeFields.value, runtimeDraft))
+const runtimeDirty = computed(() => Object.keys(runtimeUpdates.value).length > 0)
+
+function syncRuntimeDraft(fields: RuntimeField[]): void {
+  for (const key of Object.keys(runtimeDraft)) delete runtimeDraft[key]
+  for (const field of fields) {
+    runtimeDraft[field.attr] =
+      field.kind === 'bool' ? Boolean(field.value) : (field.value as string | number | null)
+  }
+}
+
+async function loadRuntime(): Promise<void> {
+  runtimeLoading.value = true
+  runtimeError.value = ''
+  try {
+    const payload = await getRuntimeConfig()
+    runtimeFields.value = Array.isArray(payload?.fields) ? payload.fields : []
+    syncRuntimeDraft(runtimeFields.value)
+  } catch (error) {
+    runtimeError.value = failureText(t('page.settings.runtime.loadFailed'), error)
+    // 第 5 轮：已有表单时（回访静默刷新）失败只提示，不把整块表单换成错误块。
+    if (runtimeFields.value.length) toast.error(runtimeError.value)
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+/** 提交值是否已经在服务端快照里（数字按字符串比、字符串按 trim 比，与 diffRuntimeFields 同口径）。 */
+function runtimeSameAsField(field: RuntimeField, value: unknown): boolean {
+  if (field.kind === 'bool') return Boolean(value) === Boolean(field.value)
+  const current = field.value === null || field.value === undefined ? '' : String(field.value)
+  return String(value).trim() === current.trim()
+}
+
+/**
+ * 保存后草稿怎么回填：先按服务端快照重置，再把**没被接受**的提交值放回草稿。
+ * 契约 settings.md §4.2「请求失败保留输入、用户可重试」同样适用于部分失败 ——
+ * 后端 errors 里的字段没有落库（runtime_settings.py:save 只 continue），
+ * 一律用 fields 重置会把用户刚填的值静默吞掉，只剩一句「部分配置未保存」。
+ */
+function restoreRejectedDrafts(
+  submitted: Record<string, unknown>,
+  fields: RuntimeField[],
+  accepted: Set<string>,
+): void {
+  const byAttr = new Map(fields.map((field) => [field.attr, field]))
+  for (const [attr, value] of Object.entries(submitted)) {
+    // changed / reverted 是后端明确受理的（reverted = 清空后回落 .env 默认）：草稿跟着快照走。
+    if (accepted.has(attr)) continue
+    const field = byAttr.get(attr)
+    if (field && runtimeSameAsField(field, value)) continue
+    // 目录里已经没有这个字段时也保留草稿：宁可多一条未保存，也不要替用户丢掉输入。
+    runtimeDraft[attr] = value as string | number | boolean | null
+  }
+}
+
+async function saveRuntime(): Promise<void> {
+  if (!runtimeDirty.value || runtimeSaving.value) return
+  const submitted = runtimeUpdates.value
+  runtimeSaving.value = true
+  try {
+    const result = await saveRuntimeConfig(submitted)
+    runtimeFields.value = Array.isArray(result?.fields) ? result.fields : runtimeFields.value
+    syncRuntimeDraft(runtimeFields.value)
+    restoreRejectedDrafts(
+      submitted,
+      runtimeFields.value,
+      new Set([...(result?.changed || []), ...(result?.reverted || [])]),
+    )
+    restartPending.value = restartPendingOf(runtimeFields.value, result?.changed)
+    const errors = Object.entries(result?.errors || {})
+    if (errors.length) {
+      toast.error(
+        t('page.settings.runtime.partialFailed', {
+          errors: errors.map(([attr, msg]) => attr + ' ' + msg).join('; '),
+        }),
+      )
+    } else {
+      toast.success(t('page.settings.runtime.saved', { count: result?.changed?.length || 0 }))
+    }
+  } catch (error) {
+    toast.error(failureText(t('page.settings.runtime.saveFailed'), error))
+  } finally {
+    runtimeSaving.value = false
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 出口代理节点
+ * ------------------------------------------------------------------ */
+
+const proxyLoading = ref(false)
+const proxyError = ref('')
+const proxyData = ref<ProxyListPayload | null>(null)
+const proxyPool = ref('')
+const proxyQuery = ref('')
+const proxyDrawer = ref(false)
+const proxySubmitting = ref(false)
+const proxyDraft = ref({ label: '', url: '', max_concurrency: 1, pool: '' })
+
+const proxyNodes = computed(() =>
+  filterProxies(proxyData.value?.items || [], { pool: proxyPool.value, q: proxyQuery.value }),
+)
+const proxySummary = computed(() => proxySummaryText(proxyData.value?.summary, t))
+
+const proxyColumns = computed<TableColumn[]>(() => [
+  {
+    key: 'label',
+    title: t('page.settings.proxies.colName'),
+    minWidth: 120,
+    mobile: 'title',
+    render: (row: TableRow) => {
+      const node = row as unknown as ProxyNode
+      return node.label || '#' + node.id
+    },
+  },
+  {
+    key: 'url',
+    title: t('page.settings.proxies.colUrl'),
+    minWidth: 220,
+    mobile: 'subtitle',
+    render: (row: TableRow) => h('span', { class: 'mono' }, (row as unknown as ProxyNode).url),
+  },
+  {
+    key: 'max_concurrency',
+    title: t('page.settings.proxies.colConcurrency'),
+    width: 80,
+    mobile: 'meta',
+    render: (row: TableRow) => String((row as unknown as ProxyNode).max_concurrency),
+  },
+  {
+    key: 'pool',
+    title: t('page.settings.proxies.colPool'),
+    width: 100,
+    mobile: 'hidden',
+    render: (row: TableRow) => (row as unknown as ProxyNode).pool || t('page.settings.proxies.defaultPool'),
+  },
+  {
+    key: 'state',
+    title: t('page.settings.proxies.colState'),
+    width: 100,
+    mobile: 'meta',
+    render: (row: TableRow) => {
+      const state = proxyStateOf(row as unknown as ProxyNode, t)
+      return h(Badge, { tone: state.tone }, { default: () => state.label })
+    },
+  },
+  {
+    key: 'ops',
+    title: t('page.settings.proxies.colOps'),
+    width: 190,
+    mobile: 'actions',
+    render: (row: TableRow) => {
+      const node = row as unknown as ProxyNode
+      const buttons = [
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: () => toggleProxy(node) }, {
+          default: () => (node.enabled ? t('page.settings.proxies.disable') : t('page.settings.proxies.enable')),
+        }),
+      ]
+      if (node.blocked) {
+        buttons.push(
+          h(Btn, { size: 'sm', variant: 'quiet', onClick: () => unblockProxyNode(node) }, {
+            default: () => t('page.settings.proxies.unblock'),
+          }),
+        )
+      }
+      buttons.push(
+        h(Btn, { size: 'sm', variant: 'danger', onClick: () => removeProxy(node) }, {
+          default: () => t('common.delete'),
+        }),
+      )
+      return h('div', { class: 'st-ops' }, buttons)
+    },
+  },
+])
+
+async function loadProxies(): Promise<void> {
+  proxyLoading.value = true
+  proxyError.value = ''
+  try {
+    proxyData.value = await listProxies()
+  } catch (error) {
+    proxyError.value = failureText(t('page.settings.proxies.loadFailed'), error)
+    // 第 5 轮：已有节点列表时刷新失败只提示，保留旧表（模板里错误块只在从未加载成功时出现）。
+    if (proxyData.value) toast.error(proxyError.value)
+  } finally {
+    proxyLoading.value = false
+  }
+}
+
+function openProxyDrawer(): void {
+  proxyDraft.value.label = ''
+  proxyDraft.value.url = ''
+  proxyDraft.value.max_concurrency = 1
+  proxyDraft.value.pool = proxyPool.value
+  proxyDrawer.value = true
+}
+
+async function submitProxy(): Promise<void> {
+  const error = validateProxyInput(proxyDraft.value, t)
+  if (error) {
+    toast.error(error)
+    return
+  }
+  proxySubmitting.value = true
+  try {
+    await createProxy({ ...proxyDraft.value })
+    proxyDrawer.value = false
+    toast.success(t('page.settings.proxies.added'))
+    await loadProxies()
+  } catch (err) {
+    toast.error(failureText(t('page.settings.proxies.addFailed'), err))
+  } finally {
+    proxySubmitting.value = false
+  }
+}
+
+async function toggleProxy(node: ProxyNode): Promise<void> {
+  try {
+    await patchProxy(node.id, { enabled: node.enabled ? 0 : 1 })
+    toast.success(node.enabled ? t('page.settings.proxies.disabled') : t('page.settings.proxies.enabled'))
+    await loadProxies()
+  } catch (error) {
+    toast.error(failureText(t('page.settings.proxies.toggleFailed'), error))
+  }
+}
+
+async function unblockProxyNode(node: ProxyNode): Promise<void> {
+  try {
+    await unblockProxy(node.id)
+    toast.success(t('page.settings.proxies.unblocked'))
+    await loadProxies()
+  } catch (error) {
+    toast.error(failureText(t('page.settings.proxies.unblockFailed'), error))
+  }
+}
+
+async function removeProxy(node: ProxyNode): Promise<void> {
+  const ok = await confirm({
+    title: t('page.settings.proxies.deleteTitle'),
+    message: t('page.settings.proxies.deleteBody'),
+    okText: t('common.delete'),
+    danger: true,
+  })
+  if (!ok) return
+  try {
+    await deleteProxy(node.id)
+    toast.success(t('page.settings.proxies.deleted'))
+    await loadProxies()
+  } catch (error) {
+    toast.error(failureText(t('page.settings.proxies.deleteFailed'), error))
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 邀请绑定
+ * ------------------------------------------------------------------ */
+
+const invitationLoading = ref(false)
+const invitationError = ref('')
+const invitation = ref<InvitationPayload | null>(null)
+const invitationInput = ref('')
+
+const invitationDirty = computed(
+  () => invitationInput.value.trim() !== String(invitation.value?.invite_code || ''),
+)
+
+async function loadInvitation(): Promise<void> {
+  invitationLoading.value = true
+  invitationError.value = ''
+  try {
+    invitation.value = await getInvitation()
+    invitationInput.value = invitation.value?.invite_code || ''
+  } catch (error) {
+    invitationError.value = failureText(t('page.settings.invitation.loadFailed'), error)
+    if (invitation.value) toast.error(invitationError.value)
+  } finally {
+    invitationLoading.value = false
+  }
+}
+
+const invitationSaving = ref(false)
+
+async function saveInvitationValue(value: string): Promise<void> {
+  invitationSaving.value = true
+  try {
+    invitation.value = await saveInvitation(value)
+    invitationInput.value = invitation.value?.invite_code || ''
+    toast.success(
+      invitation.value?.enabled ? t('page.settings.invitation.saved') : t('page.settings.invitation.savedOff'),
+    )
+  } catch (error) {
+    toast.error(failureText(t('page.settings.invitation.saveFailed'), error))
+  } finally {
+    invitationSaving.value = false
+  }
+}
+
+async function disableInvitation(): Promise<void> {
+  const ok = await confirm({
+    title: t('page.settings.invitation.disableTitle'),
+    message: t('page.settings.invitation.disableBody'),
+    okText: t('page.settings.invitation.disable'),
+  })
+  if (!ok) return
+  await saveInvitationValue('')
+}
+
+/* ------------------------------------------------------------------ *
+ * 修改登录密码
+ * ------------------------------------------------------------------ */
+
+const passwordSaving = ref(false)
+const passwordDraft = reactive({ old: '', next: '', confirm: '' })
+const passwordDirty = computed(
+  () => Boolean(passwordDraft.old || passwordDraft.next || passwordDraft.confirm),
+)
+
+async function submitPassword(): Promise<void> {
+  const error = validatePasswordChange(passwordDraft.old, passwordDraft.next, passwordDraft.confirm, t)
+  if (error) {
+    toast.error(error)
+    return
+  }
+  passwordSaving.value = true
+  try {
+    const result = await changePassword(passwordDraft.old, passwordDraft.next)
+    passwordDraft.old = ''
+    passwordDraft.next = ''
+    passwordDraft.confirm = ''
+    const revoked = Number(result?.revoked_sessions || 0)
+    toast.success(
+      revoked
+        ? t('page.settings.password.savedRevoked', { count: revoked })
+        : t('page.settings.password.saved'),
+    )
+  } catch (error) {
+    toast.error(failureText(t('page.settings.password.saveFailed'), error))
+  } finally {
+    passwordSaving.value = false
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 逆向产物
+ * ------------------------------------------------------------------ */
+
+const sourceLoading = ref(false)
+const sourceError = ref('')
+const sourceStatus = ref<AppSourceStatus | null>(null)
+const sourceMissing = ref(false)
+const installDraft = ref('')
+const outputDraft = ref('')
+const sourceBusy = ref('')
+const unpackProgress = ref<UnpackProgress | null>(null)
+const unpacking = ref(false)
+const searchQuery = ref('')
+const searching = ref(false)
+const searchHits = ref<SourceHit[]>([])
+const searchNote = ref('')
+
+const sourceLines = computed(() => sourceStatusLines(sourceStatus.value, t))
+const sourceDirty = computed(
+  () =>
+    installDraft.value.trim() !== String(sourceStatus.value?.install_dir || '') ||
+    outputDraft.value.trim() !== String(sourceStatus.value?.source_dir || ''),
+)
+
+/**
+ * 「本部署未开放」只有两个来源：后端整路由 404（ADMIN_DEV_TOOLS=0 或非本机运行时），
+ * 或状态接口显式回报 dev_tools=false。500 / 超时 / 断网都是真错误——显示错误 + 重试，
+ * 不能吞成「未开放」，否则运维看到的是部署没开，而不是后端崩了。
+ */
+function isSourceUnavailable(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status === 404
+  const status = (error as { status?: unknown } | null)?.status
+  if (typeof status === 'number' && Number.isFinite(status)) return status === 404
+  // 非 ApiError（反向代理改写的错误、测试桩）只能看文案里是否明确是 404
+  return /\b404\b/.test(String((error as { message?: unknown } | null)?.message || ''))
+}
+
+async function loadSource(): Promise<void> {
+  sourceLoading.value = true
+  sourceError.value = ''
+  try {
+    const status = await getAppSourceStatus()
+    sourceStatus.value = status
+    installDraft.value = status?.install_dir || ''
+    outputDraft.value = status?.source_dir || ''
+    // 路由被整段摘掉时后端只给 404，走不到这里；dev_tools=false 是防御性口径
+    sourceMissing.value = status?.dev_tools === false
+  } catch (error) {
+    if (isSourceUnavailable(error)) {
+      sourceMissing.value = true
+    } else {
+      // 保留上一次成功的数据，同时把错误摆出来（可重试）
+      sourceError.value = failureText(t('page.settings.appsource.loadFailed'), error)
+    }
+  } finally {
+    sourceLoading.value = false
+  }
+}
+
+async function runSourceAction(action: 'detect' | 'plan' | 'unpack' | 'remove'): Promise<void> {
+  if (sourceBusy.value) return
+  sourceBusy.value = action
+  try {
+    if (action === 'detect') {
+      sourceStatus.value = await detectAppSource()
+      installDraft.value = sourceStatus.value?.install_dir || ''
+      toast.success(
+        sourceStatus.value?.install_dir
+          ? t('page.settings.appsource.rescanned')
+          : t('page.settings.appsource.scanMissing'),
+      )
+    } else if (action === 'plan') {
+      const plan = await planUnpack()
+      toast.info(t('page.settings.appsource.planDone', { detail: JSON.stringify(plan).slice(0, 160) }))
+    } else if (action === 'unpack') {
+      await startUnpack()
+      unpacking.value = true
+      toast.info(t('page.settings.appsource.unpackStarted'))
+    } else {
+      const ok = await confirm({
+        title: t('page.settings.appsource.removeTitle'),
+        message: t('page.settings.appsource.removeBody'),
+        okText: t('common.delete'),
+        danger: true,
+      })
+      if (!ok) return
+      sourceStatus.value = await removeUnpackedSource()
+      toast.success(t('page.settings.appsource.removed'))
+    }
+  } catch (error) {
+    toast.error(failureText(t('page.settings.appsource.actionFailed'), error))
+  } finally {
+    sourceBusy.value = ''
+  }
+}
+
+async function saveInstallDir(): Promise<void> {
+  if (!installDraft.value.trim() && !outputDraft.value.trim()) {
+    toast.error(t('page.settings.appsource.installRequired'))
+    return
+  }
+  sourceBusy.value = 'locate'
+  try {
+    sourceStatus.value = await locateAppSource({
+      install_dir: installDraft.value,
+      source_dir: outputDraft.value,
+    })
+    installDraft.value = sourceStatus.value?.install_dir || installDraft.value
+    outputDraft.value = sourceStatus.value?.source_dir || outputDraft.value
+    toast.success(t('page.settings.appsource.pathSaved'))
+  } catch (error) {
+    toast.error(failureText(t('page.settings.appsource.validateFailed'), error))
+  } finally {
+    sourceBusy.value = ''
+  }
+}
+
+async function saveOutputDir(): Promise<void> {
+  if (!outputDraft.value.trim()) {
+    toast.error(t('page.settings.appsource.outputRequired'))
+    return
+  }
+  sourceBusy.value = 'locate-source'
+  try {
+    sourceStatus.value = await locateAppSource({ source_dir: outputDraft.value })
+    outputDraft.value = sourceStatus.value?.source_dir || outputDraft.value
+    toast.success(t('page.settings.appsource.outputSet'))
+  } catch (error) {
+    toast.error(failureText(t('page.settings.appsource.outputFailed'), error))
+  } finally {
+    sourceBusy.value = ''
+  }
+}
+
+async function runSearch(): Promise<void> {
+  const q = searchQuery.value.trim()
+  if (!q) {
+    toast.error(t('page.settings.appsource.searchKeyword'))
+    return
+  }
+  searching.value = true
+  searchNote.value = ''
+  try {
+    const payload = await searchAppSource(q, 50)
+    searchHits.value = payload?.files || []
+    if (!payload?.ok) {
+      searchNote.value = String(payload?.reason || t('page.settings.appsource.notReady'))
+    } else if (!searchHits.value.length) {
+      searchNote.value = t('page.settings.appsource.noMatches')
+    }
+  } catch (error) {
+    searchHits.value = []
+    searchNote.value = failureText(t('page.settings.appsource.search'), error)
+  } finally {
+    searching.value = false
+  }
+}
+
+/** 拆包进度轮询：只有正在拆时才跑，结束自动停。 */
+const unpackPoll = usePolling(
+  async () => {
+    if (!unpacking.value) return
+    try {
+      const progress = await getUnpackProgress()
+      unpackProgress.value = progress
+      if (progress?.running === false) {
+        unpacking.value = false
+        toast.success(t('page.settings.appsource.unpackDone'))
+        await loadSource()
+      }
+    } catch (error) {
+      unpacking.value = false
+      toast.error(failureText(t('page.settings.appsource.progressFailed'), error))
+    }
+  },
+  1500,
+  { immediate: false },
+)
+
+/* ------------------------------------------------------------------ *
+ * 生命周期
+ * ------------------------------------------------------------------ */
+
+/**
+ * 保存条的改动项数：运行配置按改动的字段数，邀请码算一项。
+ * 改密码、逆向产物路径是即时动作（各自有按钮），不计入保存条。
+ */
+const dirty = computed(
+  () => Object.keys(runtimeUpdates.value).length + (invitation.value && invitationDirty.value ? 1 : 0),
+)
+const settingsSaving = computed(() => runtimeSaving.value || invitationSaving.value)
+
+async function saveAll(): Promise<void> {
+  if (settingsSaving.value) return
+  if (runtimeDirty.value) await saveRuntime()
+  if (invitation.value && invitationDirty.value) await saveInvitationValue(invitationInput.value.trim())
+}
+
+/** 保存条「放弃」：草稿回到上次读到的值，不发请求。 */
+function discardAll(): void {
+  syncRuntimeDraft(runtimeFields.value)
+  invitationInput.value = invitation.value?.invite_code || ''
+}
+
+/**
+ * 第 5 轮：二次进入（KeepAlive）/ 后台轮询属于「静默刷新」——DataTable 用 `refreshing`
+ * 保留旧数据、只在工具栏转小圈，不出顶部进度条。用计数，重叠的静默刷新互不打断。
+ */
+const silentDepth = ref(0)
+const silentRefresh = computed(() => silentDepth.value > 0)
+async function silently(task: () => Promise<unknown> | void): Promise<void> {
+  silentDepth.value += 1
+  try {
+    await task()
+  } finally {
+    silentDepth.value -= 1
+  }
+}
+
+// 二次进入（KeepAlive 命中）：保留旧数据、不出骨架，后台静默刷新（11-polish-motion §2）。
+// 设置型页面：有未保存修改时不刷新，免得覆盖草稿。
+useRevisit(
+  () => {
+    if (dirty.value) return
+    void loadRuntime()
+    void silently(() => loadProxies())
+    void loadInvitation()
+    void loadSource()
+  },
+  { minIntervalMs: 10_000 },
+)
+
+onMounted(() => {
+  void loadRuntime()
+  void loadProxies()
+  void loadInvitation()
+  void loadSource()
+  unpackPoll.start()
+})
+
+onBeforeUnmount(() => {
+  unpackPoll.stop()
+})
+</script>
+
+<template>
+  <SettingsLayout
+    :title="t('page.settings.title')"
+    :help="helpText"
+    :sections="sections"
+    :dirty="dirty"
+    :saving="settingsSaving"
+    @save="saveAll"
+    @discard="discardAll"
+  >
+    <!-- 0. 界面语言（本地偏好，不写入后端配置） -->
+    <LanguageCard />
+
+    <!-- 1. 运行配置 -->
+    <SettingsCard
+      id="settings-runtime"
+      :title="t('page.settings.runtime.title')"
+      :description="t('page.settings.runtime.description')"
+      :dirty="runtimeDirty"
+      plain
+    >
+      <div v-if="runtimeLoading && !runtimeFields.length" class="st-skeleton"><n-skeleton text :repeat="6" /></div>
+      <ErrorBlock v-else-if="runtimeError && !runtimeFields.length" :title="runtimeError" retry @retry="loadRuntime" />
+      <template v-else>
+        <div v-if="restartPending.length" class="st-banner">
+          <Badge tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
+          <span>
+            {{
+              t('page.settings.runtime.restartBanner', {
+                count: restartPending.length,
+                labels: restartPending.map((item) => item.label).join(locale === 'en-US' ? ', ' : '、'),
+              })
+            }}
+          </span>
+        </div>
+        <Section
+          v-for="(group, index) in runtimeGroups"
+          :key="group.group"
+          :title="group.group"
+          :first="index === 0"
+        >
+          <div class="st-rows">
+            <div v-for="field in group.items" :key="field.attr" class="st-row">
+              <div class="st-row__text">
+                <div class="st-row__label">
+                  <span>{{ field.label }}</span>
+                  <Badge v-if="field.restart" tone="warn">{{ t('page.settings.runtime.restartBadge') }}</Badge>
+                  <Badge v-if="field.overridden" tone="neutral">{{ t('page.settings.runtime.overridden') }}</Badge>
+                </div>
+                <p v-if="field.desc" class="st-row__desc">{{ field.desc }}</p>
+                <p class="st-row__default">
+                  {{
+                    t('page.settings.runtime.default', {
+                      value:
+                        field.default === null || field.default === ''
+                          ? t('page.settings.runtime.emptyValue')
+                          : String(field.default),
+                    })
+                  }}
+                  <template v-if="field.min !== null || field.max !== null">
+                    · {{ t('page.settings.runtime.range', { min: field.min ?? '−∞', max: field.max ?? '∞' }) }}
+                  </template>
+                  <!-- 配置项的环境变量名只给运维对照用：降成最弱的一行小字（第 2 轮审查 P1-5）。 -->
+                  · <code class="st-attr" :title="t('page.settings.runtime.attrTitle')">{{ field.attr }}</code>
+                </p>
+              </div>
+              <div class="st-row__control">
+                <n-switch
+                  v-if="field.kind === 'bool'"
+                  :value="Boolean(runtimeDraft[field.attr])"
+                  :aria-label="field.label"
+                  @update:value="(value: boolean) => setRuntimeDraft(field.attr, value)"
+                />
+                <n-input-number
+                  v-else-if="field.kind === 'int' || field.kind === 'float'"
+                  :value="runtimeNumber(field.attr)"
+                  :min="field.min ?? undefined"
+                  :max="field.max ?? undefined"
+                  :step="field.step || 1"
+                  :aria-label="field.label"
+                  style="width: 160px"
+                  @update:value="(value: number | null) => setRuntimeDraft(field.attr, value)"
+                />
+                <n-input
+                  v-else
+                  :value="runtimeText(field.attr)"
+                  :aria-label="field.label"
+                  :placeholder="String(field.default ?? '')"
+                  @update:value="(value: string) => setRuntimeDraft(field.attr, value)"
+                />
+              </div>
+            </div>
+          </div>
+        </Section>
+      </template>
+    </SettingsCard>
+
+    <!-- 2. 出口代理节点 -->
+    <SettingsCard
+      id="settings-proxies"
+      :title="t('page.settings.proxies.title')"
+      :description="t('page.settings.proxies.description')"
+      plain
+    >
+      <template #actions>
+        <Btn size="sm" variant="default" @click="router.push('/schedules')">
+          {{ t('page.settings.proxies.goSchedules') }}
+        </Btn>
+        <Btn size="sm" variant="default" :disabled="proxyLoading" @click="openProxyDrawer">
+          {{ t('page.settings.proxies.add') }}
+        </Btn>
+      </template>
+
+      <div v-if="proxyLoading && !proxyData" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
+      <ErrorBlock v-else-if="proxyError && !proxyData" :title="proxyError" retry @retry="loadProxies" />
+      <template v-else>
+        <p class="st-note">{{ proxySummary }}</p>
+        <p class="st-note">{{ proxyData?.note || '' }}</p>
+        <div class="st-filters">
+          <n-select
+            :value="proxyPool"
+            :options="[
+              { label: t('page.settings.proxies.allPools'), value: '' },
+              ...(proxyData?.pools || []).map((pool) => ({
+                label: pool || t('page.settings.proxies.defaultPool'),
+                value: pool,
+              })),
+            ]"
+            :aria-label="t('page.settings.proxies.filterAria')"
+            style="width: 180px"
+            @update:value="(value: string | null) => (proxyPool = value || '')"
+          />
+          <n-input
+            v-model:value="proxyQuery"
+            :placeholder="t('page.settings.proxies.search')"
+            clearable
+            style="width: 220px"
+          />
+        </div>
+        <DataTable
+          table-id="settings-proxies"
+          :columns="proxyColumns"
+          :data="proxyNodes as unknown as TableRow[]"
+          row-key="id"
+          :loading="proxyLoading && !silentRefresh"
+          :refreshing="proxyLoading && silentRefresh"
+        />
+      </template>
+      <!-- 「添加节点」只在卡头放一个。 -->
+      <Empty
+        v-if="!proxyLoading && !(proxyError && !proxyData) && !proxyNodes.length"
+        compact
+        :description="t('page.settings.proxies.empty')"
+      />
+    </SettingsCard>
+
+    <!-- 3. 邀请绑定 -->
+    <SettingsCard
+      id="settings-invitation"
+      :title="t('page.settings.invitation.title')"
+      :description="t('page.settings.invitation.description')"
+      :dirty="Boolean(invitation) && invitationDirty"
+    >
+      <template #actions>
+        <Badge :tone="invitation?.enabled ? 'ok' : 'neutral'" dot>
+          {{ invitation?.enabled ? t('page.settings.invitation.enabled') : t('page.settings.invitation.disabled') }}
+        </Badge>
+      </template>
+      <div v-if="invitationLoading && !invitation" class="st-skeleton"><n-skeleton text :repeat="2" /></div>
+      <ErrorBlock v-else-if="invitationError && !invitation" :title="invitationError" retry @retry="loadInvitation" />
+      <template v-else>
+        <FormField
+          :label="t('page.settings.invitation.field')"
+          :hint="t('page.settings.invitation.hint')"
+        >
+          <div class="st-inline">
+            <n-input
+              v-model:value="invitationInput"
+              :placeholder="t('page.settings.invitation.placeholder')"
+              autocomplete="off"
+            />
+            <Btn
+              v-if="invitation?.enabled"
+              variant="quiet"
+              size="sm"
+              @click="disableInvitation"
+            >
+              {{ t('page.settings.invitation.disable') }}
+            </Btn>
+          </div>
+        </FormField>
+        <p v-if="invitation?.invite_url" class="st-note mono">{{ invitation.invite_url }}</p>
+      </template>
+    </SettingsCard>
+
+    <!-- 4. 修改登录密码 -->
+    <SettingsCard
+      id="settings-password"
+      :title="t('page.settings.password.title')"
+      :description="t('page.settings.password.description')"
+    >
+      <!-- 改密码是一次性动作（不是配置项），保留自己的按钮，不进底部保存条。 -->
+      <FormField :label="t('page.settings.password.old')">
+        <n-input v-model:value="passwordDraft.old" type="password" autocomplete="current-password" />
+      </FormField>
+      <FormField :label="t('page.settings.password.next')" :hint="t('page.settings.password.hint')">
+        <n-input v-model:value="passwordDraft.next" type="password" autocomplete="new-password" />
+      </FormField>
+      <FormField :label="t('page.settings.password.confirm')">
+        <div class="st-inline">
+          <n-input v-model:value="passwordDraft.confirm" type="password" autocomplete="new-password" />
+          <Btn variant="default" :loading="passwordSaving" :disabled="!passwordDirty" @click="submitPassword">
+            {{ t('page.settings.password.save') }}
+          </Btn>
+        </div>
+      </FormField>
+    </SettingsCard>
+
+    <!-- 5. 逆向产物：本部署未开放（生产环境 404 / dev_tools=false）时整块不渲染 -->
+    <SettingsCard
+      v-if="!sourceMissing"
+      id="settings-appsource"
+      :title="t('page.settings.appsource.title')"
+      :description="t('page.settings.appsource.description')"
+      plain
+    >
+      <div v-if="sourceLoading && !sourceStatus" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
+      <template v-else>
+        <ErrorBlock v-if="sourceError" :title="sourceError" retry @retry="loadSource" />
+        <template v-if="sourceStatus">
+          <KV :items="sourceLines.map((line) => ({ label: line.label, value: line.value, mono: line.mono }))" />
+
+          <Section :title="t('page.settings.appsource.paths')">
+            <FormField
+              :label="t('page.settings.appsource.install')"
+              :hint="t('page.settings.appsource.installHint')"
+            >
+              <div class="st-inline">
+                <n-input v-model:value="installDraft" :placeholder="t('page.settings.appsource.installPlaceholder')" />
+                <Btn
+                  variant="primary"
+                  size="sm"
+                  :loading="sourceBusy === 'locate'"
+                  @click="saveInstallDir"
+                >
+                  {{ t('page.settings.appsource.validate') }}
+                </Btn>
+              </div>
+            </FormField>
+            <FormField
+              :label="t('page.settings.appsource.output')"
+              :hint="t('page.settings.appsource.outputHint')"
+            >
+              <div class="st-inline">
+                <n-input v-model:value="outputDraft" :placeholder="t('page.settings.appsource.outputPlaceholder')" />
+                <Btn
+                  variant="default"
+                  size="sm"
+                  :loading="sourceBusy === 'locate-source'"
+                  @click="saveOutputDir"
+                >
+                  {{ t('page.settings.appsource.setOutput') }}
+                </Btn>
+              </div>
+            </FormField>
+            <div class="st-inline">
+              <Btn
+                variant="default"
+                size="sm"
+                :icon="ScanSearch"
+                :loading="sourceBusy === 'detect'"
+                @click="runSourceAction('detect')"
+              >
+                {{ t('page.settings.appsource.rescan') }}
+              </Btn>
+              <Btn
+                variant="default"
+                size="sm"
+                :icon="FileSearch"
+                :loading="sourceBusy === 'plan'"
+                @click="runSourceAction('plan')"
+              >
+                {{ t('page.settings.appsource.precheck') }}
+              </Btn>
+              <Btn variant="primary" size="sm" :icon="PackageOpen" :loading="sourceBusy === 'unpack' || unpacking" :disabled="sourceStatus?.can_unpack === false" @click="runSourceAction('unpack')">
+                {{ t('page.settings.appsource.unpack') }}
+              </Btn>
+              <Btn
+                variant="danger"
+                size="sm"
+                :icon="Trash2"
+                :loading="sourceBusy === 'remove'"
+                @click="runSourceAction('remove')"
+              >
+                {{ t('page.settings.appsource.remove') }}
+              </Btn>
+            </div>
+
+            <div v-if="unpacking || unpackProgress" class="st-progress">
+              <div class="st-progress__head">
+                <span>{{ unpackProgress?.phase || t('page.settings.appsource.preparing') }}</span>
+                <span class="tnum">{{ unpackPercent(unpackProgress) }}%</span>
+              </div>
+              <Meter
+                :value="unpackPercent(unpackProgress)"
+                tone="brand"
+                :aria-label="t('page.settings.appsource.progressAria')"
+              />
+              <p class="st-note mono">{{ unpackProgress?.current || '' }}</p>
+            </div>
+          </Section>
+
+          <Section :title="t('page.settings.appsource.searchSection')">
+            <div class="st-inline">
+              <n-input
+                v-model:value="searchQuery"
+                :placeholder="t('page.settings.appsource.searchPlaceholder')"
+                @keyup.enter="runSearch"
+              />
+              <Btn variant="default" size="sm" :icon="RefreshCw" :loading="searching" @click="runSearch">
+                {{ t('page.settings.appsource.search') }}
+              </Btn>
+            </div>
+            <p v-if="searchNote" class="st-note">{{ searchNote }}</p>
+            <ul v-if="searchHits.length" class="st-hits">
+              <li v-for="(hit, index) in searchHits" :key="index" class="st-hit">
+                <span class="st-hit__file mono">{{ hit.file }}:{{ hit.line }}</span>
+                <code class="st-hit__text">{{ hit.text }}</code>
+              </li>
+            </ul>
+          </Section>
+        </template>
+      </template>
+    </SettingsCard>
+
+    <FormDrawer
+      v-model:show="proxyDrawer"
+      :title="t('page.settings.proxies.drawerTitle')"
+      :submit-text="t('page.settings.proxies.drawerSubmit')"
+      :submit-loading="proxySubmitting"
+      :submit-disabled="!proxyDraft.url.trim()"
+      @submit="submitProxy"
+    >
+      <FormField :label="t('page.settings.proxies.nameField')">
+        <n-input
+          :value="proxyDraft.label"
+          :placeholder="t('page.settings.proxies.namePlaceholder')"
+          @update:value="(value: string) => (proxyDraft.label = value)"
+        />
+      </FormField>
+      <FormField
+        :label="t('page.settings.proxies.urlField')"
+        required
+        :hint="t('page.settings.proxies.urlHint')"
+      >
+        <n-input
+          :value="proxyDraft.url"
+          placeholder="http://user:pass@host:port"
+          autocomplete="off"
+          @update:value="(value: string) => (proxyDraft.url = value)"
+        />
+      </FormField>
+      <FormField
+        :label="t('page.settings.proxies.concurrencyField')"
+        :hint="t('page.settings.proxies.concurrencyHint')"
+      >
+        <n-input-number
+          :value="proxyDraft.max_concurrency"
+          :min="1"
+          :max="32"
+          style="width: 140px"
+          @update:value="(value: number | null) => (proxyDraft.max_concurrency = value ?? 1)"
+        />
+      </FormField>
+      <FormField
+        :label="t('page.settings.proxies.poolField')"
+        :hint="t('page.settings.proxies.poolHint')"
+      >
+        <n-input
+          :value="proxyDraft.pool"
+          :placeholder="t('page.settings.proxies.poolPlaceholder')"
+          @update:value="(value: string) => (proxyDraft.pool = value)"
+        />
+      </FormField>
+    </FormDrawer>
+  </SettingsLayout>
+</template>
+
+<style scoped>
+.st-skeleton {
+  padding: var(--sp-2) 0;
+}
+
+.st-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+}
+
+.st-rows {
+  display: grid;
+  gap: 0;
+}
+
+/* 「左栏标签 + 说明 / 右栏控件」（10-visual-refresh §1.6）：组内每行用 --border-soft 分隔。 */
+.st-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 360px);
+  align-items: start;
+  gap: var(--sp-6);
+  min-width: 0;
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.st-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.st-row__text {
+  min-width: 0;
+}
+
+.st-row__label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-h3);
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.st-attr {
+  font-size: var(--fs-tiny);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+
+.st-row__desc {
+  margin-top: 2px;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+  max-width: 64ch;
+  text-wrap: pretty;
+}
+
+.st-row__default {
+  margin-top: 2px;
+  font-size: var(--fs-tiny);
+  color: var(--fg-faint);
+}
+
+.st-row__control {
+  min-width: 0;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.st-note {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-muted);
+  max-width: 68ch;
+}
+
+.st-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.st-inline > :first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.st-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3) var(--sp-4);
+}
+
+.st-ops {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.st-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 第 5 轮：手机宽度下代理池筛选 / 搜索各占一整行（行内 180 / 220px 宽在 375 下会挤成两行半宽）。 */
+@media (max-width: 767px) {
+  .st-filters > * {
+    flex: 1 1 100%;
+    width: 100% !important;
+  }
+}
+
+.st-progress {
+  display: grid;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+}
+
+.st-progress__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+}
+
+.st-hits {
+  display: grid;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.st-hit {
+  display: grid;
+  gap: 2px;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+}
+
+.st-hit__file {
+  color: var(--brand);
+}
+
+.st-hit__text {
+  color: var(--fg-2);
+  word-break: break-all;
+}
+
+@media (max-width: 720px) {
+  .st-row {
+    flex-wrap: wrap;
+  }
+
+  .st-row__control {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .st-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .st-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-2);
+  }
+}
+</style>
