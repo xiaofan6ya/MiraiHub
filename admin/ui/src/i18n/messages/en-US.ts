@@ -2058,6 +2058,7 @@ export const enUS: Record<MessageKey, string> = {
   'page.keys.policyHelpLabel': 'About the routing policy',
   'page.keys.groupOption.none': 'Unrestricted (all available models)',
   'page.keys.groupOption.count': ' ({count} models)',
+  'page.keys.groupOption.empty': ' (no usable models — pick models in Groups first)',
   'page.keys.platformOption.none': 'Unrestricted (all platforms)',
   'page.keys.account.fallback': 'account',
   'page.keys.account.disabled': ' · disabled',

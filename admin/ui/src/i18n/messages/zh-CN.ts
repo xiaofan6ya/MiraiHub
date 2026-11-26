@@ -2071,6 +2071,7 @@ export const zhCN = {
   'page.keys.policyHelpLabel': '账号调度策略说明',
   'page.keys.groupOption.none': '不限制（全部可用模型）',
   'page.keys.groupOption.count': '（{count} 个模型）',
+  'page.keys.groupOption.empty': '（无可用模型，禁选 —— 请先到「分组管理」重新勾选模型）',
   'page.keys.platformOption.none': '不限制（全部平台）',
   'page.keys.account.fallback': '账号',
   'page.keys.account.disabled': ' · 已禁用',

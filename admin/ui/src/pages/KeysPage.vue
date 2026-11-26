@@ -188,10 +188,25 @@ let auxLoaded = false
 
 const groupOptions = computed(() => [
   { label: t('page.keys.groupOption.none'), value: 0 },
-  ...groups.value.map((group) => ({
-    label: group.name + (group.effective_count != null ? t('page.keys.groupOption.count', { count: group.effective_count }) : ''),
-    value: group.id,
-  })),
+  ...groups.value.map((group) => {
+    // 分组里没有「已启用的模型」时，绑上去等于把 Key 变成不能用：
+    // 每次调用都会被 effective_group_models 判成组外 → 403。历史上模型改名 /
+    // 下架后就会变成这种空分组（issue #120：「分组实际不可选」）。
+    // 所以：**别的分组可以选，这个不行**，并写清为什么、去哪修。
+    //
+    // 例外：编辑一个**已经绑着**这个空分组的 Key 时不能禁选 —— 否则用户连
+    // 「改别的字段」都保存不了（Naive UI 对 disabled 选项的当前值处理很别扭）。
+    const empty = group.effective_count === 0
+    const keepSelectable = draft.value.groupId === group.id
+    const suffix = group.effective_count != null
+      ? t('page.keys.groupOption.count', { count: group.effective_count })
+      : ''
+    return {
+      label: group.name + suffix + (empty ? t('page.keys.groupOption.empty') : ''),
+      value: group.id,
+      disabled: empty && !keepSelectable,
+    }
+  }),
 ])
 const platformOptionsForForm = computed(() => [
   { label: t('page.keys.platformOption.none'), value: '' },
