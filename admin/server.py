@@ -1917,13 +1917,21 @@ def _admin_cookie_params(request: Request, max_age: int):
                 secure=https, path="/", max_age=max_age)
 
 
-def _console_mode(request: Request) -> str:
+def _console_mode(request: Request | None = None) -> str:
     """本次请求使用哪套控制台：v1（旧）或 v2（新版）。
 
     优先级：`?ui=v1` 显式回退 > `MIRAIHUB_CONSOLE` 环境变量 > 默认 v1。
     非法值一律按 v1 处理，避免写错一个字符就把后台切没。
+
+    `request` 允许缺省 / 是测试替身：`query_params` 取不到时按「没有显式回退」
+    处理。历史上这里硬解 `request.query_params`，`_FakeRequest` 那种替身直接
+    AttributeError（test_console_boot 的两条 error 就是这么来的）。
     """
-    forced = (request.query_params.get("ui") or "").strip().lower()
+    params = getattr(request, "query_params", None) or {}
+    try:
+        forced = (params.get("ui") or "").strip().lower()
+    except AttributeError:  # 不是 Mapping：当成没有 ui 参数
+        forced = ""
     if forced == "v1":
         return "v1"
     mode = (os.environ.get("MIRAIHUB_CONSOLE") or "v1").strip().lower()

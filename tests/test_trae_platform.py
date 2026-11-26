@@ -391,6 +391,14 @@ def test_gateway_routing() -> None:
     from admin.security import hash_key
 
     client = TestClient(s.app, raise_server_exceptions=False)
+    # `LifecycleMiddleware` 只在 PHASE_READY 准入（排空语义的硬要求，见
+    # admin/lifecycle.py:try_admit 与 test_graceful_lifecycle 的
+    # test_fresh_instance_starts_in_starting_and_refuses_admission）。
+    # TestClient 不跑 lifespan，进程会一直停在 starting，于是每个请求都被
+    # 判成 service_draining → 503。这里显式标成就绪，模拟「uvicorn 已起来」。
+    from admin.lifecycle import get_lifecycle
+
+    get_lifecycle().mark_ready()
     raw = "sk-trae-test-" + secrets.token_hex(12)
     created = None
     with SessionLocal() as db:

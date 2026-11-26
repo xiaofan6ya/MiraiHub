@@ -226,8 +226,8 @@ def build_market(db: Session, key: ApiKey, *, hours: int = DEFAULT_HOURS) -> dic
         entry["models"].add(mid)
         entry["readables"].add(readable)
         entry["platforms"].add(storage)
-        # `credit_multiplier` 负数 = 「该平台没配这个模型的计价」（Trae 的
-        # `-1` 就是这种情况），既不是免费也不是某个倍率。当成「未知」输出，
+        # `credit_multiplier` 负数 = 「该平台没配这个模型的计价」（部分平台用
+        # `-1` 表示这种状态），既不是免费也不是某个倍率。当成「未知」输出，
         # 否则客户端会显示成 `×-1.00`。
         raw_multiplier = config.credit_multiplier
         known = raw_multiplier is not None and float(raw_multiplier) >= 0

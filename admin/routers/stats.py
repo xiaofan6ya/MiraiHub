@@ -233,7 +233,7 @@ def _ok_filter(q):
 
 
 def _strip_realm_suffix(label: str) -> str:
-    """`Trae 国内版` -> `Trae`，`Qoder 中国版` -> `Qoder`（落库名标签用）。"""
+    """把「<产品名> 国内版 / 国际版 / 中国版」削成纯产品名（落库名标签用）。"""
     base = str(label or "")
     for suffix in (" 国内版", " 国际版", " 中国版", "国内版", "国际版", "中国版"):
         if base.endswith(suffix):
@@ -244,10 +244,10 @@ def _strip_realm_suffix(label: str) -> str:
 def platform_labels(db: Session) -> dict[str, str]:
     """落库平台名 / 对外 id -> 展示名。
 
-    `usage_logs.platform` 与汇总表存的是**落库名**（`trae` / `qoder`），一个落库名
-    可能对应两个区（`trae-cn` + `trae-intl`）。原实现用 `setdefault(storage, label)`
-    让 `trae` 取到第一个登记的「Trae 国内版」—— 国际版的流量于是全部显示成
-    国内版（platform_scoping_review P1-6 / N4）。
+    `usage_logs.platform` 与汇总表存的是**落库名**（一个产品可能只有一个落库名），
+    一个落库名可能对应两个区（`<名>-cn` + `<名>-intl`）。原实现用
+    `setdefault(storage, label)` 让落库名取到第一个登记的「国内版」标签 ——
+    国际版的流量于是全部显示成国内版（platform_scoping_review P1-6 / N4）。
 
     现在：
       * 对外 id（`trae-cn` / `qoder-intl`）-> 各自的标签；
