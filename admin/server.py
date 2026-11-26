@@ -2215,7 +2215,16 @@ class UIStaticGZipMiddleware:
             await self.app(scope, receive, send)
 
 
-app.add_middleware(UIStaticGZipMiddleware)
+# ⚠️ 必须**追加到栈尾**（最内层），不能用 `add_middleware`。
+#
+# `add_middleware` 是 `user_middleware.insert(0, ...)` —— 后添加的会在**最外层**。
+# 本文件末尾才定义这个类，直接 `add_middleware` 就会把 `AbuseGuardMiddleware`
+# （封禁守卫，必须最外层、不分路径）挤到第二层，`test_graceful_lifecycle` 的
+# «最外层必须仍是不分路径的封禁守卫» 会挂。而这个 gzip 只对 `/admin/v2/`
+# 静态资源生效，放在最内层语义完全等价。
+from starlette.middleware import Middleware as _StarletteMiddleware
+
+app.user_middleware.append(_StarletteMiddleware(UIStaticGZipMiddleware))
 
 
 # 新版控制台（Vue 3 + Vite 构建产物）—— `/admin/v2`
