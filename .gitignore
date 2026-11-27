@@ -361,3 +361,7 @@ logs/daemon*.lock
 admin/ui/.vite-cache/
 ui-refresh-verification/
 _marvis/
+
+# 根目录临时产物（抓包 / 反编译清单 / 一次性分析报告）：归位到这里，不进仓库。
+temp/
+
