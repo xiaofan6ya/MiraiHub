@@ -207,13 +207,13 @@ async def _join_gate_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-#: 后台页面统一 CSP —— 旧版 `/admin` 与新版 `/admin/v2` 共用这一条。
+#: 后台页面统一 CSP —— 合并后只剩一套前端，`/admin`、`/join`、`/j` 共用这一条。
 #:
 #: 为什么抽成常量、而不是各写一套：这份策略是「够用且不宽松」的交集，
-#: 新版 Vite 产物的每一项依赖它都能满足 ——
+#: Vite 产物的每一项依赖它都能满足 ——
 #:   * module script / CSS：`script-src 'self'`、`style-src 'self'`；
 #:   * woff2/woff 字体：`font-src 'self'`（同源，构建后 CSS 里是
-#:     `/admin/v2/assets/*.woff2` 绝对路径，没有外链字体）；
+#:     `/admin/assets/*.woff2` 绝对路径，没有外链字体）；
 #:   * 图标 png/svg 与图表截图：`img-src 'self' data: blob:`；
 #:   * Naive UI 运行时注入的 `<style>`：`style-src` 的 `'unsafe-inline'`；
 #:   * ECharts canvas：canvas 不受 CSP 约束，不需要额外指令。
@@ -266,8 +266,7 @@ async def _security_headers(request: Request, call_next):
     _p = request.url.path
     _is_html_doc = (
         (_p.startswith("/admin")
-         and not _p.startswith("/admin/assets")
-         and not _p.startswith("/admin/v2/assets"))
+         and not _p.startswith("/admin/assets"))
         or _p in ("/join", "/join/", "/", "/j")
         or (_p.startswith("/static/") and _p.endswith(".html"))
     )
@@ -1866,10 +1865,9 @@ def index_redirect():
     return RedirectResponse(url="/admin")
 
 
-CONSOLE_DIR = Path(__file__).resolve().parent / "console"
-#: 会话 Cookie 名。控制台本体在 admin/console/（**不经** /static 暴露），
-#: 只有携带有效会话 Cookie 的请求才能拿到 —— 未登录的访客只会看到
-#: static/login.html 这个中性壳页，HTML 源码里不再出现任何产品与内部实现信息。
+#: 会话 Cookie 名。后台前端在 admin/ui/dist/（Vite 构建产物，**不经** /static 暴露），
+#: 只有携带有效会话 Cookie 的请求才能拿到；未登录访客只看到同一份构建里的
+#: login.html 中性壳页，源码里不出现任何产品与内部实现信息。
 _ADMIN_COOKIE = "admin_session"
 
 
@@ -1917,299 +1915,82 @@ def _admin_cookie_params(request: Request, max_age: int):
                 secure=https, path="/", max_age=max_age)
 
 
-def _console_mode(request: Request | None = None) -> str:
-    """本次请求使用哪套控制台：v1（旧）或 v2（新版）。
-
-    优先级：`?ui=v1` 显式回退 > `MIRAIHUB_CONSOLE` 环境变量 > 默认 v1。
-    非法值一律按 v1 处理，避免写错一个字符就把后台切没。
-
-    `request` 允许缺省 / 是测试替身：`query_params` 取不到时按「没有显式回退」
-    处理。历史上这里硬解 `request.query_params`，`_FakeRequest` 那种替身直接
-    AttributeError（test_console_boot 的两条 error 就是这么来的）。
-    """
-    params = getattr(request, "query_params", None) or {}
-    try:
-        forced = (params.get("ui") or "").strip().lower()
-    except AttributeError:  # 不是 Mapping：当成没有 ui 参数
-        forced = ""
-    if forced == "v1":
-        return "v1"
-    mode = (os.environ.get("MIRAIHUB_CONSOLE") or "v1").strip().lower()
-    return mode if mode in ("v1", "v2") else "v1"
+#: 后台入口的唯一实现见下方 `admin_index`：合并后只有新版一套前端，
+#: 不再有 `?ui=v1` 回退，也没有 `MIRAIHUB_CONSOLE` 开关。
 
 
 @app.get("/admin")
 @app.get("/admin/")
 def admin_index(request: Request):
-    """登录门禁：有会话 Cookie → 完整控制台；否则只给中性登录壳。
+    """后台唯一入口：新版前端（`admin/ui/dist`，Vue 3 + Vite）。
 
-    S30 切换：MIRAIHUB_CONSOLE=v2 且 admin/ui/dist/index.html 存在时，
-    已登录 → 302 到 /admin/v2/；未登录 → 发新版 login.html（缺失则回退旧登录页）。
-    ?ui=v1 可临时回退旧版；默认仍是 v1，行为与切换前一致。
+    合并前这里是 v1(console) / v2(ui) 双轨：`?ui=v1` / `MIRAIHUB_CONSOLE`
+    决定走哪套，旧版由 `_console_shell()` 读 `admin/console/index.html` 再注入
+    登录态。现在只剩一套 —— `admin/console` 与 `admin/static/login.html`
+    都已下线，登录页由同一次构建产出的 `dist/login.html` 承担。
+
+    未登录 → `dist/login.html`；已登录 → `dist/index.html`。
+    两者都缺就是构建没跑：直说 404 并打日志（见 `_log_ui_missing`），
+    比发一个白屏页面更好排查。
     """
-    mode = _console_mode(request)
-    ui_index = UI_DIST / "index.html"
-    if mode == "v2" and ui_index.is_file():
-        if _console_allowed(request):
-            return RedirectResponse(url="/admin/v2/", status_code=302,
-                                    headers={"Cache-Control": "no-store"})
-        ui_login = UI_DIST / "login.html"
-        if ui_login.is_file():
-            return FileResponse(ui_login, headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Content-Security-Policy": _ADMIN_CSP,
-            })
-        # 新版登录页缺失时继续走下面的旧登录页，绝不把后台切成 404。
-    if _console_allowed(request):
-        index = CONSOLE_DIR / "index.html"
-        # 兼容旧打包布局（控制台仍在 static/ 的桌面/移动端产物）。
-        if not index.is_file() and (STATIC_DIR / "index.html").is_file():
-            return HTMLResponse(_console_shell(STATIC_DIR / "index.html"),
-                                headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
-        return HTMLResponse(_console_shell(index),
-                            headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
-    # 登录页本身不引用任何外部资源（脚本全内联），没有 `?v=` 可打，
-    # 继续用 FileResponse 发原文件即可。
-    return FileResponse(STATIC_DIR / "login.html",
-                        headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
-
-
-def _stamped_page(path) -> str:
-    """读一个小页面并把资源 `?v=` 换成内容哈希（注册页用）。
-
-    注册页直接引用 `/static/phone-session.js` 与 `phone-region.css`，
-    而且**原本一个版本号都没写** —— 换了内容照样被浏览器缓存。
-    文件只有几十 KB，每次读一遍不值得做缓存。
-    """
-    try:
-        return stamp_asset_urls(_read_console_html(path))
-    except OSError:
-        return ""
-
-
-#: 控制台 HTML 的内存缓存：键为 (绝对路径, mtime, 大小)。
-#: 每次请求都读 500KB 文件再拼字符串是纯浪费，而这份文件在进程生命周期内
-#: 基本不变（升级会重启进程）。
-#: 注意缓存的是**原始** HTML：资源 `?v=` 每次下发时按当前内容重新盖章
-#: （见 stamp_asset_urls），所以改了 js/css 不必重启、也不必清这个缓存。
-_CONSOLE_SHELL_CACHE: dict = {}
+    if not (UI_DIST / "index.html").is_file():
+        _log_ui_missing()
+        raise HTTPException(status_code=404)
+    if not _console_allowed(request):
+        login = UI_DIST / "login.html"
+        if not login.is_file():
+            _log_ui_missing()
+            raise HTTPException(status_code=404)
+        return FileResponse(login, headers=dict(_UI_HTML_HEADERS))
+    return FileResponse(UI_DIST / "index.html", headers=dict(_UI_HTML_HEADERS))
 
 
 # ---------------------------------------------------------------------------
-# 资源版本号：**按内容自动算**，不再手工改 `?v=`
+# 旧控制台的资源版本化机制 —— 已随 admin/console 下线
 # ---------------------------------------------------------------------------
 #
-# 以前每个静态资源（console-app.js / console.css / 各面板脚本）的 URL 上都写死
-# 一个 `?v=20261105-ui9` 之类的串，改完代码要**记得**手工加版本，忘了就是
-# 「改了没生效，用户看到的是缓存里的旧文件」，而且一次改动往往要连改
-# index.html 里十几处、还得跟打包脚本对齐。
+# 这里原来有一整套：`_stamped_page` / `_asset_roots` / `_asset_file_of` /
+# `asset_digest` / `stamp_asset_urls` / `_console_shell` / `_read_console_html`。
+# 它读旧版 index.html，把 `/admin/assets/*` 与 `/static/*` 的 `?v=` 换成内容哈希，
+# 再把登录态注入成 `<html class="console-authed">`，避免首屏闪一下登录卡片。
 #
-# 现在统一由服务端在**下发 HTML 时**把 `/admin/assets/*` 与 `/static/*` 的
-# `?v=` 换成该文件内容的哈希前 10 位：
-#   · 内容不变 → URL 不变 → 浏览器缓存继续命中（不会每次刷新都重下）；
-#   · 内容变了 → URL 变了 → 立刻失效，**不可能忘**；
-#   · 打包/源码/dev 三种情况走同一条代码路径，不需要 build 里再插一步。
-#
-# 代价：每个资源**第一次**被引用时读一遍算哈希（console-app.js 780KB ≈ 2ms），
-# 之后按 (mtime_ns, size) 命中缓存 —— 只有文件真的变了才重算。
-# 内容哈希的 URL 天生可以长缓存，所以这里按「一个文件」算，不做全目录扫描。
-#: 绝对路径 → (mtime_ns, size, 内容哈希前 10 位)
-_ASSET_DIGEST_CACHE: dict = {}
-#: URL 路径 → 磁盘文件。`Path.resolve()` 在 Windows 上要问文件系统，
-#: 一屏 40 个资源引用点每个都 resolve 两次就是几十毫秒 —— 缓存住。
-_ASSET_PATH_CACHE: dict = {}
-_ASSET_REF_RE = None         # 懒编译
-
-
-def _asset_roots() -> list:
-    """参与版本化的资源根目录：`/admin/assets/` 与 `/static/`。"""
-    return [("/admin/assets/", CONSOLE_DIR), ("/static/", STATIC_DIR)]
-
-
-def _asset_file_of(url_path: str):
-    """URL 路径 → 磁盘文件（越界或不存在返回 None）。
-
-    只认 `/admin/assets/...` 与 `/static/...`；`/admin`、`/join` 这类页面路由
-    原样返回 None，因此不会被误加 `?v=`。
-    """
-    if url_path in _ASSET_PATH_CACHE:
-        return _ASSET_PATH_CACHE[url_path]
-    resolved = None
-    for prefix, root in _asset_roots():
-        if not url_path.startswith(prefix):
-            continue
-        relative = url_path[len(prefix):]
-        if not relative or relative.endswith("/"):
-            break
-        try:
-            base = root.resolve()
-            target = (base / relative).resolve()
-        except OSError:
-            break
-        if target != base and not str(target).startswith(str(base) + os.sep):
-            break            # `../` 穿越，绝不返回
-        if target.is_file():
-            resolved = target
-        break
-    _ASSET_PATH_CACHE[url_path] = resolved
-    return resolved
-
-
-def _hash_file(path: Path) -> str:
-    digest = hashlib.sha1()
-    try:
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(262144), b""):
-                digest.update(chunk)
-    except OSError:
-        # 读不到（并发删 / 权限）就退回时间戳，至少 URL 还能区分新旧
-        try:
-            return "t%x" % int(path.stat().st_mtime)
-        except OSError:
-            return ""
-    return digest.hexdigest()[:10]
-
-
-def asset_digest(path) -> str:
-    """单个资源文件的内容哈希（带 (mtime, size) 缓存）。
-
-    文件内容一变就换 URL —— 这就是「再也不用记着手改 `?v=`」的全部机制。
-    """
-    try:
-        path = Path(path)
-        stat = path.stat()
-    except OSError:
-        return ""
-    cached = _ASSET_DIGEST_CACHE.get(str(path))
-    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-        return cached[2]
-    digest = _hash_file(path)
-    _ASSET_DIGEST_CACHE[str(path)] = (stat.st_mtime_ns, stat.st_size, digest)
-    return digest
-
-
-def _asset_version_of(url_path: str) -> str:
-    target = _asset_file_of(url_path)
-    return asset_digest(target) if target is not None else ""
-
-
-def stamp_asset_urls(html: str) -> str:
-    """把 HTML 里 `/admin/assets/*` 与 `/static/*` 的 `?v=` 换成内容哈希。
-
-    只动 `src=` / `href=` 的属性值，且只动以 `/` 开头的同源路径 ——
-    外链、`data:`、`#anchor`、页面路由（`/admin`、`/join`）一律原样。
-    """
-    import re as _re
-
-    global _ASSET_REF_RE
-    if _ASSET_REF_RE is None:
-        _ASSET_REF_RE = _re.compile(r'\b(src|href)="(/[^"]*)"')
-    pattern = _ASSET_REF_RE
-
-    def replace(match):
-        attr, url = match.group(1), match.group(2)
-        core = url.split("#", 1)[0].split("?", 1)[0]
-        version = _asset_version_of(core)
-        if not version:
-            return match.group(0)
-        return '%s="%s?v=%s"' % (attr, core, version)
-
-    return pattern.sub(replace, html)
-
-
-def _console_shell(path) -> str:
-    """把「已登录」状态直接写进首屏 HTML，避免刷新时闪一下登录卡片。
-
-    为什么要在服务端做：`/admin` 这个入口本来就已经用会话 Cookie 判定过
-    「这个请求该不该拿到控制台」——判定结果就在眼前，却要等浏览器下载完
-    500KB 的 index.html、再跑一段 JS 请求 `/api/accounts` 才知道该显示哪个
-    界面。中间这段时间里 `#login` 是可见的，表现就是「刷新后先出现
-    登录页、过一会儿才变成后台」。
-
-    这里把结论直接注入成 `<html class="console-authed">`，配合 index.html
-    里的 `html.console-authed #login{display:none!important}`，登录卡片在
-    首帧就不会被绘制。JS 仍会在 Cookie/token 都失效时把它显示回来，
-    因此没有 JS 或会话过期时行为与原来一致。
-    """
-    stat = path.stat()
-    # 缓存的是**原始** HTML（读盘 + 完整性校验最贵）；盖章放在缓存之外，
-    # 这样改了 js/css 不用重启进程、也不用等缓存过期。
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
-    html = _CONSOLE_SHELL_CACHE.get(key)
-    if html is None:
-        html = _read_console_html(path)
-        if _console_html_complete(html):
-            _CONSOLE_SHELL_CACHE.clear()
-            _CONSOLE_SHELL_CACHE[key] = html
-    # 静态资源的 `?v=` 由服务端注入内容哈希 —— HTML 里留着的历史版本号会被覆盖
-    html = stamp_asset_urls(html)
-    marker = 'lang="zh-CN"'
-    if marker in html:
-        html = html.replace(marker, marker + ' class="console-authed"', 1)
-    elif "<html" in html:
-        html = html.replace("<html", '<html class="console-authed"', 1)
-    return html
-
-
-def _console_html_complete(html: str) -> bool:
-    return html.rstrip().endswith("</html>")
-
-
-def _read_console_html(path) -> str:
-    """读控制台 HTML，保证读到的是**完整**文件。
-
-    为什么需要：`index.html` 有 800KB、近 1.5 万行，编辑/升级的瞬间文件会先被
-    截断再写入。恰好在这个窗口里刷新页面，读到的就是半截 HTML —— 浏览器会把
-    最后一个 `<script>` 一直解析到文件结尾，报
-    `Uncaught SyntaxError: Unexpected end of input`，于是所有 `onclick` 都绑不上，
-    界面上表现为「扫描/导入/导出/账号池的按钮点了全都没反应」，而控制台里那条
-    报错完全看不出跟「文件没写完」有关。这里读到不完整就稍等重读，宁可慢一点
-    也不能把半截页面发出去。
-    """
-    html = ""
-    for _ in range(4):
-        before = path.stat()
-        html = path.read_text(encoding="utf-8")
-        after = path.stat()
-        stable = (before.st_mtime_ns == after.st_mtime_ns and before.st_size == after.st_size)
-        if stable and _console_html_complete(html):
-            return html
-        time.sleep(0.05)
-    return html
-
+# 新版是 Vite 构建产物：文件名本身就是内容哈希，缓存分层由
+# `_UI_ASSET_HEADERS` / `_UI_HTML_HEADERS` 承担；首屏登录态由 Vue 路由守卫处理，
+# 不再需要服务端注入。上面那套在本文件内已无调用方，tests/ 也没有引用，
+# 故整体移除（还原见 git 历史：合并前快照 501074e）。
 
 
 @app.get("/admin/assets/{file_path:path}")
-def console_asset(file_path: str, request: Request):
-    """控制台私有静态资源（admin/console/*）。无会话一律 404，不暴露存在性。
+def ui_asset(file_path: str):
+    """新版控制台静态资源（`admin/ui/dist/assets/*`）。
 
-    缓存策略跟着 `?v=` 走（版本号由 `stamp_asset_urls()` 注入内容哈希）：
+    与旧实现（`console_asset` 读 `admin/console/`）的关键差异：**这里不要会话**。
 
-      * URL 里的版本 == 当前文件哈希 → `immutable`，一年有效。
-        这个 URL 天生是内容寻址的，文件一变 URL 就变，长缓存不会拿到旧内容。
-      * 否则（无 version / 手写的旧版本号）→ `no-cache`，每次用 ETag 校验。
-        宁可多一个 304，也不让「改完没生效」再发生一次。
+    Vite 产物按内容哈希命名，`login.html` 在未登录时就要加载它引用的 JS/CSS；
+    旧实现在这里卡 `_console_allowed()`，未登录访客拿到的是白屏 + 一串 404。
+    公开可读不泄露任何东西 —— 文件名就是内容指纹，能取到的只有构建产物本身。
+
+    缓存：文件名变了内容才变，所以一年 immutable。旧版那套「按 `?v=` 查询串校验
+    内容哈希」的机制随 `admin/console` 一并移除，新版在构建期就完成了内容寻址。
     """
-    if not _console_allowed(request):
-        raise HTTPException(status_code=404)
-    root = CONSOLE_DIR.resolve()
-    target = (root / file_path).resolve()
+    root = (UI_DIST / "assets").resolve()
+    try:
+        target = (root / file_path).resolve()
+    except OSError:
+        raise HTTPException(status_code=404) from None
     if not str(target).startswith(str(root) + os.sep) or not target.is_file():
         raise HTTPException(status_code=404)
-    current = asset_digest(target)
-    supplied = request.query_params.get("v") or ""
-    if current and supplied == current:
-        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
-    else:
-        headers = {"Cache-Control": "no-cache"}
-    return FileResponse(target, headers=headers)
+    return FileResponse(target, headers=dict(_UI_ASSET_HEADERS))
 
 
 class UIStaticGZipMiddleware:
-    """只给 /admin/v2 的静态资源开 gzip。
+    """只给 /admin 下的静态资源开 gzip。
 
     为什么不全局：`/v1`、`/gw` 的 SSE 长连接一旦被 gzip 缓冲，token 会被攒住，
     流式体验直接坏掉。这里按路径分流，API/SSE 原样直通。
+
+    合并后前缀从 `/admin/v2/` 收窄为 `/admin`：入口 HTML 与 `assets/` 都在这个
+    前缀下，`/admin` 本身只有几百字节，`minimum_size=1024` 会自动跳过。
     """
 
     def __init__(self, app):
@@ -2217,7 +1998,7 @@ class UIStaticGZipMiddleware:
         self.gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=6)
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http" and scope.get("path", "").startswith("/admin/v2/"):
+        if scope.get("type") == "http" and scope.get("path", "").startswith("/admin"):
             await self.gzip(scope, receive, send)
         else:
             await self.app(scope, receive, send)
@@ -2235,111 +2016,114 @@ from starlette.middleware import Middleware as _StarletteMiddleware
 app.user_middleware.append(_StarletteMiddleware(UIStaticGZipMiddleware))
 
 
-# 新版控制台（Vue 3 + Vite 构建产物）—— `/admin/v2`
+# 后台前端（Vue 3 + Vite 构建产物）—— `/admin`
 # ---------------------------------------------------------------------------
 #
-# 与旧版**并行**：`/admin` 与 `/admin/assets/*` 继续由 admin_index /
-# console_asset 服务（admin/console/ 下是手写 JS，改一次要全量自测），
-# 新版只读 `admin/ui/dist`，源码在 `admin/ui`（`npm run build` 产出）。
-# 好处是切换只影响这两条路由，旧版随时可以回退，见 docs/ui-v2/README.md。
+# 合并后只剩这一套：`/admin` 入口、`/admin/assets/*` 资源、`/admin/{file}`
+# 其余文件 + SPA 回退，全部读 `admin/ui/dist`（源码 `admin/ui`，pnpm build 产出）。
+#
+# 旧控制台 `admin/console/`（手写 JS）已下线，不再有任何路由服务它；
+# `/admin/v2/*` 保留一条 301 哑跳转，只是为了不让老书签和文档链接 404。
 UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
 
 #: 入口 HTML（含 SPA 回退）的响应头：**一律不缓存**。
 #:
-#: 新版把 JS/CSS 换成了内容哈希文件名，但入口 HTML 里引用的是**构建时**
+#: 构建把 JS/CSS 换成了内容哈希文件名，但入口 HTML 里引用的是**构建时**
 #: 写死的那几个哈希；一旦发版，浏览器缓存里的旧 index.html 指向的 chunk
 #: 已经被删，用户看到的是白屏 + 一堆 404。所以 HTML 必须每次回源校验。
-_UI_V2_HTML_HEADERS = {
+_UI_HTML_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate",
     "Content-Security-Policy": _ADMIN_CSP,
 }
 
 #: `assets/` 下的文件名自带内容哈希（Vite 生成），改一个字节文件名就变，
 #: 于是可以放心长缓存一年：不存在「改完没生效」的可能。
-_UI_V2_ASSET_HEADERS = {
+_UI_ASSET_HEADERS = {
     "Cache-Control": "public, max-age=31536000, immutable",
 }
 
 
-def _log_ui_v2_missing() -> None:
-    """新版构建缺失时的统一日志。
+def _log_ui_missing() -> None:
+    """构建缺失时的统一日志。
 
     没有这一条，运维看到的只是一个 404 —— 分不清是「路由没挂」「没登录」
     还是「部署包漏了 dist 目录」。这里把话说明白，并给出补救命令。
     """
-    logger.warning("新版控制台未构建：%s 不存在（在 admin/ui 下执行 npm run build）",
+    logger.warning("后台前端未构建：%s 不存在（在 admin/ui 下执行 pnpm build）",
                    UI_DIST / "index.html")
 
 
 @app.get("/admin/v2")
 @app.get("/admin/v2/")
-def ui_v2_index(request: Request):
-    """新版控制台入口：有会话 → 发 `admin/ui/dist/index.html`。
+@app.get("/admin/v2/{legacy_path:path}")
+def ui_v2_redirect(request: Request, legacy_path: str = ""):
+    """旧链接兼容：`/admin/v2/...` → 301 `/admin/...`。
 
-    未通过 `_console_allowed()` 时**不**在这里发登录页，而是 303 回旧版
-    `/admin`：登录页只有一份（admin/static/login.html），两张皮迟早会漂移。
-    `/admin` 自己的门禁不变，跳转不会放宽任何东西。
+    合并前新版挂在 `/admin/v2/` 下，书签、发版公告、截图里全是这个前缀。
+    留一条哑跳转比让它们 404 更友好；hash 路由部分（`#/accounts`）本来就不发到
+    服务端，浏览器会自己带过去，不需要在这里拼。
     """
-    if not _console_allowed(request):
-        return RedirectResponse(url="/admin", status_code=303)
-    index = UI_DIST / "index.html"
-    if not index.is_file():
-        _log_ui_v2_missing()
-        raise HTTPException(status_code=404)
-    return FileResponse(index, headers=dict(_UI_V2_HTML_HEADERS))
+    suffix = "/" + legacy_path if legacy_path else "/"
+    query = request.url.query
+    url = "/admin" + suffix + ("?" + query if query else "")
+    return RedirectResponse(url=url, status_code=301)
 
 
-@app.get("/admin/v2/{file_path:path}")
-def ui_v2_asset(file_path: str, request: Request):
-    """新版控制台的静态资源 + SPA 回退。
+@app.get("/admin/{file_path:path}")
+def ui_file(file_path: str, request: Request):
+    """后台前端的其余文件 + SPA 回退。
 
-    与 `console_asset` 对齐的两条：
+    `assets/` 由上面的 `ui_asset` 先接走（内容哈希 → 长缓存、不要会话）；
+    这里处理：
 
-      * **未登录一律 404**，不告诉探测者「文件存在，只是你没权限」；
-      * 路径穿越用同样的 `resolve()` + 前缀校验挡掉（`../server.py` 之类），
-        且越界直接 404，不参与后面的 SPA 回退。
+      * 公开入口 `login.html` / `join.html` / `favicon.svg` / `logos/*` ——
+        登录页与注册页在未登录时就要加载它们引用的图标与图片；
+      * 其余文件（`index.html` 之外的一切）**未登录一律 404**，不告诉探测者
+        「文件存在，只是你没权限」；
+      * 路径穿越用 `resolve()` + 前缀校验挡掉（`../server.py` 之类），越界直接
+        404，不参与后面的 SPA 回退，避免把任意路径都伪装成 200。
 
-    额外一条是缓存分层：`assets/` 下是 Vite 的**内容哈希**产物 → immutable
-    长缓存；其余（`login.html` 等）→ `no-cache`，每次用 ETag 校验。
-
-    前端用的是 hash 路由（`/admin/v2/#/accounts`），正常不会把深链打到服务端；
-    但 `login.html` 是独立入口，未来也可能改成 history 模式，所以非
-    `assets/` 的未知路径统一回入口页，不让刷新直接吃 404。
+    前端用 hash 路由（`/admin/#/accounts`），正常不会把深链打到服务端；但将来
+    若改 history 模式，非 `assets/` 的未知路径会回入口页，刷新不会吃 404。
     """
-    # 登录页本身是公开入口：它引用的 JS/CSS 必须能在未登录时加载，
-    # 否则 /admin 发出去的 login.html 会白屏（浏览器报一堆 assets 404）。
-    # 只放行 assets/ 与 login.html；入口 HTML、SPA 深链、其他文件继续要求会话。
-    public_entry = file_path.replace("\\", "/") == "login.html"
-    is_asset = file_path.replace("\\", "/").startswith("assets/")
-    # The public join entry shares platform logos and the site icon with the console.
-    normalized_path = file_path.replace("\\", "/")
-    public_image = normalized_path == "favicon.svg" or (
-        normalized_path.startswith("logos/")
-        and Path(normalized_path).suffix.lower() in {".svg", ".png", ".webp", ".jpg", ".jpeg", ".avif"}
-    )
-    if not _console_allowed(request) and not (is_asset or public_entry or public_image):
+    normalized = file_path.replace("\\", "/")
+    public_entry = normalized in ("login.html", "join.html", "favicon.svg")
+    # 公开注册入口与登录页共用平台 logo 与站点图标（admin/ui/public/ 下）。
+    public_image = normalized.startswith("logos/") and Path(normalized).suffix.lower() in {
+        ".svg", ".png", ".webp", ".jpg", ".jpeg", ".avif",
+    }
+    if not _console_allowed(request) and not (public_entry or public_image):
         raise HTTPException(status_code=404)
     root = UI_DIST.resolve()
     try:
-        target = (root / file_path).resolve()
+        target = (root / normalized).resolve()
     except OSError:
         raise HTTPException(status_code=404) from None
     escaped = not str(target).startswith(str(root) + os.sep)
     if escaped or not target.is_file():
         # 资源缺失就是「构建不完整」，直说 404 比给一个入口页更好排查。
-        if is_asset or public_image:
+        if public_image or normalized.startswith("assets/"):
             raise HTTPException(status_code=404)
         if escaped:
-            # 穿越到 dist 之外：不回退，避免把任意路径都伪装成 200。
             raise HTTPException(status_code=404)
         index = root / "index.html"
         if not index.is_file():
-            _log_ui_v2_missing()
+            _log_ui_missing()
             raise HTTPException(status_code=404)
-        return FileResponse(index, headers=dict(_UI_V2_HTML_HEADERS))
-    headers = (dict(_UI_V2_ASSET_HEADERS) if is_asset
+        return FileResponse(index, headers=dict(_UI_HTML_HEADERS))
+    headers = (dict(_UI_ASSET_HEADERS) if normalized.startswith("assets/")
                else {"Cache-Control": "no-cache"})
     return FileResponse(target, headers=headers)
+
+
+@app.get("/static/login.html")
+def legacy_login_page():
+    """旧登录页已下线：登录页随新版一起构建，老链接 301 回入口。
+
+    合并时删掉了 `admin/static/login.html`。`/static/` 还挂着 `vendor/` 等
+    旧资产，直接让这个路径 404 会让收藏过登录页的人以为服务挂了。
+    """
+    return RedirectResponse(url="/admin", status_code=301)
 
 
 @app.get("/join")
@@ -2349,7 +2133,7 @@ def join_index(request: Request, db: Session = Depends(get_db)):
     """Vue public account entry; access remains controlled by the join gate middleware."""
     target = UI_DIST / "join.html"
     if not target.is_file():
-        _log_ui_v2_missing()
+        _log_ui_missing()
         raise HTTPException(status_code=404)
     return FileResponse(target, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate",

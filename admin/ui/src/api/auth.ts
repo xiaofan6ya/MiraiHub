@@ -6,10 +6,10 @@
  * 这里只提供一个可注册的回调，谁挂载外壳谁调用 setUnauthorizedHandler()。
  *
  * 后端事实（admin/server.py）：
- *   · 未登录访问 /admin 时服务端只下发 admin/static/login.html，**不读 next 参数**；
+ *   · 未登录访问 /admin 时服务端只下发 admin/ui/dist/login.html，**不读 next 参数**；
  *   · login.html 登录成功后执行 location.replace("/admin")，查询串会丢。
  * 所以"登录后回到原页面"只能靠浏览器侧暂存：这里把当前 hash 写进
- * sessionStorage('mh.nextHash')，跳转仍然只去 /admin（旧后端不支持 next）。
+ * sessionStorage('mh.nextHash')，跳转仍然只去 /admin（后端不支持 next）。
  * 新版外壳启动时调用 consumeNextHash() 即可恢复。
  */
 

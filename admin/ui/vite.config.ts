@@ -206,7 +206,7 @@ function inlineEntryCss(): Plugin {
         return html.replace(LINK, (tag) => {
           const href = HREF.exec(tag)?.[1]
           if (!href) return tag
-          // href 形如 /admin/v2/assets/index-xxxx.css —— 只取文件名去匹配产物。
+          // href 形如 /admin/assets/index-xxxx.css —— 只取文件名去匹配产物。
           const name = href.split('/').pop() || ''
           const asset = byFileName.get(name)
           if (!asset) return tag
@@ -224,7 +224,9 @@ function inlineEntryCss(): Plugin {
 export default defineConfig({
   // Independent cache for the review copy; never contend with the original frontend.
   cacheDir: '.vite-cache',
-  base: '/admin/v2/',
+  // 合并后新版独占 `/admin`：产物资源走 /admin/assets/*，与后端 admin/ui/dist 路由对齐。
+  // 旧版 `/admin/v2/` 只保留 301 兼容跳转（见 admin/server.py:ui_v2_redirect）。
+  base: '/admin/',
   plugins: [
     vue(),
     preloadFirstRoute('OverviewPage', 4096),
@@ -253,9 +255,10 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // base 改为 /admin/ 后，dev 入口是 http://localhost:5173/admin/；
+    // 原先的 /admin/assets 代理指向已下线的旧控制台（admin/console），一并去掉。
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: false },
-      '/admin/assets': { target: API_TARGET, changeOrigin: false },
       '/static': { target: API_TARGET, changeOrigin: false },
     },
   },
