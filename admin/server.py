@@ -2210,7 +2210,15 @@ import mimetypes
 # Windows registry MIME mappings can override JS/CSS and fail under nosniff.
 for _suffix, _mime in {".js": "application/javascript", ".css": "text/css", ".svg": "image/svg+xml"}.items():
     mimetypes.add_type(_mime, _suffix)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# `/static` 只剩旧控制台时代的 vendor 资源（新版全部走 /admin/assets/*，由 Vite 产物承担）。
+# APK 打包不再往里塞 mobile.css/js，所以这个目录可能不存在 —— `StaticFiles(check_dir=True)`
+# 在目录缺失时会直接抛 RuntimeError，把启动打断。这里改成「有就挂、没有就不挂」，
+# 而不是为了一个空目录在打包脚本里继续复制旧文件。
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    logging.getLogger("admin.server").warning(
+        "/static 目录不存在，跳过挂载（新版前端不依赖它；/static/login.html 仍走 301 到 /admin）")
 
 # ============================================================================
 # /gw 内嵌 converter 网关 —— **已下线**

@@ -3928,6 +3928,37 @@ export const zhCN = {
   'page.schedules.weekday.wed': '周三',
   'page.schedules.zoneHint': '北京时间 · UTC+8',
   'polling.paused': '自动刷新已暂停：{reason}',
+
+  // ---- Android 本机（只在 APK 的 WebView 里渲染，见 layout/AndroidCard.vue）----
+  'page.settings.android.title': 'Android 本机',
+  'page.settings.android.description':
+    '本地服务、通知与后台限制。这些开关直接调系统设置，改完回到本页会自动刷新状态。',
+  'page.settings.android.statusTitle': '本机服务状态',
+  'page.settings.android.actions': '本机操作',
+  'page.settings.android.service': '服务状态',
+  'page.settings.android.origin': '服务地址',
+  'page.settings.android.healthy': '最近健康检查',
+  'page.settings.android.notifications': '通知',
+  'page.settings.android.battery': '电池优化',
+  'page.settings.android.background': '后台运行',
+  'page.settings.android.keeper': '保活',
+  'page.settings.android.stateRunning': '运行中',
+  'page.settings.android.stateStarting': '正在启动',
+  'page.settings.android.stateStopped': '未启动',
+  'page.settings.android.allowed': '已允许',
+  'page.settings.android.blocked': '受限',
+  'page.settings.android.unrestricted': '不受限制',
+  'page.settings.android.restricted': '尚未授权',
+  'page.settings.android.keeperOn': '已开启（累计打断 {count} 次）',
+  'page.settings.android.keeperOff': '未开启',
+  'page.settings.android.refresh': '刷新状态',
+  'page.settings.android.restart': '重启本地服务',
+  'page.settings.android.restartConfirm': '当前 API 对话会断开，账号和设置将保留。确定重启？',
+  'page.settings.android.openNotifications': '通知设置',
+  'page.settings.android.openBattery': '电池优化',
+  'page.settings.android.openStartup': '自启动设置',
+  'page.settings.android.hint':
+    '通知关闭时服务仍可能运行；需要后台长期保持 API 时，请在系统设置里允许后台运行并忽略电池优化。',
 } as const
 
 export type MessageKey = keyof typeof zhCN

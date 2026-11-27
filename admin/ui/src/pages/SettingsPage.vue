@@ -29,6 +29,8 @@ import KV from '@/components/base/KV.vue'
 import Meter from '@/components/data/Meter.vue'
 import Section from '@/components/base/Section.vue'
 import LanguageCard from '@/layout/LanguageCard.vue'
+import AndroidCard from '@/layout/AndroidCard.vue'
+import { isAndroid } from '@/platform/android'
 import DataTable from '@/components/data/DataTable.vue'
 import Empty from '@/components/base/Empty.vue'
 import TitleTip from '@/components/base/TitleTip.vue'
@@ -918,6 +920,9 @@ onBeforeUnmount(() => {
   >
     <!-- 0. 界面语言（本地偏好，不写入后端配置） -->
     <LanguageCard />
+
+    <!-- 0.5 Android 本机能力（只在 APK 的 WebView 里出现：重启服务 / 通知 / 电池 / 自启动） -->
+    <AndroidCard v-if="isAndroid()" />
 
     <!-- 1. 运行配置 -->
     <SettingsCard

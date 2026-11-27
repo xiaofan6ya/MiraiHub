@@ -37,17 +37,29 @@
 6. **契约先行**：每个页面动手前，执行模型必须先从旧代码里抽出该页的接口与功能清单，写进
    `docs/ui-v2/contracts/<page>.md`，再按设计稿实现。功能清单就是验收标准，不允许丢功能。
 
-## 旧前端位置（参考用，Web 路由已下线）
+## 旧前端（已删除）
 
-> **重要**：`admin/console/` 已不再被任何 Web 路由服务（`/admin/assets/*` 现在指向
-> `admin/ui/dist/assets/`），但它**仍是 Android APK 的构建输入** ——
-> `scripts/build_android.py:218` 会 `copytree(admin/console)` 再用 `mobile_js()` /
-> `mobile_html()` 改写成本地页面。删这个目录之前先改打包脚本。
+> **2026-11-27 已整个移除 `admin/console/`（2.66 MB / 64 文件）。**
+>
+> 判断依据：APK 的 WebView 加载的是 `MainActivity.java:145` 的
+> `web.loadUrl(origin + "/admin?desktop=1&android=1")` —— 一个 URL，不是本地文件。
+> 合并后 `/admin` 由新版 Vue 承担（自带 `layout/MobileDrawer.vue` 与
+> 640/720/767/1023px 断点），所以旧控制台既不被 Web 路由服务，也不会被 APK 加载。
+> `build_android.py` 里对应的 `copytree(admin/console)` + `mobile_html()` /
+> `mobile_js()` 改写、以及 `android/web/mobile.{css,js}` / `mobile_settings.js` /
+> `settings.html` 一并删除。
+>
+> **APK 的 Android 原生能力**（重启本地服务 / 通知 / 电池优化 / 自启动 / 保存文件）
+> 原先只存在于旧控制台的移动端设置面板里，已在新版补回：
+> `admin/ui/src/platform/android.ts`（`window.WBAndroid` 桥接）+
+> `admin/ui/src/layout/AndroidCard.vue`（设置页「Android 本机」卡片，仅在 APK 内渲染）。
 
-- 页面结构：`admin/console/index.html`（24 个 `<section id="panel-xxx">`）
-- 主逻辑：`admin/console/console-app.js`（1.8 万行），`const TABS` 在第 1264 行
-- 辅助脚本：`platform-switch.js`（当前平台上下文 `window.WBPlatform`）、`dashboard.js`、`market.js`、
-  `agent.js`、`growth_center.js`、`traffic.js`、`platform-actions.js`、`ip-management.js`、`key-ip.js` 等
+历史实现（需要对照时看 `v1-console` 分支或 git 历史）：`admin/console/index.html`
+（24 个 `<section id="panel-xxx">`）+ `console-app.js`（1.8 万行，`const TABS` 在
+第 1264 行）+ 一批面板脚本（`dashboard.js` / `market.js` / `agent.js` /
+`growth_center.js` / `traffic.js` / `platform-actions.js` / `ip-management.js` /
+`key-ip.js` 等）。
+
 - 旧登录页 `admin/static/login.html` 与旧注册页 `admin/static/join.html` **已删除**
   （登录页/注册页随新版一起构建；`/static/login.html` 301 回 `/admin`，
   `/static/join.html` 仍走 `/join` 同一份产物与门禁）

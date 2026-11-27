@@ -16,11 +16,22 @@
 | 旧兼容 | `/admin/v2/*` → 301 `/admin/*`（老书签、发版公告、截图里的前缀） |
 | 移除 | `_console_mode()`、`?ui=v1` 回退、`MIRAIHUB_CONSOLE` 开关、`/admin/assets/*` 旧控制台路由、资源 `?v=` 哈希盖章机制（`stamp_asset_urls` / `asset_digest` / `_console_shell` 等 7 个函数）、`console_asset` |
 | 删除文件 | `admin/static/login.html`、`join.html`、`phone-session.js`、`phone-region.css` |
-| 保留 | `admin/console/`（不再被任何 Web 路由服务，**但仍是 Android APK 的构建输入**：`scripts/build_android.py:218` 会 `copytree(admin/console)` 再改写成本地页面 —— 删目录前必须先改打包脚本）、`admin/static/vendor/` |
+| 删除目录 | `admin/console/`（2.66 MB / 64 文件）。判断依据：APK 的 WebView 加载的是 `MainActivity.java:145` 的 `web.loadUrl(origin + "/admin?desktop=1&android=1")`，不是本地文件 —— 合并后 `/admin` 由新版承担，旧控制台既不被路由服务也不会被 APK 加载。连带删除 `android/web/mobile.{css,js}`、`mobile_settings.js`、`settings.html` 与 `build_android.py` 里的 `copytree(admin/console)` + `mobile_html()`/`mobile_js()` 改写（staging 已验证：`admin/console` 与 `admin/static` 不再进包，`admin/ui/dist` 正常进包） |
+| 保留 | `admin/static/vendor/`（旧控制台时代的 dompurify / marked / fontawesome / tailwind，新版全部走 npm 包，运行时无人引用；`/static` 的挂载已改成「目录不存在就跳过」，随时可删） |
 | 构建 | `vite.config.ts` 的 `base: '/admin/v2/'` → `'/admin/'`；dev proxy 去掉旧 `/admin/assets` |
 | 测试 | `tests/test_ui_v2_serving.py` 重写（18 例）、`tests/test_join_vue_entry.py` 适配（5 例），23 passed |
 
 前台入口：`http://<host>/admin` · 注册：`/join` · 票据引导：`/j`
+
+### 1.1 本轮已修复的缺口
+
+| # | 缺口 | 修法 |
+|---|---|---|
+| 1 | **WorkBuddy 官方登录接力缺失**（审计漏项，用户指出的） | 后端 `modes: ["sms","official"]`（`admin/platform/workbuddy/public_auth.py:22`）一直活着，但新版 `useJoin.ts` 的 `Mode` 类型只有 `qr/auth_url/sms`，过滤时把 `official` 认成未知模式。已补：类型加 `'official'`、`choose()` 按 `qr → auth_url → official → sms` 选默认模式、`load()` 的白名单加 `official`；`JoinPage.vue` 增加「改用官方授权登录」往返切换，`official` 模式下文案改为「点下面的按钮打开官方授权页，用同一台手机完成登录，结果会自动出现」 |
+| 2 | 注册页验证码约束（原第 7 节降级 #5） | `maxlength` 10 → 8、`@input` 剔除非数字、前端校验补「4–8 位纯数字」 |
+| 3 | **Android 原生能力丢失**（本轮合并引入的回归） | 旧控制台的移动端设置面板（重启服务 / 通知 / 电池 / 自启动）随 `admin/console` 一起不再被加载。新增 `admin/ui/src/platform/android.ts`（`window.WBAndroid` 桥接封装）+ `admin/ui/src/layout/AndroidCard.vue`（设置页「Android 本机」卡片，仅在 APK 内渲染），接口与 `MainActivity.MobileBridge` 一一对应 |
+| 4 | 悬空的 `/static/login.html` | 旧登录页删除后加 301 → `/admin`，老书签不作废 |
+| 5 | `test_public_entry.py` 断言 `doubao` 平台存在 | 平台已下线，去掉该断言（测试本来就在红） |
 
 ---
 

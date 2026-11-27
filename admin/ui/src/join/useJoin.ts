@@ -1,6 +1,16 @@
-﻿import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-type Mode = 'qr' | 'auth_url' | 'sms'
+/**
+ * 公开入口的验证方式。
+ *
+ * `auth_url` 与 `official` 的区别在**服务端**，不在渲染层：
+ *   · `auth_url` —— 平台给出一个可授权的 https 地址（Marvis 这类）；
+ *   · `official`  —— WorkBuddy 的「官方登录接力」：服务端开一个官方登录会话，
+ *     把 `plugin_auth_url` 交给页面，用户用同一台手机在官方页完成登录后，
+ *     服务端轮询上游拿凭证入库（`admin/platform/workbuddy/public_auth.py:41`）。
+ * 两者返回的都是 `auth_url` 字段，前端可以走同一条渲染分支。
+ */
+type Mode = 'qr' | 'auth_url' | 'official' | 'sms'
 export interface JoinPlatform { id: string; label: string; modes: Mode[] }
 interface Account { name?: string; type?: string; sec_uid: string }
 interface Reply {
@@ -89,7 +99,11 @@ export function useJoin() {
   }
   async function choose(platform: JoinPlatform, nextMode?: Mode) {
     reset(); selected.value = platform
-    mode.value = nextMode || (platform.modes.includes('qr') ? 'qr' : platform.modes.includes('auth_url') ? 'auth_url' : 'sms')
+    mode.value = nextMode || (platform.modes.includes('qr') ? 'qr'
+      : platform.modes.includes('auth_url') ? 'auth_url'
+      // WorkBuddy 官方登录接力：手机号之外的另一条主路径，别漏。
+      : platform.modes.includes('official') ? 'official'
+      : 'sms')
     if (!platform.modes.includes(mode.value)) { stage.value = 'choose'; error.value = '该平台暂未开放此验证方式'; return }
     if (mode.value === 'sms') { stage.value = 'sms'; return }
     const token = epoch, id = platform.id; busy.value = true; stage.value = 'loading'
@@ -128,15 +142,19 @@ export function useJoin() {
     finally { if (current(token)) busy.value = false }
   }
   function verify() {
-    if (!code.value.trim() || code.value.trim().length > 10) { error.value = '请输入有效验证码'; return }
+    // 短信验证码是 4–8 位纯数字（旧版 join.html 的 maxlength=8 + 剔除非数字 + ≥4 位）。
+    // 只判「非空」会把 1 位数字或粘贴进来的乱码直接送到上游，白耗一次配对。
+    const digit = code.value.trim()
+    if (!digit || digit.length < 4) { error.value = '请输入收到的验证码'; return }
+    if (!/^\d+$/.test(digit)) { error.value = '验证码只包含数字，请重新输入'; return }
     if (needPassword.value && password.value.length < 6) { error.value = '请输入至少 6 位的账号密码'; return }
-    return submit('sms/verify', { code: code.value.trim(), password: password.value })
+    return submit('sms/verify', { code: digit, password: password.value })
   }
   function submitCallback() { if (callback.value.trim()) return submit('submit', { callback: callback.value.trim() }) }
   function back() { reset(); selected.value = null; stage.value = 'choose' }
   async function load() {
     const token = ++epoch; loading.value = true; error.value = ''
-    try { const data = await request('/api/open/platforms'); if (current(token)) { platforms.value = (data.platforms || []).filter(p => p.modes?.some(m => ['qr', 'auth_url', 'sms'].includes(m))); copy.value = data.copy || {} } }
+    try { const data = await request('/api/open/platforms'); if (current(token)) { platforms.value = (data.platforms || []).filter(p => p.modes?.some(m => ['qr', 'auth_url', 'official', 'sms'].includes(m))); copy.value = data.copy || {} } }
     catch (e) { if (current(token)) error.value = e instanceof Error ? e.message : '加载入口失败' }
     finally { if (current(token)) loading.value = false }
   }
