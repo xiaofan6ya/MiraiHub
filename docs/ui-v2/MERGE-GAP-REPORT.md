@@ -16,7 +16,7 @@
 | 旧兼容 | `/admin/v2/*` → 301 `/admin/*`（老书签、发版公告、截图里的前缀） |
 | 移除 | `_console_mode()`、`?ui=v1` 回退、`MIRAIHUB_CONSOLE` 开关、`/admin/assets/*` 旧控制台路由、资源 `?v=` 哈希盖章机制（`stamp_asset_urls` / `asset_digest` / `_console_shell` 等 7 个函数）、`console_asset` |
 | 删除文件 | `admin/static/login.html`、`join.html`、`phone-session.js`、`phone-region.css` |
-| 保留 | `admin/console/`（不再被任何路由服务，留作补缺口时的实现参考）、`admin/static/vendor/` |
+| 保留 | `admin/console/`（不再被任何 Web 路由服务，**但仍是 Android APK 的构建输入**：`scripts/build_android.py:218` 会 `copytree(admin/console)` 再改写成本地页面 —— 删目录前必须先改打包脚本）、`admin/static/vendor/` |
 | 构建 | `vite.config.ts` 的 `base: '/admin/v2/'` → `'/admin/'`；dev proxy 去掉旧 `/admin/assets` |
 | 测试 | `tests/test_ui_v2_serving.py` 重写（18 例）、`tests/test_join_vue_entry.py` 适配（5 例），23 passed |
 
