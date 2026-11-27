@@ -88,7 +88,7 @@ WorkBuddy 的公开注册本来有两条路：手机号验证码、**官方登�
 | 平台 | 文件 |
 |---|---|
 | Windows x64 | `miraihub-1.1.6-windows-x64.exe` |
-| macOS arm64 / x64 | `miraihub-1.1.6-macos-*.zip` |
-| Android arm64 | `dist/android/miraihub-1.1.6-android-arm64.apk` |
+| Android arm64 | `miraihub-1.1.6-android-arm64.apk` |
 
-每个产物都带 `.sha256` 校验文件。
+每个产物都带 `.sha256` 校验文件。macOS 包需要在 macOS 上构建（`python scripts/build_desktop.py`），
+本版未附带。
