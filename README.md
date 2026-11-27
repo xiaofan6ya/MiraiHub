@@ -5,7 +5,7 @@
 一个 API Key，调用多家上游；一套协议，覆盖所有模型。
 自带账号池、配额计费、风控哨兵与实时监控 —— 开箱即用，不需要外部中间件。
 
-当前版本 **v1.1.5** · Windows / macOS / Android / Docker
+当前版本 **v1.1.6** · Windows / macOS / Android / Docker
 
 ![MiraiHub 概览](assets/screenshots/overview.png)
 
@@ -56,7 +56,7 @@ Vue 3 + Vite 单页应用，**25 个页面 / 9 个分组**，深浅两套主题�
 | 公开入口 | 公开注册入口（邀请链接、文案、平台开关） |
 | 系统 | 设置 · 出口代理 · 更新与备份 |
 
-访问 `/admin` 即可。只有一个入口 —— **旧的手写 JS 控制台已在 v1.1.5 完全移除**，
+访问 `/admin` 即可。只有一个入口 —— **旧的手写 JS 控制台已在 v1.1.6 完全移除**，
 `?ui=v1` 与 `MIRAIHUB_CONSOLE` 开关一并下线，`/admin/v2/*` 只保留 301 兼容跳转。
 
 ![账号池](assets/screenshots/accounts.png)

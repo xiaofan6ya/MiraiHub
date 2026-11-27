@@ -15,9 +15,9 @@ MACOS = sys.platform == 'darwin'
 name = (f'miraihub-{version}-macos-{ARCH}' if MACOS
         else f'miraihub-{version}-windows-x64')
 datas = [(str(root / 'admin/static'), 'admin/static'),
-         # The authenticated management console lives outside the public
-         # static directory and must be present in the desktop bundle too.
-         (str(root / 'admin/console'), 'admin/console'),
+         # 后台前端只有一个实现（Vue 3 构建产物）。旧的 admin/console 已在
+         # 1.1.6 删除，spec 若继续收它，PyInstaller 会报
+         # 「Unable to find 'admin/console'」并中断整个构建。
          (str(root / 'admin/ui/dist'), 'admin/ui/dist'),
          # admin/data/ 是运行期用 read_text() 读的 JSON（上游错误文案表），
          # 漏打包会让 EXE/APK 启动即 FileNotFoundError：源码运行正常，只有产物才暴露。

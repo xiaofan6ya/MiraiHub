@@ -1488,16 +1488,27 @@ class DesktopAPI:
 
     def _smoke_test(self):
         result = {"ok": False, "version": VERSION, "port": self.port}
+        # 版本号在界面上的落点变了：旧控制台是 `#appVersion`（页脚），
+        # 新版 Vue 后台是侧栏底部 `.foot-version .ver`。两个都认，
+        # 否则后台换皮之后打包冒烟会永远等不到 ready。
+        probe = (
+            "(() => {"
+            "  const app = document.getElementById('app');"
+            "  if (!app || app.classList.contains('hidden')) return '';"
+            "  const el = document.querySelector('.foot-version .ver')"
+            "          || document.getElementById('appVersion');"
+            "  return el ? String(el.textContent || '') : '';"
+            "})()"
+        )
+        want = "v" + VERSION
         try:
-            for _ in range(60):
+            for _ in range(90):
                 if self._closing.wait(.5):
                     break
-                ready = self.window.evaluate_js("document.getElementById('app') && "
-                    "!document.getElementById('app').classList.contains('hidden') && "
-                    "document.getElementById('appVersion').textContent.includes('v" + VERSION + "')")
-                if ready:
+                text = self.window.evaluate_js(probe) or ""
+                if want in text:
                     result.update(ok=True, title=self.window.evaluate_js("document.title"),
-                                  footer=self.window.evaluate_js("document.getElementById('appVersion').textContent"))
+                                  footer=text)
                     break
         except Exception as exc:          # noqa: BLE001
             result["error"] = str(exc)

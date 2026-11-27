@@ -18,6 +18,9 @@ import App from './App.vue'
 import router from './router'
 import { initTheme } from './theme/useTheme'
 import { initLocale } from './i18n'
+// APK 的 WebView 靠 window.WBMobile 判定工作台就绪并换本地会话 Cookie；
+// 必须在挂载前注册，否则 Java 侧的 checkWorkbench 永远拿到 'waiting'。
+import './platform/mobile'
 
 initTheme()
 initPalette()
