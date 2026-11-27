@@ -56,7 +56,12 @@ export function createAppRouter(): Router {
       { path: '/:pathMatch(.*)*', redirect: '/overview' },
     ],
     // 前进 / 后退回到原来的滚动位置（KeepAlive 缓存的页面不重新出骨架，位置也要对得上）。
-    scrollBehavior: (_to, _from, savedPosition) => savedPosition ?? { top: 0 },
+    scrollBehavior: (to, from, savedPosition) => {
+      if (savedPosition) return savedPosition
+      // Filters, sorting and pagination update this page in place.
+      if (to.path === from.path) return false
+      return { top: 0 }
+    },
   })
 
   router.beforeEach(() => {

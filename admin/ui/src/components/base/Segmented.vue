@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 分段控件：高 28px、--surface-2 底、选中项纸底 + 1px 边框。 */
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SegmentedOption } from './segmented'
 import { useI18n } from '@/i18n'
 
@@ -18,6 +18,34 @@ const props = withDefaults(
 const emit = defineEmits<{ (event: 'update:modelValue', value: string | number): void }>()
 const { t } = useI18n()
 const labelText = computed(() => props.ariaLabel ?? t('common.segmentedAria'))
+const host = ref<HTMLElement | null>(null)
+const indicator = ref<{ x: number; y: number; width: number; height: number } | null>(null)
+let observer: ResizeObserver | undefined
+
+function measure(): void {
+  const active = host.value?.querySelector<HTMLElement>('.is-active')
+  if (!active || !active.offsetWidth) { indicator.value = null; return }
+  const next = { x: active.offsetLeft, y: active.offsetTop, width: active.offsetWidth, height: active.offsetHeight }
+  const previous = indicator.value
+  if (!previous || Object.keys(next).some(key => next[key as keyof typeof next] !== previous[key as keyof typeof next])) indicator.value = next
+}
+function observeItems(): void {
+  observer?.disconnect()
+  if (!host.value) return
+  observer?.observe(host.value)
+  host.value.querySelectorAll('.mh-seg__item').forEach(item => observer?.observe(item))
+}
+watch(() => props.modelValue, measure, { flush: 'post' })
+watch(() => props.options, () => { observeItems(); measure() }, { deep: true, flush: 'post' })
+onMounted(() => {
+  if (typeof ResizeObserver !== 'undefined') observer = new ResizeObserver(measure)
+  observeItems()
+  measure()
+  window.addEventListener('resize', measure)
+  void document.fonts?.ready.then(measure)
+})
+onBeforeUnmount(() => { observer?.disconnect(); window.removeEventListener('resize', measure) })
+
 
 function select(value: string | number): void {
   if (value === props.modelValue) return
@@ -27,11 +55,18 @@ function select(value: string | number): void {
 
 <template>
   <div
+    ref="host"
     class="mh-seg"
-    :class="{ 'mh-seg--scroll': scrollable }"
+    :class="{ 'mh-seg--scroll': scrollable, 'has-indicator': indicator }"
     role="radiogroup"
     :aria-label="labelText"
   >
+    <span
+      v-if="indicator"
+      class="mh-seg__indicator"
+      aria-hidden="true"
+      :style="{ transform: `translate3d(${indicator.x}px, ${indicator.y}px, 0)`, width: indicator.width + 'px', height: indicator.height + 'px' }"
+    />
     <button
       v-for="option in options"
       :key="String(option.value)"
@@ -50,6 +85,8 @@ function select(value: string | number): void {
 
 <style scoped>
 .mh-seg {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -65,6 +102,8 @@ function select(value: string | number): void {
 }
 
 .mh-seg__item {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
@@ -75,6 +114,7 @@ function select(value: string | number): void {
   background: transparent;
   color: var(--fg-muted);
   font-size: var(--fs-small);
+  font-weight: 500;
   line-height: var(--lh-small);
   cursor: pointer;
   white-space: nowrap;
@@ -90,5 +130,23 @@ function select(value: string | number): void {
   border-color: var(--border);
   color: var(--fg);
   font-weight: 500;
+}
+
+.mh-seg__indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  pointer-events: none;
+  transition: transform 280ms cubic-bezier(.22,1,.36,1), width 280ms cubic-bezier(.22,1,.36,1), height 280ms cubic-bezier(.22,1,.36,1);
+}
+.has-indicator .mh-seg__item.is-active { background: transparent; border-color: transparent; }
+.mh-seg__item:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .mh-seg__indicator, .mh-seg__item { transition: none; }
 }
 </style>

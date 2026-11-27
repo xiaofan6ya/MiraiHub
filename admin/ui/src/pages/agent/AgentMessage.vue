@@ -15,6 +15,7 @@ import { Bot, CircleAlert, CircleCheck, LoaderCircle, Paperclip, Wrench } from '
 import { assetUrl, renderMarkdown, type ChatMessage, type ChatToolTrace } from '@/api/agent'
 import { fmtDuration } from '@/utils/format'
 import { useI18n } from '@/i18n'
+import { TitleTip } from '@/components'
 
 const props = defineProps<{
   message: ChatMessage
@@ -65,9 +66,7 @@ function toolIcon(tool: ChatToolTrace) {
             </span>
             <Wrench :size="14" class="agent-tool__kind" aria-hidden="true" />
             <span class="agent-tool__name">{{ tool.label }}</span>
-            <span v-if="tool.summary && tool.status !== 'running'" class="agent-tool__summary" :title="tool.summary">
-              {{ tool.summary }}
-            </span>
+            <TitleTip v-if="tool.summary && tool.status !== 'running'" :content="tool.summary"><span class="agent-tool__summary">{{ tool.summary }}</span></TitleTip>
             <span v-if="tool.ms" class="agent-tool__ms">{{ fmtDuration(tool.ms) }}</span>
           </li>
         </ul>

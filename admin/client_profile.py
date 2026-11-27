@@ -782,15 +782,29 @@ def _apply_env(profile: dict) -> dict:
 
 def _build_ua(desktop_version: str | None, cli_version: str | None,
               application_name: str | None = None) -> str:
-    """按官方三段式拼 UA：`WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`。
+    """按官方口径拼 UA：`WorkBuddy/<v> WorkBuddy/<v>[ CLI/<cli>]`。
 
-    第一段/第二段是产品名（官方取 `applicationName`，见 app-instance.js 里对
+    前两段是产品名（官方取 `applicationName`，见 app-instance.js 里对
     `electron.app.userAgentFallback` 的覆写），第三段是内嵌 CLI 版本。
+
+    ## 第三段是**可选**的（2026-11-27 复核 5.11.3）
+
+    `main/server.js::buildVlmGatewayHeaders` 原文::
+
+        [`WorkBuddy/${n}`, `WorkBuddy/${n}`, ...(r ? [`CLI/${r}`] : [])].join(" ")
+
+    `r` 来自 `resolveBundledCliUserAgent()`（读 `cli/package.json`）——
+    读不到时**整段 CLI 都不拼**，只剩两段。所以 `cli_version` 传空串表示
+    「这个构建没有内嵌 CLI」，必须丢掉第三段；拿默认值顶上去等于报了一个
+    本机根本不存在的 CLI 版本，那才是真的对不上。
     """
     v = (desktop_version or DEFAULTS["desktop_version"]).strip()
-    c = (cli_version or DEFAULTS["cli_version"]).strip()
     brand = (application_name or DEFAULTS["application_name"]).strip()
-    return f"{brand}/{v} {brand}/{v} CLI/{c}"
+    segments = [f"{brand}/{v}", f"{brand}/{v}"]
+    cli = (cli_version or "").strip()
+    if cli and cli != "0.0.0":
+        segments.append(f"CLI/{cli}")
+    return " ".join(segments)
 
 
 # ---------------------------------------------------------------------------

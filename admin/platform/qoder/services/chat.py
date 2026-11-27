@@ -314,17 +314,79 @@ def _plan_iterator(plan: dict):
 
     `plan["abort"]`（可选，`http_keepalive.AbortHandle`）：网关在客户端断开时用它
     打断阻塞读（r3 第 2 项）；没有时行为与原来一致。
+
+    ## 端点被撤时的自动回退（2026-11-26）
+
+    model server 的 HTTP 端点 `/model/v1/chat/completions` 在上游已经撤掉：
+    连不带凭证的请求都回**空 404**，所以那不是「模型名写错」，而是**路由没了**。
+    以前这条 404 被记成 `model_unknown`，用户看到「模型不存在」，账号还被
+    记一次失败 —— 明明是网关侧要换链路。
+
+    现在：第一次拿到 `kind="endpoint_gone"` 就把这条链路**进程内标记为不可用**
+    （`_MODEL_SERVER_STATE`），本次请求立刻改走旧 COSY 链路
+    （`/algo/.../agent_chat_generation`，实测 200 正常出流），
+    之后所有请求直接走旧链路，不再每次白撞一次 404。
+    标记有 TTL：上游哪天把端点放回来，到点会自动再用新链路试。
     """
-    abort = plan.get("abort")
-    if plan.get("mode") == "model_server":
-        return client.iter_model_chat_stream(
-            plan["token"], plan["realm"], body=plan["upstream_openai"],
-            account_id=plan.get("account_id", 0), abort=abort)
-    return client.iter_chat_stream(
+    mode = plan.get("mode")
+    if mode == "model_server" and _model_server_usable():
+        try:
+            yield from client.iter_model_chat_stream(
+                plan["token"], plan["realm"], body=plan["upstream_openai"],
+                account_id=plan.get("account_id", 0), abort=plan.get("abort"))
+            return
+        except client.UpstreamError as exc:
+            if exc.kind != "endpoint_gone":
+                raise
+            _mark_model_server_down(exc.message)
+            logger.warning("Qoder model server 不可用，自动回退旧链路：%s",
+                           exc.message)
+    yield from client.iter_chat_stream(
         plan["token"], plan["realm"], uid=plan["uid"],
         body=plan["upstream"], name=plan["name"], email=plan["email"],
         machine_id=plan["machine_id"], account_id=plan.get("account_id", 0),
-        abort=abort)
+        abort=plan.get("abort"))
+
+
+#: model server 端点的可用性标记（进程内，跨账号共享 —— 端点没了是平台级事实）。
+_MODEL_SERVER_STATE: dict = {"down_at": 0.0, "reason": ""}
+
+#: 端点被撤后多久再试一次（秒）。太长会让上游恢复后还用旧链路，
+#: 太短会回到「每次请求白撞一次 404」。
+MODEL_SERVER_RETRY_S = 600.0
+
+
+def _model_server_usable() -> bool:
+    """model server 当前能不能用（被标记下线且未到期 → 不用）。"""
+    down_at = float(_MODEL_SERVER_STATE.get("down_at") or 0.0)
+    if not down_at:
+        return True
+    if time.time() - down_at >= MODEL_SERVER_RETRY_S:
+        # 到期：清掉标记，用一次新链路探活；失败会重新标记
+        _MODEL_SERVER_STATE.update({"down_at": 0.0, "reason": ""})
+        return True
+    return False
+
+
+def _mark_model_server_down(reason: str) -> None:
+    """把 model server 标记为不可用（下次到期前所有请求直接走旧链路）。"""
+    if not _MODEL_SERVER_STATE.get("down_at"):
+        logger.warning("Qoder model server 标记下线（%s），%d 秒后再试",
+                       reason, int(MODEL_SERVER_RETRY_S))
+    _MODEL_SERVER_STATE.update({"down_at": time.time(),
+                                "reason": str(reason or "")[:200]})
+
+
+def model_server_state() -> dict:
+    """当前 model server 链路状态（诊断用：`/api/qoder/...` 会透出）。"""
+    down_at = float(_MODEL_SERVER_STATE.get("down_at") or 0.0)
+    return {
+        "usable": _model_server_usable() if down_at else True,
+        "down_at": down_at or None,
+        "reason": _MODEL_SERVER_STATE.get("reason") or "",
+        "retry_after_s": max(0, int(MODEL_SERVER_RETRY_S - (time.time() - down_at))
+                             ) if down_at else 0,
+    }
 
 
 # ---------------------------------------------------------------------------

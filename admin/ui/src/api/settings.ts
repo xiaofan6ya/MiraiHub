@@ -127,6 +127,10 @@ export interface ProxyNode {
   last_ok_at: string | null
   last_error: string
   state: 'ready' | 'blocked' | 'disabled' | string
+  /** 是不是全局出口当前正在用的节点（issue #39）。 */
+  current?: boolean
+  /** 最近一次连通性体检结果（POST /api/proxies/{id}/test 写入）。 */
+  probe?: ProxyProbeResult | null
 }
 
 export interface ProxySummary {
@@ -170,6 +174,104 @@ export function deleteProxy(id: number): Promise<{ ok: boolean; id: number }> {
 
 export function unblockProxy(id: number): Promise<{ ok: boolean; id: number }> {
   return http<{ ok: boolean; id: number }>('POST', '/api/proxies/' + id + '/unblock')
+}
+
+/* -------------------------------------------------------------------------- */
+/* 全局出口（issue #39）：对话主链路挂代理 / 自动轮换 / 连通性体检               */
+/* -------------------------------------------------------------------------- */
+
+/** `admin/proxy_egress.py::probe()` 的返回。 */
+export interface ProxyProbeResult {
+  ok: boolean
+  latency_ms: number | null
+  status: number
+  egress_ip: string
+  via: string
+  target: string
+  error: string
+  at: string
+  total_ms?: number
+}
+
+export interface ProxyEgressSettings {
+  /** 0 = 直连，1 = 对话主链路走出口。 */
+  enabled: number
+  /** auto = 自动轮换；fixed = 锁定节点（手动切换）。 */
+  mode: 'auto' | 'fixed' | string
+  endpoint_id: number
+  pool: string
+  rotate_seconds: number
+  /** 1 = 每条请求换节点；0 = 按 rotate_seconds 周期。 */
+  rotate_per_request: number
+}
+
+export interface ProxyEgressCurrent {
+  endpoint_id: number
+  label: string
+  url: string
+  pool: string
+  since: string
+  reason: string
+}
+
+export interface ProxyEgressPayload {
+  settings: ProxyEgressSettings
+  current: ProxyEgressCurrent | null
+  available: number
+  slots: number
+  next_rotate_in: number | null
+  runtime: {
+    requests: number
+    rotations: number
+    last_ok_at: string
+    last_error: string
+    last_error_at: string
+    last_reason: string
+    waf_blocked: boolean
+  }
+  warnings: string[]
+  probe_target: string
+}
+
+/** GET /api/proxies/egress —— 全局出口现状。 */
+export function getProxyEgress(): Promise<ProxyEgressPayload> {
+  return http<ProxyEgressPayload>('GET', '/api/proxies/egress')
+}
+
+/** PUT /api/proxies/egress —— 合并式保存（只传要改的键）。 */
+export function saveProxyEgress(
+  patch: Partial<ProxyEgressSettings>,
+): Promise<ProxyEgressPayload> {
+  return http<ProxyEgressPayload>('PUT', '/api/proxies/egress', { body: patch })
+}
+
+/** POST /api/proxies/egress/rotate —— 手动切换；不传 id = 切到下一个。 */
+export function rotateProxyEgress(
+  endpointId?: number,
+): Promise<{ ok: boolean; current: ProxyEgressCurrent | null; status: ProxyEgressPayload }> {
+  return http('POST', '/api/proxies/egress/rotate', {
+    body: { endpoint_id: Number(endpointId || 0) },
+  })
+}
+
+/** POST /api/proxies/{id}/test —— 真实拨一次（延迟 / 出口 IP / 失败原因）。 */
+export function testProxyNode(id: number): Promise<{
+  ok: boolean
+  error: string
+  probe: ProxyProbeResult | null
+  endpoint_id: number
+  item?: ProxyNode
+}> {
+  return http('POST', '/api/proxies/' + id + '/test')
+}
+
+/** POST /api/proxies/test —— 测试还没落库的地址。 */
+export function testProxyUrl(url: string): Promise<{
+  ok: boolean
+  error: string
+  probe: ProxyProbeResult | null
+}> {
+  return http('POST', '/api/proxies/test', { body: { url } })
 }
 
 export const PROXY_STATE_LABELS: Record<string, string> = {

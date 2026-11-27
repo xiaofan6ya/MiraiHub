@@ -9,7 +9,7 @@
  * 设计原则（P6）：**按平台能力声明显示，不在页面里散落 if (platform === 'xxx')**。
  * 平台特有的授权流程集中在本文件的 PLATFORM_AUTH_FLOWS 表里，页面只问 addMethodsFor()。
  */
-import { http } from './http'
+import { http, type Query } from './http'
 import { fmtTime } from '@/utils/format'
 import { t as defaultTranslate, type Translate } from '@/i18n'
 
@@ -57,6 +57,8 @@ export interface BrowserAuthView {
   url: string
   accountId: number
   message: string
+  qrImage?: string
+  userCode?: string
 }
 
 /** 导入解析结果的一行（预览表格）。 */
@@ -130,9 +132,27 @@ export interface AuthFlowSpec {
   /** 提交验证码（成功后账号入池）。 */
   verify?: { path: string; body: (form: PhoneForm, session: Record<string, unknown>) => Record<string, unknown> }
   /** 浏览器授权：发起。 */
-  begin?: { path: string; body?: (platformId: string) => Record<string, unknown> }
-  /** 浏览器授权：轮询会话。 */
-  poll?: { path: string }
+  begin?: {
+    path: string
+    body?: (platformId: string) => Record<string, unknown>
+    query?: (platformId: string) => Query
+  }
+  /** 浏览器授权：轮询会话；session 保存 begin 返回的 auth_id/nonce。 */
+  poll?: {
+    path: string
+    query?: (session: Record<string, unknown>) => Query
+  }
+  fallback?: {
+    kind: 'callback' | 'cookie' | 'password'
+    path: string
+    body: (form: AuthFallbackForm, session: Record<string, unknown>) => Record<string, unknown>
+  }
+}
+
+export interface AuthFallbackForm {
+  value: string
+  username: string
+  password: string
 }
 
 /**
@@ -141,6 +161,23 @@ export interface AuthFlowSpec {
  * 没收录的平台不会出现对应的添加方式 —— 宁可不显示，也不给一个点了 404 的按钮。
  */
 export const PLATFORM_AUTH_FLOWS: Record<string, AuthFlowSpec> = {
+  // WorkBuddy：手机号验证码登录（接口位于 admin/routers/login.py）。
+  workbuddy: {
+    kind: 'phone',
+    prepare: { path: '/api/login/start' },
+    send: {
+      path: '/api/login/send',
+      body: (form, session) => ({
+        sid: String(session.sid || ''),
+        mobile: form.phone,
+        country_code: String(form.country || '+86').replace(/\D/g, '') || '86',
+      }),
+    },
+    verify: {
+      path: '/api/login/verify',
+      body: (form, session) => ({ sid: String(session.sid || ''), code: form.code }),
+    },
+  },
   // Loomy：手机号 + 验证码（老号直接登录、新号需要补密码）
   loomy: {
     kind: 'phone',
@@ -182,17 +219,43 @@ export const PLATFORM_AUTH_FLOWS: Record<string, AuthFlowSpec> = {
   marvis: {
     kind: 'browser',
     begin: { path: '/api/marvis/auth/begin' },
-    poll: { path: '/api/marvis/auth/poll' },
+    poll: { path: '/api/marvis/auth/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
   },
   raccoon: {
     kind: 'browser',
     begin: { path: '/api/raccoon/auth/begin' },
-    poll: { path: '/api/raccoon/auth/poll' },
+    poll: { path: '/api/raccoon/auth/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
   },
   'wps-lingxi': {
     kind: 'browser',
     begin: { path: '/api/wps-lingxi/auth/start' },
-    poll: { path: '/api/wps-lingxi/auth/poll' },
+    poll: { path: '/api/wps-lingxi/auth/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
+  },
+  trae: {
+    kind: 'browser',
+    begin: { path: '/api/trae/device/start', query: (id) => ({ realm: id.endsWith('-intl') ? 'intl' : 'cn' }) },
+    poll: { path: '/api/trae/device/poll', query: (session) => ({ nonce: String(session.nonce || session.auth_id || session.id || '') }) },
+    fallback: {
+      kind: 'callback', path: '/api/trae/device/callback',
+      body: (form, session) => ({ nonce: String(session.nonce || ''), callback_url: form.value.trim() }),
+    },
+  },
+  minimax: {
+    kind: 'browser',
+    begin: { path: '/api/minimax/device/start', query: (id) => ({ realm: id.endsWith('-intl') ? 'intl' : 'cn' }) },
+    poll: { path: '/api/minimax/device/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
+  },
+  astudio: {
+    kind: 'browser',
+    begin: { path: '/api/astudio/auth/begin' },
+    poll: { path: '/api/astudio/auth/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
+    fallback: { kind: 'cookie', path: '/api/astudio/auth/cookie', body: (form) => ({ cookie: form.value.trim() }) },
+  },
+  codar: {
+    kind: 'browser',
+    begin: { path: '/api/codar/auth/begin' },
+    poll: { path: '/api/codar/auth/poll', query: (session) => ({ auth_id: String(session.auth_id || session.id || '') }) },
+    fallback: { kind: 'password', path: '/api/codar/auth/password', body: (form) => ({ username: form.username.trim(), password: form.password }) },
   },
 }
 
@@ -345,17 +408,31 @@ export function beginBrowserAuth(
   const flow = flowOf(spec)
   if (!flow?.begin) return Promise.reject(new Error(tr('add.phone.noBrowser')))
   const platformId = String(spec?.id || storageOf(spec))
-  return http('POST', flow.begin.path, { body: flow.begin.body ? flow.begin.body(platformId) : {} })
+  return http('POST', flow.begin.path, {
+    body: flow.begin.body ? flow.begin.body(platformId) : {},
+    query: flow.begin.query?.(platformId),
+  })
 }
 
 export function pollBrowserAuth(
   spec: PlatformAddSpec | null | undefined,
+  session: Record<string, unknown> = {},
   translate?: Translate,
 ): Promise<Record<string, unknown>> {
   const tr = translate ?? defaultTranslate
   const flow = flowOf(spec)
   if (!flow?.poll) return Promise.reject(new Error(tr('add.phone.noBrowser')))
-  return http('GET', flow.poll.path)
+  return http('GET', flow.poll.path, { query: flow.poll.query ? flow.poll.query(session) : {} })
+}
+
+export function submitAuthFallback(
+  spec: PlatformAddSpec | null | undefined,
+  form: AuthFallbackForm,
+  session: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const fallback = flowOf(spec)?.fallback
+  if (!fallback) return Promise.reject(new Error('Unsupported authorization method'))
+  return http('POST', fallback.path, { body: fallback.body(form, session) })
 }
 
 /* ------------------------------------------------------------------ *
@@ -513,17 +590,19 @@ export function scanSummary(
 export function authStateOf(payload: Record<string, unknown> | null): BrowserAuthView {
   const data = payload || {}
   const rawStatus = String(data.status || data.state || '').toLowerCase()
-  const url = pickString(data, ['auth_url', 'url', 'qr_url', 'qr_svg_url', 'login_url'])
-  const message = pickString(data, ['message', 'detail', 'error', 'reason'])
+  const url = pickString(data, ['auth_url', 'url', 'verification_uri_complete', 'verification_uri', 'login_url', 'qr_url', 'qr_svg_url'])
+  const message = pickString(data, ['message', 'detail', 'error', 'reason', 'hint'])
   const accountId = Number(data.account_id || (data.account as Record<string, unknown> | undefined)?.id || 0) || 0
   let state: AuthState = 'pending'
-  if (rawStatus === 'failed' || rawStatus === 'error' || data.ok === false) state = 'failed'
+  if (['failed', 'error', 'expired', 'denied', 'canceled', 'cancelled'].includes(rawStatus) || data.ok === false) state = 'failed'
   else if (rawStatus === 'authorized' || rawStatus === 'done' || rawStatus === 'success' || rawStatus === 'completed' || accountId) {
     state = 'authorized'
   } else if (rawStatus === 'scanned' || data.scanned === true) state = 'scanned'
   else if (url) state = 'opened'
   else if (rawStatus === 'pending' || rawStatus === 'waiting' || rawStatus === '') state = 'pending'
-  return { state, url, accountId, message }
+  const qrImage = pickString(data, ['qr_image', 'qr_svg_url'])
+  const userCode = pickString(data, ['user_code'])
+  return { state, url, accountId, message, ...(qrImage ? { qrImage } : {}), ...(userCode ? { userCode } : {}) }
 }
 
 /** 步骤条文案（授权流程）。 */

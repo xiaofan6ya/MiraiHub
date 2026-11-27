@@ -12,11 +12,10 @@ import type { ModelMarketPayload } from '@/api/market'
 
 vi.mock('@/api/market', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/market')>()
-  return { ...actual, listModelMarket: vi.fn(), getModelAggregate: vi.fn(), getMarketTrend: vi.fn() }
+  return { ...actual, listModelMarket: vi.fn(), getModelAggregate: vi.fn() }
 })
 const listMarket = vi.mocked(marketApi.listModelMarket)
 const getAggregate = vi.mocked(marketApi.getModelAggregate)
-const getTrend = vi.mocked(marketApi.getMarketTrend)
 
 const payload: ModelMarketPayload = {
   window_hours: 24, start: '2026-11-22T11:00:00Z', end: '2026-11-23T11:00:00Z', source: 'rollup', total: 1, available_models: 1,
@@ -40,13 +39,14 @@ afterEach(() => { mounted?.wrapper.unmount(); mounted = null; document.body.inne
 
 describe('MarketPage 覆盖率补测', () => {
   it('首屏渲染模型广场与统计', async () => {
-    listMarket.mockResolvedValue(payload); getAggregate.mockResolvedValue(null as never); getTrend.mockResolvedValue({ trend: [] } as never)
+    listMarket.mockResolvedValue(payload); getAggregate.mockResolvedValue(null as never)
     const { wrapper } = await mountPage()
     expect(wrapper.find('h1').text()).toContain('模型广场')
     expect(wrapper.text()).toContain('DeepSeek-V4.1-Flash')
+    expect(wrapper.findAll('.mkc .wbm-cell').length).toBe(0)
   })
   it('搜索写入 query', async () => {
-    listMarket.mockResolvedValue(payload); getAggregate.mockResolvedValue(null as never); getTrend.mockResolvedValue({ trend: [] } as never)
+    listMarket.mockResolvedValue(payload); getAggregate.mockResolvedValue(null as never)
     const { wrapper, router } = await mountPage()
     const input = wrapper.findAll('input').find((x) => (x.attributes('placeholder') || '').includes('搜索模型'))
     expect(input, 'search input').toBeTruthy()
@@ -55,7 +55,7 @@ describe('MarketPage 覆盖率补测', () => {
     expect(router.currentRoute.value.query.q).toBe('deepseek')
   })
   it('主接口失败渲染错误态并可重试', async () => {
-    listMarket.mockRejectedValue(new Error('boom')); getAggregate.mockResolvedValue(null as never); getTrend.mockResolvedValue({ trend: [] } as never)
+    listMarket.mockRejectedValue(new Error('boom')); getAggregate.mockResolvedValue(null as never)
     const { wrapper } = await mountPage()
     expect(wrapper.text()).toContain('加载模型广场')
     const retry = wrapper.findAll('button').find((b) => b.text().includes('重试'))
@@ -68,7 +68,6 @@ describe('MarketPage 中英切换', () => {
   it('切到英文：页头 / 价格 / 汇总 / 状态出英文', async () => {
     listMarket.mockResolvedValue(payload)
     getAggregate.mockResolvedValue(null as never)
-    getTrend.mockResolvedValue({ trend: [] } as never)
 
     setLocale('zh-CN')
     const { wrapper } = await mountPage()

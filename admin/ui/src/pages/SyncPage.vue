@@ -21,7 +21,7 @@ import { NInput, NSkeleton } from 'naive-ui'
 import { CloudUpload, Copy, Eye, EyeOff, RefreshCw } from 'lucide-vue-next'
 import SettingsLayout from '@/layout/SettingsLayout.vue'
 import SettingsCard from '@/layout/SettingsCard.vue'
-import { Badge, Btn, Copyable, Empty, ErrorBlock, FormField, IconBtn, KV } from '@/components'
+import { Badge, Btn, Copyable, Empty, ErrorBlock, FormField, IconBtn, KV, TitleTip } from '@/components'
 import type { KvItem } from '@/components'
 import { useConfirm, useCopy, useRevisit, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
@@ -493,7 +493,7 @@ onBeforeUnmount(() => {
               <span class="last-push__label">{{ t('page.sync.lastPush') }}</span>
               <template v-if="lastPush">
                 <Badge :tone="lastPush.ok ? 'ok' : 'danger'" dot>{{ lastPush.resultText }}</Badge>
-                <span class="last-push__time" :title="lastPush.timeFull">{{ lastPush.timeText }}</span>
+                <TitleTip :content="lastPush.timeFull"><span class="last-push__time">{{ lastPush.timeText }}</span></TitleTip>
                 <span v-if="lastPush.remoteText" class="last-push__remote">
                   {{ lastPush.remoteText }}
                 </span>

@@ -4,7 +4,7 @@
  * 文案按 05-patterns §6：用过去式（"已保存""已禁用 3 个账号"），
  * 错误用 "<动作>失败：<原因>"，原因取后端 detail / message（utils/error 的 failureText）。
  */
-import { useMessage } from 'naive-ui'
+import { useIslandMessage as useMessage } from '@/components/feedback/islandQueue'
 
 /** 各类型的默认停留时长（毫秒）。 */
 export const TOAST_DURATION = {

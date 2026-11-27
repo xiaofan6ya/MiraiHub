@@ -5,7 +5,7 @@
  * 键盘：radiogroup 内 ←/→/↑/↓ 切换焦点，Enter/空格选中（11-polish-motion §4.5）。
  */
 import { ref } from 'vue'
-import { Card } from '@/components'
+import { Card, TitleTip } from '@/components'
 import { strategyDescription, type GatewayConfig } from '@/api/gateway'
 import { useI18n } from '@/i18n'
 
@@ -62,7 +62,7 @@ function onKey(event: KeyboardEvent, index: number): void {
         @keydown="onKey($event, index)"
       >
         <span class="gw-strategy__dot" aria-hidden="true" />
-        <span class="gw-strategy__name" :title="item.description">{{ item.label }}</span>
+        <TitleTip :content="item.description"><span class="gw-strategy__name">{{ item.label }}</span></TitleTip>
       </button>
     </div>
     <p v-if="config" class="gw-strategy__detail">{{ strategyDescription(config) }}</p>

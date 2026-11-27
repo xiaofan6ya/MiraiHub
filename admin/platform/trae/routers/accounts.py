@@ -1163,8 +1163,9 @@ def test_account(acc_id: int, model: str = "", _: bool = Depends(require_admin),
     except client.UpstreamError as exc:
         stages["models"] = {"ok": False, **exc.to_dict()}
 
-    candidates = [model] if model else [
-        str(r.get("name") or "") for r in (stages.get("models", {}).get("models") or [])]
+    # `stages["models"]["models"]` is normalized to a string list above;
+    # do not treat its entries as the original response dictionaries.
+    candidates = [model] if model else list(stages.get("models", {}).get("models") or [])
     candidates = [c for c in candidates if c][:3]
     stages["conversation"] = {"ok": False, "error": "无可试模型"}
     for candidate in candidates:

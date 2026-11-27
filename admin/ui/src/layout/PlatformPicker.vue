@@ -135,6 +135,7 @@ onBeforeUnmount(() => {
     trigger="click"
     placement="bottom-start"
     :width="320"
+    :style="{ padding: '0', maxWidth: 'calc(100vw - 24px)' }"
     :show-arrow="false"
     :content-style="{ padding: '0', borderRadius: 'var(--r-card)' }"
     @clickoutside="close"
@@ -204,7 +205,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--sp-2);
   height: 32px;
-  max-width: 320px;
+  width: max-content;
+  max-width: 268px;
+  flex: 0 0 auto;
+  min-width: 0;
   padding: 0 10px 0 6px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -230,6 +234,9 @@ onBeforeUnmount(() => {
 }
 
 .picker-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: left;
   font-size: var(--fs-body);
   font-weight: 600;
   white-space: nowrap;
@@ -238,6 +245,7 @@ onBeforeUnmount(() => {
 }
 
 .picker-count {
+  white-space: nowrap;
   flex: 0 0 auto;
   padding: 0 7px;
   height: 20px;
@@ -317,6 +325,7 @@ onBeforeUnmount(() => {
 }
 
 .row-count {
+  white-space: nowrap;
   flex: 0 0 auto;
   color: var(--fg-muted);
   font-size: var(--fs-small);
@@ -362,15 +371,12 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
-@media (max-width: 1023px) {
-  .picker-count {
-    display: none;
-  }
-}
+@media (max-width: 1279px) { .picker { max-width: 252px; } }
 
 @media (max-width: 640px) {
   .picker {
-    max-width: 150px;
+    width: clamp(128px, 43vw, 208px);
   }
+  .picker-count { display: none; }
 }
 </style>

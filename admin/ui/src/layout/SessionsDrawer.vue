@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { useIslandMessage as useMessage } from '@/components/feedback/islandQueue'
 import { computed, ref, watch } from 'vue'
-import { NDrawer, NDrawerContent, useDialog, useMessage } from 'naive-ui'
+import { NDrawer, NDrawerContent, useDialog } from 'naive-ui'
 import {
   banSession,
   listSessions,

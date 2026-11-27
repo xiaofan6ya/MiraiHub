@@ -7,7 +7,7 @@
 import { nextTick, ref } from 'vue'
 import { NInput } from 'naive-ui'
 import { Pencil, Pin, Plus, Search, Trash2 } from 'lucide-vue-next'
-import { Btn, ErrorBlock, IconBtn } from '@/components'
+import { Btn, ErrorBlock, IconBtn, TitleTip } from '@/components'
 import { fmtRelative } from '@/utils/format'
 import { useI18n } from '@/i18n'
 import type { AgentConversation } from '@/api/agent'
@@ -122,10 +122,12 @@ function onItemKey(event: KeyboardEvent, item: AgentConversation): void {
             @blur="saveRename(item)"
           />
           <template v-else>
-            <span class="agent-conv__title" :title="displayTitle(item)">
-              <Pin v-if="item.pinned" :size="14" class="agent-conv__pin" aria-hidden="true" />
-              {{ displayTitle(item) }}
-            </span>
+            <TitleTip :content="displayTitle(item)">
+              <span class="agent-conv__title">
+                <Pin v-if="item.pinned" :size="14" class="agent-conv__pin" aria-hidden="true" />
+                {{ displayTitle(item) }}
+              </span>
+            </TitleTip>
             <span class="agent-conv__time">{{ fmtRelative(item.updated_at || item.created_at) }}</span>
           </template>
           <span v-if="editingId !== item.conversation_id" class="agent-conv__ops" @click.stop>

@@ -297,8 +297,9 @@
 
 .models-edit-head__main {
   display: grid;
-  gap: 2px;
+  gap: 6px;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .models-edit-head__name {
@@ -324,15 +325,30 @@
 .models-edit-platform,
 .models-edit-multiplier {
   display: grid;
-  grid-template-columns: 18px 1fr auto auto;
   align-items: center;
   gap: var(--sp-2);
-  padding: 4px 0;
+  padding: 12px 14px;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.models-edit-platform {
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+}
+
+.models-edit-multiplier {
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 5px;
 }
 
 .models-edit-platform__name,
 .models-edit-multiplier__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--fg);
+  font-weight: 500;
 }
 
 .models-edit-platform__mult,
@@ -342,7 +358,7 @@
 }
 
 .models-edit-multiplier__raw {
-  grid-column: 2 / -1;
+  grid-column: 1 / -1;
   color: var(--fg-muted);
   font-size: var(--fs-small);
   overflow: hidden;
@@ -382,12 +398,18 @@
 
 .models-edit-map__row {
   display: grid;
-  grid-template-columns: 128px minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: center;
   gap: var(--sp-2);
-  padding: 4px 0;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 12px 14px;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
 }
+
+.models-edit-map__row > :nth-child(2) { grid-column: 1; grid-row: 2; min-width: 0; }
+.models-edit-map__row > :nth-child(3) { grid-column: 1 / -1; grid-row: 3; min-width: 0; }
+.models-edit-map__row > :last-child { grid-column: 2; grid-row: 1; justify-self: end; }
 
 .models-edit-map__platform {
   display: inline-flex;
@@ -436,8 +458,10 @@
   }
 
   .models-edit-map__row {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
+  .models-edit-map__row > :nth-child(2) { grid-column: 1 / -1; }
+  .models-edit-caps__number { width: min(160px, 52%); }
 
   .models-edit-map__upstream {
     grid-column: 1 / -1;

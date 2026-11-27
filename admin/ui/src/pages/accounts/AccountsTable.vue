@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * 账号池 · 表格（AccountsPage 拆分，10-visual-refresh §1.5 / §5）。
  *
@@ -84,38 +86,37 @@ function sortOrderOf(stateKey: string): 'ascend' | 'descend' | false {
 function renderAccount(row: TableRow): VNodeChild {
   const item = row as AccountRow
   const sub: VNodeChild[] = []
-  sub.push(h('span', { class: 'acc-cell__uid mono', title: item.uid || '' }, item.uidMasked || FMT_EMPTY))
+  sub.push(h(TitleTip, { content: String((item.uid || '') ?? '') }, { default: () => h('span', { class: 'acc-cell__uid mono' }, item.uidMasked || FMT_EMPTY) }))
   if (item.domain) {
     sub.push(h('span', { class: 'acc-cell__sep', 'aria-hidden': 'true' }, '·'))
-    sub.push(h('span', { class: 'acc-cell__domain', title: item.domain }, item.domain))
+    sub.push(h(TitleTip, { content: String((item.domain) ?? '') }, { default: () => h('span', { class: 'acc-cell__domain' }, item.domain) }))
   }
   // 已禁用：名称与副行整体降为 muted 灰（10-visual-refresh §5 账号表）
   return h('div', { class: ['acc-cell', item.statusKey === 'disabled' ? 'is-disabled' : ''] }, [
     // 名称可点：打开详情抽屉（契约「点击行进入详情」；只做名称可点，避免误触勾选框与行操作）
-    h(
+    h(TitleTip, { content: String((item.name) ?? '') }, { default: () => h(
       'button',
       {
         type: 'button',
         class: 'acc-cell__name',
-        title: item.name,
         onClick: () => emit('action', item, 'detail'),
       },
       item.name,
-    ),
+    ) }),
     h('span', { class: 'acc-cell__sub' }, sub),
   ])
 }
 
 function renderStatus(row: TableRow): VNodeChild {
   const item = row as AccountRow
-  return h('span', { class: 'acc-status', title: item.statusTitle }, [
+  return h(TitleTip, { content: String((item.statusTitle) ?? '') }, { default: () => h('span', { class: 'acc-status' }, [
     h(StatusDot, { tone: item.statusTone, label: item.statusLabel }),
-  ])
+  ]) })
 }
 
 function renderBalance(row: TableRow): VNodeChild {
   const item = row as AccountRow
-  return h('div', { class: 'acc-balance', title: item.balanceTitle }, [
+  return h(TitleTip, { content: String((item.balanceTitle) ?? '') }, { default: () => h('div', { class: 'acc-balance' }, [
     h('span', { class: 'acc-balance__text tnum' }, [
       h('span', { class: item.statusKey === 'disabled' ? 'acc-muted-num' : 'acc-strong' }, fmtInt(item.balanceRemain)),
       h('span', { class: 'acc-balance__total' }, ' / ' + fmtInt(item.balanceTotal)),
@@ -126,40 +127,40 @@ function renderBalance(row: TableRow): VNodeChild {
       height: 4,
       ariaLabel: t('page.accounts.balanceAria', { name: item.name }),
     }),
-  ])
+  ]) })
 }
 
 function renderToday(row: TableRow): VNodeChild {
   const item = row as AccountRow
   const zero = item.todayCredits <= 0 && item.todayRequests <= 0
   if (zero) return h('span', { class: 'acc-faint tnum' }, FMT_EMPTY)
-  return h(
+  return h(TitleTip, { content: String((t('page.accounts.todayTitle', { count: fmtInt(item.todayRequests) })) ?? '') }, { default: () => h(
     'span',
-    { class: 'tnum', title: t('page.accounts.todayTitle', { count: fmtInt(item.todayRequests) }) },
+    { class: 'tnum' },
     fmtCredit(item.todayCredits),
-  )
+  ) })
 }
 
 function renderExpire(row: TableRow): VNodeChild {
   const item = row as AccountRow
   if (!item.expireAt) return h('span', { class: 'acc-faint' }, FMT_EMPTY)
-  return h(
+  return h(TitleTip, { content: String((fmtFullTime(item.expireAt)) ?? '') }, { default: () => h(
     'span',
-    { class: 'acc-expire is-' + item.expireTone, title: fmtFullTime(item.expireAt) },
+    { class: 'acc-expire is-' + item.expireTone },
     item.expireText,
-  )
+  ) })
 }
 
 function renderLastUsed(row: TableRow): VNodeChild {
   const item = row as AccountRow
   if (!item.raw.last_used_at) return h('span', { class: 'acc-faint' }, FMT_EMPTY)
-  return h('span', { class: 'acc-muted', title: fmtFullTime(item.raw.last_used_at) }, item.lastUsedText)
+  return h(TitleTip, { content: String((fmtFullTime(item.raw.last_used_at)) ?? '') }, { default: () => h('span', { class: 'acc-muted' }, item.lastUsedText) })
 }
 
 function renderNote(row: TableRow): VNodeChild {
   const item = row as AccountRow
   if (!item.boundKeyName) return h('span', { class: 'acc-faint' }, FMT_EMPTY)
-  return h('span', { class: 'acc-note', title: item.note }, item.boundKeyName)
+  return h(TitleTip, { content: String((item.note) ?? '') }, { default: () => h('span', { class: 'acc-note' }, item.boundKeyName) })
 }
 
 function renderToken(row: TableRow): VNodeChild {
@@ -383,6 +384,7 @@ defineExpose({ clearSelection })
 
     <template #empty>
       <Empty
+        :illustration="hasFilters ? 'search' : 'empty'"
         :icon="Inbox"
         :description="hasFilters ? t('page.accounts.emptyFiltered') : t('page.accounts.emptyPlatform')"
       >

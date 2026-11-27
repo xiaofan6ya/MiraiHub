@@ -308,15 +308,15 @@ watch([days, granularity], () => {
       </section>
       <p class="stats-meta"><span class="mh-skeleton stats-skeleton__line" /></p>
       <div class="stats-charts">
-        <Card class="stats-chart-card" :title="t('page.stats.card.requests')">
+        <Card class="stats-chart-card mh-panel-card" :title="t('page.stats.card.requests')">
           <div class="mh-skeleton stats-skeleton__chart" />
         </Card>
-        <Card class="stats-chart-card" :title="t('page.stats.card.tokens')">
+        <Card class="stats-chart-card mh-panel-card" :title="t('page.stats.card.tokens')">
           <div class="mh-skeleton stats-skeleton__chart" />
         </Card>
       </div>
       <div class="stats-ranks">
-        <div v-for="index in 3" :key="index" class="mh-skeleton stats-skeleton__rank" />
+        <div v-for="index in 3" :key="index" class="mh-skeleton stats-skeleton__rank mh-panel-placeholder" />
       </div>
     </div>
 
@@ -344,7 +344,7 @@ watch([days, granularity], () => {
       </p>
 
       <div class="stats-charts">
-        <Card class="stats-chart-card" :title="t('page.stats.card.requests')" :loading="loading">
+        <Card class="stats-chart-card mh-panel-card" :title="t('page.stats.card.requests')" :loading="loading">
           <template #extra>
             <span class="stats-note">{{ requestNote }}</span>
           </template>
@@ -362,7 +362,7 @@ watch([days, granularity], () => {
           </p>
         </Card>
 
-        <Card class="stats-chart-card" :title="t('page.stats.card.tokens')" :loading="loading">
+        <Card class="stats-chart-card mh-panel-card" :title="t('page.stats.card.tokens')" :loading="loading">
           <template #extra>
             <span class="stats-note">{{ tokenNote }}</span>
           </template>
@@ -379,7 +379,7 @@ watch([days, granularity], () => {
       </div>
 
       <div class="stats-ranks">
-        <Card :title="t('page.stats.card.platforms')">
+        <Card class="mh-panel-card" :title="t('page.stats.card.platforms')">
           <template #extra>
             <span class="stats-note">{{ platformNote }}</span>
           </template>
@@ -393,7 +393,7 @@ watch([days, granularity], () => {
           <Empty v-else :description="t('page.stats.empty.platforms')" compact />
         </Card>
 
-        <Card :title="t('page.stats.card.models')">
+        <Card class="mh-panel-card" :title="t('page.stats.card.models')">
           <template #extra>
             <span class="stats-note">{{ modelNote }}</span>
           </template>
@@ -407,7 +407,7 @@ watch([days, granularity], () => {
           <Empty v-else :description="t('page.stats.empty.models')" compact />
         </Card>
 
-        <Card :title="t('page.stats.card.keys')">
+        <Card class="mh-panel-card" :title="t('page.stats.card.keys')">
           <template #extra>
             <span class="stats-note">{{ keyNote }}</span>
           </template>
@@ -439,12 +439,13 @@ watch([days, granularity], () => {
   min-width: 0;
 }
 
-/* KPI 行：≥1280 一行 5 个；768–1279 自动换成 2–3 个；手机 1 个。卡片按内容等高，不强撑。 */
+/* KPI 行：≥1280 一行 5 个；768–1279 自动换成 2–3 个；手机 1 个。卡片跨行等高。 */
 .stats-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 
@@ -453,7 +454,7 @@ watch([days, granularity], () => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-4);
   min-width: 0;
-  align-items: start;
+  align-items: stretch;
 }
 
 /* 两张主图是大卡：圆角用 --r-lg（10-visual-refresh §1.1）。 */
@@ -466,8 +467,8 @@ watch([days, granularity], () => {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-4);
   min-width: 0;
-  /* 子卡按内容高度排，不互相撑高留白（第 1 轮审查 P1-3） */
-  align-items: start;
+  /* 排行与趋势共享面板尺寸；长列表只滚动卡片内容。 */
+  align-items: stretch;
 }
 
 .stats-skeleton {

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * S18 风控哨兵 /sentinel（设计稿 06-pages-a P2，模板 A）。
  *
@@ -315,30 +317,29 @@ function cellAccount(row: TableRow): string {
 
 function cellSeverity(row: TableRow): VNodeChild {
   const tone = String(row.severityTone || 'neutral') as 'ok' | 'warn' | 'danger' | 'neutral' | 'brand'
-  return h(
+  return h(TitleTip, { content: String((String(row.signalLabel || '')) ?? '') }, { default: () => h(
     Badge,
-    { tone, title: String(row.signalLabel || '') },
+    { tone },
     { default: () => String(row.severityLabel || '') },
-  )
+  ) })
 }
 
 function cellCode(row: TableRow): VNodeChild {
   const unmapped = Boolean(row.unmapped)
-  return h(
+  return h(TitleTip, { content: String((unmapped ? t('page.sentinel.unmappedTip') : '') ?? '') }, { default: () => h(
     'span',
     {
       class: 'mono',
-      title: unmapped ? t('page.sentinel.unmappedTip') : '',
     },
     String(row.code || '-') + (unmapped ? t('page.sentinel.unmappedTag') : ''),
-  )
+  ) })
 }
 
 function cellReason(row: TableRow): VNodeChild {
   const label = String(row.label || '')
   const signal = String(row.signalLabel || '')
   const detail = String(row.detail || '')
-  return h('span', { class: 'sentinel-reason', title: detail }, signal ? signal + ' · ' + label : label || FMT_EMPTY)
+  return h(TitleTip, { content: String((detail) ?? '') }, { default: () => h('span', { class: 'sentinel-reason' }, signal ? signal + ' · ' + label : label || FMT_EMPTY) })
 }
 
 function cellActions(row: TableRow): VNodeChild {

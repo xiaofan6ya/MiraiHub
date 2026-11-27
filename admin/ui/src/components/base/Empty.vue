@@ -30,14 +30,16 @@ const props = withDefaults(
 
 const { t } = useI18n()
 const iconComponent = computed(() => props.icon ?? Inbox)
+// Keep compact rows and explicitly chosen icons small; give full empty panels a useful illustration.
+const artKind = computed(() => props.illustration ?? (!props.compact && !props.icon ? 'empty' : undefined))
 const desc = computed(() => props.description ?? t('common.empty'))
 </script>
 
 <template>
-  <div class="mh-empty" :class="{ 'mh-empty--compact': compact, 'mh-empty--art': illustration || $slots.illustration }">
-    <span v-if="$slots.illustration || illustration" class="mh-empty__art" aria-hidden="true">
+  <div class="mh-empty" :class="{ 'mh-empty--compact': compact, 'mh-empty--art': artKind || $slots.illustration }">
+    <span v-if="$slots.illustration || artKind" class="mh-empty__art" aria-hidden="true">
       <slot name="illustration">
-        <EmptyIllustration v-if="illustration" :kind="illustration" :compact="compact" />
+        <EmptyIllustration v-if="artKind" :kind="artKind" :compact="compact" />
       </slot>
     </span>
     <span v-else class="mh-empty__icon" aria-hidden="true">
@@ -68,6 +70,7 @@ const desc = computed(() => props.description ?? t('common.empty'))
 }
 
 .mh-empty__icon {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -88,14 +91,28 @@ const desc = computed(() => props.description ?? t('common.empty'))
 }
 
 .mh-empty__art {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: min(120px, 100%);
+  aspect-ratio: 4 / 3;
   margin-bottom: var(--sp-3);
 }
 
 .mh-empty--compact .mh-empty__art {
+  width: min(88px, 100%);
   margin-bottom: var(--sp-2);
+}
+
+/* Slotted artwork also keeps its intrinsic ratio inside the reserved viewport. */
+.mh-empty__art :deep(> svg),
+.mh-empty__art :deep(> img) {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  flex: none;
 }
 
 .mh-empty__title {

@@ -26,6 +26,7 @@ import {
   beginBrowserAuth,
   countryCodes,
   defaultVerify,
+  flowOf,
   importAccountsAsync,
   importLocalAccounts,
   importLocalText,
@@ -39,6 +40,8 @@ import {
   scanLocalAccounts,
   scanPreviewRows,
   scanSummary,
+  storageOf,
+  submitAuthFallback,
   sendPhoneCode,
   validatePhoneForm,
   verifyPhoneCode,
@@ -312,11 +315,23 @@ async function onVerifyPhone(): Promise<void> {
 
 /* ---------------- 浏览器授权 ---------------- */
 const authView = ref<BrowserAuthView>({ state: 'idle', url: '', accountId: 0, message: '' })
+const authSession = ref<Record<string, unknown>>({})
 const authBusy = ref(false)
+const fallbackValue = ref('')
+const fallbackUsername = ref('')
+const fallbackPassword = ref('')
+const authFallback = computed(() => flowOf(props.spec)?.fallback)
+const fallbackReady = computed(() => authFallback.value?.kind === 'password'
+  ? Boolean(fallbackUsername.value.trim() && fallbackPassword.value)
+  : Boolean(fallbackValue.value.trim()))
 const authTicks = ref(0)
 let authTimer: ReturnType<typeof setInterval> | null = null
+let authGeneration = 0
+let authPolling = false
 
 function stopAuthPoll(): void {
+  authGeneration += 1
+  authPolling = false
   if (authTimer) {
     clearInterval(authTimer)
     authTimer = null
@@ -327,15 +342,54 @@ function resetAuth(): void {
   stopAuthPoll()
   authTicks.value = 0
   authView.value = { state: 'idle', url: '', accountId: 0, message: '' }
+  authSession.value = {}
+  fallbackValue.value = ''
+  fallbackUsername.value = ''
+  fallbackPassword.value = ''
+}
+
+async function onSubmitAuthFallback(): Promise<void> {
+  if (authBusy.value || !fallbackReady.value) return
+  const generation = authGeneration
+  authBusy.value = true
+  try {
+    const payload = await submitAuthFallback(props.spec, {
+      value: fallbackValue.value, username: fallbackUsername.value, password: fallbackPassword.value,
+    }, authSession.value)
+    if (generation !== authGeneration || !props.show) return
+    const view = authStateOf(payload)
+    if (view.state === 'authorized') {
+      stopAuthPoll()
+      toast.success(t('page.accounts.authSuccess'))
+      close()
+      resetAuth()
+      emit('added')
+    } else {
+      authSession.value = { ...authSession.value, ...payload }
+      authView.value = authStateOf(authSession.value)
+      if (view.state === 'failed') stopAuthPoll()
+    }
+  } catch (error) {
+    if (generation === authGeneration && props.show) toast.error(failureText(t('page.accounts.authBeginFailed'), error))
+  } finally {
+    authBusy.value = false
+  }
 }
 
 async function onBeginAuth(): Promise<void> {
+  stopAuthPoll()
+  const generation = authGeneration
   authBusy.value = true
   try {
     const payload = await beginBrowserAuth(props.spec, t)
+    if (generation !== authGeneration || !props.show) return
+    if (storageOf(props.spec) === 'codar' && payload.auth_id) {
+      payload.qr_image = '/api/codar/auth/qr.png?auth_id=' + encodeURIComponent(String(payload.auth_id))
+    }
+    authSession.value = { ...payload }
     const view = authStateOf(payload)
     authView.value = view
-    if (view.url) {
+    if (view.url && !view.qrImage) {
       try {
         window.open(view.url, '_blank', 'noopener,noreferrer')
       } catch {
@@ -351,9 +405,15 @@ async function onBeginAuth(): Promise<void> {
 }
 
 async function pollAuthOnce(): Promise<void> {
+  if (authPolling || !props.show || props.kind !== 'authorize') return
+  const generation = authGeneration
+  authPolling = true
   try {
-    const payload = await pollBrowserAuth(props.spec, t)
-    const view = authStateOf(payload)
+    const payload = await pollBrowserAuth(props.spec, authSession.value, t)
+    if (generation !== authGeneration || !props.show) return
+    authTicks.value = 0
+    authSession.value = { ...authSession.value, ...payload }
+    const view = authStateOf(authSession.value)
     authView.value = view
     if (view.state === 'authorized') {
       stopAuthPoll()
@@ -366,24 +426,30 @@ async function pollAuthOnce(): Promise<void> {
       toast.error(t('page.accounts.authFailed', { reason: view.message || t('page.accounts.authUnknownReason') }))
     }
   } catch (error) {
+    if (generation !== authGeneration || !props.show) return
     authTicks.value += 1
     if (authTicks.value >= 3) {
       stopAuthPoll()
       toast.error(failureText(t('page.accounts.authPollFailed'), error))
     }
+  } finally {
+    if (generation === authGeneration) authPolling = false
   }
 }
 
 function startAuthPoll(): void {
   stopAuthPoll()
   authTicks.value = 0
+  const deadline = Date.now() + Math.max(30, Number(authSession.value.expires_in) || 300) * 1000
+  const interval = Math.max(2, Number(authSession.value.interval) || 2) * 1000
   authTimer = setInterval(() => {
-    if (authTicks.value >= 150) {
+    if (Date.now() >= deadline) {
       stopAuthPoll()
+      authView.value = { ...authView.value, state: 'failed' }
       return
     }
     void pollAuthOnce()
-  }, 2000)
+  }, interval)
 }
 
 async function copyAuthUrl(): Promise<void> {
@@ -428,6 +494,9 @@ watch(
       // 关闭：停掉倒计时与授权轮询（离开流程就不要再打上游）。
       stopCountdown()
       stopAuthPoll()
+      fallbackValue.value = ''
+      fallbackUsername.value = ''
+      fallbackPassword.value = ''
       return
     }
     if (!wasShown || previousKind !== kind) prepare(kind)
@@ -632,17 +701,45 @@ function submit(): void {
         {{ t('page.accounts.authStatus', { state: authStateText }) }}<template v-if="authView.message">
           · {{ authView.message }}</template>
       </p>
+      <img v-if="authView.qrImage" class="acc-auth-qr" :src="authView.qrImage" :alt="t('page.accounts.authQr')" width="200" height="200" />
+      <p v-if="authView.userCode" class="acc-hint">{{ t('page.accounts.authUserCode') }} <code class="mono">{{ authView.userCode }}</code></p>
       <div v-if="authView.url" class="acc-auth-url">
         <code class="mono">{{ authView.url }}</code>
         <Btn variant="quiet" size="sm" @click="copyAuthUrl()">{{ t('page.accounts.authCopy') }}</Btn>
         <Btn variant="quiet" size="sm" @click="pollAuthOnce()">{{ t('page.accounts.authCheckNow') }}</Btn>
       </div>
       <p class="acc-hint">{{ t('page.accounts.authNotice') }}</p>
+      <section v-if="authFallback && (authFallback.kind !== 'callback' || authSession.nonce)" class="acc-auth-fallback">
+        <p class="acc-hint">{{ t(`page.accounts.authFallback.${authFallback.kind}`) }}</p>
+        <template v-if="authFallback.kind === 'password'">
+          <FormField :label="t('page.accounts.authUsername')" required><n-input v-model:value="fallbackUsername" autocomplete="username" /></FormField>
+          <FormField :label="t('page.accounts.authPassword')" required><n-input v-model:value="fallbackPassword" type="password" show-password-on="click" autocomplete="current-password" /></FormField>
+        </template>
+        <FormField v-else :label="t(`page.accounts.authFallbackLabel.${authFallback.kind}`)" required>
+          <n-input v-model:value="fallbackValue" :type="authFallback.kind === 'cookie' ? 'password' : 'textarea'" show-password-on="click" autocomplete="off" />
+        </FormField>
+        <Btn :loading="authBusy" :disabled="!fallbackReady" @click="onSubmitAuthFallback">{{ t('page.accounts.authFallbackSubmit') }}</Btn>
+      </section>
     </template>
   </FormDrawer>
 </template>
 
 <style scoped>
+.acc-auth-fallback {
+  display: grid;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+}
+.acc-auth-qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  max-width: 100%;
+  object-fit: contain;
+  margin: var(--sp-3) auto;
+}
 .acc-hint {
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-small);

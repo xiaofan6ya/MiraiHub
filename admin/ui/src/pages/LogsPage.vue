@@ -214,7 +214,7 @@ async function loadAccounts(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 const rows = ref<LogRowView[] | null>(null)
-const listLoading = ref(false)
+const listLoading = ref(true)
 /** 当前这次列表请求是否静默刷新（第 5 轮，配合 DataTable `refreshing`）。 */
 const listSilent = ref(false)
 const listError = ref<ErrorState | null>(null)

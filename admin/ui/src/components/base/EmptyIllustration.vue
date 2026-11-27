@@ -25,6 +25,7 @@ withDefaults(
     viewBox="0 0 120 90"
     :width="compact ? 88 : 120"
     :height="compact ? 66 : 90"
+    preserveAspectRatio="xMidYMid meet"
     aria-hidden="true"
     focusable="false"
     :data-kind="kind"
@@ -72,7 +73,15 @@ withDefaults(
   --ill-soft: var(--brand-soft);
   display: block;
   flex: none;
+  aspect-ratio: 4 / 3;
+  width: 120px;
+  height: auto;
+  max-width: 100%;
   overflow: visible;
+}
+
+.mh-ill--compact {
+  width: 88px;
 }
 
 .mh-ill--error {

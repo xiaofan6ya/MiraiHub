@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * S23 积分到期 /credits（v2.1 视觉精修：KPI 行 + 风险/消耗双卡 + 到期排行 + 积分包 + 调度策略设置组）
  *
@@ -475,7 +477,7 @@ const packageColumns = computed<TableColumn[]>(() => [
     render: (row: TableRow) => {
       const item = row as unknown as PackageRowView
       return h('span', { class: 'cr-expire' }, [
-        h('span', { class: 'tnum', title: item.expire_label || '' }, packageExpireText(item)),
+        h(TitleTip, { content: String((item.expire_label || '') ?? '') }, { default: () => h('span', { class: 'tnum' }, packageExpireText(item)) }),
         item.expired
           ? h(Badge, { tone: 'danger' }, { default: () => t('page.credits.col.expiredBadge') })
           : item.expiring_soon
@@ -542,9 +544,9 @@ function accountPackagesCell(row: TableRow): VNodeChild {
   const rest = (item.next_expiring || []).length - list.length
   return h('div', { class: 'cr-chips' }, [
     ...list.map((pkg) =>
-      h(Chip, { key: pkg.package_code || pkg.display_name, title: pkg.expire_label || pkg.expire_date }, {
+      h(TitleTip, { content: String((pkg.expire_label || pkg.expire_date) ?? ''), key: pkg.package_code || pkg.display_name }, { default: () => h(Chip, { key: pkg.package_code || pkg.display_name }, {
         default: () => pkg.display_name + ' · ' + fmtCredit(pkg.remaining),
-      }),
+      }) }),
     ),
     rest > 0 ? h('span', { class: 'cr-faint' }, '+' + rest) : null,
   ])
@@ -570,7 +572,7 @@ const accountColumns = computed<TableColumn[]>(() => [
     render: (row: TableRow) => {
       const item = row as unknown as CreditAccountRow
       return h('div', { class: 'cr-account' }, [
-        h('span', { class: 'cr-strong cr-ellipsis', title: item.account_name }, item.account_name),
+        h(TitleTip, { content: String((item.account_name) ?? '') }, { default: () => h('span', { class: 'cr-strong cr-ellipsis' }, item.account_name) }),
         item.uid ? h('span', { class: 'cr-sub mono cr-ellipsis' }, item.uid) : null,
       ])
     },
@@ -639,7 +641,7 @@ const accountColumns = computed<TableColumn[]>(() => [
           ? h('span', { class: 'cr-muted' }, soonestText(item.soonest_days_left))
           : h(Badge, { tone, dot: true }, { default: () => soonestText(item.soonest_days_left) }),
         item.synced_at
-          ? h('span', { class: 'cr-sub tnum', title: fmtTime(item.synced_at) }, t('page.credits.col.syncedAt', { time: fmtTime(item.synced_at) }))
+          ? h(TitleTip, { content: String((fmtTime(item.synced_at)) ?? '') }, { default: () => h('span', { class: 'cr-sub tnum' }, t('page.credits.col.syncedAt', { time: fmtTime(item.synced_at) })) })
           : null,
       ])
     },
@@ -1131,6 +1133,7 @@ onBeforeUnmount(() => {
 
 .cr-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
   align-items: stretch;

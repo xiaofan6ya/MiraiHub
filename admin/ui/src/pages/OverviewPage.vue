@@ -76,6 +76,8 @@ import { useI18n } from '@/i18n'
 import OverviewHero from './Overview/OverviewHero.vue'
 import OverviewHealth from './Overview/OverviewHealth.vue'
 import OverviewRecent from './Overview/OverviewRecent.vue'
+import OverviewKpiDetail from './Overview/OverviewKpiDetail.vue'
+import OverviewKpiMark from './Overview/OverviewKpiMark.vue'
 
 const { t } = useI18n()
 const helpText = computed(() => t('page.overview.help'))
@@ -110,9 +112,10 @@ const payload = ref<OverviewPayload | null>(null)
 const traffic = ref<StatsDashboardPayload | null>(null)
 const trend = ref<StatsDashboardPayload | null>(null)
 const sentinel = ref<SentinelStatusPayload | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 const updatedAt = ref<Date | null>(null)
+const motionRevision = ref(0)
 /** 后台静默刷新进行中（页头小转圈）。 */
 const silentBusy = ref(false)
 
@@ -156,6 +159,7 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
     traffic.value = lanesData
     sentinel.value = sentinelData
     updatedAt.value = new Date()
+    motionRevision.value += 1
     void loadTrend(main, current)
   } catch (error) {
     if (isAbortError(error)) return
@@ -302,7 +306,7 @@ watch(days, () => {
 
 <template>
   <div class="ov-page">
-    <PageHeader :help="helpText">
+    <PageHeader :help="helpText" :eyebrow="t('overview.refined.eyebrow')" :subtitle="t(alerts.length ? 'overview.refined.attention' : 'overview.refined.healthy')">
       <template #meta>
         <StatusDot :tone="statusTone" :label="statusText" />
         <span class="ov-meta">
@@ -390,6 +394,9 @@ watch(days, () => {
         :range-label="rangeLabel"
         :lanes="lanes"
         :total="trafficTotal"
+        :replay-key="motionRevision"
+        :series="traffic?.trend?.total_requests ?? []"
+        :buckets="traffic?.trend?.buckets ?? []"
         :loading="loading"
         :base-url="baseUrl"
         :window-minutes="days * 1440"
@@ -415,6 +422,7 @@ watch(days, () => {
             :spark="item.spark"
             :loading="loading && !!payload"
           >
+            <template #ornament><OverviewKpiMark :kind="item.key" /></template>
             <template v-if="item.key === 'balance'" #extra>
               <div class="ov-balance">
                 <Meter
@@ -431,6 +439,9 @@ watch(days, () => {
                 <p v-if="hero.note" class="ov-note">{{ hero.note }}</p>
               </div>
             </template>
+            <template v-else-if="item.key === 'success' || item.key === 'tokens'" #extra>
+              <OverviewKpiDetail :kind="item.key" :window="payload?.window" />
+            </template>
           </KpiCard>
         </div>
       </section>
@@ -445,7 +456,7 @@ watch(days, () => {
         />
 
         <div class="ov-side">
-          <Card :title="t('page.overview.accounts.title')" :loading="loading">
+          <Card class="ov-account-card" :title="t('page.overview.accounts.title')" :loading="loading">
             <template #extra>
               <span class="ov-scope">{{ accountScope }}</span>
               <RouterLink class="ov-link" to="/accounts">{{ t('page.overview.accounts.all') }}</RouterLink>
@@ -479,12 +490,15 @@ watch(days, () => {
             </Empty>
           </Card>
 
-          <Card :title="t('page.overview.cache.title')" :loading="loading">
+          <Card class="ov-cache-card" :title="t('page.overview.cache.title')" :loading="loading">
             <template #extra>
               <span class="ov-scope">{{ usageScope }}</span>
             </template>
             <div class="ov-cache">
               <Ring
+                class="ov-cache__ring"
+                :size="144"
+                :stroke-width="12"
                 :value="cache.value"
                 :text="cache.text"
                 tone="brand"
@@ -637,10 +651,18 @@ watch(days, () => {
 /* 一行 4 个（≥1280）、2 个（≥768）、1 个（手机）；卡片按内容等高，不强撑（§1.4）。 */
 .ov-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  /* Natural content sets the row; every summary now has a useful lower detail. */
+  align-items: stretch;
   min-width: 0;
+}
+
+
+.ov-kpis :deep(.mh-kpi__extra) {
+  margin-top: auto;
+  border-top: 0;
 }
 
 .ov-balance {
@@ -676,12 +698,13 @@ watch(days, () => {
   display: grid;
   grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 
 .ov-side {
   display: grid;
+  grid-auto-rows: 1fr;
   gap: var(--sp-4);
   min-width: 0;
 }
@@ -757,19 +780,36 @@ watch(days, () => {
 }
 
 /* ---------- 缓存 ---------- */
-.ov-cache {
+.ov-cache-card :deep(.mh-card__body) {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
-  flex-wrap: wrap;
 }
+
+.ov-cache {
+  display: grid;
+  grid-template-columns: minmax(104px, .9fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: clamp(14px, 1.5vw, 24px);
+  width: 100%;
+  min-width: 0;
+}
+
+.ov-cache__ring { width: 100%; max-width: 144px; justify-self: center; }
+.ov-cache__ring :deep(.mh-ring__dial) { width: 100%!important; height: auto!important; aspect-ratio: 1; }
+.ov-cache__ring :deep(svg) { width: 100%; height: auto; }
+.ov-cache__ring :deep(.mh-ring__value) { font-size: 30px; line-height: 1.2; }
+.ov-cache__ring :deep(.mh-ring__label) { font-size: 13px; }
 
 .ov-cache__body {
   display: grid;
-  gap: var(--sp-2);
-  flex: 1;
-  min-width: 160px;
+  gap: 12px;
+  min-width: 0;
 }
+.ov-cache__body :deep(.mh-kv) { gap: 12px; }
+.ov-cache__body :deep(.mh-kv__row) { flex-wrap: wrap; gap: 2px 12px; }
+.ov-cache__body :deep(.mh-kv__label) { font-size: 13px; line-height: 1.5; }
+.ov-cache__body :deep(.mh-kv__value) { font-size: 18px; line-height: 1.4; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ov-cache__body .ov-note { font-size: 12px; line-height: 1.65; }
 
 @media (max-width: 1279px) {
   .ov-kpis {

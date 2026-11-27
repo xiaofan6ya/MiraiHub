@@ -4,7 +4,9 @@
  * 可以用 Tab 聚焦（以前 focusable=false，键盘用户点不到表格工具栏的图标按钮）。
  */
 import { type Component } from 'vue'
-import { NButton, NTooltip } from 'naive-ui'
+import { NButton, NPopover } from 'naive-ui'
+
+defineOptions({ inheritAttrs: false, __popover__: true })
 
 withDefaults(
   defineProps<{
@@ -17,6 +19,8 @@ withDefaults(
     tone?: 'default' | 'danger'
     /** active 时高亮（如密度/列设置已打开）。 */
     active?: boolean
+    internalSyncTargetWithParent?: boolean
+    internalInheritedEventHandlers?: { onClick: () => void; onMouseenter: () => void; onMouseleave: () => void; onFocus: () => void; onBlur: () => void }[]
   }>(),
   { disabled: false, loading: false, tone: 'default', active: false },
 )
@@ -25,9 +29,12 @@ defineEmits<{ (event: 'click', payload: MouseEvent): void }>()
 </script>
 
 <template>
-  <n-tooltip :delay="400" :disabled="false">
+  <n-popover trigger="hover" placement="top" :show-arrow="true" :style="{ maxWidth: '320px' }"
+    :internal-sync-target-with-parent="internalSyncTargetWithParent"
+    :internal-inherited-event-handlers="internalInheritedEventHandlers">
     <template #trigger>
       <n-button
+        v-bind="$attrs"
         class="mh-icon-btn"
         :class="{
           'mh-icon-btn--danger': tone === 'danger',
@@ -42,8 +49,8 @@ defineEmits<{ (event: 'click', payload: MouseEvent): void }>()
         <template #icon><component :is="icon" :size="16" /></template>
       </n-button>
     </template>
-    {{ label }}
-  </n-tooltip>
+    <div class="mh-help__content">{{ label }}</div>
+  </n-popover>
 </template>
 
 <style scoped>

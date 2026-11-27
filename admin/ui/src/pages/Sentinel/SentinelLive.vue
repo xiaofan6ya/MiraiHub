@@ -5,7 +5,7 @@
  * 轮询连续失败暂停时，底部给「恢复」。
  */
 import { watch } from 'vue'
-import { Btn, Card, Empty } from '@/components'
+import { Btn, Card, Empty, TitleTip } from '@/components'
 import { useFlashKeys } from '@/composables'
 import type { LiveRow } from '@/api/sentinel'
 import { useI18n } from '@/i18n'
@@ -40,8 +40,8 @@ watch(
     <Empty v-if="!rows.length" compact :description="t('page.sentinel.live.empty')" />
     <ol v-else class="sn-live" aria-live="polite">
       <li v-for="row in rows" :key="row.rid" class="sn-live__row" :class="['is-' + row.tone, flash.rowClass(row.rid)]">
-        <span class="sn-live__time tnum" :title="row.at">{{ row.time }}</span>
-        <span class="sn-live__model mono" :title="row.error || row.model">{{ row.model }}</span>
+        <TitleTip :content="row.at"><span class="sn-live__time tnum">{{ row.time }}</span></TitleTip>
+        <TitleTip :content="row.error || row.model"><span class="sn-live__model mono">{{ row.model }}</span></TitleTip>
         <span class="sn-live__plat">{{ row.platformLabel }}</span>
         <span class="sn-live__status tnum">
           <i class="sn-live__dot" aria-hidden="true" />{{ row.statusText }}

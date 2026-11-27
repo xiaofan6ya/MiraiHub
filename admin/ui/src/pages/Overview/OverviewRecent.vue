@@ -5,7 +5,7 @@
  * 空时说明「近 1 小时没有请求」，并给去用量日志的入口 —— 避免长时间无流量时让人以为页面坏了（第 3 轮审查 C）。
  */
 import { watch } from 'vue'
-import { Card, Empty } from '@/components'
+import { Card, Empty, TitleTip } from '@/components'
 import { useFlashKeys } from '@/composables'
 import type { LiveRow } from '@/api/sentinel'
 import { useI18n } from '@/i18n'
@@ -36,8 +36,8 @@ watch(
     <Empty v-if="!rows.length" compact :description="t('page.overview.recent.empty')" />
     <ol v-else class="ov-recent">
       <li v-for="row in rows" :key="row.rid" class="ov-recent__row" :class="['is-' + row.tone, flash.rowClass(row.rid)]">
-        <span class="ov-recent__time tnum" :title="row.at">{{ row.time }}</span>
-        <span class="ov-recent__model mono" :title="row.error || row.model">{{ row.model }}</span>
+        <TitleTip :content="row.at"><span class="ov-recent__time tnum">{{ row.time }}</span></TitleTip>
+        <TitleTip :content="row.error || row.model"><span class="ov-recent__model mono">{{ row.model }}</span></TitleTip>
         <span class="ov-recent__plat">{{ row.platformLabel }}</span>
         <span class="ov-recent__status tnum"><i aria-hidden="true" />{{ row.statusText }}</span>
       </li>

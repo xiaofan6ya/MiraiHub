@@ -3,6 +3,7 @@
 import { computed, ref } from 'vue'
 import { Copy, Eye, EyeOff } from 'lucide-vue-next'
 import { NButton } from 'naive-ui'
+import TitleTip from './TitleTip.vue'
 import { copyText, useComponentToast } from '../_internal/feedback'
 import { maskValue } from '../_internal/text'
 import { t } from '@/i18n'
@@ -36,27 +37,24 @@ async function onCopy(): Promise<void> {
 <template>
   <span class="mh-copy" :class="{ 'mh-copy--muted': muted }">
     <code class="mh-copy__text mono">{{ display }}</code>
-    <n-button
-      v-if="mask"
+    <TitleTip v-if="mask" :content="revealed ? t('common.hideValue') : t('common.showValue')"><n-button
       quaternary
       size="tiny"
       class="mh-copy__btn"
       :aria-label="revealed ? t('common.hideValue') : t('common.showValue')"
-      :title="revealed ? t('common.hideValue') : t('common.showValue')"
       @click="revealed = !revealed"
     >
       <template #icon><component :is="revealed ? EyeOff : Eye" :size="14" /></template>
-    </n-button>
-    <n-button
+    </n-button></TitleTip>
+    <TitleTip :content="t('common.copy')"><n-button
       quaternary
       size="tiny"
       class="mh-copy__btn"
       :aria-label="t('common.copy')"
-      :title="t('common.copy')"
       @click="onCopy"
     >
       <template #icon><Copy :size="14" /></template>
-    </n-button>
+    </n-button></TitleTip>
   </span>
 </template>
 

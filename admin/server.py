@@ -2311,7 +2311,13 @@ def ui_v2_asset(file_path: str, request: Request):
     # 只放行 assets/ 与 login.html；入口 HTML、SPA 深链、其他文件继续要求会话。
     public_entry = file_path.replace("\\", "/") == "login.html"
     is_asset = file_path.replace("\\", "/").startswith("assets/")
-    if not _console_allowed(request) and not (is_asset or public_entry):
+    # The public join entry shares platform logos and the site icon with the console.
+    normalized_path = file_path.replace("\\", "/")
+    public_image = normalized_path == "favicon.svg" or (
+        normalized_path.startswith("logos/")
+        and Path(normalized_path).suffix.lower() in {".svg", ".png", ".webp", ".jpg", ".jpeg", ".avif"}
+    )
+    if not _console_allowed(request) and not (is_asset or public_entry or public_image):
         raise HTTPException(status_code=404)
     root = UI_DIST.resolve()
     try:
@@ -2321,7 +2327,7 @@ def ui_v2_asset(file_path: str, request: Request):
     escaped = not str(target).startswith(str(root) + os.sep)
     if escaped or not target.is_file():
         # 资源缺失就是「构建不完整」，直说 404 比给一个入口页更好排查。
-        if is_asset:
+        if is_asset or public_image:
             raise HTTPException(status_code=404)
         if escaped:
             # 穿越到 dist 之外：不回退，避免把任意路径都伪装成 200。
@@ -2338,17 +2344,17 @@ def ui_v2_asset(file_path: str, request: Request):
 
 @app.get("/join")
 @app.get("/join/")
+@app.get("/static/join.html")
 def join_index(request: Request, db: Session = Depends(get_db)):
-    """公开注册页（复刻 WorkBuddy 手机号登录页）。
-
-    **门禁已上移到 `_join_gate_middleware`**：这里不再用「库里有没有邀请码」
-    当开关 —— 那套隐式判据会和 `/api/join/*`、`join_invites` 三处漂移。
-    现在总闸状态只有一个来源（`admin/join_gate.py`），本函数只负责发文件。
-    """
-    # 资源 `?v=` 同样由服务端按内容哈希注入（见 stamp_asset_urls），
-    # 免得改完 phone-session.js / vendor 库还要手工改版本号。
-    return HTMLResponse(_stamped_page(STATIC_DIR / "join.html"),
-                        headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    """Vue public account entry; access remains controlled by the join gate middleware."""
+    target = UI_DIST / "join.html"
+    if not target.is_file():
+        _log_ui_v2_missing()
+        raise HTTPException(status_code=404)
+    return FileResponse(target, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Content-Security-Policy": _ADMIN_CSP,
+    })
 
 
 #: 票据引导页。**这是整个 join 链路里唯一不设门禁的页面**。

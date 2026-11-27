@@ -28,6 +28,7 @@ import Empty from '@/components/base/Empty.vue'
 import { buildChartTheme } from '@/theme/echartsTheme'
 import { useTheme } from '@/theme/useTheme'
 import { useI18n } from '@/i18n'
+import { appearance } from '@/theme/useAppearance'
 import { chartHasData, finalizeChartOption } from '@/components/charts/options'
 import type { registerTheme as registerThemeFn } from '@/components/charts/chartRuntime'
 
@@ -80,6 +81,7 @@ const VChart = defineAsyncComponent(async () => {
 
 /* ---------- 减弱动效 ---------- */
 const reducedMotion = ref(false)
+const hasRenderedData = ref(false)
 let motionQuery: MediaQueryList | null = null
 const onMotionChange = (event: MediaQueryListEvent): void => {
   reducedMotion.value = event.matches
@@ -109,13 +111,13 @@ let lastThemeAttr = ''
 const finalOption = computed(() => {
   void effectiveTheme.value
   void themeName.value
-  return finalizeChartOption(props.option, { reducedMotion: reducedMotion.value, locale: localeTag.value })
+  return finalizeChartOption(props.option, { reducedMotion: reducedMotion.value || appearance.value.motion === 'off' || appearance.value.motion === 'once' && hasRenderedData.value, locale: localeTag.value })
 })
 
 const isEmpty = computed(() => !props.loading && !chartHasData(props.option))
 
-/** 系列数量变化时全量替换，避免残留幽灵系列。 */
-const updateOptions = { notMerge: true, lazyUpdate: false }
+/** Diff data in place; replace the series collection to remove obsolete series. */
+const updateOptions = { notMerge: false, replaceMerge: ['series'], lazyUpdate: true }
 
 /* ---------- resize：ResizeObserver + rAF 合并 ---------- */
 const root = ref<HTMLElement | null>(null)
@@ -207,9 +209,10 @@ onBeforeUnmount(() => {
       class="mh-chart__canvas"
       :option="finalOption"
       :theme="themeName"
-      :loading="props.loading"
+      :loading="props.loading && !chartHasData(props.option)"
       :autoresize="false"
       :update-options="updateOptions"
+      @finished="hasRenderedData = true"
     />
   </div>
 </template>

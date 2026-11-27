@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * S22 积分流水 /journal（v2.1 视觉精修：KPI 行 + 一行工具栏的流水表）
  *
@@ -315,20 +317,19 @@ function cellDelta(row: TableRow): VNodeChild {
 
 function cellBalance(row: TableRow): VNodeChild {
   const item = row as JournalRow
-  return h(
+  return h(TitleTip, { content: String((item.balanceRecorded ? '' : t('page.journal.balanceMissing')) ?? '') }, { default: () => h(
     'span',
     {
       class: item.balanceRecorded ? 'tnum' : 'journal-faint',
-      title: item.balanceRecorded ? '' : t('page.journal.balanceMissing'),
     },
     item.balanceRecorded ? item.balanceText : FMT_EMPTY,
-  )
+  ) })
 }
 
 function cellAccount(row: TableRow): VNodeChild {
   const item = row as JournalRow
   return h('div', { class: 'journal-account' }, [
-    h('span', { class: 'journal-account__name', title: item.accountName }, item.accountName || t('journal.row.account')),
+    h(TitleTip, { content: String((item.accountName) ?? '') }, { default: () => h('span', { class: 'journal-account__name' }, item.accountName || t('journal.row.account')) }),
     item.accountId ? h('span', { class: 'journal-account__id mono' }, '#' + item.accountId) : null,
   ])
 }
@@ -342,7 +343,7 @@ const columns = computed<TableColumn[]>(() => [
     sortable: true,
     sortOrder: sortOrderOf('time'),
     render: (row: TableRow) =>
-      h('span', { class: 'tnum journal-time', title: String(row.fullTime || '') }, String(row.time || FMT_EMPTY)),
+      h(TitleTip, { content: String((String(row.fullTime || '')) ?? '') }, { default: () => h('span', { class: 'tnum journal-time' }, String(row.time || FMT_EMPTY)) }),
   },
   {
     key: 'accountText',
@@ -380,7 +381,7 @@ const columns = computed<TableColumn[]>(() => [
     render: (row: TableRow) => {
       const note = String(row.note || '')
       return note && note !== FMT_EMPTY
-        ? h('span', { class: 'journal-note', title: String(row.source || '') }, note)
+        ? h(TitleTip, { content: String((String(row.source || '')) ?? '') }, { default: () => h('span', { class: 'journal-note' }, note) })
         : h('span', { class: 'journal-faint' }, FMT_EMPTY)
     },
   },
@@ -615,6 +616,7 @@ onBeforeUnmount(() => {
 
 .journal-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
   align-items: stretch;

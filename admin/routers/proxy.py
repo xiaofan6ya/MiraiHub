@@ -304,10 +304,14 @@ def _upstream_extra_headers(request: Request, purpose: str = "conversation",
     `turn` stays fixed across the attempts of one gateway request so the rows
     can be reassembled; see admin/upstream_identity.py for the probe evidence.
     """
-    del request, account
+    del request
     del body  # conversation/turn are resolved once per gateway request
     headers = identity.identity_headers(purpose)
     headers.update(identity.trace_headers(conversation, turn))
+    # 设备号：**这个账号自己的** qimei36（见 core/qimei.py）。
+    # 共用一串 = 全池绑在同一台机器上，一个号出事其余连坐；所以由 uid 派生。
+    headers.update(identity.device_headers(
+        uid=getattr(account, "uid", "") or ""))
     # Keep the id we actually sent: upstream echoes it as the credit-usage
     # record's requestId, which is how a local log row is matched to a billing
     # line. This also proves in the diagnostic that we no longer let upstream
@@ -1609,6 +1613,15 @@ def _apply_account_policy(db: Session, acc: Account, kind: str, status: int,
         acc.last_err_at = now
         acc.last_err_msg = (msg or "waf 403")[:255]
         POOL.waf.note(acc.uid or "")
+        # 出口 IP 被 WAF 拦 = 这条代理节点该歇了（issue #39 全局出口）。
+        # 只记在**当前出口**上：`note_error` 内部还会用
+        # `proxy_pool.looks_ip_blocked()` 复核，单账号 401/参数错不会误伤节点。
+        try:
+            from admin import proxy_egress
+
+            proxy_egress.note_error(proxy_egress.snapshot()["endpoint_id"], status, msg or "")
+        except Exception:  # noqa: BLE001 - 复盘记账失败不影响本次处置
+            pass
     elif kind == "not_found":
         # 404 短冷却不累计 errCount（防雪崩）
         acc.cool_until = now + timedelta(seconds=60)
@@ -1707,6 +1720,16 @@ def _note_success(db: Session, acc: Account) -> None:
             db.commit()
         except Exception:
             db.rollback()
+    # 出口健康计时（issue #39）：只更新内存里的 `last_ok_at`，
+    # 热路径不写库 —— 面板上的「最近成功」来自真实对话请求，不是配置存在。
+    try:
+        from admin import proxy_egress
+
+        endpoint = proxy_egress.snapshot()["endpoint_id"]
+        if endpoint:
+            proxy_egress.note_ok(endpoint)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 #: 连败降权时长（秒）与封顶。达阈后临时出池，避免「一直失败但一直没到熔断阈值」的号
@@ -1913,15 +1936,39 @@ def _refresh_if_suspect(acc: Account, sess) -> None:
         pass
 
 
+def _egress_for(db: Session, acc) -> tuple[str, int]:
+    """这次会话该从哪个出口出去（issue #39：对话主链路挂代理）。
+
+    返回值 `(代理地址, 节点 id)`，空地址 = 直连。优先顺序在
+    `admin/proxy_egress.resolve` 里：账号绑定 > 全局出口（fixed / auto）。
+
+    **全异常吞掉**：出口解析读的是配置表 + 密文，任何一步坏掉都只该退回
+    直连，不能让「设置里填错一个字段」把整个对话请求打成 500。
+    节点 id 会挂到会话上（`sess.proxy_endpoint_id`），失败时据此把
+    确切那个出口打进静默期，而不是把整池节点一起停掉。
+    """
+    try:
+        from admin import proxy_egress
+
+        return proxy_egress.resolve(db, acc)
+    except Exception:  # noqa: BLE001 - 出口解析失败退回直连
+        _logger.warning("全局出口解析失败，本次会话直连", exc_info=True)
+        return "", 0
+
+
 def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession | None:
     """创建 AccountSession 并调用 get_headers()（可能触发 token 刷新）。
 
     若刷新失败（session 死亡等），按策略禁用/冷却该账号并返回 None。
+    会话同时绑定本次出口（issue #39）：`AccountSession(proxy=...)`，
+    传输层见 `admin/platform/workbuddy/core/backend.py:http_client`。
     """
     sess = None
     try:
+        proxy_url, proxy_endpoint = _egress_for(db, acc)
         if not isinstance(acc, Account) or not isinstance(acc.id, int):
-            sess = backend.AccountSession(acc.auth_json)
+            sess = backend.AccountSession(acc.auth_json, proxy=proxy_url)
+            sess.proxy_endpoint_id = proxy_endpoint
             sess._gateway_headers = sess.get_headers()
             return sess
         # CredentialManager's lock belongs to one instance. Concurrent requests
@@ -1936,7 +1983,8 @@ def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession |
                     if row is None:
                         raise RuntimeError('账号已被删除')
                     original = row[0]
-                    sess = backend.AccountSession(original)
+                    sess = backend.AccountSession(original, proxy=proxy_url)
+                    sess.proxy_endpoint_id = proxy_endpoint
                     sess._gateway_headers = sess.get_headers()
                     _refresh_if_suspect(acc, sess)
                     updated = sess.updated_json()

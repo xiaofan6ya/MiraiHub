@@ -185,6 +185,8 @@ def mobile_js(js: str) -> str:
 
 
 def prepare() -> None:
+    from scripts.build_frontend import build_frontend, stage_frontend
+    build_frontend(ROOT)
     # Do not allow a symlink or changed working directory to redirect recursive cleanup.
     staging = STAGING.resolve()
     allowed = (ROOT / "android/app/build").resolve()
@@ -214,6 +216,7 @@ def prepare() -> None:
     (staging / "desktop/version.json").write_text(json.dumps(metadata), encoding="utf-8")
     shutil.copytree(ROOT / "admin/static", staging / "admin/static")
     shutil.copytree(ROOT / "admin/console", staging / "admin/console")
+    stage_frontend(staging, ROOT)
     shutil.copytree(ROOT / "admin/data", staging / "admin/data")
     # 平台自带的数据文件（如 trae/data/catalog_*.json）也要进包：
     # 上面的 rglob 只拷 *.py，这些 json 在真机/模拟器上一律缺文件，

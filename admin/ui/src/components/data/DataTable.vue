@@ -131,7 +131,10 @@ const isMobile = computed(() => isPhoneQuery.value || isNarrowQuery.value)
 const { t, localeTag } = useI18n()
 
 /** 静默刷新的小转圈：只在有旧数据、且不是 loading 时显示；>300ms 才出现，快接口不闪。 */
-const silentBusy = computed(() => props.refreshing && !props.loading)
+const hasSettled = ref(!props.loading || props.data.length > 0)
+watch(() => props.loading, value => { if (!value) hasSettled.value = true })
+const initialLoading = computed(() => props.loading && !hasSettled.value && !props.data.length)
+const silentBusy = computed(() => (props.refreshing || props.loading) && !initialLoading.value)
 const showRefreshSpin = useDelayedFlag(() => silentBusy.value, 300)
 
 /** 空态说明：页面可覆盖，默认跟随语言。 */
@@ -217,7 +220,7 @@ const naiveColumns = computed(() => {
   visibleColumns.value.forEach((col, index) => {
     const next: Record<string, unknown> = { ...col }
     next.align = col.align ?? (col.numeric ? 'right' : 'left')
-    const classes = [col.className]
+    const classes = [col.className, 'mh-col--' + next.align]
     if (col.numeric) classes.push('mh-td--num')
     if (index === 0 && props.emphasizeFirst && !col.numeric && !isActionsColumn(col)) classes.push('mh-td--primary')
     if (isActionsColumn(col)) classes.push('mh-td--actions')
@@ -602,7 +605,7 @@ defineExpose({ clearSelection, toggleDensity })
     class="mh-table"
     :class="{ 'mh-table--compact': density === 'compact', 'mh-table--mobile': isMobile }"
   >
-    <div class="mh-table__bar" :class="{ 'is-active': loading && data.length > 0 }"><i /></div>
+    <div class="mh-table__bar" :class="{ 'is-active': initialLoading }"><i /></div>
 
     <div class="mh-table__toolbar">
       <div class="mh-table__toolbar-left">
@@ -667,7 +670,7 @@ defineExpose({ clearSelection, toggleDensity })
 
     <!-- 手机：卡片列表 -->
     <template v-if="isMobile">
-      <div v-if="loading && !displayRows.length" class="mh-table__loading" aria-busy="true">
+      <div v-if="initialLoading" class="mh-table__loading" aria-busy="true">
         <span v-for="n in 4" :key="n" class="mh-skeleton mh-table__sk-card" />
       </div>
       <div
@@ -765,7 +768,7 @@ defineExpose({ clearSelection, toggleDensity })
       @focusout="onBodyFocusout"
     >
       <!-- 首次加载：只用一种骨架屏（10-visual-refresh §1.7），模拟表头 + 6 行；刷新时保留旧数据 + 顶部进度条 -->
-      <div v-if="loading && !data.length" class="mh-table__loading" aria-busy="true">
+      <div v-if="initialLoading" class="mh-table__loading" aria-busy="true">
         <span class="mh-skeleton mh-table__sk-head" />
         <span v-for="n in 6" :key="n" class="mh-skeleton mh-table__sk-row" />
       </div>
@@ -975,6 +978,13 @@ defineExpose({ clearSelection, toggleDensity })
 .mh-table__body :deep(.n-data-table-tr.mh-row--checked:hover .n-data-table-td) {
   background: var(--brand-soft);
 }
+
+/* Keep labels beside their sorter. Right-aligned labels share the value's right edge. */
+.mh-table__body :deep(.n-data-table-th__title) { flex: 0 1 auto; min-width: 0; }
+.mh-table__body :deep(.mh-col--right .n-data-table-th__title-wrapper) { justify-content: flex-end; }
+.mh-table__body :deep(.mh-col--right .n-data-table-sorter),
+.mh-table__body :deep(.mh-col--right .n-data-table-filter) { order: -1; margin: 0 4px 0 0; }
+.mh-table__body :deep(.mh-col--center .n-data-table-th__title-wrapper) { justify-content: center; }
 
 /* 首列（名称）：500 字重 + --fg */
 .mh-table__body :deep(.n-data-table-td.mh-td--primary) {

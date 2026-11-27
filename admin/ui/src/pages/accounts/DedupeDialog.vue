@@ -12,7 +12,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NModal } from 'naive-ui'
 import { CopyX } from 'lucide-vue-next'
-import { Btn, Empty, ErrorBlock } from '@/components'
+import { Btn, Empty, ErrorBlock, TitleTip } from '@/components'
 import { useConfirm, useKeepAliveSuspended, useToast } from '@/composables'
 import { usePlatformStore } from '@/stores/platform'
 import { isAbortError } from '@/api/http'
@@ -179,7 +179,7 @@ async function runDedupe(): Promise<void> {
           </header>
           <ul class="acc-dedupe__groups">
             <li v-for="group in section.groups" :key="section.key + ':' + group.uid" class="acc-dedupe__group">
-              <span class="acc-dedupe__uid mono" :title="group.uid">{{ group.uid }}</span>
+              <TitleTip :content="group.uid"><span class="acc-dedupe__uid mono">{{ group.uid }}</span></TitleTip>
               <span class="acc-dedupe__keep">
                 <span class="acc-dedupe__label">{{ t('page.accounts.dedupe.keep') }}</span>
                 {{ group.keep.name || '#' + group.keep.id }}
@@ -187,12 +187,9 @@ async function runDedupe(): Promise<void> {
               </span>
               <span class="acc-dedupe__remove">
                 <span class="acc-dedupe__label">{{ t('page.accounts.dedupe.remove', { count: group.remove.length }) }}</span>
-                <span
-                  v-for="item in group.remove"
-                  :key="item.id"
-                  class="acc-dedupe__chip"
-                  :title="item.created_at"
-                >{{ item.name || '#' + item.id }} <span class="mono">#{{ item.id }}</span></span>
+                <TitleTip v-for="item in group.remove" :key="item.id" :content="item.created_at">
+                  <span class="acc-dedupe__chip">{{ item.name || '#' + item.id }} <span class="mono">#{{ item.id }}</span></span>
+                </TitleTip>
               </span>
             </li>
           </ul>

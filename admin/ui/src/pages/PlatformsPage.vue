@@ -90,11 +90,12 @@ const speed = ref<PlatformSpeedPayload | null>(null)
 const gateway = ref<GatewayConfigPayload | null>(null)
 const accounts = ref<Record<string, { total: number; active: number; credits: number }>>({})
 const loading = ref(false)
+const loaded = ref(false)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 let controller: AbortController | null = null
 
 const hours = computed(() => (filters.hours === '168' ? 168 : 24))
-const firstLoading = computed(() => loading.value && !platforms.value.length)
+const firstLoading = computed(() => loading.value && !loaded.value)
 
 function prettyDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail
@@ -123,6 +124,7 @@ async function load(): Promise<void> {
     // 仍会 resolve，并把速度表 / 调度配置 / 账号快照覆盖成空。只认最后一次请求。
     if (controller !== current) return
     platforms.value = Array.isArray(list?.items) ? list.items : []
+    loaded.value = true
     speed.value = bench
     gateway.value = cfg
     accounts.value = aggregateAccounts(snapshot?.items || [])

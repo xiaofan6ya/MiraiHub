@@ -3,7 +3,7 @@
 import { computed, ref } from 'vue'
 import { NInput } from 'naive-ui'
 import { Search } from 'lucide-vue-next'
-import { Btn, Chip, DetailDrawer, Empty } from '@/components'
+import { Btn, Chip, DetailDrawer, Empty, TitleTip } from '@/components'
 import { useI18n } from '@/i18n'
 import { searchModelChips, type AggregateModelsPayload } from '@/api/keys'
 
@@ -34,9 +34,9 @@ const hits = computed(() => searchModelChips(props.models, term.value))
       <div class="km-model__rows">
         <div v-for="row in hit.rows" :key="row.callId" class="km-model__row">
           <span class="km-platform">{{ row.platformLabel }}</span>
-          <Chip mono copy :value="row.callId" :title="t('page.keys.models.upstreamId', { id: row.upstreamId })">
+          <TitleTip :content="t('page.keys.models.upstreamId', { id: row.upstreamId })"><Chip mono copy :value="row.callId">
             {{ row.callId }}
-          </Chip>
+          </Chip></TitleTip>
           <span class="km-muted tnum">{{ row.multiplierText }}</span>
         </div>
       </div>

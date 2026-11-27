@@ -13,9 +13,10 @@ import { GROUPS, PAGES } from '@/router/pages'
 import { createAppRouter } from '@/router'
 import { resetShellState } from './shellState'
 import { resetShellBadges } from '@/platform/shellBadges'
+import IslandProvider from '@/components/feedback/IslandProvider.vue'
 
 /**
- * 外壳冒烟：侧栏分组、24 个占位页可点、页签高亮、命令面板键盘、平台选择器显示规则。
+ * 外壳冒烟：侧栏分组、25 个页面可点、页签高亮、命令面板键盘、平台选择器显示规则。
  * 用假 fetch，避免测试真的打后端（http 层 401 会跳 /admin）。
  */
 const PLATFORM_ITEMS = [
@@ -84,6 +85,8 @@ function stubFetch(): void {
         payload = { platform: 'workbuddy', realm: '', raw: 'workbuddy' }
       } else if (url.includes('/api/platforms')) {
         payload = { items: PLATFORM_ITEMS, default: 'workbuddy', loader: {} }
+      } else if (url.includes('/api/accounts/probe')) {
+        payload = { ok: true }
       } else if (url.includes('/api/accounts/badges')) {
         payload = { expiring_accounts: 2, scope: 'all' }
       } else if (url.includes('/api/app/version')) {
@@ -111,13 +114,14 @@ const Host = defineComponent({
     NMessageProvider,
     NDialogProvider,
     NNotificationProvider,
+    IslandProvider,
   },
   template: `
     <n-config-provider>
       <n-notification-provider>
         <n-message-provider>
           <n-dialog-provider>
-            <router-view />
+            <IslandProvider><router-view /></IslandProvider>
           </n-dialog-provider>
         </n-message-provider>
       </n-notification-provider>
@@ -178,7 +182,7 @@ describe('应用外壳', () => {
     expect(wrapper.findAll('.item-label')).toHaveLength(0)
   })
 
-  it('24 个页面都能点开，标题/侧栏高亮/文档标题同步', async () => {
+  it('25 个页面都能点开，标题/侧栏高亮/文档标题同步', async () => {
     const { router, wrapper } = await mountShell(1440)
     // 已接入真实页面的 key；其余仍应是 _Placeholder（逐页交付，路由表始终完整）。
     const implemented = new Set([
@@ -188,6 +192,7 @@ describe('应用外壳', () => {
       'sentinel', 'gateway', 'platforms', 'overview',
       'journal', 'credits', 'growth', 'accounts',
       'client', 'settings', 'openentry', 'agent',
+      'proxy',
     ])
     for (const page of PAGES) {
       await router.push('/' + page.key)
@@ -236,27 +241,30 @@ describe('应用外壳', () => {
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/logs'), { timeout: 8000 })
   })
 
-  it('顶栏：面包屑一直在；platformScoped 页右侧多一个平台选择器胶囊', async () => {
+  it('顶部灵动岛常驻，展开面板包含面包屑和平台选择器', async () => {
     const { router, wrapper } = await mountShell(1440)
     await router.push('/accounts')
     await flushPromises()
-    // 10-visual-refresh §1.2：左边面包屑「分组 / 页面」，平台选择器挪到右侧
-    expect(wrapper.find('.topbar-right .picker').exists()).toBe(true)
-    expect(wrapper.find('.breadcrumb').text()).toContain('账号')
-    expect(wrapper.find('.breadcrumb').text()).toContain('账号池')
+    expect(wrapper.findAll('.dynamic-island')).toHaveLength(1)
+    expect(wrapper.find('.island-title').text()).toBe('账号池')
+    await wrapper.find('.island-toggle').trigger('click')
+    expect(wrapper.find('.island-toolbar .picker').exists()).toBe(true)
+    expect(wrapper.find('.island-breadcrumb').text()).toContain('账号')
+    expect(wrapper.find('.island-breadcrumb').text()).toContain('账号池')
 
     await router.push('/settings')
     await flushPromises()
     expect(wrapper.find('.picker').exists()).toBe(false)
-    expect(wrapper.find('.breadcrumb').text()).toContain('设置')
+    expect(wrapper.find('.island-breadcrumb').text()).toContain('设置')
   })
 
-  it('顶栏：宽搜索按钮打开命令面板，状态点正常时不带数字', async () => {
+  it('灵动岛面板的搜索入口打开命令面板，常驻胶囊显示真实状态', async () => {
     const { wrapper } = await mountShell(1440)
-    const search = wrapper.find('.topbar-center .cmdk')
+    await wrapper.find('.island-toggle').trigger('click')
+    const search = wrapper.find('.island-search')
     expect(search.exists()).toBe(true)
     expect(search.text()).toContain('搜索页面、账号、Key')
-    expect(wrapper.find('.status-count').exists()).toBe(false)
+    expect(wrapper.find('.island-idle-status').text()).toContain('运行中')
     await search.trigger('click')
     await flushPromises()
     await nextTick()
@@ -266,7 +274,7 @@ describe('应用外壳', () => {
   it('375 宽：侧栏变抽屉（汉堡按钮打开），内容区照常渲染', async () => {
     const { wrapper } = await mountShell(375)
     expect(wrapper.find('aside.side').exists()).toBe(false)
-    const burger = wrapper.find('.topbar-left .topbar-icon-btn')
+    const burger = wrapper.find('.topbar-mobile-menu')
     expect(burger.exists()).toBe(true)
     await burger.trigger('click')
     await flushPromises()

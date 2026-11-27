@@ -148,7 +148,7 @@
 .wbm-cell {
   display: block; min-width: 0; border-radius: 2px;
   background: var(--surface-3);
-  opacity: var(--cov, 1);
+  opacity: max(0.55, var(--cov, 1));
   transition: transform .12s ease, filter .12s ease;
 }
 .wbm-cells .wbm-cell:hover { transform: scaleY(1.25); filter: brightness(1.08); }
@@ -159,7 +159,8 @@
   background: repeating-linear-gradient(135deg,
     var(--danger) 0 2px, color-mix(in srgb, var(--danger) 26%, transparent) 2px 4px);
 }
-.wbm-cell.is-idle { background: var(--surface-3); }
+.wbm-cell.is-idle { background: color-mix(in srgb, var(--brand) 52%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 72%, var(--border)); }
 /* 只覆盖了窗口一部分的格子（首尾常见）按覆盖率淡出：3 分钟的格子看起来就该很淡 */
 .wbm-cell.is-partial { outline: 1px solid color-mix(in srgb, var(--fg-subtle) 22%, transparent);
   outline-offset: -1px; }

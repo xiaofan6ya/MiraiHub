@@ -6,7 +6,7 @@
  * 右：可用模型 chip（同模型跨平台合一组）+「全部 N ▸」+ 账号调度策略（跳积分到期页）。
  * 原来这几项是一列 label/value 行，模型 chip 挤在最后一行；调度策略按钮挂在页头，和主按钮抢位置。
  */
-import { HelpTip, Btn, Card, Chip, Copyable } from '@/components'
+import { HelpTip, Btn, Card, Chip, Copyable, TitleTip } from '@/components'
 import { NSelect } from 'naive-ui'
 import { ChevronRight } from 'lucide-vue-next'
 import { useI18n } from '@/i18n'
@@ -80,16 +80,13 @@ const { t } = useI18n()
             <span class="ks-count tnum">{{ t('page.keys.share.groups', { count: chips.total }) }}</span>
           </p>
           <div class="ks-models">
-            <Chip
-              v-for="chip in chips.chips"
-              :key="chip.key"
+            <TitleTip v-for="chip in chips.chips" :key="chip.key" :content="chip.title"><Chip
               mono
               copy
               :value="chip.copyValue"
-              :title="chip.title"
             >
               {{ chip.name }}<span v-if="chip.platformCount > 1" class="ks-chip-count">{{ chip.platformCount }}</span>
-            </Chip>
+            </Chip></TitleTip>
             <Btn v-if="chips.total" variant="quiet" size="sm" @click="emit('showModels')">
               {{ t('page.keys.share.allModels', { count: chips.total }) }}
             </Btn>

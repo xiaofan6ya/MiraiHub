@@ -1,0 +1,118 @@
+/* Optional materials: solid remains the default; unsupported browsers keep opaque surfaces. */
+html:root{--glass-blur:18px;--glass-opacity:82%;--glass-saturation:130%;--glow-power:.45;--glow-radius:18px;--glow-spot-opacity:9%;--glow-edge-opacity:4.5%;--glow-ambient-opacity:5.4%;--chart-glow-opacity:.203;--chart-glow-blur:3.6px;--chart-fill-opacity:.215;--chart-ink-mix:0%;--chart-line:color-mix(in srgb,var(--fg) var(--chart-ink-mix),var(--brand))}
+html .theme-studio.n-popover{border:1px solid var(--border-strong);border-radius:18px;overflow:hidden;background-color:var(--surface-raised);box-shadow:var(--shadow-pop)}
+
+/* Material light is separate from optional decorative glow. White reflections stay
+   neutral across palettes; the backdrop supplies the transmitted theme colour. */
+html:root{
+  --material-light:#fff;
+  --material-edge:color-mix(in srgb,#fff 48%,var(--border));
+  --material-shadow:0 10px 30px #25344b12,0 2px 6px #25344b08;
+  --material-depth:0 16px 40px #25344b1c,0 3px 8px #25344b0c;
+  --material-backlight:22%;
+}
+html:root[data-theme="dark"]{
+  --material-edge:color-mix(in srgb,#fff 12%,var(--border));
+  --material-shadow:0 12px 32px #0003,0 2px 6px #0002;
+  --material-depth:0 18px 44px #0005,0 3px 10px #0003;
+  --material-backlight:28%;
+}
+
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  /* A static, full-page light field gives blur something to transmit below the
+     hero as well. No animated filters, full-screen blur or extra DOM layers. */
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell{
+    background-image:
+      radial-gradient(ellipse at 24% 12%,color-mix(in srgb,var(--brand) var(--material-backlight),transparent),transparent 43%),
+      radial-gradient(ellipse at 94% 62%,color-mix(in srgb,var(--cosmic-light) var(--material-backlight),transparent),transparent 40%),
+      linear-gradient(125deg,transparent 24%,color-mix(in srgb,var(--cosmic-light) 9%,transparent) 39%,transparent 53%);
+    background-attachment:fixed;
+  }
+  html:root[data-material="frosted"]{
+    --material-reflection:linear-gradient(155deg,#ffffff12,transparent 48%,#ffffff04);
+    --material-rim:inset 0 1px 0 #ffffff38,inset 0 -1px 0 #ffffff08;
+  }
+  html:root[data-material="liquid"]{
+    --material-reflection:
+      radial-gradient(ellipse at 10% -18%,#ffffff30,transparent 62%),
+      linear-gradient(132deg,#ffffff18,transparent 38%,transparent 68%,#ffffff0c);
+    --material-rim:inset 0 1px 0 #ffffff66,inset 1px 0 0 #ffffff18,inset -1px 0 0 #ffffff0c,inset 0 -1px 0 #ffffff18;
+    --material-shadow:var(--material-depth);
+  }
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell :is(.mh-card,.mh-kpi),
+  html:root:is([data-material="frosted"],[data-material="liquid"]) :is(.theme-studio.n-popover,.n-dropdown-menu,.n-modal,.n-drawer,.login__card,.studio-material-sample,.dynamic-island){
+    background-color:color-mix(in srgb,var(--surface) var(--glass-opacity),transparent);
+    background-image:var(--material-reflection);
+    border-color:var(--material-edge);
+    -webkit-backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    box-shadow:var(--material-rim),var(--material-shadow);
+  }
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell .side{
+    background-color:color-mix(in srgb,var(--side-bg) var(--glass-opacity),transparent);
+    background-image:var(--material-reflection),radial-gradient(ellipse at 0 12%,color-mix(in srgb,var(--brand) 12%,transparent),transparent 65%);
+    border-color:var(--material-edge);
+    -webkit-backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    box-shadow:inset -1px 0 0 #ffffff10,6px 0 24px #0000000c;
+  }
+  /* The header is only an anchor for the floating island. A second backdrop
+     filter here would flatten the island's own transmitted background. */
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell .topbar{
+    background:transparent;
+  }
+  /* Draw only the curved rim: content, charts, hit targets and tooltips remain
+     unobstructed, and the hero keeps its own existing ::before highlight. */
+  html:root[data-material="liquid"] body .shell :is(.mh-card,.mh-kpi)::after,
+  html:root[data-material="liquid"] :is(.login__card,.studio-material-sample,.dynamic-island)::after{
+    content:"";
+    position:absolute;
+    inset:0;
+    padding:1px;
+    border-radius:inherit;
+    background:linear-gradient(135deg,#ffffff80,#ffffff0c 28%,#ffffff04 53%,#ffffff38 80%,#ffffff10);
+    -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+    mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor;
+    mask-composite:exclude;
+    pointer-events:none;
+  }
+  /* The preview uses the same material over visible shapes, so changes to
+     blur, opacity and saturation can be judged before closing the studio. */
+  html:root:is([data-material="frosted"],[data-material="liquid"]) .studio-live{
+    background-image:radial-gradient(circle at 32% 85%,color-mix(in srgb,var(--brand) 55%,transparent) 0 21px,transparent 22px),radial-gradient(circle at 78% 26%,color-mix(in srgb,var(--cosmic-light) 55%,transparent) 0 29px,transparent 30px);
+    min-height:104px;
+  }
+  html:root:is([data-material="frosted"],[data-material="liquid"]) .studio-material-sample{
+    position:relative;
+    min-width:164px;
+  }
+}
+
+/* These variables also drive the real SVG traffic line; the preview is not a substitute. */
+html:root[data-glow="on"] .surface-sheen__light{background:radial-gradient(circle,color-mix(in srgb,var(--cosmic-light) var(--glow-spot-opacity),transparent),transparent 68%)}
+html:root[data-glow="on"] body .shell .ov-hero{background-image:radial-gradient(ellipse at 20% 0,color-mix(in srgb,var(--cosmic-light) var(--glow-ambient-opacity),transparent),transparent 70%)}
+html:root[data-glow="on"] body .shell :is(.mh-card,.mh-kpi):hover{box-shadow:0 0 var(--glow-radius) color-mix(in srgb,var(--cosmic-light) var(--glow-edge-opacity),transparent),var(--shadow-1)}
+html:root[data-glow="on"] :is(.mh-btn--primary,.login__submit):hover{box-shadow:0 0 var(--glow-radius) color-mix(in srgb,var(--cosmic-light) var(--glow-edge-opacity),transparent),var(--shadow-1)}
+html:root[data-glow="off"] .surface-sheen{display:none}
+html:root[data-glow="off"] body .shell .ov-hero{background-image:none}
+html:root[data-glow="off"] :is(.trend-line,.trend-point,.studio-preview-curve){filter:none}
+html:root[data-glow="off"] :is(.trend-bloom,.studio-preview-bloom){display:none}
+html:root[data-glow="off"] .studio-toggle[aria-checked="true"]{box-shadow:none}
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell .ov-hero{background-image:var(--material-reflection)}
+  html:root:is([data-material="frosted"],[data-material="liquid"]) body .shell :is(.mh-card,.mh-kpi):is(:hover,:focus-within){box-shadow:var(--material-rim),var(--material-shadow),0 0 var(--glow-radius) color-mix(in srgb,var(--cosmic-light) var(--glow-edge-opacity),transparent)}
+  html:root:is([data-material="frosted"],[data-material="liquid"])[data-glow="off"] body .shell :is(.mh-card,.mh-kpi):is(:hover,:focus-within){box-shadow:var(--material-rim),var(--material-shadow)}
+}
+@media(hover:none){html:root[data-glow="on"] body .shell :is(.mh-card,.mh-kpi):hover{box-shadow:var(--shadow-1)}}
+@media(forced-colors:active){
+  html:root[data-material] body :is(.shell,.mh-card,.mh-kpi,.side,.topbar,.theme-studio.n-popover,.dynamic-island,.login__card,.studio-material-sample,.n-dropdown-menu,.n-modal,.n-drawer){background:Canvas!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:CanvasText!important;box-shadow:none!important}
+  html:root[data-material] body :is(.mh-card,.mh-kpi,.login__card,.studio-material-sample,.dynamic-island)::after,.trend-bloom{display:none}
+}
+
+/* A true off setting: final content stays visible and loading state stays readable. */
+html:root[data-motion="off"] { --dur-1:0ms;--dur-2:0ms;--dur-3:0ms;--t-fast:0ms;--t-base:0ms;--t-slow:0ms; }
+html[data-motion="off"] *,html[data-motion="off"] *::before,html[data-motion="off"] *::after { animation:none!important;transition:none!important;scroll-behavior:auto!important; }
+html[data-motion="off"] .surface-sheen { display:none; }
+html[data-motion="off"] :is(.orbit-scene__parallax,.kpi-orbit-mark,.mh-card--hoverable,.mh-kpi--link,.pf-card,.pf-card__logo,.side-item .item-icon,.n-button:active,.login__submit:active) { transform:none!important; }
+html[data-motion="off"] .mh-table__bar i { width:100%;transform:none; }

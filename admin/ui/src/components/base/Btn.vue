@@ -4,9 +4,12 @@
  * 约定：**每个区域最多 1 个 primary**（04-components §1）。
  */
 import { computed, type Component } from 'vue'
-import { NButton } from 'naive-ui'
+import { NButton, NPopover } from 'naive-ui'
 import type { BtnSize, BtnVariant } from './btn'
 import { useDelayedFlag } from '@/composables/useDelayedFlag'
+
+// 让外层 Dropdown/Popover 识别嵌套弹层，事件与定位继续绑定实际按钮。
+defineOptions({ inheritAttrs: false, __popover__: true })
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +25,8 @@ const props = withDefaults(
     title?: string
     ariaLabel?: string
     nativeType?: 'button' | 'submit' | 'reset'
+    internalSyncTargetWithParent?: boolean
+    internalInheritedEventHandlers?: { onClick: () => void; onMouseenter: () => void; onMouseleave: () => void; onFocus: () => void; onBlur: () => void }[]
   }>(),
   {
     variant: 'default',
@@ -66,29 +71,36 @@ const naiveSize = computed(() =>
 </script>
 
 <template>
-  <n-button
-    class="mh-btn"
-    :type="naiveType"
-    :class="[
-      `mh-btn--${variant}`,
-      `mh-btn--${size}`,
-      { 'mh-btn--solid': solid, 'mh-btn--block': block, 'mh-btn--pending': pending && !disabled },
-    ]"
-    :size="naiveSize"
-    :loading="showSpinner"
-    :disabled="disabled || loading"
-    :block="block"
-    :attr-type="nativeType"
-    :title="title"
-    :aria-label="ariaLabel || title"
-    :aria-busy="loading ? 'true' : undefined"
-    @click="onClick"
-  >
-    <template v-if="icon || $slots.icon" #icon>
-      <slot name="icon"><component :is="icon" :size="16" /></slot>
+  <n-popover trigger="hover" placement="top" :show-arrow="true" :disabled="!title" :style="{ maxWidth: '320px' }"
+    :internal-sync-target-with-parent="internalSyncTargetWithParent"
+    :internal-inherited-event-handlers="internalInheritedEventHandlers">
+    <template #trigger>
+      <n-button
+        v-bind="$attrs"
+        class="mh-btn"
+        :type="naiveType"
+        :class="[
+          `mh-btn--${variant}`,
+          `mh-btn--${size}`,
+          { 'mh-btn--solid': solid, 'mh-btn--block': block, 'mh-btn--pending': pending && !disabled },
+        ]"
+        :size="naiveSize"
+        :loading="showSpinner"
+        :disabled="disabled || loading"
+        :block="block"
+        :attr-type="nativeType"
+        :aria-label="ariaLabel || title"
+        :aria-busy="loading ? 'true' : undefined"
+        @click="onClick"
+      >
+        <template v-if="icon || $slots.icon" #icon>
+          <slot name="icon"><component :is="icon" :size="16" /></slot>
+        </template>
+        <slot />
+      </n-button>
     </template>
-    <slot />
-  </n-button>
+    <div class="mh-help__content">{{ title }}</div>
+  </n-popover>
 </template>
 
 <style scoped>

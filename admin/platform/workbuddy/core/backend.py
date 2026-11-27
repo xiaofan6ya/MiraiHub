@@ -233,6 +233,10 @@ class AccountSession:
         self._http = None
         #: 本次会话的出站出口（空 = 直连）
         self.proxy = str(proxy or "").strip()
+        #: 出口节点 id（0 = 直连 / 账号自带绑定）。由 `admin/routers/proxy.py`
+        #: 在建设话时写入，失败记账时用来把**确切那个节点**打进静默期，
+        #: 而不是把整池节点一起停掉（issue #39 的全局出口）。
+        self.proxy_endpoint_id = 0
         #: 本次会话是否发生过 token 刷新（意味着库里那份凭证已经旧了）。
         #: 调用方据此决定要不要 `updated_json()` 回写 —— 只读场景（列表、
         #: 健康检查的失败分支）不该为了一个没变的凭证白跑一次 commit。
@@ -272,7 +276,28 @@ class AccountSession:
         headers = self.cm.get_headers(extra=extra)
         if (self.cm._session().get("auth") or {}).get("accessToken") != before:
             self._token_rotated = True
+        self._apply_device_headers(headers)
         return headers
+
+    def _apply_device_headers(self, headers: dict) -> None:
+        """补上**这个账号自己的**设备号（`X-Device-Id-List`）。
+
+        为什么在这里补：客户端 5.11.3 起会把 qimei36 报给上游，而设备号是
+        设备级标识 —— 号池共用一串等于全池绑在同一台机器上，一个号出事其余
+        连坐。所以按账号派生、一个账号一串（见 core/qimei.py）。
+
+        为什么只补缺：调用方可能已经显式给了这个头（测试、导入探活），
+        显式值优先，免得两处各说一套。
+        """
+        if any(key.lower() == "x-device-id-list" for key in headers):
+            return
+        try:
+            from admin.platform.workbuddy.core import qimei
+
+            headers.update(qimei.device_headers(
+                uid=self._uid(), auth=self._sess_auth()))
+        except Exception:          # 设备号出问题绝不能挡住业务请求
+            pass
 
     @staticmethod
     def identity_headers(purpose: str = "conversation",

@@ -143,6 +143,7 @@ const showNav = computed(() => props.sections.length > 2)
           @click="jump(section.id)"
           @keydown="onNavKey($event, index)"
         >
+          <span class="settings-nav-index" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span>
           {{ section.title }}
         </button>
       </nav>

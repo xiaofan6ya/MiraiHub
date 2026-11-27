@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * IP 管理 · 封禁名单（后端一次返回全部，筛选 / 排序 / 分页在客户端）。
  *
@@ -164,7 +166,7 @@ function asRow(row: TableRow): BlockedIpRow {
 
 function renderIp(row: TableRow): VNodeChild {
   const item = asRow(row)
-  return h('span', { class: 'ib-ip', title: item.ip }, item.ip || FMT_EMPTY)
+  return h(TitleTip, { content: String((item.ip) ?? '') }, { default: () => h('span', { class: 'ib-ip' }, item.ip || FMT_EMPTY) })
 }
 
 function renderSource(row: TableRow): VNodeChild {
@@ -172,11 +174,11 @@ function renderSource(row: TableRow): VNodeChild {
   const reason = autoBlockReason(item.note)
   // 后端 source 优先（r3）；老后端没有 source 时 toBlockedRows 已按 auto: 前缀推算
   if (item.source !== 'auto') return h('span', { class: 'ib-muted' }, t('page.ip.source.manual'))
-  return h(
+  return h(TitleTip, { content: String((t('page.ip.source.autoTitle', { reason: reason || FMT_EMPTY })) ?? '') }, { default: () => h(
     Badge,
-    { tone: 'neutral', title: t('page.ip.source.autoTitle', { reason: reason || FMT_EMPTY }) },
+    { tone: 'neutral' },
     { default: () => t('page.ip.source.auto') },
-  )
+  ) })
 }
 
 function renderNote(row: TableRow): VNodeChild {
@@ -184,34 +186,34 @@ function renderNote(row: TableRow): VNodeChild {
   const reason = autoBlockReason(item.note)
   const text = reason === null ? item.note : reason
   if (!text) return h('span', { class: 'ib-faint' }, FMT_EMPTY)
-  return h('span', { class: 'ib-note', title: item.note }, text)
+  return h(TitleTip, { content: String((item.note) ?? '') }, { default: () => h('span', { class: 'ib-note' }, text) })
 }
 
 function renderCreated(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (!item.createdAt) return h('span', { class: 'ib-faint' }, FMT_EMPTY)
-  return h('span', { class: 'ib-time', title: fmtFullTime(item.createdAt) }, fmtRelative(item.createdAt))
+  return h(TitleTip, { content: String((fmtFullTime(item.createdAt)) ?? '') }, { default: () => h('span', { class: 'ib-time' }, fmtRelative(item.createdAt)) })
 }
 
 function renderExpiry(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (item.expiry === 'permanent') return h('span', { class: 'ib-muted' }, t('page.ip.blocked.permanent'))
-  return h(
+  return h(TitleTip, { content: String((fmtFullTime(item.expiresAt)) ?? '') }, { default: () => h(
     'span',
-    { class: 'ib-expiry is-' + expiryTone(item.expiresAt), title: fmtFullTime(item.expiresAt) },
+    { class: 'ib-expiry is-' + expiryTone(item.expiresAt) },
     fmtExpiry(item.expiresAt),
-  )
+  ) })
 }
 
 function renderStatus(row: TableRow): VNodeChild {
   const item = asRow(row)
   // r3：启用但已过到期时间 = 不再拦截（后端 expired / active），单独标出，避免误以为仍在封禁。
   if (item.enabled && item.expired) {
-    return h(
+    return h(TitleTip, { content: String((fmtFullTime(item.expiresAt)) ?? '') }, { default: () => h(
       Badge,
-      { tone: 'warn', dot: true, title: fmtFullTime(item.expiresAt) },
+      { tone: 'warn', dot: true },
       { default: () => t('page.ip.status.expired' as MessageKey) },
-    )
+    ) })
   }
   return item.enabled
     ? h(Badge, { tone: 'danger', dot: true }, { default: () => t('page.ip.status.blocked') })
@@ -253,7 +255,7 @@ const columns = computed<TableColumn[]>(() => {
 </script>
 
 <template>
-  <Card flush class="ib">
+  <Card flush class="ib" :motion-pending="firstLoading">
     <ErrorBlock
       v-if="error && rows === null"
       class="ib-error"

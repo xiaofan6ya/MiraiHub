@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * 分组管理 · 表格（列定义 + 分页 + 批量选择）。
  *
@@ -71,11 +73,11 @@ function asRow(row: TableRow): GroupRow {
 
 function renderName(row: TableRow): VNodeChild {
   const group = asRow(row)
-  return h('span', { class: 'gt-name', title: group.name }, group.name || FMT_EMPTY)
+  return h(TitleTip, { content: String((group.name) ?? '') }, { default: () => h('span', { class: 'gt-name' }, group.name || FMT_EMPTY) })
 }
 
 function modelChip(model: string): VNodeChild {
-  return h(Chip, { key: 'model-' + model, mono: true, title: model }, { default: () => model })
+  return h(TitleTip, { content: String((model) ?? ''), key: 'model-' + model }, { default: () => h(Chip, { key: 'model-' + model, mono: true }, { default: () => model }) })
 }
 
 function renderModels(row: TableRow): VNodeChild {
@@ -109,11 +111,11 @@ function renderModels(row: TableRow): VNodeChild {
   }
   if (group.staleCount > 0) {
     nodes.push(
-      h(
+      h(TitleTip, { content: String((t('page.groups.cell.staleTitle', { count: group.effectiveCount })) ?? ''), key: 'stale' }, { default: () => h(
         Badge,
-        { key: 'stale', tone: 'warn', title: t('page.groups.cell.staleTitle', { count: group.effectiveCount }) },
+        { key: 'stale', tone: 'warn' },
         { default: () => t('page.groups.cell.staleBadge', { count: group.staleCount }) },
-      ),
+      ) }),
     )
   }
   return h('div', { class: 'gt-models' }, nodes)
@@ -127,7 +129,7 @@ function renderKeyCount(row: TableRow): VNodeChild {
 function renderNote(row: TableRow): VNodeChild {
   const group = asRow(row)
   if (!group.note) return h('span', { class: 'gt-faint' }, FMT_EMPTY)
-  return h('span', { class: 'gt-note', title: group.note }, group.note)
+  return h(TitleTip, { content: String((group.note) ?? '') }, { default: () => h('span', { class: 'gt-note' }, group.note) })
 }
 
 function renderActions(row: TableRow): VNodeChild {
@@ -197,7 +199,7 @@ function onChecked(keys: Array<string | number>): void {
     <template #toolbar><slot name="toolbar" /></template>
     <template #bulk="{ clear }"><slot name="bulk" :clear="clear" /></template>
     <template #empty>
-      <Empty :description="emptyDescription" :icon="Layers">
+      <Empty illustration="empty" :description="emptyDescription" :icon="Layers">
         <Btn v-if="hasFilters" variant="default" size="sm" @click="emit('reset')">{{ t('page.groups.clearFilters') }}</Btn>
         <Btn v-else variant="default" size="sm" :icon="Plus" @click="emit('create')">{{ t('page.groups.create') }}</Btn>
       </Empty>

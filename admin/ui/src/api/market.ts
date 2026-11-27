@@ -81,9 +81,42 @@ export interface MarketItem {
   active_accounts: number
   exhausted_accounts: number
   available: boolean
+  timeline?: MarketHealthSample[]
+  uptime?: number | null
+  measured_cells?: number
+}
+
+export type MarketHealthState = 'up' | 'warn' | 'down' | 'off' | 'idle'
+
+export interface MarketHealthSample {
+  state: MarketHealthState
+  requests: number
+  success_rate: number | null
+  avg_latency_ms?: number
+  cooling?: number
+  coverage?: number
+  partial?: boolean
+}
+
+export interface MarketHealthBucket {
+  label: string
+  tip?: string
+  start?: string
+  end?: string
+  coverage?: number
+  partial?: boolean
+}
+
+export interface MarketHealth {
+  bucketHours: number
+  uptime: number | null
+  measured: number
+  cells: Array<MarketHealthSample & { label: string; tip: string; missing: boolean }>
 }
 
 export interface ModelMarketPayload {
+  buckets?: MarketHealthBucket[]
+  bucket_hours?: number
   window_hours: number
   start: string
   end: string
@@ -254,6 +287,7 @@ export function writeMarketHours(hours: unknown): void {
 /* -------------------------------------------------------------------------- */
 
 export interface MarketCard {
+  health?: MarketHealth
   key: string
   name: string
   platforms: string[]
@@ -284,6 +318,35 @@ export interface MarketCard {
   spark: number[]
   /** 与 spark 同源的窗口内请求合计（tooltip 用），没有分时数据时为 null。 */
   sparkTotal: number | null
+}
+
+/** Keep the server's bucket boundaries and states; request volume cannot imply health. */
+export function marketHealth(item: MarketItem, payload: ModelMarketPayload): MarketHealth {
+  const states: MarketHealthState[] = ['up', 'warn', 'down', 'off', 'idle']
+  const samples = Array.isArray(item.timeline) ? item.timeline : []
+  const buckets = Array.isArray(payload.buckets) ? payload.buckets : []
+  return {
+    bucketHours: Math.max(1, Number(payload.bucket_hours) || 1),
+    uptime: typeof item.uptime === 'number' && Number.isFinite(item.uptime) ? Math.min(1, Math.max(0, item.uptime)) : null,
+    measured: Math.max(0, Number(item.measured_cells) || 0),
+    cells: buckets.map((bucket, index) => {
+      const sample = samples[index]
+      const valid = !!sample && states.includes(sample.state)
+      const coverage = sample?.coverage ?? bucket.coverage ?? 1
+      return {
+        label: bucket.label,
+        tip: bucket.tip || bucket.label,
+        state: valid ? sample.state : 'idle',
+        missing: !valid,
+        requests: Math.max(0, Number(sample?.requests) || 0),
+        success_rate: typeof sample?.success_rate === 'number' ? sample.success_rate : null,
+        avg_latency_ms: Math.max(0, Number(sample?.avg_latency_ms) || 0),
+        cooling: Math.max(0, Number(sample?.cooling) || 0),
+        coverage: Number.isFinite(coverage) ? Math.min(1, Math.max(0, coverage)) : 1,
+        partial: Boolean(sample?.partial || bucket.partial || coverage < 0.999),
+      }
+    }),
+  }
 }
 
 /** 模型名归一：只留字母数字，供跨接口（展示名 / 原始 id / key）匹配。 */
@@ -501,6 +564,7 @@ export function toMarketCards(
       const active = Math.max(0, Number(item.active_accounts) || 0)
       const exhausted = Math.max(0, Number(item.exhausted_accounts) || 0)
       return {
+        health: marketHealth(item, payload!),
         key: String(item.key || item.name || ''),
         name: String(item.name || item.key || tr(translate, 'market.row.unknownModel')),
         platforms,

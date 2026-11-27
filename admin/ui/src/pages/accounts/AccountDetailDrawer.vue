@@ -7,7 +7,7 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
-import { Btn, DetailDrawer, Empty, ErrorBlock, KV, Meter, type KvItem } from '@/components'
+import { Btn, DetailDrawer, Empty, ErrorBlock, KV, Meter, TitleTip, type KvItem } from '@/components'
 import { isAbortError } from '@/api/http'
 import { failureText } from '@/utils/error'
 import { FMT_EMPTY, fmtCredit, fmtDuration, fmtFullTime, fmtInt, fmtRelative } from '@/utils/format'
@@ -173,7 +173,7 @@ const isActive = computed(() => props.row?.status === 'active')
         <Empty v-else-if="!packages.length" compact :description="t('page.accounts.detailEmpty')" />
         <ul v-else class="acc-detail__list">
           <li v-for="pkg in packages" :key="pkg.key" class="acc-detail__pkg">
-            <span class="acc-detail__name" :title="pkg.name">{{ pkg.name }}</span>
+            <TitleTip :content="pkg.name"><span class="acc-detail__name">{{ pkg.name }}</span></TitleTip>
             <Meter :value="pkg.pct" :height="4" tone="neutral" />
             <span class="tnum acc-detail__num">{{ fmtCredit(pkg.remain) }} / {{ fmtCredit(pkg.total) }}</span>
             <span class="acc-detail__muted">{{ pkg.expire }}</span>

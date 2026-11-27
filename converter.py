@@ -500,7 +500,29 @@ class CredentialManager:
         h = self._build_headers_from(s.get("auth") or {}, s.get("account") or {})
         if extra:
             h.update(extra)
+        self._apply_device_headers(h, s)
         return h
+
+    def _apply_device_headers(self, headers: dict, session: dict) -> None:
+        """补上**这个账号自己的**设备号（`X-Device-Id-List`）。
+
+        客户端 5.11.3 起会把 QIMEI 的 qimei36 报给上游。设备号是设备级标识，
+        号池共用一串 = 全池绑在同一台机器上，一个号出事其余连坐 —— 所以按
+        uid 派生，一个账号固定一串（见 `core/qimei.py`）。
+
+        只补缺：调用方显式给了这个头就听调用方的。刷新令牌那条路不经过这里
+        （`_refresh` 自己拼头），与官方一致 —— 官方也不在换票请求上带设备号。
+        """
+        if any(key.lower() == "x-device-id-list" for key in headers):
+            return
+        try:
+            from admin.platform.workbuddy.core import qimei
+
+            headers.update(qimei.device_headers(
+                uid=str((session.get("account") or {}).get("uid") or ""),
+                auth=session.get("auth") or {}))
+        except Exception:          # 设备号出问题绝不能挡住业务请求
+            pass
 
     def _headers_without_refresh(self, extra: dict | None = None) -> dict:
         """Return current headers without checking the expiry timestamp."""

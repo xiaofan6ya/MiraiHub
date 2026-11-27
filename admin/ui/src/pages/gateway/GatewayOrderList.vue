@@ -10,7 +10,7 @@
 import { ref } from 'vue'
 import { NInputNumber } from 'naive-ui'
 import { GripVertical } from 'lucide-vue-next'
-import { Badge, Btn, PlatformLogo } from '@/components'
+import { Badge, Btn, PlatformLogo, TitleTip } from '@/components'
 import { fmtInt } from '@/utils/format'
 import { formatBalance, priorityOf, type GatewayConfig, type GatewayOrderItem } from '@/api/gateway'
 import { useI18n } from '@/i18n'
@@ -144,20 +144,16 @@ function onHandleKey(index: number, event: KeyboardEvent): void {
         </span>
       </span>
 
-      <span
-        class="gw-order__meta"
-        :title="row.balance_remain === null || row.balance_remain === undefined ? undefined : fmtInt(row.balance_remain)"
-      >
-        {{ t('page.gateway.order.meta', { usable: row.usable, balance: formatBalance(row.balance_remain) }) }}
-      </span>
+      <TitleTip
+        :disabled="row.balance_remain === null || row.balance_remain === undefined"
+        :content="fmtInt(row.balance_remain ?? 0)"
+      ><span class="gw-order__meta">{{ t('page.gateway.order.meta', { usable: row.usable, balance: formatBalance(row.balance_remain) }) }}</span></TitleTip>
       <span class="gw-order__reason">
-        <Badge v-if="row.disabled" tone="neutral" dot :title="row.reason || undefined">
-          {{ t('page.gateway.order.disabled') }}
-        </Badge>
-        <Badge v-else-if="!row.available" tone="warn" dot :title="row.reason || undefined">
-          {{ t('page.gateway.order.noAccounts') }}
-        </Badge>
-        <span v-else-if="row.reason" class="gw-sub" :title="row.reason">{{ row.reason }}</span>
+        <TitleTip v-if="row.disabled && row.reason" :content="row.reason"><Badge tone="neutral" dot>{{ t('page.gateway.order.disabled') }}</Badge></TitleTip>
+        <Badge v-else-if="row.disabled" tone="neutral" dot>{{ t('page.gateway.order.disabled') }}</Badge>
+        <TitleTip v-else-if="!row.available && row.reason" :content="row.reason"><Badge tone="warn" dot>{{ t('page.gateway.order.noAccounts') }}</Badge></TitleTip>
+        <Badge v-else-if="!row.available" tone="warn" dot>{{ t('page.gateway.order.noAccounts') }}</Badge>
+        <TitleTip v-else-if="row.reason" :content="row.reason"><span class="gw-sub">{{ row.reason }}</span></TitleTip>
       </span>
       <Btn class="gw-order__toggle" variant="quiet" size="sm" :disabled="saving" @click="emit('toggle', row)">
         {{ row.disabled ? t('page.gateway.action.enable') : t('page.gateway.action.disable') }}

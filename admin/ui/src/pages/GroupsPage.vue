@@ -52,7 +52,7 @@ const table = useTableQuery('groups', {
  * ------------------------------------------------------------------ */
 
 const groups = ref<GroupItem[] | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 const checkedKeys = ref<string[]>([])
 const bulkRunning = ref(false)
@@ -423,9 +423,10 @@ onBeforeUnmount(() => {
 
 .groups-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 

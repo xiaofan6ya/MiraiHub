@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * API Keys 列表（10-visual-refresh §1.5）。
  *
@@ -83,7 +85,7 @@ function limitsText(item: KeyRow): string {
 function renderName(row: TableRow): VNodeChild {
   const item = asRow(row)
   return h('div', { class: 'kt-name' }, [
-    h('span', { class: 'kt-name__main', title: item.note ? item.name + ' · ' + item.note : item.name }, item.name),
+    h(TitleTip, { content: String((item.note ? item.name + ' · ' + item.note : item.name) ?? '') }, { default: () => h('span', { class: 'kt-name__main' }, item.name) }),
     h('span', { class: 'kt-name__sub' }, item.accountLabel),
   ])
 }
@@ -91,7 +93,7 @@ function renderName(row: TableRow): VNodeChild {
 function renderKey(row: TableRow): VNodeChild {
   const item = asRow(row)
   return h('div', { class: 'kt-key' }, [
-    h('code', { class: 'kt-key__text', title: item.masked }, item.masked),
+    h(TitleTip, { content: String((item.masked) ?? '') }, { default: () => h('code', { class: 'kt-key__text' }, item.masked) }),
     h(IconBtn, {
       icon: Copy,
       label: t('page.keys.cell.copyKey'),
@@ -138,25 +140,24 @@ function renderLimits(row: TableRow): VNodeChild {
 function renderIps(row: TableRow): VNodeChild {
   const item = asRow(row)
   return h('div', { class: 'kt-ips' }, [
-    h(
+    h(TitleTip, { content: String((t('page.keys.cell.ipsTitle')) ?? '') }, { default: () => h(
       'button',
       {
         type: 'button',
         class: 'keys-ips__count',
-        title: t('page.keys.cell.ipsTitle'),
         onClick: (event: MouseEvent) => {
           event.stopPropagation()
           emit('ips', item)
         },
       },
       item.ipText,
-    ),
+    ) }),
     item.ipBadges.length
       ? h(
           'div',
           { class: 'kt-ips__badges' },
           item.ipBadges.map((entry) =>
-            h('span', { key: entry.ip, class: 'kt-ip', title: entry.text }, entry.ip),
+            h(TitleTip, { content: String((entry.text) ?? ''), key: entry.ip }, { default: () => h('span', { key: entry.ip, class: 'kt-ip' }, entry.ip) }),
           ),
         )
       : null,
@@ -166,7 +167,7 @@ function renderIps(row: TableRow): VNodeChild {
 function renderGroup(row: TableRow): VNodeChild {
   const item = asRow(row)
   return item.groupId
-    ? h(Badge, { tone: 'neutral', title: t('page.keys.cell.groupTitle') }, { default: () => item.groupLabel })
+    ? h(TitleTip, { content: String((t('page.keys.cell.groupTitle')) ?? '') }, { default: () => h(Badge, { tone: 'neutral' }, { default: () => item.groupLabel }) })
     : h('span', { class: 'kt-muted' }, item.groupLabel)
 }
 

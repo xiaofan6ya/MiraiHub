@@ -44,6 +44,7 @@ import {
   KpiCard,
   Meter,
   StatusDot,
+  TitleTip,
   type JobItem,
 } from '@/components'
 import { useConfirm, useJob, useTableQuery, useToast, type JobSnapshot } from '@/composables'
@@ -904,7 +905,7 @@ const loadErrorTitle = computed(() => loadError.value?.message || errorMessage(n
                     </button>
                   </td>
                   <td class="gw-cell-name" :data-label="t('page.growth.col.account')">
-                    <span class="gw-name" :title="card.account.name">{{ card.account.name }}</span>
+                    <TitleTip :content="card.account.name"><span class="gw-name">{{ card.account.name }}</span></TitleTip>
                     <span v-if="card.progress.levelLabel" class="gw-level">{{ card.progress.levelLabel }}</span>
                   </td>
                   <td class="gw-col-status" :data-label="t('page.growth.col.status')">
@@ -926,11 +927,10 @@ const loadErrorTitle = computed(() => loadError.value?.message || errorMessage(n
                   <td class="gw-col-progress" :data-label="t('page.growth.col.progress')">
                     <span v-if="card.disabled" class="gw-dash">{{ FMT_EMPTY }}</span>
                     <span v-else-if="card.loading" class="gw-muted">{{ t('page.growth.row.loading') }}</span>
-                    <span
+                    <TitleTip
                       v-else-if="card.error && isCredentialMissing(card)"
-                      class="gw-muted"
-                      :title="card.error"
-                    >{{ t('page.growth.row.credentialMissing') }}</span>
+                      :content="card.error"
+                    ><span class="gw-muted">{{ t('page.growth.row.credentialMissing') }}</span></TitleTip>
                     <span v-else-if="card.error" class="gw-row-failed">{{ t('page.growth.row.failed') }}</span>
                     <span v-else-if="!card.loaded" class="gw-dash">{{ FMT_EMPTY }}</span>
                     <div v-else class="gw-progress">
@@ -1005,9 +1005,9 @@ const loadErrorTitle = computed(() => loadError.value?.message || errorMessage(n
                           class="gw-task"
                           :class="{ 'is-claimed': isClaimedTask(task) }"
                         >
-                          <span class="gw-task__title" :title="task.strategy || task.title || task.task_code">
-                            {{ task.title || task.task_code }}
-                          </span>
+                          <TitleTip :content="task.strategy || task.title || task.task_code">
+                            <span class="gw-task__title">{{ task.title || task.task_code }}</span>
+                          </TitleTip>
                           <span v-if="isClaimedTask(task)" class="gw-task__claimed">
                             <CheckCheck :size="14" />
                             {{ taskBadge(task).label }}
@@ -1095,6 +1095,7 @@ const loadErrorTitle = computed(() => loadError.value?.message || errorMessage(n
 /* KPI：≥1280 一行 4 个，≥768 两个，手机一个（10-visual-refresh §1.4） */
 .gw-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
   /* 4 张卡都有 hint，拉齐成一条等高带，和下方表格卡上沿形成两条平行线 */

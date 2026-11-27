@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="MiraiHub">
-  <!-- 站点图标：品牌靛色底 + 白色 M（与侧栏 MiraiHub 标识同色，见 tokens.css 的 brand 令牌） -->
-  <rect width="32" height="32" rx="7" fill="#3148C8" />
-  <path
-    d="M9 23.5V10l7 8.5 7-8.5v13.5"
-    fill="none"
-    stroke="#FFFFFF"
-    stroke-width="2.8"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="MiraiHub">
+  <defs>
+    <linearGradient id="mh-favicon" x1="4" y1="4" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e6eef5" />
+      <stop offset=".52" stop-color="#b5c5d4" />
+      <stop offset="1" stop-color="#88a6bb" />
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="38" height="38" rx="12" fill="#1b2936" />
+  <path d="M10.5 28V12.5l9.5 9 9.5-9V28" fill="none" stroke="url(#mh-favicon)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="30.4" cy="10.2" r="2" fill="#88a6bb" />
 </svg>

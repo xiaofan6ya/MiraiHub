@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NSpin, useDialog } from 'naive-ui'
 import SideNav from './SideNav.vue'
@@ -30,6 +30,13 @@ import { pageTitle, useI18n } from '@/i18n'
 import { prefetchGroupIdle } from '@/router/pageLoaders'
 import { silentRefreshing } from '@/composables/useRevisit'
 import { useDelayedFlag } from '@/composables/useDelayedFlag'
+import { effectiveTheme } from '@/theme/useTheme'
+import { palette } from '@/theme/usePalette'
+import { enterPage, replayVisuals } from '@/composables/usePageMotion'
+import { useSurfaceMotion } from '@/composables/useSurfaceMotion'
+import CosmicBackdrop from '@/components/ambient/CosmicBackdrop.vue'
+import LayoutSkeleton from '@/components/feedback/LayoutSkeleton.vue'
+import { useLayoutSkeleton } from '@/composables/useLayoutSkeleton'
 
 /**
  * 应用外壳（03-shell §2）：侧栏 + 顶栏 + 内容区，以及三个全局浮层
@@ -38,9 +45,12 @@ import { useDelayedFlag } from '@/composables/useDelayedFlag'
  * 外壳只做三件事（03-shell §4）：会话检查、心跳、平台列表；其余数据归页面。
  */
 const route = useRoute()
+const surfaces = ref<HTMLElement | null>(null)
+useSurfaceMotion(surfaces)
 const router = useRouter()
 const dialog = useDialog()
 const { t, locale } = useI18n()
+const layout = useLayoutSkeleton(surfaces, () => route.path, () => locale.value)
 const platformStore = usePlatformStore()
 const heartbeat = useHeartbeatStore()
 const { load: loadAppInfo } = useAppInfo()
@@ -169,38 +179,22 @@ watch(
  * 用 Web Animations 而不是 CSS 类：KeepAlive 缓存的页面每次回来都能重新播放，且不依赖页面根节点的样式。
  * 减少动效、不支持 element.animate（jsdom）、页面根不是元素（Fragment）时直接放行。
  */
-const ROUTE_ENTER_MS = 180
-const ROUTE_EASE = 'cubic-bezier(.16, 1, .3, 1)'
-
-function prefersReducedMotion(): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
-  try {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  } catch {
-    return false
-  }
-}
-
 function onRouteEnter(el: Element, done: () => void): void {
-  const node = el as HTMLElement
-  if (!(node instanceof HTMLElement) || typeof node.animate !== 'function' || prefersReducedMotion()) {
-    done()
-    return
-  }
-  const animation = node.animate(
-    [
-      { opacity: 0, transform: 'translateY(4px)' },
-      { opacity: 1, transform: 'none' },
-    ],
-    { duration: ROUTE_ENTER_MS, easing: ROUTE_EASE },
-  )
-  animation.onfinish = () => done()
-  animation.oncancel = () => done()
+  enterPage(el, done)
 }
 
 function onRouteLeave(_el: Element, done: () => void): void {
   done()
 }
+
+// Theme/palette and same-page query switches keep component state and replay their artwork.
+watch([effectiveTheme, palette, () => route.fullPath], async (next, previous) => {
+  // A same-page query/tab switch is an intentional replay; a route change already
+  // owns its entrance animation and must not be restarted by this watcher.
+  if (next[2] !== previous[2] && String(next[2]).split('?')[0] !== String(previous[2]).split('?')[0]) return
+  await nextTick()
+  if (surfaces.value) replayVisuals(surfaces.value)
+})
 
 /** 回到缓存页时的后台静默刷新：右上角 14px 小转圈，>300ms 才出现。 */
 const showSilentSpinner = useDelayedFlag(() => silentRefreshing.value, 300)
@@ -239,8 +233,9 @@ function confirmLogout(): void {
     />
 
     <div class="shell-main">
+      <CosmicBackdrop />
       <TopBar @open-mobile-nav="toggleMobileNav" />
-      <main class="shell-content">
+      <main ref="surfaces" class="shell-content" :data-layout-mode="layout.mode.value" :aria-busy="layout.loading.value || undefined" :style="{ minHeight: layout.reservedHeight.value }">
         <!-- KeepAlive :max=6：二次进入不出骨架；页面用 useRevisit 在回来时静默刷新 -->
         <router-view v-slot="{ Component, route: viewRoute }">
           <transition :css="false" @enter="onRouteEnter" @leave="onRouteLeave">
@@ -249,6 +244,7 @@ function confirmLogout(): void {
             </keep-alive>
           </transition>
         </router-view>
+        <LayoutSkeleton v-if="layout.show.value" :snapshot="layout.snapshot.value" />
       </main>
       <div
         v-if="showSilentSpinner"
@@ -272,6 +268,8 @@ function confirmLogout(): void {
 </template>
 
 <style scoped>
+.shell-content :deep([data-layout-placeholder]){visibility:hidden}
+.shell-content[data-layout-mode="cached"]>:not(.layout-skeleton-layer){visibility:hidden}
 .shell {
   display: flex;
   align-items: stretch;
@@ -282,6 +280,8 @@ function confirmLogout(): void {
 
 /* 主列：内容区顶部 240px 叠一层极淡的品牌光晕（只在这里出现，10-visual-refresh §1.1） */
 .shell-main {
+  position: relative;
+  isolation: isolate;
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
@@ -293,6 +293,7 @@ function confirmLogout(): void {
 
 /* 内容区：1600 居中；表格页（页面根节点 .mh-page--wide）放宽到 1920 */
 .shell-content {
+  position: relative;
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;

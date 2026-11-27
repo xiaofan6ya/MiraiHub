@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import IslandProvider from '@/components/feedback/IslandProvider.vue'
 import {
   NConfigProvider,
   NDialogProvider,
@@ -31,7 +32,7 @@ const naiveDateLocale = computed(() => (locale.value === 'en-US' ? dateEnUS : da
     <n-loading-bar-provider>
       <n-message-provider :max="3" placement="top-right">
         <n-dialog-provider>
-          <router-view />
+          <IslandProvider><router-view /></IslandProvider>
         </n-dialog-provider>
       </n-message-provider>
     </n-loading-bar-provider>

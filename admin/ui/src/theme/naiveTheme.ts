@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { darkTheme, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 import { useTheme } from './useTheme'
+import { palette } from './usePalette'
 
 const cssVar = (name: string): string => {
   if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return ''
@@ -22,24 +23,24 @@ export const FONT_MONO_FALLBACK = '"JetBrains Mono", ui-monospace, "Cascadia Mon
  * Naive 会用 seemly 对 primaryColor 等做颜色运算，空串会得到错误的派生色。
  */
 export const LIGHT_FALLBACK: Readonly<Record<string, string>> = {
-  '--brand': '#3148C8',
-  '--brand-hover': '#2839A6',
+  '--brand': '#4b657b',
+  '--brand-hover': '#354d62',
   '--ok': '#14866A',
   '--warn': '#B7791F',
   '--danger': '#C8382B',
-  '--bg': '#F3F5F8',
+  '--bg': '#f3f5f7',
   '--surface': '#FFFFFF',
   '--surface-raised': '#FFFFFF',
-  '--surface-2': '#F7F8FA',
-  '--surface-hover': '#F1F3F7',
-  '--border': '#E3E6EC',
-  '--border-soft': '#EDEFF3',
-  '--border-strong': '#CDD2DB',
-  '--fg': '#171A21',
-  '--fg-2': '#454B57',
-  '--fg-muted': '#6B7280',
-  '--fg-faint': '#9AA1AD',
-  '--ring': 'rgba(49, 72, 200, .22)',
+  '--surface-2': '#edf1f4',
+  '--surface-hover': '#e7edf1',
+  '--border': '#dce3e9',
+  '--border-soft': '#e8edf1',
+  '--border-strong': '#bdc9d3',
+  '--fg': '#202a34',
+  '--fg-2': '#4f5f6d',
+  '--fg-muted': '#657584',
+  '--fg-faint': '#82919e',
+  '--ring': 'rgba(75, 101, 123, .24)',
 }
 
 /** 读令牌；读不到时按浅色兜底。 */
@@ -50,7 +51,7 @@ export function token(name: string): string {
 /** 控件尺寸（10-visual-refresh §1.6：按钮 / 输入框 md 34px，sm 28px）。 */
 export const CONTROL_HEIGHT = { small: '28px', medium: '34px', large: '38px' } as const
 /** 圆角（与 tokens.css --r-ctl / --r-chip / --r-card 同值）。 */
-export const RADIUS = { ctl: '8px', chip: '6px', card: '12px', lg: '14px' } as const
+export const RADIUS = { ctl: '9px', chip: '6px', card: '17px', lg: '21px' } as const
 
 /**
  * 从 tokens.css 读取令牌生成 Naive UI 覆盖，保证两套主题只有一处真值。
@@ -251,7 +252,7 @@ export function useNaiveTheme() {
   const themeOverrides = ref<GlobalThemeOverrides>(buildThemeOverrides())
 
   watch(
-    effectiveTheme,
+    [effectiveTheme, palette],
     () => {
       // 等 data-theme 写入后再读取 CSS 变量。
       const run = (): void => {

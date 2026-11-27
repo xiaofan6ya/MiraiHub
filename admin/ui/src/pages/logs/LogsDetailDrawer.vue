@@ -9,7 +9,7 @@
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { ChevronRight, Copy, Download, Network, UserRound } from 'lucide-vue-next'
-import { Badge, Btn, CodeBlock, DetailDrawer, ErrorBlock, KV, Section } from '@/components'
+import { Badge, Btn, CodeBlock, DetailDrawer, ErrorBlock, KV, Section, TitleTip } from '@/components'
 import { useCopy, useToast } from '@/composables'
 import { ApiError, isAbortError } from '@/api/http'
 import { FMT_EMPTY, fmtCredit, fmtDuration, fmtFullTime, fmtInt, fmtRelative } from '@/utils/format'
@@ -377,7 +377,7 @@ async function downloadCapture(): Promise<void> {
           <p class="ld-subhead">{{ t('page.logs.diag.stagesTitle') }}</p>
           <div class="ld-stages">
             <div v-for="(stage, index) in diag.stages" :key="stage.name + index" class="ld-stage">
-              <span class="ld-stage__name mono" :title="stage.name">{{ stage.name }}</span>
+              <TitleTip :content="stage.name"><span class="ld-stage__name mono">{{ stage.name }}</span></TitleTip>
               <span class="ld-stage__track"><i :style="{ width: Math.max(2, (stage.ms / stageMax) * 100) + '%' }" /></span>
               <span class="ld-stage__ms tnum">{{ fmtDuration(stage.ms) }}</span>
             </div>
@@ -422,7 +422,7 @@ async function downloadCapture(): Promise<void> {
           <div v-for="(attempt, index) in capture.upstream" :key="attempt.attempt" class="ld-upstream">
             <div class="ld-upstream__head">
               <span class="ld-attempt__index tnum">{{ attempt.attempt }}</span>
-              <span class="mono ld-upstream__url" :title="attempt.url">{{ attempt.method }} {{ attempt.url }}</span>
+              <TitleTip :content="attempt.url"><span class="mono ld-upstream__url">{{ attempt.method }} {{ attempt.url }}</span></TitleTip>
               <Badge v-if="attempt.http_status" :tone="httpStatusTone(attempt.http_status)">{{ attempt.http_status }}</Badge>
               <Badge v-else tone="neutral">{{ t('page.logs.detail.noStatus') }}</Badge>
             </div>

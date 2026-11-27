@@ -14,7 +14,7 @@
  * 列表首次出现 160ms 淡入；按压 scale(.995)；减少动效时全部关闭。
  */
 import { ChevronRight } from 'lucide-vue-next'
-import { Card, Empty, Meter, PlatformLogo } from '@/components'
+import { Card, Empty, Meter, PlatformLogo, TitleTip } from '@/components'
 import { fmtInt } from '@/utils/format'
 import type { OverviewHealth, OverviewHealthRow } from '@/api/overview'
 import { useI18n } from '@/i18n'
@@ -76,9 +76,7 @@ function accountText(row: OverviewHealthRow): string {
               :aria-label="t('page.overview.health.shareAria', { name: row.name })"
             />
           </span>
-          <span class="ov-health__num tnum" :title="t('page.overview.health.requestsTitle')">
-            {{ fmtInt(row.requests) }}
-          </span>
+          <TitleTip :content="t('page.overview.health.requestsTitle')"><span class="ov-health__num tnum">{{ fmtInt(row.requests) }}</span></TitleTip>
           <span
             class="ov-health__num tnum"
             :class="{ 'is-danger': row.tone === 'danger', 'is-faint': row.successRate === null }"
@@ -91,8 +89,8 @@ function accountText(row: OverviewHealthRow): string {
           <ChevronRight class="ov-health__go" :size="16" aria-hidden="true" />
         </button>
       </li>
-      <li v-if="health.idle.length" class="ov-health__idle" :title="health.idle.join(t('page.sentinel.listSeparator'))">
-        {{ t('page.overview.health.idleRow', { count: health.idle.length }) }}
+      <li v-if="health.idle.length" class="ov-health__idle">
+        <TitleTip :content="health.idle.join(t('page.sentinel.listSeparator'))">{{ t('page.overview.health.idleRow', { count: health.idle.length }) }}</TitleTip>
       </li>
     </ul>
   </Card>

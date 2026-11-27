@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * 用量日志主表格（10-visual-refresh §1.5）。
  *
@@ -74,11 +76,11 @@ const columns = computed<TableColumn[]>(() => [
     width: 96,
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
-      return h(
+      return h(TitleTip, { content: item.timeFull + ' · ' + fmtRelative(item.created_at) }, { default: () => h(
         'span',
-        { class: 'lt-time tnum', title: item.timeFull + ' · ' + fmtRelative(item.created_at) },
+        { class: 'lt-time tnum' },
         item.timeShort,
-      )
+      ) })
     },
   },
   {
@@ -90,8 +92,8 @@ const columns = computed<TableColumn[]>(() => [
       const item = asRow(row)
       const sub = modelSub(item)
       return h('div', { class: 'lt-cell' }, [
-        h('span', { class: 'lt-model', title: item.model_raw && item.model_raw !== item.model ? item.model + ' ← ' + item.model_raw : item.model }, item.model || FMT_EMPTY),
-        sub ? h('small', { class: 'lt-sub', title: item.use_case || undefined }, sub) : null,
+        h(TitleTip, { content: String((item.model_raw && item.model_raw !== item.model ? item.model + ' ← ' + item.model_raw : item.model) ?? '') }, { default: () => h('span', { class: 'lt-model' }, item.model || FMT_EMPTY) }),
+        sub ? h(TitleTip, { content: String((item.use_case || undefined) ?? '') }, { default: () => h('small', { class: 'lt-sub' }, sub) }) : null,
       ])
     },
   },
@@ -102,9 +104,9 @@ const columns = computed<TableColumn[]>(() => [
     width: 128,
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
-      return h('span', { class: 'lt-badge', title: item.error_kind || 'success' }, [
+      return h(TitleTip, { content: String((item.error_kind || 'success') ?? '') }, { default: () => h('span', { class: 'lt-badge' }, [
         h(Badge, { tone: item.resultTone, dot: true }, { default: () => statusLabel(item) }),
-      ])
+      ]) })
     },
   },
   {
@@ -140,7 +142,7 @@ const columns = computed<TableColumn[]>(() => [
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
       if (item.tokensText === FMT_EMPTY) return h('span', { class: 'lt-faint' }, FMT_EMPTY)
-      return h('div', { class: 'lt-cell lt-cell--end', title: item.tokensText }, [
+      return h(TitleTip, { content: String((item.tokensText) ?? '') }, { default: () => h('div', { class: 'lt-cell lt-cell--end' }, [
         h('span', { class: 'lt-num' }, fmtInt(item.total_tokens)),
         h(
           'small',
@@ -149,7 +151,7 @@ const columns = computed<TableColumn[]>(() => [
             ' · ' +
             t('page.logs.col.tokenOut', { value: fmtInt(item.completion_tokens) }),
         ),
-      ])
+      ]) })
     },
   },
   {
@@ -183,7 +185,7 @@ const columns = computed<TableColumn[]>(() => [
     width: 140,
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
-      return h('span', { class: 'lt-ellipsis', title: item.key_name }, item.key_name || FMT_EMPTY)
+      return h(TitleTip, { content: String((item.key_name) ?? '') }, { default: () => h('span', { class: 'lt-ellipsis' }, item.key_name || FMT_EMPTY) })
     },
   },
   {
@@ -194,7 +196,7 @@ const columns = computed<TableColumn[]>(() => [
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
       return h('div', { class: 'lt-cell' }, [
-        h('span', { class: 'lt-ellipsis', title: item.account_name }, item.account_name || FMT_EMPTY),
+        h(TitleTip, { content: String((item.account_name) ?? '') }, { default: () => h('span', { class: 'lt-ellipsis' }, item.account_name || FMT_EMPTY) }),
         h('small', { class: 'lt-sub' }, item.platform ? props.platformLabel(item.platform) : FMT_EMPTY),
       ])
     },
@@ -207,7 +209,7 @@ const columns = computed<TableColumn[]>(() => [
     render: (row: TableRow): VNodeChild => {
       const item = asRow(row)
       return item.client_ip
-        ? h('span', { class: 'lt-mono', title: item.client_ip }, item.client_ip)
+        ? h(TitleTip, { content: String((item.client_ip) ?? '') }, { default: () => h('span', { class: 'lt-mono' }, item.client_ip) })
         : h('span', { class: 'lt-faint' }, FMT_EMPTY)
     },
   },

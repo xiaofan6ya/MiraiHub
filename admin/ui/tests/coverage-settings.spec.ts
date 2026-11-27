@@ -20,8 +20,10 @@ import * as settingsApi from '@/api/settings'
 import type {
   AppSourceStatus,
   InvitationPayload,
+  ProxyEgressPayload,
   ProxyListPayload,
   ProxyNode,
+  ProxyProbeResult,
   RuntimeField,
 } from '@/api/settings'
 
@@ -65,6 +67,10 @@ vi.mock('@/api/settings', async (importOriginal) => {
     patchProxy: vi.fn(),
     deleteProxy: vi.fn(),
     unblockProxy: vi.fn(),
+    getProxyEgress: vi.fn(),
+    saveProxyEgress: vi.fn(),
+    rotateProxyEgress: vi.fn(),
+    testProxyNode: vi.fn(),
     getInvitation: vi.fn(),
     saveInvitation: vi.fn(),
     changePassword: vi.fn(),
@@ -86,6 +92,10 @@ const createProxy = vi.mocked(settingsApi.createProxy)
 const patchProxy = vi.mocked(settingsApi.patchProxy)
 const deleteProxy = vi.mocked(settingsApi.deleteProxy)
 const unblockProxy = vi.mocked(settingsApi.unblockProxy)
+const getProxyEgress = vi.mocked(settingsApi.getProxyEgress)
+const saveProxyEgress = vi.mocked(settingsApi.saveProxyEgress)
+const rotateProxyEgress = vi.mocked(settingsApi.rotateProxyEgress)
+const testProxyNode = vi.mocked(settingsApi.testProxyNode)
 const getInvitation = vi.mocked(settingsApi.getInvitation)
 const saveInvitation = vi.mocked(settingsApi.saveInvitation)
 const changePassword = vi.mocked(settingsApi.changePassword)
@@ -144,7 +154,7 @@ function proxyNode(id: number, overrides: Partial<ProxyNode> = {}): ProxyNode {
 
 function proxyPayload(items?: ProxyNode[]): ProxyListPayload {
   const list = items ?? [
-    proxyNode(1),
+    proxyNode(1, { current: true, probe: probeResult() }),
     proxyNode(2, {
       label: '住宅-上海', pool: '住宅', url: 'socks5://u:***@1.2.3.4:1080',
       state: 'blocked', blocked: true, max_concurrency: 1,
@@ -164,9 +174,60 @@ function proxyPayload(items?: ProxyNode[]): ProxyListPayload {
   }
 }
 
-function invitation(overrides: Partial<InvitationPayload> = {}): InvitationPayload {
+function probeResult(overrides: Partial<ProxyProbeResult> = {}): ProxyProbeResult {
   return {
-    invite_code: 'ABC123',
+    ok: true,
+    latency_ms: 444.6,
+    status: 200,
+    egress_ip: '103.151.173.102',
+    via: 'http://127.0.0.1:7897',
+    target: 'https://api.ipify.org?format=json',
+    error: '',
+    at: '2026-11-27T01:41:19Z',
+    total_ms: 444.8,
+    ...overrides,
+  }
+}
+
+/** GET /api/proxies/egress 的真实响应形状（admin/proxy_egress.py:status）。 */
+function proxyEgress(overrides: Partial<ProxyEgressPayload> = {}): ProxyEgressPayload {
+  return {
+    settings: {
+      enabled: 1,
+      mode: 'auto',
+      endpoint_id: 0,
+      pool: '',
+      rotate_seconds: 300,
+      rotate_per_request: 0,
+    },
+    current: {
+      endpoint_id: 1,
+      label: '机房A-01',
+      url: 'http://user:***@10.0.0.1:8080',
+      pool: '机房',
+      since: '2026-11-27T01:41:19Z',
+      reason: 'rotate',
+    },
+    available: 2,
+    slots: 4,
+    next_rotate_in: 240,
+    runtime: {
+      requests: 5,
+      rotations: 2,
+      last_ok_at: '',
+      last_error: '',
+      last_error_at: '',
+      last_reason: 'rotate',
+      waf_blocked: false,
+    },
+    warnings: [],
+    probe_target: 'https://api.ipify.org?format=json',
+    ...overrides,
+  }
+}
+
+function invitation(overrides: Partial<InvitationPayload> = {}): InvitationPayload {
+  return {    invite_code: 'ABC123',
     invite_url: 'https://wb.example.com/invite/ABC123',
     enabled: true,
     ...overrides,
@@ -295,6 +356,10 @@ beforeEach(() => {
   patchProxy.mockResolvedValue({ ok: true, item: proxyNode(1, { enabled: false }) })
   deleteProxy.mockResolvedValue({ ok: true, id: 1 })
   unblockProxy.mockResolvedValue({ ok: true, id: 2 })
+  getProxyEgress.mockResolvedValue(proxyEgress())
+  saveProxyEgress.mockResolvedValue(proxyEgress())
+  rotateProxyEgress.mockResolvedValue({ ok: true, current: proxyEgress().current, status: proxyEgress() })
+  testProxyNode.mockResolvedValue({ ok: true, error: '', endpoint_id: 1, probe: probeResult() })
   getInvitation.mockResolvedValue(invitation())
   saveInvitation.mockResolvedValue(invitation())
   changePassword.mockResolvedValue({ ok: true, revoked_sessions: 2 })
@@ -589,7 +654,8 @@ describe('SettingsPage · 出口代理节点', () => {
 
     await search!.setValue('')
     await flush()
-    const poolSelect = wrapper.findAllComponents(NSelect)[0]
+    // Egress 面板也有一个 NSelect（出口模式），所以按 .st-filters 容器取分组筛选。
+    const poolSelect = wrapper.find('.st-filters').findComponent(NSelect)
     poolSelect.vm.$emit('update:value', '住宅')
     await flush()
     expect(wrapper.findComponent(DataTable).props('data')).toHaveLength(1)
@@ -645,6 +711,89 @@ describe('SettingsPage · 出口代理节点', () => {
     } finally {
       window.matchMedia = originalMatchMedia
     }
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * 3.1 全局出口（issue #39）：对话主链路挂代理 / 自动轮换 / 手动切换 / 体检
+ * ------------------------------------------------------------------ */
+
+describe('SettingsPage · 全局出口', () => {
+  it('面板显示当前出口、轮换统计与下一次轮换倒计时', async () => {
+    const { wrapper } = await mountPage()
+    const panel = wrapper.find('.st-egress')
+    expect(panel.exists()).toBe(true)
+    expect(panel.text()).toContain('当前出口：机房A-01')
+    expect(panel.text()).toContain('轮换 2 次')
+    expect(panel.text()).toContain('240s 后轮换')
+    expect(wrapper.findComponent(DataTable).props('data')).toHaveLength(2)
+  })
+
+  it('开关 / 模式 / 周期 / 每条请求都落到 PUT /api/proxies/egress', async () => {
+    const { wrapper } = await mountPage()
+    const panel = wrapper.find('.st-egress')
+
+    await panel.findAllComponents(NSwitch)[0].vm.$emit('update:value', false)
+    await flush()
+    expect(saveProxyEgress).toHaveBeenCalledWith({ enabled: 0 })
+
+    saveProxyEgress.mockClear()
+    await panel.findComponent(NSelect).vm.$emit('update:value', 'fixed')
+    await flush()
+    expect(saveProxyEgress).toHaveBeenCalledWith({ mode: 'fixed' })
+
+    saveProxyEgress.mockClear()
+    await panel.findComponent(NInputNumber).vm.$emit('update:value', 600)
+    await flush()
+    expect(saveProxyEgress).toHaveBeenCalledWith({ rotate_seconds: 600 })
+
+    saveProxyEgress.mockClear()
+    await panel.findAllComponents(NSelect)[1].vm.$emit('update:value', '住宅')
+    await flush()
+    expect(saveProxyEgress).toHaveBeenCalledWith({ pool: '住宅' })
+
+    saveProxyEgress.mockClear()
+    await panel.findAllComponents(NSwitch)[1].vm.$emit('update:value', true)
+    await flush()
+    expect(saveProxyEgress).toHaveBeenCalledWith({ rotate_per_request: 1 })
+  })
+
+  it('立即轮换切到下一个节点并刷新当前出口', async () => {
+    const { wrapper } = await mountPage()
+    await click(wrapper.find('.st-egress').element, '立即轮换')
+    expect(rotateProxyEgress).toHaveBeenCalled()
+    expect(bodyText()).toContain('已切换到 机房A-01')
+  })
+
+  it('测试当前出口走 /api/proxies/{id}/test，把延迟与出口 IP 显示出来', async () => {
+    const { wrapper } = await mountPage()
+    await click(wrapper.find('.st-egress').element, '测试当前出口')
+    expect(testProxyNode).toHaveBeenCalledWith(1)
+    expect(bodyText()).toContain('连通正常（444.6 ms）')
+    // 面板上留住「延迟 + 出口 IP」，不用再点第二次
+    expect(wrapper.find('.st-egress').text()).toContain('出口 IP 103.151.173.102')
+  })
+
+  it('节点行的「测试」与「设为当前（锁定节点）」都真实落到接口', async () => {
+    const { wrapper } = await mountPage()
+    const panel = wrapper.find('#settings-proxies').element
+
+    await click(panel, '测试')
+    expect(testProxyNode).toHaveBeenCalled()
+
+    saveProxyEgress.mockClear()
+    await click(panel, '设为当前')
+    expect(saveProxyEgress).toHaveBeenCalledWith({ mode: 'fixed', endpoint_id: 2 })
+  })
+
+  it('没有当前节点 / 有告警时如实显示，不装成正常', async () => {
+    getProxyEgress.mockResolvedValue(
+      proxyEgress({ current: null, warnings: ['全局出口已开启，但没有任何可用节点，对话会退回直连'] }),
+    )
+    const { wrapper } = await mountPage()
+    const panel = wrapper.find('.st-egress')
+    expect(panel.text()).toContain('还没有选出当前节点')
+    expect(panel.text()).toContain('对话会退回直连')
   })
 })
 

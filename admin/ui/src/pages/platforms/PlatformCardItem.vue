@@ -8,9 +8,10 @@
  * 动作全部 emit 给页面执行，卡片本身无状态。
  */
 import { computed } from 'vue'
+import { vReveal } from '@/composables/usePageMotion'
 import { NDropdown, type DropdownOption } from 'naive-ui'
 import { MoreHorizontal } from 'lucide-vue-next'
-import { Badge, Btn, Meter, PlatformLogo } from '@/components'
+import { Badge, Btn, Meter, PlatformLogo, TitleTip } from '@/components'
 import { fmtCompact, fmtCredit, fmtDuration, fmtInt } from '@/utils/format'
 import { useI18n } from '@/i18n'
 import { successTone, type PlatformCard } from '@/api/platforms-admin'
@@ -57,6 +58,7 @@ const showRealm = computed(() => Boolean(props.card.realmLabel) && !props.card.l
 
 <template>
   <article
+    v-reveal
     class="pf-card"
     :class="{ 'is-disabled': !card.enabled, 'is-current': current }"
     :aria-label="card.label"
@@ -64,7 +66,7 @@ const showRealm = computed(() => Boolean(props.card.realmLabel) && !props.card.l
     <header class="pf-card__head">
       <span class="pf-card__logo"><PlatformLogo :id="card.id" :size="24" :label="card.label" /></span>
       <div class="pf-card__title">
-        <h3 :title="card.notes || card.label">{{ card.label }}</h3>
+        <TitleTip :content="card.notes || card.label"><h3>{{ card.label }}</h3></TitleTip>
         <p>
           <template v-if="showRealm">{{ card.realmLabel }} · </template>
           {{ t('page.platforms.card.priority', { value: card.priority === null ? '—' : card.priority }) }}

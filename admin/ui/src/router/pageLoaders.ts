@@ -36,6 +36,7 @@ export const PAGE_LOADERS: Partial<Record<PageKey, PageLoader>> = {
   accounts: () => import('@/pages/AccountsPage.vue').then((mod) => mod.default),
   client: () => import('@/pages/ClientPage.vue').then((mod) => mod.default),
   settings: () => import('@/pages/SettingsPage.vue').then((mod) => mod.default),
+  proxy: () => import('@/pages/ProxyPage.vue').then((mod) => mod.default),
   openentry: () => import('@/pages/OpenEntryPage.vue').then((mod) => mod.default),
   agent: () => import('@/pages/AgentPage.vue').then((mod) => mod.default),
 }

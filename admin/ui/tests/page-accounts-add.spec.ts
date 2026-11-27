@@ -28,11 +28,11 @@ function spec(overrides: Partial<PlatformAddSpec> = {}): PlatformAddSpec {
 }
 
 describe('添加方式的能力声明', () => {
-  it('WorkBuddy：手动 + 导入 + 扫描，没有不存在的授权入口', () => {
+  it('WorkBuddy：手机号登录 + 手动 + 导入 + 扫描', () => {
     const methods = addMethodsFor(spec()).map((method) => method.key)
-    expect(methods).toEqual(['manual', 'import', 'scan'])
+    expect(methods).toEqual(['phone', 'manual', 'import', 'scan'])
     expect(methodEnabled(spec(), 'scan')).toBe(true)
-    expect(methodEnabled(spec(), 'phone')).toBe(false)
+    expect(methodEnabled(spec(), 'phone')).toBe(true)
     expect(methodEnabled(spec(), 'authorize')).toBe(false)
   })
 

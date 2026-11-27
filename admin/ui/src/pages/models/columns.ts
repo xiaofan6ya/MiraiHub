@@ -1,3 +1,5 @@
+
+import TitleTip from '@/components/base/TitleTip.vue'
 /**
  * 模型配置表格的单元格渲染与列定义（从 ModelsPage.vue 拆出，10-visual-refresh §5）。
  * 只搬家、不改逻辑；行内点击 / 行操作回调由页面传入。
@@ -79,46 +81,43 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
 
   function renderModelCell(row: ModelRow): VNodeChild {
     const caps = row.capabilityKeys.map((key) =>
-      h(
+      h(TitleTip, { content: String((CAPABILITY_LABELS[key]) ?? ''), key: 'cap-' + key }, { default: () => h(
         'span',
         {
           key: 'cap-' + key,
           class: ['models-cap', CAP_TONES[key]],
-          title: CAPABILITY_LABELS[key],
           'aria-label': CAPABILITY_LABELS[key],
         },
         [h(CAP_ICONS[key], { size: 12 })],
-      ),
+      ) }),
     )
     const aliasChips = row.aliases.slice(0, MODEL_ALIAS_LIMIT).map((alias) =>
-      h(
+      h(TitleTip, { content: String((t('page.models.cell.aliasCopy')) ?? ''), key: 'alias-' + alias }, { default: () => h(
         Chip,
-        { key: 'alias-' + alias, mono: true, copy: true, value: alias, title: t('page.models.cell.aliasCopy') },
+        { key: 'alias-' + alias, mono: true, copy: true, value: alias },
         {
         default: () => alias,
-      }),
+      }) }),
     )
     if (row.aliasOverflow > 0) {
       const rest = row.aliases.slice(MODEL_ALIAS_LIMIT)
       aliasChips.push(
-        h(
+        h(TitleTip, { content: String((t('page.models.cell.aliasMore', { count: row.aliasOverflow, list: rest.join('、') })) ?? ''), key: 'alias-more' }, { default: () => h(
           Chip,
           {
             key: 'alias-more',
-            title: t('page.models.cell.aliasMore', { count: row.aliasOverflow, list: rest.join('、') }),
           },
           { default: () => '+' + row.aliasOverflow },
-        ),
+        ) }),
       )
     }
 
-    return h(
+    return h(TitleTip, { content: String((t('page.models.cell.editTitle', { name: row.name })) ?? '') }, { default: () => h(
       'div',
       {
         class: 'models-name',
         role: 'button',
         tabindex: 0,
-        title: t('page.models.cell.editTitle', { name: row.name }),
         onClick: () => void openEdit(row),
         onKeydown: (event: KeyboardEvent) => {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -154,7 +153,7 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
           ? h('div', { class: 'models-name__caps', 'aria-label': t('page.models.cell.capsAria') }, caps)
           : null,
       ],
-    )
+    ) })
   }
 
   /** 模型健康按上游 id 建索引：平台列用它判断「哪个平台在跑流量」。 */
@@ -192,12 +191,11 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
     })
     const shown = badges.slice(0, MODEL_PLATFORM_LIMIT)
     const nodes: VNodeChild[] = shown.map((badge) =>
-      h(
+      h(TitleTip, { content: String((badgeTitle(badge.label, badge.realms, badge.requests, badge.accounts)) ?? ''), key: 'logo-' + badge.platform }, { default: () => h(
         'span',
         {
           key: 'logo-' + badge.platform,
           class: ['models-platform', { 'is-off': isBadgeDimmed(badge), 'is-live': badge.requests > 0 }],
-          title: badgeTitle(badge.label, badge.realms, badge.requests, badge.accounts),
         },
         [
           h(PlatformLogo, { id: badge.icon, size: 16, label: badge.label }),
@@ -205,26 +203,26 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
             ? h('span', { class: 'models-platform__count tnum', 'aria-hidden': 'true' }, String(badge.realms.length))
             : null,
         ],
-      ),
+      ) }),
     )
     if (badges.length > shown.length) {
       const rest = badges.slice(MODEL_PLATFORM_LIMIT).map((badge) => badge.label)
       nodes.push(
-        h(
+        h(TitleTip, { content: String((rest.join(' · ')) ?? ''), key: 'logo-more' }, { default: () => h(
           'span',
-          { key: 'logo-more', class: 'models-platform is-more tnum', title: rest.join(' · ') },
+          { key: 'logo-more', class: 'models-platform is-more tnum' },
           ['+' + (badges.length - shown.length)],
-        ),
+        ) }),
       )
     }
-    return h('div', { class: 'models-platforms', title: platformTooltip(row) }, [
+    return h(TitleTip, { content: String((platformTooltip(row)) ?? '') }, { default: () => h('div', { class: 'models-platforms' }, [
       ...nodes,
       h(
         'span',
         { key: 'logo-sum', class: 'models-platforms__sum tnum' },
         t('page.models.status.platforms', { enabled: row.enabledCount, total: row.platformCount }),
       ),
-    ])
+    ]) })
   }
 
   function renderMultiplier(row: ModelRow): VNodeChild {
@@ -237,7 +235,7 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
           : row.multiplier === 0
             ? t('page.models.cell.multiplierFree')
             : t('page.models.cell.multiplierRelative')
-    return h('span', { class: ['models-mult', 'is-' + tone], title: hint }, row.multiplierText)
+    return h(TitleTip, { content: String((hint) ?? '') }, { default: () => h('span', { class: ['models-mult', 'is-' + tone] }, row.multiplierText) })
   }
 
   function renderLimits(row: ModelRow): VNodeChild {
@@ -253,17 +251,16 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
     ]
     if (row.availableAccounts !== null) {
       lines.push(
-        h(
+        h(TitleTip, { content: String((t('page.models.cell.accountsTitle')) ?? '') }, { default: () => h(
           'span',
           {
             class: 'models-limits__line',
-            title: t('page.models.cell.accountsTitle'),
           },
           [
             h('span', { class: 'models-limits__label' }, t('page.models.cell.accounts')),
             h('span', { class: 'tnum' }, row.availableAccounts + '/' + (row.eligibleAccounts ?? 0)),
           ],
-        ),
+        ) }),
       )
     }
     return h('div', { class: 'models-limits' }, lines)
@@ -275,7 +272,7 @@ export function useModelColumns(deps: ModelColumnDeps): ComputedRef<TableColumn[
     if (row.requests <= 0 && row.successRate === null && (row.ttftP50 === null || row.ttftP50 <= 0)) {
       const noAccounts = row.availableAccounts === 0 && (row.eligibleAccounts || 0) > 0
       return h('div', { class: 'models-health' }, [
-        h('span', { class: 'models-dash', title: t('page.models.cell.noSamples') }, FMT_EMPTY),
+        h(TitleTip, { content: String((t('page.models.cell.noSamples')) ?? '') }, { default: () => h('span', { class: 'models-dash' }, FMT_EMPTY) }),
         noAccounts ? h(Badge, { tone: 'danger' }, { default: () => t('page.models.cell.noAccounts') }) : null,
       ])
     }

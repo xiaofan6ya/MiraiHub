@@ -23,10 +23,10 @@ const cssVar = (name: string): string => {
 
 /** 浅色兜底（读不到 CSS 变量时，例如测试环境）。 */
 const FALLBACK: Readonly<Record<string, string>> = {
-  '--chart-1': '#3148C8',
+  '--chart-1': '#4b657b',
   '--chart-2': '#14866A',
   '--chart-3': '#B7791F',
-  '--chart-4': '#8A4FC7',
+  '--chart-4': '#7a899e',
   '--chart-5': '#1F8FB3',
   '--chart-6': '#C8382B',
   '--chart-7': '#6B7A2E',
@@ -38,7 +38,7 @@ const FALLBACK: Readonly<Record<string, string>> = {
   '--border-soft': '#EDEFF3',
   '--border-strong': '#CDD2DB',
   '--surface-raised': '#FFFFFF',
-  '--brand': '#3148C8',
+  '--brand': '#4b657b',
 }
 
 function tokenOf(name: string): string {

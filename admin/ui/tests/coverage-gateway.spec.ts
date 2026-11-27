@@ -366,7 +366,10 @@ describe('首屏', () => {
     expect(rows[0].find('.gw-order__meta').text()).toContain('3 可用')
     // 额度用量级缩写，完整数字在悬停提示里（第 1 轮审查 P2）
     expect(rows[0].find('.gw-order__meta').text()).toContain('12K')
-    expect(rows[0].find('.gw-order__meta').attributes('title')).toBe('12,000')
+    expect(rows[0].find('.gw-order__meta').attributes('title')).toBeUndefined()
+    await rows[0].find('.gw-order__meta').trigger('mouseenter')
+    await new Promise(resolve => setTimeout(resolve, 180))
+    expect(document.querySelector('.mh-help__content')?.textContent).toBe('12,000')
     expect(rows[0].classes()).toContain('is-draggable')
     expect(rows[1].find('.gw-order__reason').text()).toContain('优先级 20')
     expect(rows[2].find('.gw-order__reason').text()).toContain('无可用账号')

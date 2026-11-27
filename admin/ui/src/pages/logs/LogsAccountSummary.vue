@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * 按账号汇总（放在日志表下方，默认收起；第 1 轮审查 P2：日志表要在第一位）。
  * 数据与顶部 KPI 同一次 /api/logs/summary，展开不额外请求。行点击 = 按该账号筛选。
@@ -101,7 +103,7 @@ const columns = computed<TableColumn[]>(() => [
     mobile: 'meta',
     width: 96,
     numeric: true,
-    render: (row: TableRow) => h('span', { class: 'ls-num', title: fmtInt(asRow(row).total_tokens) }, fmtCompact(asRow(row).total_tokens)),
+    render: (row: TableRow) => h(TitleTip, { content: String((fmtInt(asRow(row).total_tokens)) ?? '') }, { default: () => h('span', { class: 'ls-num' }, fmtCompact(asRow(row).total_tokens)) }),
   },
   {
     key: 'cache_rate',
@@ -127,7 +129,7 @@ const columns = computed<TableColumn[]>(() => [
     render: (row: TableRow) => {
       const item = asRow(row)
       return item.last_used_at
-        ? h('span', { class: 'ls-time', title: fmtFullTime(item.last_used_at) }, fmtRelative(item.last_used_at))
+        ? h(TitleTip, { content: String((fmtFullTime(item.last_used_at)) ?? '') }, { default: () => h('span', { class: 'ls-time' }, fmtRelative(item.last_used_at)) })
         : h('span', { class: 'ls-num is-faint' }, FMT_EMPTY)
     },
   },

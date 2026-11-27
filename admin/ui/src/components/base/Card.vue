@@ -1,13 +1,17 @@
 <script setup lang="ts">
+import { vReveal } from '@/composables/usePageMotion'
 /**
  * 卡片（10-visual-refresh §1.1）：表面底 + 1px --border + --shadow-1（很轻）+ 12px 圆角。
  * 英雄区 / 图表大卡用 hero（14px 圆角）；可点击的卡片用 hoverable（悬停换 --shadow-2 与
  * --border-strong，160ms，不上浮、不缩放）。内嵌表格时用 flush 去掉内边距。
  */
 import { NSpin } from 'naive-ui'
+import { useDelayedFlag } from '@/composables/useDelayedFlag'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
+    /** Gate entrance motion while a skeleton is shown without adding a spinner. */
+    motionPending?: boolean
     title?: string
     /** 标题下一行说明（12px --fg-muted），可选。 */
     subtitle?: string
@@ -22,14 +26,16 @@ withDefaults(
   }>(),
   { title: undefined, subtitle: undefined, flush: false, loading: false, hero: false, hoverable: false },
 )
+const showRefresh = useDelayedFlag(() => props.loading, 300)
 </script>
 
 <template>
   <section
+    v-reveal="motionPending ?? loading"
     class="mh-card"
     :class="{ 'mh-card--flush': flush, 'mh-card--hero': hero, 'mh-card--hoverable': hoverable }"
   >
-    <header v-if="title || $slots.title || $slots.extra || loading" class="mh-card__head">
+    <header v-if="title || $slots.title || $slots.extra" class="mh-card__head">
       <div class="mh-card__heading">
         <h2 class="mh-card__title">
           <slot name="title">{{ title }}</slot>
@@ -37,27 +43,35 @@ withDefaults(
         <p v-if="subtitle" class="mh-card__sub">{{ subtitle }}</p>
       </div>
       <div class="mh-card__tools">
-        <n-spin v-if="loading" :size="14" />
+        <n-spin v-if="showRefresh" :size="14" />
         <slot name="extra" />
       </div>
     </header>
+    <n-spin v-else-if="showRefresh" class="mh-card__refresh" :size="14" />
     <div class="mh-card__body">
       <slot />
     </div>
     <footer v-if="$slots.footer" class="mh-card__foot">
       <slot name="footer" />
     </footer>
+    <span class="surface-sheen" aria-hidden="true"><i class="surface-sheen__light" /></span>
   </section>
 </template>
 
 <style scoped>
 .mh-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  box-sizing: border-box;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-1);
   min-width: 0;
 }
+.mh-card__refresh{position:absolute;right:12px;top:12px;z-index:1}
 
 .mh-card--hero {
   border-radius: var(--r-lg);
@@ -89,6 +103,7 @@ withDefaults(
 }
 
 .mh-card__head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -133,6 +148,7 @@ withDefaults(
 }
 
 .mh-card__body {
+  flex: 1 1 auto;
   padding: var(--sp-4) var(--sp-5) var(--sp-5);
   min-width: 0;
 }
@@ -143,6 +159,7 @@ withDefaults(
 }
 
 .mh-card--flush .mh-card__body {
+  flex: 1 1 auto;
   padding: 0;
 }
 
@@ -151,6 +168,7 @@ withDefaults(
 }
 
 .mh-card__foot {
+  flex: none;
   border-top: 1px solid var(--border-soft);
   padding: var(--sp-3) var(--sp-5);
   display: flex;

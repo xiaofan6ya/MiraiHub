@@ -100,17 +100,17 @@ const deviceTable = useTableQuery('ip-devices', { pageSize: 20, filters: { dq: '
  * ------------------------------------------------------------------ */
 
 const activity = ref<IpActivityPayload | null>(null)
-const activityLoading = ref(false)
+const activityLoading = ref(view.value === 'active')
 const activityError = ref<IpErrorState | null>(null)
 
 const blockedItems = ref<BlockedIpItem[] | null>(null)
 /** 列表级 expiry_supported（r3 后端；空列表时也能据此开放「时长」）。 */
 const blockedExpiryFlag = ref(false)
-const blockedLoading = ref(false)
+const blockedLoading = ref(view.value === 'blocked')
 const blockedError = ref<IpErrorState | null>(null)
 
 const devices = ref<IpDeviceRow[] | null>(null)
-const deviceLoading = ref(false)
+const deviceLoading = ref(view.value === 'devices')
 const deviceError = ref<IpErrorState | null>(null)
 
 let activityController: AbortController | null = null

@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { useIslandMessage as useMessage } from '@/components/feedback/islandQueue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+
 import { CornerDownLeft, Search } from 'lucide-vue-next'
 import { PAGES } from '@/router/pages'
 import { usePlatformStore } from '@/stores/platform'

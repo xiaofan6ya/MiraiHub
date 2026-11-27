@@ -17228,6 +17228,42 @@ function modelLabelOf(model) {
   return _modelLabelMap[raw] || raw;
 }
 
+/**
+ * 网关分类（error_kind）的中文名。
+ *
+ * 表格原来直接把 `error_kind` 截 6 个字显示，`endpoint_gone` 这类新分类
+ * 就只能看到一串下划线英文（2026-11-26 Qoder 空 404 事故）。
+ * 没收录的仍原样返回 —— 宁可见到生词，也别把它藏起来。
+ */
+const ERR_KIND_LABELS = {
+  endpoint_gone: "上游端点下线",
+  model_unknown: "模型不存在",
+  quota_exceeded: "额度耗尽",
+  hard_credit: "积分不足",
+  rate_limit: "限速",
+  soft_rate: "上游限流",
+  model_rate: "模型限流",
+  model_block: "模型不可用",
+  auth: "登录失效",
+  session_dead: "登录失效",
+  signature_invalid: "签名无效",
+  upstream_business: "上游业务错误",
+  upstream_error: "上游服务错误",
+  upstream_internal: "上游内部错误",
+  upstream_auth_anomaly: "上游鉴权异常",
+  network: "网络失败",
+  transport: "网络中断",
+  timeout: "超时",
+  client_disconnected: "客户端断开",
+  gateway_rejected: "网关拒绝",
+  no_account: "无可用账号",
+};
+function errKindLabel(kind) {
+  const raw = String(kind || "").trim();
+  if (!raw) return "失败";
+  return ERR_KIND_LABELS[raw] || raw;
+}
+
 //: 当前页数据（模型展示名映射到手后要重画，避免再打一次接口）
 let _logLastItems = [];
 let _logLastConds = [];
@@ -17330,9 +17366,12 @@ function logRow(l) {
        </div>`
     : `<span class="text-xs" style="color:var(--fg-subtle)">—</span>`;
   const ok = !l.error_kind || l.error_kind === 'success';
+  // kind 的中文名：表格里直接显示 `endpoint_gone` 这种原始串没人看得懂
+  // （2026-11-26 Qoder 空 404 事故新加的分类）。没收录的仍显示原值。
+  const kindText = errKindLabel(l.error_kind);
   const statusHtml = ok
     ? `<span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-600 text-xs" data-tooltip="成功"><span class="wb-icon "><svg class="wb-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span></span>`
-    : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700" data-tooltip="${esc(l.error_kind||'')}">${esc((l.error_kind||'失败').slice(0,6))}</span>`;
+    : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700" data-tooltip="${esc(l.error_kind||'')} · ${esc(kindText)}">${esc(kindText.slice(0,8))}</span>`;
   return `<tr data-tooltip="IP: ${esc(l.client_ip||'—')} | Seq: ${l.seq||'—'}">
     <td class="text-xs whitespace-nowrap tnum" style="color:var(--fg-subtle)" data-tooltip="${esc(fmtTime(l.created_at))}">${esc(fmtTime(l.created_at).slice(5))}</td>
     <td class="text-xs font-mono">${WBUsage.ipCell(l.client_ip)}</td>

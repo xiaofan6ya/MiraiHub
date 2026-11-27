@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * IP 管理 · 设备关联（客户端上报的设备 ID / 指纹 / MAC；后端一次返回最近 2000 条，客户端筛排分页）。
  * 一行工具栏：搜索标识 / IP · 状态 ……… 统计 · 重置 · 刷新。
@@ -124,7 +126,7 @@ function asRow(row: TableRow): IpDeviceRow {
 function renderKind(row: TableRow): VNodeChild {
   const item = asRow(row)
   return h('div', { class: 'id-kind' }, [
-    h('span', { class: 'id-kind__value', title: item.value }, item.value || FMT_EMPTY),
+    h(TitleTip, { content: String((item.value) ?? '') }, { default: () => h('span', { class: 'id-kind__value' }, item.value || FMT_EMPTY) }),
     h('small', { class: 'id-sub' }, item.kindLabel || FMT_EMPTY),
   ])
 }
@@ -133,10 +135,10 @@ function renderIps(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (!item.ips.length) return h('span', { class: 'id-faint' }, FMT_EMPTY)
   const shown = item.ips.slice(0, 3)
-  const nodes: VNodeChild[] = shown.map((ip) => h(Chip, { key: ip, mono: true, title: ip }, { default: () => ip }))
+  const nodes: VNodeChild[] = shown.map((ip) => h(TitleTip, { content: String((ip) ?? ''), key: ip }, { default: () => h(Chip, { key: ip, mono: true }, { default: () => ip }) }))
   if (item.ips.length > shown.length) {
     nodes.push(
-      h(Chip, { key: 'more', title: item.ips.slice(3).join(', ') }, { default: () => '+' + (item.ips.length - shown.length) }),
+      h(TitleTip, { content: String((item.ips.slice(3).join(', ')) ?? ''), key: 'more' }, { default: () => h(Chip, { key: 'more' }, { default: () => '+' + (item.ips.length - shown.length) }) }),
     )
   }
   return h('div', { class: 'id-chips' }, nodes)
@@ -145,7 +147,7 @@ function renderIps(row: TableRow): VNodeChild {
 function renderSeen(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (!item.lastSeen) return h('span', { class: 'id-faint' }, FMT_EMPTY)
-  return h('span', { class: 'id-time', title: fmtFullTime(item.lastSeen) }, fmtRelative(item.lastSeen))
+  return h(TitleTip, { content: String((fmtFullTime(item.lastSeen)) ?? '') }, { default: () => h('span', { class: 'id-time' }, fmtRelative(item.lastSeen)) })
 }
 
 function renderStatus(row: TableRow): VNodeChild {
@@ -180,7 +182,7 @@ const columns = computed<TableColumn[]>(() => [
 </script>
 
 <template>
-  <Card flush class="id">
+  <Card flush class="id" :motion-pending="firstLoading">
     <ErrorBlock
       v-if="error && rows === null"
       class="id-error"

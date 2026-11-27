@@ -97,7 +97,7 @@ const schedules = ref<ScheduleItem[] | null>(null)
 const globalProxy = ref<ScheduleGlobalProxy | null>(null)
 const taskCatalog = ref<ScheduleTaskOption[]>([])
 const proxyPayload = ref<ProxyListPayload | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 const runningIds = ref<number[]>([])
 
@@ -592,7 +592,7 @@ onBeforeUnmount(() => {
       <Btn variant="quiet" size="sm" @click="poll.resume()">{{ t('page.schedules.poll.resume') }}</Btn>
     </p>
 
-    <Card flush class="schedules-card">
+    <Card flush class="schedules-card" :motion-pending="firstLoading">
       <div class="schedules-filter">
         <FilterBar
           :chips="chips"

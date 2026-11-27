@@ -90,7 +90,7 @@ const table = useTableQuery('keys', { pageSize: 20, filters: { q: '', group: '',
 
 /* ------------------------------ 列表 ------------------------------ */
 const keys = ref<ApiKeyItem[] | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 let controller: AbortController | null = null
 
@@ -254,11 +254,12 @@ async function loadKeys(): Promise<void> {
   loadError.value = null
   try {
     const payload = await listKeys(current.signal)
+    if (controller !== current) return
     keys.value = Array.isArray(payload?.items) ? payload.items : []
     const maxPage = Math.max(1, Math.ceil(filteredRows.value.length / table.state.pageSize))
     if (table.state.page > maxPage) table.setPage(maxPage)
   } catch (error) {
-    if (isAbortError(error)) return
+    if (controller !== current || isAbortError(error)) return
     loadError.value = {
       message: errorMessage(error),
       detail: error instanceof ApiError && error.detail ? prettyDetail(error.detail) : '',

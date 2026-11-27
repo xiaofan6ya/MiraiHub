@@ -174,9 +174,10 @@ const icon = computed(() => (props.line.tone === 'ok' ? ShieldCheck : ShieldAler
 
 .sn-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 

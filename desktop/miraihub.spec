@@ -18,6 +18,7 @@ datas = [(str(root / 'admin/static'), 'admin/static'),
          # The authenticated management console lives outside the public
          # static directory and must be present in the desktop bundle too.
          (str(root / 'admin/console'), 'admin/console'),
+         (str(root / 'admin/ui/dist'), 'admin/ui/dist'),
          # admin/data/ 是运行期用 read_text() 读的 JSON（上游错误文案表），
          # 漏打包会让 EXE/APK 启动即 FileNotFoundError：源码运行正常，只有产物才暴露。
          (str(root / 'admin/data'), 'admin/data'),

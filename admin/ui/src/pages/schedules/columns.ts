@@ -1,3 +1,5 @@
+
+import TitleTip from '@/components/base/TitleTip.vue'
 /**
  * 定时任务表格的单元格渲染与列定义（从 SchedulesPage.vue 拆出，10-visual-refresh §5）。
  * 只搬家、不改逻辑；启停 / 行操作回调由页面传入。
@@ -34,7 +36,7 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
       if (index > 0) nodes.push('_', h('wbr'))
       nodes.push(part)
     })
-    return h('code', { class: 'sc-task__id mono', title: t('page.schedules.cell.taskIdTitle') }, nodes)
+    return h(TitleTip, { content: String((t('page.schedules.cell.taskIdTitle')) ?? '') }, { default: () => h('code', { class: 'sc-task__id mono' }, nodes) })
   }
 
   /**
@@ -44,7 +46,7 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
   function renderName(row: TableRow): VNodeChild {
     const item = row as ScheduleRow
     const head: VNodeChild[] = [
-      h('span', { class: 'sc-name', title: item.displayName }, item.displayName || FMT_EMPTY),
+      h(TitleTip, { content: String((item.displayName) ?? '') }, { default: () => h('span', { class: 'sc-name' }, item.displayName || FMT_EMPTY) }),
     ]
     if (item.running) {
       head.push(
@@ -62,11 +64,11 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
     if (item.stopAfter) {
       sub.push(
         h('span', { class: 'sc-sep', 'aria-hidden': 'true' }, '·'),
-        h(
+        h(TitleTip, { content: String((t('page.schedules.cell.stopAfterTitle')) ?? '') }, { default: () => h(
           'span',
-          { class: 'sc-name__stop', title: t('page.schedules.cell.stopAfterTitle') },
+          { class: 'sc-name__stop' },
           t('page.schedules.cell.stopAfter', { time: fmtTime(item.stopAfter) }),
-        ),
+        ) }),
       )
     }
     return h('div', { class: 'sc-name-cell' }, [
@@ -79,16 +81,13 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
     const item = row as ScheduleRow
     // 「该平台全部账号」是所有行都一样的常态说明：收进悬停提示，不再和平台名拼在一起（第 2 轮审查 P0-15）。
     return h('div', { class: 'sc-scope' }, [
-      h(
-        'span',
-        {
-          title:
-            t('page.schedules.cell.scopeTitle', { platform: item.platform || '—' }) +
+      h(TitleTip, { content: t('page.schedules.cell.scopeTitle', { platform: item.platform || '—' }) +
             ' · ' +
-            t('page.schedules.cell.scopeHint'),
-        },
+            t('page.schedules.cell.scopeHint') }, { default: () => h(
+        'span',
+        {},
         item.platformLabel || FMT_EMPTY,
-      ),
+      ) }),
     ])
   }
 
@@ -139,7 +138,7 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
       h('span', { class: item.proxyPool ? 'sc-proxy__main' : 'sc-proxy__main is-global' }, item.proxyText),
     ]
     if (custom.length) children.push(h('span', { class: 'sc-proxy__hint' }, custom.join(' · ')))
-    return h('div', { class: 'sc-proxy', title: hints.join('\n') }, children)
+    return h(TitleTip, { content: String((hints.join('\n')) ?? '') }, { default: () => h('div', { class: 'sc-proxy' }, children) })
   }
 
   /**
@@ -151,12 +150,12 @@ export function useScheduleColumns(deps: ScheduleColumnDeps): ComputedRef<TableC
     const result = item.result
     const time = item.lastRunAt ? fmtTime(item.lastRunAt) : t('page.schedules.cell.neverRun')
     const tip = [t('page.schedules.cell.lastRunTitle') + ' · ' + time, result.summary].filter(Boolean).join('\n')
-    return h('div', { class: 'sc-result', title: tip }, [
+    return h(TitleTip, { content: String((tip) ?? '') }, { default: () => h('div', { class: 'sc-result' }, [
       h('div', { class: 'sc-result__head' }, [
         h(Badge, { tone: result.tone, dot: true }, { default: () => result.label }),
         h('span', { class: 'sc-result__time' }, time),
       ]),
-    ])
+    ]) })
   }
 
   function renderEnabled(row: TableRow): VNodeChild {

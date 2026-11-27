@@ -246,6 +246,7 @@ const PAGE_TITLE_KEY: Record<PageKey, MessageKey> = {
   agent: 'nav.page.agent',
   openentry: 'nav.page.openentry',
   settings: 'nav.page.settings',
+  proxy: 'nav.page.proxy',
   maintenance: 'nav.page.maintenance',
 }
 

@@ -356,3 +356,8 @@ desktop/assets/app.iconset/
 # 运行时实例锁 / 守护锁（每个端口一个，按机器生成，不进仓库）
 .workbuddy2api*.lock
 logs/daemon*.lock
+
+# ===== 构建缓存 / 本地验证产物 / 会话临时目录（不属源码，2026-11-27 备份分支时补）=====
+admin/ui/.vite-cache/
+ui-refresh-verification/
+_marvis/

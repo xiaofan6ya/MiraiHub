@@ -170,6 +170,8 @@ def _client_ip(request) -> str:
 
 
 def _cool_seconds(kind: str) -> int:
+    # `queued`（上游 10605 排队）**不要冷却**：号没坏，只是上游此刻在排队。
+    # 冷却会让这个号在池子里消失几分钟，而排队本来就是几秒级的事。
     return {"auth": 600, "quota_exceeded": 1800,
             "signature_invalid": 300, "upstream_business": 120}.get(kind, 0)
 
@@ -179,7 +181,7 @@ def _attempt(db, request, key, body: dict, *, realm: str, model_hint: str = ""):
     exclude: set[int] = set()
     realm = realm or "cn"
     last_error = None
-    for _ in range(MAX_ATTEMPTS):
+    for attempt_idx in range(MAX_ATTEMPTS):
         account = shared.select_account(
             db, storage=qoder_accounts.PLATFORM, realm=realm,
             key=key, model=model_hint, exclude_ids=exclude,
@@ -205,11 +207,23 @@ def _attempt(db, request, key, body: dict, *, realm: str, model_hint: str = ""):
             return plan, account
         except client.UpstreamError as exc:
             shared.release(account)
+            # **排队不是故障**：10605 是上游容量状态，号本身没问题。
+            # 计错误 / 冷却 / 换号三件事都不该做 —— 换号换到别的号也是同一个
+            # 排队队列，只会把 N 个号一起打上「失败」标记。
+            queued = exc.kind == "queued" or exc.code == "10605"
             shared.note_failure(
                 db, account, kind=exc.kind, detail=exc.detail or exc.message,
                 status=exc.status, model=model_hint, public_platform=_public(request),
-                cool_seconds=_cool_seconds(exc.kind))
+                cool_seconds=_cool_seconds(exc.kind),
+                count_error=not queued)
             last_error = exc
+            if queued:
+                # 短暂退避后**同一个号**重试一次；仍排队就直接把错误抛给客户端
+                # （前端看到「上游排队中」比看到「所有账号都失败」有用得多）。
+                if attempt_idx > 0:
+                    break
+                time.sleep(1.0)
+                continue
             exclude.add(account.id)
             if not exc.retryable():
                 break

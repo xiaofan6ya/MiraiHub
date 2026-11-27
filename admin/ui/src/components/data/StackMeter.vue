@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 多段堆叠进度（如到期风险分布），下方图例。 */
 import { computed } from 'vue'
+import TitleTip from '../base/TitleTip.vue'
 import { badgeToneStyle } from '../base/badge'
 import type { StackMeterItem } from './stackmeter'
 
@@ -36,13 +37,10 @@ function colorOf(item: StackMeterItem): string {
 <template>
   <div class="mh-stack">
     <div class="mh-stack__bar" :style="{ height: height + 'px' }">
-      <span
-        v-for="item in items"
-        :key="item.label"
+      <TitleTip v-for="item in items" :key="item.label" :content="item.label + ' ' + item.value + unit"><span
         class="mh-stack__seg"
         :style="{ width: widthOf(item), background: colorOf(item) }"
-        :title="item.label + ' ' + item.value + unit"
-      />
+      /></TitleTip>
     </div>
     <ul v-if="showLegend" class="mh-stack__legend">
       <li v-for="item in items" :key="item.label" class="mh-stack__legend-item">

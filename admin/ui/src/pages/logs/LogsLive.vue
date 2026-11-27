@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
 /**
  * 请求动态（近 15 分钟，每分钟一根柱；横轴本地时区）+ 最近 5 条请求。
  *
@@ -91,11 +92,8 @@ function elapsedText(item: LiveRequest): string {
           <div class="logs-chart__area">
             <div class="logs-chart__grid" aria-hidden="true"><i /><i /><i /></div>
             <div class="logs-chart__bars" role="img" :aria-label="t('page.logs.live.barsAria')">
-              <div
-                v-for="bar in bars"
-                :key="bar.at"
+              <TitleTip v-for="bar in bars" :key="bar.at" :content="t('page.logs.live.barTitle', { label: bar.label, requests: bar.requests, errors: bar.errors })"><div
                 class="logs-chart__col"
-                :title="t('page.logs.live.barTitle', { label: bar.label, requests: bar.requests, errors: bar.errors })"
               >
                 <div class="logs-chart__bar" :style="{ height: heightOf(bar.requests) }">
                   <div
@@ -104,7 +102,7 @@ function elapsedText(item: LiveRequest): string {
                     :style="{ height: Math.min(100, (bar.errors / Math.max(1, bar.requests)) * 100) + '%' }"
                   />
                 </div>
-              </div>
+              </div></TitleTip>
             </div>
             <p v-if="total === 0" class="logs-chart__empty">
               {{ t('page.logs.live.empty') }}
@@ -125,10 +123,10 @@ function elapsedText(item: LiveRequest): string {
         <p class="logs-recent__title">{{ t('page.logs.live.recentTitle') }}</p>
         <ul v-if="recent.length" class="logs-recent__list">
           <li v-for="item in recent" :key="item.request_id" class="logs-recent__row">
-            <span class="logs-recent__time tnum" :title="fmtFullTime(item.started_at)">
+            <TitleTip :content="fmtFullTime(item.started_at)"><span class="logs-recent__time tnum">
               {{ fmtTime(item.started_at) }}
-            </span>
-            <span class="logs-recent__model" :title="item.model || item.path">{{ item.model || item.path }}</span>
+            </span></TitleTip>
+            <TitleTip :content="item.model || item.path"><span class="logs-recent__model">{{ item.model || item.path }}</span></TitleTip>
             <span class="logs-recent__status"><Badge :tone="liveTone(item)" dot>{{ liveStatusLabel(item) }}</Badge></span>
             <span class="logs-recent__elapsed tnum">{{ elapsedText(item) }}</span>
           </li>

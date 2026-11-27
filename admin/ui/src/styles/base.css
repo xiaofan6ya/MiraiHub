@@ -126,7 +126,7 @@ main.shell-content:has(.mh-page--wide) {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 
@@ -145,14 +145,16 @@ main.shell-content:has(.mh-page--wide) {
   }
 }
 
-/* KPI 自适应网格：≥1280 一行 4 个，≥768 2 个，手机 1 个；卡片按内容等高，不强拉伸。 */
+/* KPI 自适应网格：同一网格行内卡片始终等高，避免信息量不同造成参差。 */
 .mh-kpis {
   display: grid;
+  grid-auto-rows: 1fr;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
+
 
 @media (max-width: 1279px) {
   .mh-kpis {
@@ -639,4 +641,39 @@ kbd {
   :root[data-theme="dark"] .mh-skeleton {
     background-image: none;
   }
+}
+
+/* Analytics panels share one size in both populated and empty states. Keep long
+   rankings inside their body so one dataset cannot stretch the surrounding grid. */
+.mh-panel-card,
+.mh-panel-placeholder {
+  height: var(--panel-height, 356px);
+}
+
+/* 帮助图标、文本说明与按钮提示共用同一套弹层排版。 */
+.mh-help__content {
+  max-width: 320px;
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--fg-2);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.mh-panel-card > .mh-card__head,
+.mh-panel-card .mh-card__tools {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.mh-panel-card > .mh-card__body {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.mh-panel-card > .mh-card__body > .mh-empty {
+  flex: 1;
+}
+@media (max-width: 359px) {
+  .mh-panel-card, .mh-panel-placeholder { --panel-height: 400px; }
 }

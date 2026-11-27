@@ -3,7 +3,7 @@
  * 智能体 · 右栏「产物」卡（从 AgentPage 拆出，r3）。选中 ≥2 个视频可合并。
  */
 import { Check, RefreshCw } from 'lucide-vue-next'
-import { Badge, Btn, Card, Empty } from '@/components'
+import { Badge, Btn, Card, Empty, TitleTip } from '@/components'
 import { assetUrl, type AgentAsset } from '@/api/agent'
 import { useI18n } from '@/i18n'
 
@@ -34,13 +34,11 @@ const { t } = useI18n()
       <span v-for="index in 6" :key="index" class="mh-skeleton agent-gallery__sk" />
     </div>
     <div v-else-if="assets.length" class="agent-gallery">
-      <button
-        v-for="asset in assets"
-        :key="asset.asset_id"
+      <TitleTip v-for="asset in assets" :key="asset.asset_id" :content="asset.prompt || asset.asset_id"><button
         type="button"
         class="agent-gallery__item"
         :class="{ 'is-selected': selected.includes(asset.asset_id) }"
-        :title="asset.prompt || asset.asset_id"
+        :aria-label="asset.prompt || asset.asset_id"
         :aria-pressed="selected.includes(asset.asset_id)"
         @click="emit('toggle', asset.asset_id)"
       >
@@ -52,7 +50,7 @@ const { t } = useI18n()
         <span v-if="selected.includes(asset.asset_id)" class="agent-gallery__check" aria-hidden="true">
           <Check :size="14" />
         </span>
-      </button>
+      </button></TitleTip>
     </div>
     <Empty v-else :description="t('page.agent.assetsEmpty')" compact />
     <template #footer>

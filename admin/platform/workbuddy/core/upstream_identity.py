@@ -114,6 +114,33 @@ def identity_headers(purpose: str = DEFAULT_PURPOSE) -> dict:
       · **模型/对话请求**用 `SaaS`（部署形态，来自配置 deploymentType）；
       · 活动 banner 那条独立请求写死 `WorkBuddy`（产品名）。
     我们走的是前者，所以 `SaaS` 是对的。
+
+    ## 2026-11-27 复核：官方 5.11.3 的头组装（变化点）
+
+    从 `D:\\WorkBuddy\\resources\\app.asar` 的 `main/server.js` 反出来：
+
+        buildVlmGatewayHeaders():            // 身份头，与上面一致
+            X-Product = deploymentType || "SaaS"
+            X-IDE-Type/Name = "WorkBuddy"（写死）
+            X-Private-Data = "true"
+            User-Agent = [WorkBuddy/<v>, WorkBuddy/<v>, ...(r ? [CLI/<r>] : [])]
+
+        applyGatewayHeaders() + applyTraceHeaders():   // 每条模型请求都有
+            x-requested-with: XMLHttpRequest
+            x-codebuddy-request: 1
+            acp-connection-id / X-Conversation-* / X-Agent-Intent / X-Agent-Purpose
+            traceparent: 00-<32hex>-<16hex>-01
+            b3 / X-B3-TraceId / X-B3-SpanId / X-B3-ParentSpanId / X-B3-Sampled
+            X-Trace-ID
+
+    两处结论：
+      * UA 的 CLI 段**是可选的** —— 读不到 `cli/package.json` 就不拼，
+        所以这世上同时存在两段与三段两种形状（见 client_profile._build_ua）；
+      * 追踪头是每请求现造的随机值，我们照抄形状即可（`trace_headers`）。
+
+    设备号（qimei36）**不在**模型请求上 —— 客户端只把它放在
+    `POST /v2/plugin/auth/state` 的 `X-Device-Id-List` 里。我们按账号派生
+    一串、在带账号凭据的业务请求上带出去，理由见 `core/qimei.py`。
     """
     if not enabled():
         return {}
@@ -162,6 +189,24 @@ def account_headers(uid: str = "", enterprise_id: str = "") -> dict:
     return headers
 
 
+def device_headers(uid: str = "", phone: str = "", auth=None) -> dict:
+    """设备号头（`X-Device-Id-List`）：**一个账号一台设备**。
+
+    WorkBuddy 的 qimei36 是设备级标识。号池共用一串 = 上游一次关联就能把
+    整池串成一窝，一个号出事其余连坐；所以这里按 uid 派生，一个账号固定一串
+    （见 `core/qimei.py`）。取不到 uid（也没有手机号）时返回空 dict ——
+    宁可不发，也不退回一个共用值。
+    """
+    if not enabled():
+        return {}
+    from admin.platform.workbuddy.core import qimei
+
+    try:
+        return qimei.device_headers(uid, phone, auth)
+    except Exception:        # 设备号出问题绝不能挡住业务请求
+        return {}
+
+
 def new_id() -> str:
     """UUIDv7（32 位十六进制、无连字符），与官方 messageId 同形状。
 
@@ -187,12 +232,21 @@ def trace_headers(conversation_id: str = "", turn_id: str = "") -> dict:
 
     与它相对，`turn_id` 在**一次网关请求内**保持不变：它标记「这是同一次
     用户发送派生出的第 N 次尝试」，方便把多行用量还原成一整轮。
+
+    ## 追踪头（2026-11-27 补）
+
+    官方 `applyTraceHeaders()` 每条模型请求都现造 W3C/B3 两组，上游按
+    `traceparent` 串链路。缺这组不会报错，但会让「这不是官方客户端」多一个
+    可判的差异，所以照抄形状。它们都是**每请求随机**，不携带任何账号信息。
     """
     if not enabled():
         return {}
     attempt = new_id()
     message = turn_id or attempt
     conversation = conversation_id or message
+    trace_id = os.urandom(16).hex()
+    span_id = os.urandom(8).hex()
+    parent_id = os.urandom(8).hex()
     return {
         "X-Request-ID": attempt,
         # 上游用量表的 requestId 取这一个；缺它就回退成 crb- 前缀的自造值。
@@ -200,6 +254,16 @@ def trace_headers(conversation_id: str = "", turn_id: str = "") -> dict:
         "X-Conversation-Message-ID": message,
         "X-Root-Request-ID": message,
         "X-Conversation-ID": conversation,
+        # —— 分布式追踪（官方 applyTraceHeaders 同款）——
+        "traceparent": f"00-{trace_id}-{span_id}-01",
+        "b3": f"{trace_id}-{span_id}-1-{parent_id}",
+        "X-B3-TraceId": trace_id,
+        "X-B3-SpanId": span_id,
+        "X-B3-ParentSpanId": parent_id,
+        "X-B3-Sampled": "1",
+        "X-Trace-ID": trace_id,
+        # 本地 app-server 连接 id：官方按连接给，我们按会话给（同一轮尝试内稳定）。
+        "acp-connection-id": conversation,
     }
 
 

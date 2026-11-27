@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '../base/TitleTip.vue'
+import { vReveal } from '@/composables/usePageMotion'
 /**
  * KPI 统计卡（10-visual-refresh §1.4 / §3）。
  * 标签 + 大数字（28/34）+ 单位 + 环比 chip（好坏按 deltaGood 着色）+ 迷你折线 + 可选 32px 图标方块。
@@ -19,6 +21,7 @@ import Sparkline from './Sparkline.vue'
 import { kpiDelta, kpiSplitUnit, kpiToneColors, kpiValueText, type KpiDeltaGood, type KpiTone } from './kpi'
 import { FMT_EMPTY } from '@/utils/format'
 import { useI18n } from '@/i18n'
+import { useDelayedFlag } from '@/composables/useDelayedFlag'
 
 const props = withDefaults(
   defineProps<{
@@ -66,6 +69,7 @@ const split = computed(() =>
 const valueText = computed(() => split.value.num)
 const unitText = computed(() => props.unit || split.value.unit)
 const showSkeleton = computed(() => props.loading && (props.value === null || props.value === undefined))
+const showRefresh = useDelayedFlag(() => Boolean(props.loading && !showSkeleton.value), 300)
 const deltaView = computed(() => kpiDelta(props.delta, props.deltaGood))
 const deltaIcon = computed(() =>
   deltaView.value?.dir === 'up' ? ArrowUpRight : deltaView.value?.dir === 'down' ? ArrowDownRight : Minus,
@@ -85,6 +89,7 @@ const clickable = computed(() => Boolean(props.to))
 
 <template>
   <component
+    v-reveal="loading"
     :is="clickable ? RouterLink : 'section'"
     :to="clickable ? to : undefined"
     class="mh-kpi"
@@ -93,7 +98,7 @@ const clickable = computed(() => Boolean(props.to))
   >
     <div class="mh-kpi__head">
       <span class="mh-kpi__label">{{ label }}</span>
-      <n-spin v-if="loading && !showSkeleton" class="mh-kpi__spin" :size="14" />
+      <n-spin v-if="showRefresh" class="mh-kpi__spin" :size="14" />
       <span
         v-if="icon"
         class="mh-kpi__icon"
@@ -110,35 +115,36 @@ const clickable = computed(() => Boolean(props.to))
     </div>
     <template v-else>
       <div class="mh-kpi__value">
-        <!-- 数字变化：tabular-nums 保持宽度，新值淡入 180ms（不做数字滚动，11-polish-motion §1） -->
-        <transition name="mh-fade" mode="out-in">
-          <span :key="valueText" class="mh-kpi__num" :class="{ 'is-empty': isEmpty }">{{ valueText }}</span>
-        </transition>
+        <!-- 数字在原节点更新，tabular-nums 保持宽度，刷新期间不经过空白帧。 -->
+        <span class="mh-kpi__num" :class="{ 'is-empty': isEmpty }">{{ valueText }}</span>
         <span v-if="$slots.unit && !isEmpty" class="mh-kpi__unit"><slot name="unit" /></span>
         <span v-else-if="unitText && !isEmpty" class="mh-kpi__unit">{{ unitText }}</span>
-        <span
-          v-if="deltaView"
+        <TitleTip v-if="deltaView" :content="deltaAria"><span
           class="mh-kpi__delta"
           :class="'is-' + deltaView.verdict"
           :aria-label="deltaAria"
-          :title="deltaAria"
         >
           <component :is="deltaIcon" :size="12" aria-hidden="true" />
           {{ deltaView.text }}
-        </span>
+        </span></TitleTip>
       </div>
       <Sparkline v-if="hasSpark" class="mh-kpi__spark" :data="spark || []" :tone="sparkTone" :height="28" />
-      <p v-if="hint" class="mh-kpi__hint">{{ hint }}</p>
+      <TitleTip v-if="hint" :content="hint"><p class="mh-kpi__hint">{{ hint }}</p></TitleTip>
     </template>
 
     <div v-if="$slots.extra" class="mh-kpi__extra">
       <slot name="extra" />
     </div>
+    <span v-if="$slots.ornament" class="mh-kpi__ornament" aria-hidden="true"><slot name="ornament" /></span>
+    <span class="surface-sheen" aria-hidden="true"><i class="surface-sheen__light" /></span>
   </component>
 </template>
 
 <style scoped>
 .mh-kpi {
+  position: relative;
+  align-self: stretch;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -184,6 +190,17 @@ const clickable = computed(() => Boolean(props.to))
   align-items: center;
   gap: var(--sp-2);
   min-height: 20px;
+}
+
+.mh-kpi__ornament {
+  position: absolute;
+  right: 18px;
+  top: 13px;
+  width: 44px;
+  height: 34px;
+  color: var(--cosmic-light, var(--fg-muted));
+  opacity: .36;
+  pointer-events: none;
 }
 
 .mh-kpi__label {

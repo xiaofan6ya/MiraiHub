@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import HelpTip from '@/components/base/HelpTip.vue'
 import { groupOf, isPageKey, type PageKey } from '@/router/pages'
 import { groupTitle, pageTitle, useI18n } from '@/i18n'
+import PageInsignia from '@/components/ambient/PageInsignia.vue'
+import { pageIcon } from './pagePresentation'
 
 /**
  * 页头（03-shell §2.3 + 10-visual-refresh §1.3）：
@@ -37,6 +39,8 @@ const showTabs = computed(() => tabs.value.length > 1)
 const groupLabel = computed(() =>
   pageKey.value ? groupTitle(groupOf(pageKey.value).key) : String(route.meta.group ?? ''),
 )
+const illustrated = computed(() => Boolean(pageKey.value && pageKey.value !== 'overview'))
+const description = computed(() => props.subtitle ?? (illustrated.value ? t(`workspace.${pageKey.value}.description` as Parameters<typeof t>[0]) : ''))
 
 function go(key: PageKey): void {
   if (key === pageKey.value) return
@@ -45,8 +49,9 @@ function go(key: PageKey): void {
 </script>
 
 <template>
-  <header class="page-header" :class="{ 'page-header--tabs': showTabs }">
+  <header class="page-header" :class="{ 'page-header--tabs': showTabs, 'page-header--illustrated': illustrated }">
     <div class="ph-row">
+      <PageInsignia v-if="illustrated && pageKey" :icon="pageIcon(pageKey)" />
       <div class="ph-heading">
         <p v-if="eyebrow" class="ph-eyebrow">{{ eyebrow }}</p>
         <div class="ph-title-row">
@@ -58,7 +63,7 @@ function go(key: PageKey): void {
             <slot name="meta" />
           </div>
         </div>
-        <p v-if="subtitle" class="ph-sub">{{ subtitle }}</p>
+        <p v-if="description" class="ph-sub">{{ description }}</p>
       </div>
       <div class="ph-actions">
         <slot name="actions" />
@@ -81,6 +86,7 @@ function go(key: PageKey): void {
         :aria-selected="tab.key === pageKey ? 'true' : 'false'"
         @click="go(tab.key)"
       >
+        <component :is="pageIcon(tab.key)" v-if="illustrated" :size="14" aria-hidden="true" />
         {{ pageTitle(tab.key) }}
       </button>
     </nav>
@@ -88,6 +94,34 @@ function go(key: PageKey): void {
 </template>
 
 <style scoped>
+.page-header--illustrated {
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: linear-gradient(112deg, var(--brand-soft), transparent 60%), var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.page-header.page-header--illustrated .ph-row { padding: 18px 22px; gap: 16px; min-height: 116px; align-items: center; }
+.page-header--illustrated .ph-title { font-size: 25px; line-height: 34px; }
+.page-header--illustrated .ph-heading { gap: 5px; }
+.page-header--illustrated .ph-sub { margin: 0; font-size: 12px; line-height: 20px; max-width: 68ch; }
+.page-header.page-header--illustrated .ph-tabs { padding: 9px 18px; gap: 6px; border-top: 1px solid var(--border-soft); }
+.page-header--illustrated .ph-tab { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 8px; }
+.page-header--illustrated .ph-tab:hover { background: var(--surface-hover); }
+.page-header--illustrated .ph-tab.active { color: var(--brand); background: var(--brand-soft); }
+.page-header--illustrated .ph-tab.active::after { display: none; }
+@media(max-width:1100px) {
+  .page-header--illustrated .ph-heading { flex-basis: calc(100% - 100px); }
+  .page-header.page-header--illustrated .ph-row { flex-wrap: wrap; }
+  .page-header--illustrated .ph-actions:not(:empty) { margin-left: 96px; justify-content: flex-start; }
+}
+@media(max-width:767px) {
+  .page-header.page-header--illustrated .ph-row { padding: 16px; gap: 10px; min-height: 0; }
+  .page-header--illustrated .ph-heading { flex-basis: calc(100% - 68px); }
+  .page-header--illustrated .ph-title { font-size: 22px; line-height: 30px; }
+  .page-header--illustrated .ph-actions:not(:empty) { margin-left: 0; width: 100%; }
+  .page-header.page-header--illustrated .ph-tabs { padding: 8px; gap: 2px; }
+  .page-header--illustrated .ph-tab { padding: 0 10px; }
+}
 .page-header {
   margin-bottom: var(--sp-4);
 }

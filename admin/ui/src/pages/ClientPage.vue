@@ -28,6 +28,7 @@ import {
   IconBtn,
   Section,
   Segmented,
+  TitleTip,
   type KvItem,
   type TableColumn,
   type TableRow,
@@ -601,7 +602,7 @@ onBeforeUnmount(() => {
           <div v-for="row in visibleSources" :key="row.key" class="cl-row">
             <span class="cl-row__label mono">{{ row.key }}</span>
             <span class="cl-row__value">
-              <Badge :tone="row.tone" :title="row.source">{{ sourceLabel(row.source) }}</Badge>
+              <TitleTip :content="row.source"><Badge :tone="row.tone">{{ sourceLabel(row.source) }}</Badge></TitleTip>
             </span>
           </div>
         </div>

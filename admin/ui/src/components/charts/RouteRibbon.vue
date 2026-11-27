@@ -16,7 +16,7 @@
  *   · 暂停收进组件：标签页隐藏、页面被 KeepAlive 缓存（离开）、线路带滚出视口时 `svg.pauseAnimations()`，
  *     回来 `unpauseAnimations()`。页面里原来的兜底可以删（留着也不冲突）。
  */
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import Badge from '../base/Badge.vue'
 import PlatformLogo from '../identity/PlatformLogo.vue'
 import { usePrefersReducedMotion } from '../_internal/media'
@@ -75,12 +75,14 @@ function syncAnimations(): void {
   const svg = svgRef.value
   if (!svg || typeof svg.pauseAnimations !== 'function') return
   try {
-    if (pageHidden || inactive || offscreen) svg.pauseAnimations()
+    if (pageHidden || inactive || offscreen || reducedMotion.value) svg.pauseAnimations()
     else svg.unpauseAnimations()
   } catch {
     /* 旧浏览器 / jsdom：没有 SMIL 时间线，忽略 */
   }
 }
+
+watch(reducedMotion, syncAnimations, { flush: 'post' })
 
 function onVisibility(): void {
   pageHidden = document.hidden

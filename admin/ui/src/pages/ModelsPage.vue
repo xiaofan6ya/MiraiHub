@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
 /**
  * S12 模型配置 /models（模板 B：PageHeader + FilterBar + DataTable + FormDrawer）
  *
@@ -90,7 +91,7 @@ const officialTotal = ref(0)
 const health = ref<ModelHealthItem[] | null>(null)
 const healthError = ref('')
 
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 const syncing = ref(false)
 const bulkRunning = ref(false)
@@ -193,13 +194,14 @@ async function loadConfigs(): Promise<void> {
   loadError.value = null
   try {
     const payload = await listModelConfigs(current.signal)
+    if (controller !== current) return
     items.value = Array.isArray(payload?.items) ? payload.items : []
     platforms.value = Array.isArray(payload?.platforms) ? payload.platforms : []
     officialTotal.value = Number(payload?.official_total) || 0
     const maxPage = Math.max(1, Math.ceil(filteredRows.value.length / table.state.pageSize))
     if (table.state.page > maxPage) table.setPage(maxPage)
   } catch (error) {
-    if (isAbortError(error)) return
+    if (controller !== current || isAbortError(error)) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     loadError.value = { message: errorMessage(error), detail }
     toast.error(
@@ -562,7 +564,7 @@ onBeforeUnmount(() => {
       </template>
     </PageHeader>
 
-    <Card flush class="models-card">
+    <Card flush class="models-card" :motion-pending="firstLoading">
       <div class="models-filter">
         <FilterBar
           :chips="chips"
@@ -689,6 +691,7 @@ onBeforeUnmount(() => {
       size="lg"
       :submit-text="t('common.save')"
       :submit-loading="submitting"
+      :mask-closable="!submitting"
       @submit="submitEdit"
     >
       <template v-if="editing">
@@ -807,12 +810,11 @@ onBeforeUnmount(() => {
                 {{ ref.platformLabel }}
               </span>
               <Copyable :value="ref.clientId" muted />
-              <span
+              <TitleTip :content="t('page.models.edit.upstreamTitle', { id: ref.upstreamId })"><span
                 class="models-edit-map__upstream mono"
-                :title="t('page.models.edit.upstreamTitle', { id: ref.upstreamId })"
               >
                 {{ ref.upstreamId }}
-              </span>
+              </span></TitleTip>
               <Badge :tone="ref.enabled ? 'ok' : 'neutral'" dot>
                 {{ ref.enabled ? t('page.models.edit.platformOn') : t('page.models.edit.platformOff') }}
               </Badge>

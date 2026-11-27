@@ -311,6 +311,21 @@ class QoderAccountOps:
                                    quota.get("remaining"), quota.get("total"))}
         except client.UpstreamError as exc:
             stages["quota"] = {"ok": False, "detail": exc.message[:100]}
+        # 对话链路：model server 被上游撤掉时会自动回退旧 COSY 链路，
+        # 这里如实标出当前在用哪条 —— 否则「能出字但日志里全是 model_unknown」
+        # 这种状态没人看得出来（2026-11-26 空 404 事故）。
+        try:
+            from admin.platform.qoder.services import chat as qoder_chat
+
+            link = qoder_chat.model_server_state()
+            stages["chat_link"] = {
+                "ok": True,
+                "detail": ("model server（新链路）" if link["usable"] else
+                           "旧 COSY 链路（model server 已下线：%s，%d 秒后重试）"
+                           % (link["reason"][:60], link["retry_after_s"])),
+            }
+        except Exception as exc:  # noqa: BLE001 - 状态读不到不影响健康检查
+            stages["chat_link"] = {"ok": True, "detail": "不可读：%s" % str(exc)[:60]}
         return {"account_id": account.id, "account": account.name,
                 "ok": all(s.get("ok") for s in stages.values()),
                 "stages": stages}

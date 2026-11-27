@@ -31,6 +31,7 @@ import Section from '@/components/base/Section.vue'
 import LanguageCard from '@/layout/LanguageCard.vue'
 import DataTable from '@/components/data/DataTable.vue'
 import Empty from '@/components/base/Empty.vue'
+import TitleTip from '@/components/base/TitleTip.vue'
 import FormDrawer from '@/components/overlay/FormDrawer.vue'
 import type { TableColumn, TableRow } from '@/components'
 import { useConfirm, usePolling, useRevisit, useToast } from '@/composables'
@@ -46,6 +47,7 @@ import {
   filterProxies,
   getAppSourceStatus,
   getInvitation,
+  getProxyEgress,
   getRuntimeConfig,
   getUnpackProgress,
   groupRuntimeFields,
@@ -57,19 +59,25 @@ import {
   proxySummaryText,
   removeUnpackedSource,
   restartPendingOf,
+  rotateProxyEgress,
   saveInvitation,
+  saveProxyEgress,
   saveRuntimeConfig,
   searchAppSource,
   sourceStatusLines,
   startUnpack,
+  testProxyNode,
   unblockProxy,
   unpackPercent,
   validatePasswordChange,
   validateProxyInput,
   type AppSourceStatus,
   type InvitationPayload,
+  type ProxyEgressPayload,
+  type ProxyEgressSettings,
   type ProxyListPayload,
   type ProxyNode,
+  type ProxyProbeResult,
   type RuntimeField,
   type SourceHit,
   type UnpackProgress,
@@ -235,7 +243,12 @@ const proxyColumns = computed<TableColumn[]>(() => [
     mobile: 'title',
     render: (row: TableRow) => {
       const node = row as unknown as ProxyNode
-      return node.label || '#' + node.id
+      const name = node.label || '#' + node.id
+      if (!node.current) return name
+      return h('span', { class: 'st-current-node' }, [
+        name,
+        h(Badge, { tone: 'ok' }, { default: () => t('page.settings.egress.currentTag') }),
+      ])
     },
   },
   {
@@ -244,6 +257,22 @@ const proxyColumns = computed<TableColumn[]>(() => [
     minWidth: 220,
     mobile: 'subtitle',
     render: (row: TableRow) => h('span', { class: 'mono' }, (row as unknown as ProxyNode).url),
+  },
+  {
+    key: 'probe',
+    title: t('page.settings.egress.colProbe'),
+    width: 130,
+    mobile: 'meta',
+    render: (row: TableRow) => {
+      const probe = (row as unknown as ProxyNode).probe
+      if (!probe) return h('span', { class: 'st-note' }, '—')
+      if (probe.ok) {
+        return h(Badge, { tone: 'ok' }, {
+          default: () => t('page.settings.egress.probeLatency', { latency: probe.latency_ms ?? '-' }),
+        })
+      }
+      return h(Badge, { tone: 'warn' }, { default: () => t('page.settings.egress.probeBad') })
+    },
   },
   {
     key: 'max_concurrency',
@@ -272,15 +301,25 @@ const proxyColumns = computed<TableColumn[]>(() => [
   {
     key: 'ops',
     title: t('page.settings.proxies.colOps'),
-    width: 190,
+    width: 300,
     mobile: 'actions',
     render: (row: TableRow) => {
       const node = row as unknown as ProxyNode
       const buttons = [
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: () => probeNode(node.id) }, {
+          default: () => t('page.settings.egress.test'),
+        }),
         h(Btn, { size: 'sm', variant: 'quiet', onClick: () => toggleProxy(node) }, {
           default: () => (node.enabled ? t('page.settings.proxies.disable') : t('page.settings.proxies.enable')),
         }),
       ]
+      if (!node.current) {
+        buttons.push(
+          h(Btn, { size: 'sm', variant: 'quiet', onClick: () => pinNode(node) }, {
+            default: () => t('page.settings.egress.useThis'),
+          }),
+        )
+      }
       if (node.blocked) {
         buttons.push(
           h(Btn, { size: 'sm', variant: 'quiet', onClick: () => unblockProxyNode(node) }, {
@@ -374,6 +413,160 @@ async function removeProxy(node: ProxyNode): Promise<void> {
   } catch (error) {
     toast.error(failureText(t('page.settings.proxies.deleteFailed'), error))
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * 全局出口（issue #39）：对话主链路挂代理 / 自动轮换 / 手动切换 / 体检
+ * ------------------------------------------------------------------ */
+
+const egress = ref<ProxyEgressPayload | null>(null)
+const egressSaving = ref(false)
+const egressProbing = ref(false)
+/** 最近一次「测试当前出口」的结果（逐节点测试的结果走节点表里的 probe 字段）。 */
+const egressProbe = ref<ProxyProbeResult | null>(null)
+
+const egressEnabled = computed(() => Number(egress.value?.settings?.enabled || 0) === 1)
+const egressMode = computed(() => String(egress.value?.settings?.mode || 'auto'))
+const egressSeconds = computed(() => Number(egress.value?.settings?.rotate_seconds || 300))
+const egressPerRequest = computed(() => Number(egress.value?.settings?.rotate_per_request || 0) === 1)
+const egressCurrent = computed(() => egress.value?.current || null)
+const egressWarnings = computed(() => egress.value?.warnings || [])
+
+const egressStateText = computed(() => {
+  const current = egressCurrent.value
+  if (!egressEnabled.value) return t('page.settings.egress.off')
+  if (!current) return t('page.settings.egress.noCurrent')
+  const reason = current.reason
+  const mode = egressMode.value === 'fixed' ? t('page.settings.egress.modeFixed') : t('page.settings.egress.modeAuto')
+  return t('page.settings.egress.currentText', {
+    label: current.label || '#' + current.endpoint_id,
+    url: current.url || '-',
+    mode,
+    reason: reason === 'fixed-fallback' ? t('page.settings.egress.reasonFallback') : '',
+  })
+})
+
+const egressMetaText = computed(() => {
+  const runtime = egress.value?.runtime
+  if (!runtime) return ''
+  const parts = [t('page.settings.egress.metaRotations', { count: runtime.rotations }),
+                 t('page.settings.egress.metaRequests', { count: runtime.requests })]
+  if (egress.value?.next_rotate_in !== null && egress.value?.next_rotate_in !== undefined && egressEnabled.value) {
+    parts.push(egressPerRequest.value
+      ? t('page.settings.egress.metaPerRequest')
+      : t('page.settings.egress.metaNext', { seconds: egress.value.next_rotate_in }))
+  }
+  if (runtime.last_ok_at) parts.push(t('page.settings.egress.metaLastOk', { time: fmtTime(runtime.last_ok_at) }))
+  if (runtime.waf_blocked) parts.push(t('page.settings.egress.metaWaf'))
+  return parts.join(' · ')
+})
+
+const egressProbeText = computed(() => {
+  const probe = egressProbe.value
+  if (!probe) return ''
+  if (probe.ok) {
+    return t('page.settings.egress.probeOk', {
+      latency: probe.latency_ms ?? '-',
+      ip: probe.egress_ip || '-',
+      target: probe.target || '',
+    })
+  }
+  return t('page.settings.egress.probeFail', { reason: probe.error || '-' })
+})
+
+async function loadEgress(silent = false): Promise<void> {
+  try {
+    egress.value = await getProxyEgress()
+  } catch (error) {
+    // 静默刷新失败不打扰：面板保留上一次的数据，下一次 revisit 会重试。
+    if (!silent) toast.error(failureText(t('page.settings.egress.loadFailed'), error))
+  }
+}
+
+async function patchEgress(patch: Partial<ProxyEgressSettings>): Promise<void> {
+  if (egressSaving.value) return
+  egressSaving.value = true
+  try {
+    egress.value = await saveProxyEgress(patch)
+    toast.success(t('page.settings.egress.saved'))
+    await loadProxies()
+  } catch (error) {
+    toast.error(failureText(t('page.settings.egress.saveFailed'), error))
+  } finally {
+    egressSaving.value = false
+  }
+}
+
+async function toggleEgress(value: boolean): Promise<void> {
+  await patchEgress({ enabled: value ? 1 : 0 })
+}
+
+async function setEgressMode(mode: string): Promise<void> {
+  // 从 fixed 切回 auto 时保留 endpoint_id（切回 fixed 还能用），后端只在 fixed 读它。
+  await patchEgress({ mode })
+}
+
+async function setEgressSeconds(value: number | null): Promise<void> {
+  await patchEgress({ rotate_seconds: Math.max(5, Math.min(86400, Number(value || 300))) })
+}
+
+async function setEgressPerRequest(value: boolean): Promise<void> {
+  await patchEgress({ rotate_per_request: value ? 1 : 0 })
+}
+
+async function setEgressPool(pool: string): Promise<void> {
+  await patchEgress({ pool: pool || '' })
+}
+
+async function rotateEgress(): Promise<void> {
+  if (egressSaving.value) return
+  egressSaving.value = true
+  try {
+    const result = await rotateProxyEgress()
+    egress.value = result.status
+    const label = result.current?.label || '-'
+    toast.success(t('page.settings.egress.rotated', { label }))
+    await loadProxies()
+  } catch (error) {
+    toast.error(failureText(t('page.settings.egress.rotateFailed'), error))
+  } finally {
+    egressSaving.value = false
+  }
+}
+
+async function testCurrentEgress(): Promise<void> {
+  const id = egressCurrent.value?.endpoint_id || 0
+  if (!id) {
+    toast.warning(t('page.settings.egress.noCurrent'))
+    return
+  }
+  await probeNode(id)
+}
+
+async function probeNode(id: number): Promise<void> {
+  if (egressProbing.value) return
+  egressProbing.value = true
+  try {
+    const result = await testProxyNode(id)
+    egressProbe.value = result.probe || null
+    if (result.ok) {
+      toast.success(t('page.settings.egress.probeOkShort', {
+        latency: result.probe?.latency_ms ?? '-',
+      }))
+    } else {
+      toast.error(t('page.settings.egress.probeFailShort', { reason: result.error || '-' }))
+    }
+    await loadProxies()
+    await loadEgress(true)
+  } catch (error) {
+    toast.error(failureText(t('page.settings.egress.probeFailed'), error))
+  } finally {
+    egressProbing.value = false
+  }
+}
+
+async function pinNode(node: ProxyNode): Promise<void> {
+  await patchEgress({ mode: 'fixed', endpoint_id: node.id })
 }
 
 /* ------------------------------------------------------------------ *
@@ -692,6 +885,7 @@ useRevisit(
     if (dirty.value) return
     void loadRuntime()
     void silently(() => loadProxies())
+    void loadEgress(true)
     void loadInvitation()
     void loadSource()
   },
@@ -701,6 +895,7 @@ useRevisit(
 onMounted(() => {
   void loadRuntime()
   void loadProxies()
+  void loadEgress()
   void loadInvitation()
   void loadSource()
   unpackPoll.start()
@@ -774,7 +969,7 @@ onBeforeUnmount(() => {
                     · {{ t('page.settings.runtime.range', { min: field.min ?? '−∞', max: field.max ?? '∞' }) }}
                   </template>
                   <!-- 配置项的环境变量名只给运维对照用：降成最弱的一行小字（第 2 轮审查 P1-5）。 -->
-                  · <code class="st-attr" :title="t('page.settings.runtime.attrTitle')">{{ field.attr }}</code>
+                  · <TitleTip :content="t('page.settings.runtime.attrTitle')"><code class="st-attr">{{ field.attr }}</code></TitleTip>
                 </p>
               </div>
               <div class="st-row__control">
@@ -827,6 +1022,68 @@ onBeforeUnmount(() => {
       <div v-if="proxyLoading && !proxyData" class="st-skeleton"><n-skeleton text :repeat="4" /></div>
       <ErrorBlock v-else-if="proxyError && !proxyData" :title="proxyError" retry @retry="loadProxies" />
       <template v-else>
+        <!-- 全局出口（issue #39）：对话主链路挂代理 / 自动轮换 / 手动切换 / 体检 -->
+        <div class="st-egress" :class="{ 'st-egress--on': egressEnabled }">
+          <div class="st-egress__bar">
+            <n-switch :value="egressEnabled" :loading="egressSaving" @update:value="toggleEgress">
+              <template #checked>{{ t('page.settings.egress.on') }}</template>
+              <template #unchecked>{{ t('page.settings.egress.offShort') }}</template>
+            </n-switch>
+            <n-select
+              :value="egressMode"
+              :options="[
+                { label: t('page.settings.egress.modeAuto'), value: 'auto' },
+                { label: t('page.settings.egress.modeFixed'), value: 'fixed' },
+              ]"
+              :aria-label="t('page.settings.egress.modeAria')"
+              style="width: 150px"
+              @update:value="(value: string) => setEgressMode(value)"
+            />
+            <n-select
+              :value="egress?.settings?.pool || ''"
+              :options="[
+                { label: t('page.settings.egress.allPools'), value: '' },
+                ...(proxyData?.pools || []).map((pool) => ({
+                  label: pool || t('page.settings.proxies.defaultPool'),
+                  value: pool,
+                })),
+              ]"
+              :aria-label="t('page.settings.egress.poolAria')"
+              style="width: 150px"
+              @update:value="(value: string | null) => setEgressPool(value || '')"
+            />
+            <n-input-number
+              :value="egressSeconds"
+              :min="5"
+              :max="86400"
+              :step="30"
+              :aria-label="t('page.settings.egress.secondsAria')"
+              style="width: 140px"
+              @update:value="(value: number | null) => setEgressSeconds(value)"
+            />
+            <span class="st-egress__per">
+              <n-switch
+                :value="egressPerRequest"
+                size="small"
+                :aria-label="t('page.settings.egress.perRequestAria')"
+                @update:value="setEgressPerRequest"
+              />
+              {{ t('page.settings.egress.perRequest') }}
+            </span>
+            <Btn size="sm" variant="default" :disabled="egressSaving" @click="rotateEgress">
+              {{ t('page.settings.egress.rotate') }}
+            </Btn>
+            <Btn size="sm" variant="default" :disabled="egressProbing" @click="testCurrentEgress">
+              {{ t('page.settings.egress.testCurrent') }}
+            </Btn>
+          </div>
+          <p class="st-note">{{ egressStateText }}</p>
+          <p v-if="egressMetaText" class="st-note">{{ egressMetaText }}</p>
+          <p v-if="egressProbeText" class="st-note mono">{{ egressProbeText }}</p>
+          <p v-for="warning in egressWarnings" :key="warning" class="st-note st-egress__warn">
+            {{ warning }}
+          </p>
+        </div>
         <p class="st-note">{{ proxySummary }}</p>
         <p class="st-note">{{ proxyData?.note || '' }}</p>
         <div class="st-filters">
@@ -1216,6 +1473,47 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+}
+
+/* 全局出口（issue #39）：一行控制条 + 三行状态；开着时左侧一条强调色 */
+.st-egress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+}
+
+.st-egress--on {
+  border-left-color: var(--brand);
+}
+
+.st-egress__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.st-egress__per {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+}
+
+.st-egress__warn {
+  color: var(--warn);
+}
+
+.st-current-node {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 
 /* 第 5 轮：手机宽度下代理池筛选 / 搜索各占一整行（行内 180 / 220px 宽在 375 下会挤成两行半宽）。 */

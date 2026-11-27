@@ -89,7 +89,7 @@ const statusTab = computed(() => normalizeAccountStatus(table.state.filters.stat
 
 const items = ref<AccountItem[] | null>(null)
 const usageMap = ref<Map<number, AccountUsageToday>>(new Map())
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref<{ message: string; detail: string } | null>(null)
 
 let controller: AbortController | null = null

@@ -1,4 +1,5 @@
-import { onScopeDispose, ref, type Ref } from 'vue'
+import { computed, onScopeDispose, ref, type Ref } from 'vue'
+import { appearance } from '@/theme/useAppearance'
 
 /** 手机断点（≤640px）：抽屉铺满、表单单列等手机细节。 */
 export const MOBILE_QUERY = '(max-width: 640px)'
@@ -34,5 +35,6 @@ export function useMediaQuery(query: string): Ref<boolean> {
 
 /** 系统是否要求减少动效（线路带脉冲、骨架动画都要尊重）。 */
 export function usePrefersReducedMotion(): Ref<boolean> {
-  return useMediaQuery('(prefers-reduced-motion: reduce)')
+  const reduced = useMediaQuery('(prefers-reduced-motion: reduce)')
+  return computed(() => reduced.value || appearance.value.motion === 'off')
 }

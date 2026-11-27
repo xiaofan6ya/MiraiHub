@@ -188,6 +188,9 @@ KIND_SEVERITY = {
     "token_expired": SEVERITY_AUTH,
     # 纯留痕（请求/配置问题，换号也没用）
     "model_unknown": SEVERITY_INFO,
+    # 端点被上游撤掉：**实现问题**，换号也不会好，但必须让面板看得见
+    # （Qoder 2026-11-26 空 404 事故 —— 记成 model_unknown 会误导成"模型名写错"）
+    "endpoint_gone": SEVERITY_INFO,
     "invalid_request": SEVERITY_INFO,
     "upstream_internal": SEVERITY_INFO,
 }
@@ -205,6 +208,7 @@ SIGNAL_LABELS = {
     "quota_exceeded": "额度耗尽",
     "auth_expired": "登录态失效",
     "logout": "退出登录",
+    "endpoint_gone": "上游端点已下线",
     "unknown": "未归类信号",
 }
 

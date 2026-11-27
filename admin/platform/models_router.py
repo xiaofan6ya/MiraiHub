@@ -398,12 +398,20 @@ MODEL_NAME_MAP: dict[str, dict[str, str]] = {
         "dfmodel": "deepseek-flash",
         "dmodel": "deepseek-v4-pro",
         "gfmodel": "glm-5.3-flash",
+        # `gmodel` / `gmodel_latest` 是**两条不同产品线**（5.3 与 5.4），
+        # 不能共用一个可读名，否则归一后会被聚成同一组。
         "gmodel": "glm-5.3",
+        "gmodel_latest": "glm-5.4",
+        "jmodel": "step-5-preview",
         "kmodel": "kimi-k2.8-preview",
         "kmodel_latest": "kimi-k3.1-pro",
         "mmodel": "minimax-m3.1-flash",
         "qfmodel": "qwen3.8-flash",
         "qmodel_38max": "qwen3.8-max",
+        # 2026-11-26 新增：上游把 `qmodel_latest` 换成了 Qwen4-Max，
+        # 但映射表没跟着加 —— `/v1/models` 于是把裸 id 当可读名下发
+        # （`qmodel-latest-qoder`），客户端里看到的是一串密码。
+        "qmodel_latest": "qwen4-max",
     },
     # 腾讯 Marvis：上游只认**槽位名**（`main-auto`），但对外要展示可读模型名。
     # 这张表是「槽位 → 可读名」；反查由 `upstream_of_in_platform` 负责

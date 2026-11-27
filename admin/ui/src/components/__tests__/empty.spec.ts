@@ -8,13 +8,18 @@ import * as lib from '../index'
 
 /** 第 5 轮：Empty 插画位。默认行为不变；插画只用主题令牌、纯装饰。 */
 
-describe('Empty 默认行为不变', () => {
-  it('不传 illustration：仍是 48px 图标圆 + 默认文案', () => {
+describe('Empty 默认插画', () => {
+  it('完整空面板使用轻量 SVG，并保留默认文案', () => {
     const wrapper = mount(Empty)
-    expect(wrapper.find('.mh-empty__icon').exists()).toBe(true)
-    expect(wrapper.find('.mh-empty__art').exists()).toBe(false)
-    expect(wrapper.find('svg.mh-ill').exists()).toBe(false)
+    expect(wrapper.find('.mh-empty__icon').exists()).toBe(false)
+    expect(wrapper.find('.mh-empty__art').exists()).toBe(true)
+    expect(wrapper.find('svg.mh-ill').exists()).toBe(true)
     expect(wrapper.find('.mh-empty__desc').text()).toBe('暂无数据')
+  })
+  it('紧凑表格行保留小图标', () => {
+    const wrapper = mount(Empty, { props: { compact: true } })
+    expect(wrapper.find('.mh-empty__icon').exists()).toBe(true)
+    expect(wrapper.find('svg.mh-ill').exists()).toBe(false)
   })
 })
 

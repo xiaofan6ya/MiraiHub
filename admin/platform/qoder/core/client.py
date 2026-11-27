@@ -205,17 +205,7 @@ def _json_or_error(status: int, payload: bytes, action: str,
                    account_id: int = 0, realm: str = "") -> dict:
     text = payload.decode("utf-8", "replace")
     if status >= 400:
-        try:
-            data = json.loads(text)
-        except ValueError:
-            data = {}
-        code = str(data.get("code") or data.get("errorCode") or status)
-        message = str(data.get("message") or data.get("errorMessage") or text[:200])
-        kind = _classify(status, code, message)
-        note_sentinel(realm or "cn", account_id, kind, code=code,
-                      status=status, detail=text)
-        raise UpstreamError("%s失败（HTTP %d）" % (action, status),
-                            status=status, code=code, kind=kind, detail=text)
+        raise _error_from_payload(status, text, action, account_id, realm)
     if not text.strip():
         return {}
     try:
@@ -224,6 +214,36 @@ def _json_or_error(status: int, payload: bytes, action: str,
         raise UpstreamError("%s返回非 JSON" % action, status=status,
                             detail=text[:200]) from exc
     return data if isinstance(data, dict) else {"data": data}
+
+
+def _error_from_payload(status: int, text: str, action: str,
+                        account_id: int = 0, realm: str = "") -> "UpstreamError":
+    """把「已读出的错误体」转成 `UpstreamError`（不抛，由调用方 raise）。
+
+    **空 404 = 路由不存在**（2026-11-26）：`/model/v1/chat/completions` 现在连
+    不带凭证的请求都回空 body 的 404（GET/POST/OPTIONS、http1.1/http2 同结果），
+    说明边缘层没有这条路由 —— 是端点被撤，不是模型名写错。
+    以前这里一律落 `_classify(404)` -> `model_unknown`，用户看到「模型不存在」，
+    账号还被记一次失败。判据只有一条：**404 且 body 为空**。
+    有 body 的 404 仍然是上游的业务 404（那才可能是模型不存在）。
+    """
+    if status == 404 and not text.strip():
+        return UpstreamError(
+            "%s失败（HTTP 404，空响应：端点不存在）" % action,
+            status=status, code="404", kind="endpoint_gone", detail="")
+    try:
+        data = json.loads(text) if text.strip().startswith("{") else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    code = str(data.get("code") or data.get("errorCode") or status)
+    message = str(data.get("message") or data.get("errorMessage") or text[:200])
+    kind = _classify(status, code, message)
+    note_sentinel(realm or "cn", account_id, kind, code=code,
+                  status=status, detail=text)
+    return UpstreamError("%s失败（HTTP %d）" % (action, status),
+                         status=status, code=code, kind=kind, detail=text)
 
 
 def request_json(url: str, *, action: str, method: str = "GET",
@@ -257,10 +277,15 @@ def _json_error(exc: urllib.error.HTTPError, action: str,
         payload = exc.read()
     except Exception:  # noqa: BLE001
         pass
-    try:
-        return _json_or_error(exc.code, payload, action, account_id, realm)
-    except UpstreamError as err:
-        return err
+    return _json_error_from_payload(exc, payload, action, account_id, realm)
+
+
+def _json_error_from_payload(exc: urllib.error.HTTPError, payload: bytes,
+                             action: str, account_id: int = 0,
+                             realm: str = "") -> UpstreamError:
+    """`_json_error` 的显式 body 版本（调用方已经读过 body 时用）。"""
+    return _error_from_payload(exc.code, payload.decode("utf-8", "replace"),
+                               action, account_id, realm)
 
 
 # ---------------------------------------------------------------------------
@@ -443,16 +468,28 @@ def iter_model_chat_stream(token: str, realm: str, *, body: dict,
     try:
         resp = _open(url, encoded, headers, timeout, "POST", account_id=account_id)
     except urllib.error.HTTPError as exc:
-        # HTTP 层错误（401/403/402/5xx）：同样先过一遍载荷分类——
-        # 「无套餐」可能以 HTTP 402/403 + pricingUrl 载荷出现，
-        # 也可能就是一个裸 402（实测 161 号）。
-        err = _json_error(exc, "对话请求", account_id, realm)
-        payload = getattr(err, "detail", "") or ""
-        if "pricingUrl" in payload or exc.code == 402:
+        # **路由级 404：这条端点没了，不是模型错、更不是账号错**（2026-11-26）。
+        # 空 body 的 404 由 `_error_from_payload` 统一判成 `endpoint_gone`
+        # （见那里的注释）；这里只负责把它换成一句带端点的说明，
+        # 好让日志/面板直接看出「是链路要换，不是模型名写错」。
+        payload = b""
+        try:
+            payload = exc.read()
+        except Exception:  # noqa: BLE001 - 读不到 body 就按空处理
+            payload = b""
+        err = _json_error_from_payload(exc, payload, "对话请求", account_id, realm)
+        if err.kind == "endpoint_gone":
+            raise UpstreamError(
+                "model server 路由不存在（%s 返回空 404，该端点已被上游撤掉）"
+                % endpoints.MODEL_CHAT_PATH,
+                status=404, code="404", kind="endpoint_gone",
+                detail=url) from exc
+        payload_text = getattr(err, "detail", "") or ""
+        if "pricingUrl" in payload_text or exc.code == 402:
             raise UpstreamError(
                 "该账号没有可用套餐或额度已耗尽（上游返回定价页）",
                 status=402, code=str(exc.code), kind="quota_exceeded",
-                detail=payload[:400]) from exc
+                detail=payload_text[:400]) from exc
         raise err from exc
     except Exception as exc:  # noqa: BLE001
         if _is_delivery_unknown(exc):
@@ -665,6 +702,16 @@ def _envelope_events(resp, *, payload_realm: str, account_id: int):
                         "此账号并随便发一条消息即可恢复）",
                         status=int(status), code=str(status),
                         kind="upstream_business", detail=payload[:400])
+                # **10605 = 排队中**（`isQueued: true` + `queueType: p4`）。
+                # 这是可重试的容量状态，不是账号坏了 —— 原来落成
+                # `upstream_business` 会让 `_attempt()` 把这个号冷却 + 计一次
+                # 错误，几次排队就把好号挤出池子（国际版 qmodel_latest 实测）。
+                # `_CODE_KINDS` 里早就定义了 `queued`，只是信封这条链路没用上。
+                if "10605" in payload or "isQueued" in payload:
+                    raise UpstreamError(
+                        "上游排队中（10605，稍后自动重试）",
+                        status=429, code="10605", kind="queued",
+                        detail=payload[:400])
                 # 信封里的错误：HTTP 是 200，但业务失败 —— 必须上报，
                 # 否则「额度耗尽」会被渲染成「空回复」，无人知道原因
                 note_sentinel(realm, account_id, "upstream_business",

@@ -222,6 +222,8 @@ function inlineEntryCss(): Plugin {
 }
 
 export default defineConfig({
+  // Independent cache for the review copy; never contend with the original frontend.
+  cacheDir: '.vite-cache',
   base: '/admin/v2/',
   plugins: [
     vue(),
@@ -242,6 +244,7 @@ export default defineConfig({
       input: {
         index: 'index.html',
         login: 'login.html',
+        join: 'join.html',
       },
       output: {
         manualChunks,

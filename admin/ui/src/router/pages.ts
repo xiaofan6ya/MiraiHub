@@ -33,7 +33,7 @@ export const PAGE_GROUPS = [
   { key: 'access', title: '接入', icon: 'Plug', pages: ['client', 'sync', 'alerts'] },
   { key: 'agent', title: '智能体', icon: 'Bot', pages: ['agent'] },
   { key: 'public', title: '公开入口', icon: 'DoorOpen', pages: ['openentry'] },
-  { key: 'system', title: '系统', icon: 'Settings', pages: ['settings', 'maintenance'] },
+  { key: 'system', title: '系统', icon: 'Settings', pages: ['settings', 'proxy', 'maintenance'] },
 ] as const
 
 export type GroupKey = (typeof PAGE_GROUPS)[number]['key']
@@ -64,6 +64,7 @@ export const PAGE_TITLES: Record<PageKey, string> = {
   agent: '智能体',
   openentry: '公开注册入口',
   settings: '设置',
+  proxy: '出口代理',
   maintenance: '更新与备份',
 }
 

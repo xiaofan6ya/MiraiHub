@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * IP 管理 · 活跃 IP（服务端分页 + 服务端排序）。
  *
@@ -236,16 +238,16 @@ function renderTokens(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (!item.tokens) return numberCell(FMT_EMPTY, undefined, 'faint')
   const avg = item.avgTokens === null ? '' : t('page.ip.cell.avgTokens', { value: fmtCompact(item.avgTokens) })
-  return h('div', { class: 'ia-num', title: t('page.ip.cell.knownUsage', { count: fmtInt(item.knownUsage) }) }, [
+  return h(TitleTip, { content: String((t('page.ip.cell.knownUsage', { count: fmtInt(item.knownUsage) })) ?? '') }, { default: () => h('div', { class: 'ia-num' }, [
     h('span', { class: 'ia-num__main' }, fmtCompact(item.tokens)),
     avg ? h('small', { class: 'ia-sub' }, avg) : null,
-  ])
+  ]) })
 }
 
 function renderLastSeen(row: TableRow): VNodeChild {
   const item = asRow(row)
   if (!item.lastSeen) return h('span', { class: 'ia-faint' }, FMT_EMPTY)
-  return h('span', { class: 'ia-time', title: fmtFullTime(item.lastSeen) }, fmtRelative(item.lastSeen))
+  return h(TitleTip, { content: String((fmtFullTime(item.lastSeen)) ?? '') }, { default: () => h('span', { class: 'ia-time' }, fmtRelative(item.lastSeen)) })
 }
 
 function renderStatus(row: TableRow): VNodeChild {
@@ -304,7 +306,7 @@ function str(value: string | number | null): string {
 </script>
 
 <template>
-  <Card flush class="ia">
+  <Card flush class="ia" :motion-pending="firstLoading">
     <ErrorBlock
       v-if="error && payload === null"
       class="ia-error"

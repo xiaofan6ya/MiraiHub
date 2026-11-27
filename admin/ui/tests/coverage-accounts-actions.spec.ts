@@ -515,7 +515,7 @@ describe('AccountsPage · 添加抽屉', () => {
     await mountPage()
     await clickBodyButton('添加账号')
     await waitFor(() => dropdownOptions().length > 0, '添加账号下拉')
-    expect(dropdownOptions().map((el) => (el.textContent || '').trim())).toEqual(['手动添加', '导入账号', '扫描本机'])
+    expect(dropdownOptions().map((el) => (el.textContent || '').trim())).toEqual(['手机号登录', '手动添加', '导入账号', '扫描本机'])
     await clickBodyButton('添加账号')
 
     await openDrawerByHeader('导入')

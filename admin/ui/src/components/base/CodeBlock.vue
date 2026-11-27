@@ -2,6 +2,7 @@
 /** 等宽代码块：--surface-2 底、圆角 7px、右上角复制，可选语言标签。 */
 import { Copy } from 'lucide-vue-next'
 import { NButton } from 'naive-ui'
+import TitleTip from './TitleTip.vue'
 import { copyText, useComponentToast } from '../_internal/feedback'
 import { t } from '@/i18n'
 
@@ -29,17 +30,16 @@ async function onCopy(): Promise<void> {
     <div class="mh-code__bar">
       <span v-if="language" class="mh-code__lang mono">{{ language }}</span>
       <span v-else />
-      <n-button
+      <TitleTip :content="t('common.copy')"><n-button
         quaternary
         size="tiny"
         class="mh-code__copy"
         :aria-label="t('common.copy')"
-        :title="t('common.copy')"
         @click="onCopy"
       >
         <template #icon><Copy :size="14" /></template>
         {{ t('common.copy') }}
-      </n-button>
+      </n-button></TitleTip>
     </div>
     <pre class="mh-code__pre mono" :style="{ maxHeight }"><code>{{ code }}</code></pre>
   </div>

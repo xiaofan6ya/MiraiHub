@@ -6,6 +6,7 @@
 import { computed } from 'vue'
 import { useI18n } from '@/i18n'
 import Meter from './Meter.vue'
+import TitleTip from '../base/TitleTip.vue'
 import { badgeToneStyle } from '../base/badge'
 import type { BarListItem } from './barlist'
 
@@ -62,7 +63,7 @@ const fmt = computed(() => props.format ?? defaultFormat)
 <template>
   <ul class="mh-barlist">
     <li v-for="item in rows" :key="item.label" class="mh-barlist__row">
-      <span class="mh-barlist__label" :title="item.label">{{ item.label }}</span>
+      <TitleTip :content="item.label"><span class="mh-barlist__label">{{ item.label }}</span></TitleTip>
       <Meter
         class="mh-barlist__meter"
         :value="item.value"

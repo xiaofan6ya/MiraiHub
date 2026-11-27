@@ -39,7 +39,6 @@ const LEGACY_TABS = [
   'settings',
   'maintenance',
 ]
-
 /** 旧版 `_SUB_TAB_LABELS`（console-app.js:1388）。 */
 const LEGACY_LABELS: Record<string, string> = {
   overview: '概览',
@@ -80,17 +79,21 @@ describe('路由表', () => {
     window.scrollTo = () => undefined
   })
 
-  it('有 24 个页面，key 与旧版 TABS 完全一致', () => {
-    expect(PAGES).toHaveLength(24)
-    expect([...PAGES.map((page) => page.key)].sort()).toEqual([...LEGACY_TABS].sort())
+  it('有 25 个页面：24 个与旧版 TABS 一致，外加 /proxy（issue #39）', () => {
+    expect(PAGES).toHaveLength(25)
+    const keys = PAGES.map((page) => page.key)
+    expect(keys).toContain('proxy')
+    expect([...keys.filter((key) => key !== 'proxy')].sort()).toEqual([...LEGACY_TABS].sort())
     expect(new Set(LEGACY_TABS).size).toBe(24)
   })
 
   it('页面中文名与旧版 _SUB_TAB_LABELS 一致', () => {
-    expect(Object.keys(PAGE_TITLES)).toHaveLength(24)
+    expect(Object.keys(PAGE_TITLES)).toHaveLength(25)
     for (const [key, label] of Object.entries(LEGACY_LABELS)) {
       expect(PAGE_TITLES[key as keyof typeof PAGE_TITLES]).toBe(label)
     }
+    // 新增页只有这一处偏离旧版基线：/proxy = 出口代理（issue #39）。
+    expect(PAGE_TITLES.proxy).toBe('出口代理')
   })
 
   it('9 个分组，顺序与 03-shell §1 的表一致', () => {
@@ -114,7 +117,7 @@ describe('路由表', () => {
       ['client', 'sync', 'alerts'],
       ['agent'],
       ['openentry'],
-      ['settings', 'maintenance'],
+      ['settings', 'proxy', 'maintenance'],
     ])
   })
 

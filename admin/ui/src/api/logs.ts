@@ -521,6 +521,28 @@ export function useCaseLabel(value: string): string {
 }
 
 /**
+ * 网关分类（`error_kind`）的可读名。
+ *
+ * 结果列原来直接 `slice(0, 16)` 显示原始 kind，`endpoint_gone` 这种新分类
+ * 就只能看到一串下划线英文名（2026-11-26 Qoder 空 404 事故）。
+ * 没收录的 kind 仍原样显示 —— 宁可见到生词，也不要把它藏起来。
+ */
+export function errorKindLabel(value: string): string {
+  const raw = String(value || '').trim()
+  if (!raw) return tx('page.logs.result.fail')
+  // 键统一用**平台原始 kind**（下划线），与 i18n 里已有的 page.logs.kind.* 对齐
+  const known = [
+    'endpoint_gone', 'model_unknown', 'quota_exceeded', 'hard_credit',
+    'rate_limit', 'soft_rate', 'model_rate', 'model_block', 'auth',
+    'session_dead', 'signature_invalid', 'upstream_business', 'upstream_error',
+    'upstream_internal', 'upstream_auth_anomaly', 'network', 'transport',
+    'timeout', 'client_disconnected', 'gateway_rejected', 'no_account',
+  ]
+  if (known.includes(raw)) return tx(`page.logs.kind.${raw}`)
+  return raw.slice(0, 16)
+}
+
+/**
  * 缓存命中率（0–100）。
  *
  * 三种情况都为 null，界面显示 —（**不能显示 0%**）：
@@ -564,7 +586,7 @@ export function toLogRow(item: UsageLogRow): LogRowView {
     timeShort: fmtTime(item.created_at),
     timeFull: fmtFullTime(item.created_at),
     isError,
-    resultLabel: isError ? (errorKind.slice(0, 16) || tx('page.logs.result.fail')) : tx('page.logs.result.ok'),
+    resultLabel: isError ? errorKindLabel(errorKind) : tx('page.logs.result.ok'),
     resultTone: isError ? 'danger' : 'ok',
     cacheRate: rate,
     cacheRateText: rate === null ? FMT_EMPTY : rate.toFixed(2) + '%',

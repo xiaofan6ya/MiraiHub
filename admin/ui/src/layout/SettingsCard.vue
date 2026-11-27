@@ -10,6 +10,7 @@
  * 旧调用方传了也不会报错，但不再渲染按钮。
  */
 import Badge from '@/components/base/Badge.vue'
+import { vReveal } from '@/composables/usePageMotion'
 import { useI18n } from '@/i18n'
 
 withDefaults(
@@ -43,7 +44,7 @@ const { t } = useI18n()
 </script>
 
 <template>
-  <section class="settings-card">
+  <section v-reveal class="settings-card" :class="{ 'settings-card--dirty': dirty }">
     <header class="card-head">
       <div class="head-text">
         <h2 class="card-title">

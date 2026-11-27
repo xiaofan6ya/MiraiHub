@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NTooltip } from 'naive-ui'
+import { NPopover } from 'naive-ui'
 import { ChevronsLeft, ChevronsRight, LogOut, MonitorSmartphone, Undo2 } from 'lucide-vue-next'
 import { GROUPS, PAGES_BY_KEY, groupEntry, isPageKey, type GroupDef, type PageKey } from '@/router/pages'
 import { useShellBadges } from '@/platform/shellBadges'
@@ -9,6 +9,7 @@ import { useAppInfo } from '@/platform/version'
 import { iconComponent } from './icons'
 import { groupTitle, useI18n } from '@/i18n'
 import { prefetchPage } from '@/router/pageLoaders'
+import TitleTip from '@/components/base/TitleTip.vue'
 
 /**
  * 侧栏（03-shell §2.1 + 10-visual-refresh §1.2）：深墨蓝，两种主题都是。
@@ -64,10 +65,6 @@ const dots = computed<Record<string, GroupDot | undefined>>(() => {
   }
   return map
 })
-
-/** 品牌图标由后端提供：写成变量而不是字面量 src，避免被 Vite 当静态资源解析。 */
-const appIconUrl = '/api/app/icon'
-const logoFailed = ref(false)
 
 onMounted(() => {
   void loadAppInfo()
@@ -127,28 +124,27 @@ function goMaintenance(): void {
   <aside class="side" :class="{ collapsed: isCollapsed, drawer: isDrawer }">
     <div class="side-brand">
       <span class="brand-mark" aria-hidden="true">
-        <img
-          v-if="!logoFailed"
-          class="brand-logo"
-          :src="appIconUrl"
-          alt=""
-          width="28"
-          height="28"
-          @error="logoFailed = true"
-        />
-        <span v-else class="brand-fallback">M</span>
+        <svg class="brand-logo" viewBox="0 0 40 40" width="40" height="40" role="img" aria-label="MiraiHub">
+          <defs>
+            <linearGradient id="mh-shell-logo" x1="4" y1="4" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#e6eef5" />
+              <stop offset=".52" stop-color="#b5c5d4" />
+              <stop offset="1" stop-color="#88a6bb" />
+            </linearGradient>
+          </defs>
+          <rect x="1" y="1" width="38" height="38" rx="12" fill="#1b2936" />
+          <path d="M10.5 28V12.5l9.5 9 9.5-9V28" fill="none" stroke="url(#mh-shell-logo)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="30.4" cy="10.2" r="2" fill="#88a6bb" />
+        </svg>
       </span>
       <div v-if="!isCollapsed" class="brand-text">
         <div class="brand-title">MiraiHub</div>
-        <button
-          type="button"
-          class="brand-sub"
-          :title="hasUpdate ? t('shell.hasUpdateTip') : t('shell.updates')"
-          @click="goMaintenance"
-        >
-          <span class="ver">{{ versionText }}</span>
-          <span v-if="hasUpdate" class="has-update">{{ t('shell.hasUpdate') }}</span>
-        </button>
+        <TitleTip :content="hasUpdate ? t('shell.hasUpdateTip') : t('shell.updates')">
+          <button type="button" class="brand-sub" @click="goMaintenance">
+            <span class="ver">{{ versionText }}</span>
+            <span v-if="hasUpdate" class="has-update">{{ t('shell.hasUpdate') }}</span>
+          </button>
+        </TitleTip>
       </div>
       <button
         v-if="isDrawer"
@@ -159,26 +155,26 @@ function goMaintenance(): void {
       >
         <ChevronsLeft :size="16" />
       </button>
-      <button
-        v-else
-        type="button"
-        class="collapse-btn"
-        :aria-label="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')"
-        :title="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')"
-        @click="emit('toggle-collapse')"
-      >
-        <ChevronsRight v-if="isCollapsed" :size="16" />
-        <ChevronsLeft v-else :size="16" />
-      </button>
+      <TitleTip v-else :content="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')">
+        <button
+          type="button"
+          class="collapse-btn"
+          :aria-label="isCollapsed ? t('shell.expandSide') : t('shell.collapseSide')"
+          @click="emit('toggle-collapse')"
+        >
+          <ChevronsRight v-if="isCollapsed" :size="16" />
+          <ChevronsLeft v-else :size="16" />
+        </button>
+      </TitleTip>
     </div>
 
     <nav class="side-nav" :aria-label="t('shell.mainNav')">
-      <n-tooltip
+      <n-popover
         v-for="group in GROUPS"
         :key="group.key"
         placement="right"
         :delay="200"
-        :disabled="!isCollapsed"
+        :disabled="!isCollapsed && !dots[group.key]"
       >
         <template #trigger>
           <button
@@ -187,7 +183,6 @@ function goMaintenance(): void {
             :class="{ active: group.key === activeGroup, iconOnly: isCollapsed }"
             :aria-current="group.key === activeGroup ? 'page' : undefined"
             :aria-label="isCollapsed ? groupTitle(group.key) : undefined"
-            :title="!isCollapsed && dots[group.key] ? dots[group.key]?.tip : undefined"
             @click="go(group)"
             @mouseenter="hoverPrefetch(group)"
             @mouseleave="cancelHoverPrefetch"
@@ -204,13 +199,15 @@ function goMaintenance(): void {
             />
           </button>
         </template>
-        <span class="tip-row">{{ groupTitle(group.key) }}</span>
-        <span v-if="dots[group.key]" class="tip-sub">{{ dots[group.key]?.tip }}</span>
-      </n-tooltip>
+        <div class="mh-help__content">
+          <span class="tip-row">{{ groupTitle(group.key) }}</span>
+          <span v-if="dots[group.key]" class="tip-sub">{{ dots[group.key]?.tip }}</span>
+        </div>
+      </n-popover>
     </nav>
 
     <footer class="side-foot">
-      <n-tooltip placement="right" :delay="200" :disabled="!isCollapsed">
+      <n-popover placement="right" :delay="200" :disabled="!isCollapsed">
         <template #trigger>
           <button type="button" class="foot-item" @click="emit('open-sessions')">
             <MonitorSmartphone :size="16" />
@@ -218,19 +215,19 @@ function goMaintenance(): void {
             <span v-else class="mh-sr-only">{{ t('shell.sessions') }}</span>
           </button>
         </template>
-        {{ t('shell.sessions') }}
-      </n-tooltip>
-      <n-tooltip placement="right" :delay="200" :disabled="!isCollapsed">
+        <div class="mh-help__content">{{ t('shell.sessions') }}</div>
+      </n-popover>
+      <n-popover placement="right" :delay="200">
         <template #trigger>
-          <a class="foot-item foot-link" href="/admin?ui=v1" :title="isCollapsed ? undefined : t('shell.legacyConsoleTip')">
+          <a class="foot-item foot-link" href="/admin?ui=v1">
             <Undo2 :size="16" />
             <span v-if="!isCollapsed">{{ t('shell.legacyConsole') }}</span>
             <span v-else class="mh-sr-only">{{ t('shell.legacyConsole') }}</span>
           </a>
         </template>
-        {{ t('shell.legacyConsoleTip') }}
-      </n-tooltip>
-      <n-tooltip placement="right" :delay="200" :disabled="!isCollapsed">
+        <div class="mh-help__content">{{ t('shell.legacyConsoleTip') }}</div>
+      </n-popover>
+      <n-popover placement="right" :delay="200" :disabled="!isCollapsed">
         <template #trigger>
           <button type="button" class="foot-item" @click="emit('logout')">
             <LogOut :size="16" />
@@ -238,18 +235,14 @@ function goMaintenance(): void {
             <span v-else class="mh-sr-only">{{ t('shell.logout') }}</span>
           </button>
         </template>
-        {{ t('shell.logout') }}
-      </n-tooltip>
-      <button
-        v-if="isCollapsed"
-        type="button"
-        class="foot-version"
-        :title="hasUpdate ? t('shell.hasUpdateTip') : t('shell.updates')"
-        @click="goMaintenance"
-      >
-        <span class="ver">{{ versionText }}</span>
-        <span v-if="hasUpdate" class="update-dot" aria-hidden="true" />
-      </button>
+        <div class="mh-help__content">{{ t('shell.logout') }}</div>
+      </n-popover>
+      <TitleTip v-if="isCollapsed" :content="hasUpdate ? t('shell.hasUpdateTip') : t('shell.updates')">
+        <button type="button" class="foot-version" @click="goMaintenance">
+          <span class="ver">{{ versionText }}</span>
+          <span v-if="hasUpdate" class="update-dot" aria-hidden="true" />
+        </button>
+      </TitleTip>
     </footer>
   </aside>
 </template>
@@ -322,13 +315,6 @@ function goMaintenance(): void {
   height: 28px;
   display: block;
   object-fit: cover;
-}
-
-.brand-fallback {
-  font-size: var(--fs-body);
-  font-weight: 600;
-  line-height: 1;
-  color: #fff;
 }
 
 .brand-text {

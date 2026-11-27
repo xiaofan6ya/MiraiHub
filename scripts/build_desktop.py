@@ -27,6 +27,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _machine_arch() -> str:
     machine = (platform.machine() or "").lower()
@@ -116,6 +119,9 @@ def main():
             raise SystemExit("A 64-bit Python interpreter is required")
 
     subprocess.run([sys.executable, str(ROOT / 'scripts/check_runtime.py')], cwd=ROOT, check=True)
+
+    from scripts.build_frontend import build_frontend
+    build_frontend(ROOT)
 
     version = json.loads((ROOT / "desktop/version.json").read_text(encoding="utf-8"))["version"]
     if len(tuple(int(v) for v in version.split("."))) != 3:

@@ -8,13 +8,14 @@
  *      最多 6 个，其余收成「+N」chip（悬停列出全部）；右侧灰字「N 个平台」；
  *   3. 价格：大字「×0.80 / 免费 / 按量计费 / 未定价」+ 一行说明；
  *   4. 四格指标：成功率 / TTFT / 平均耗时 / 吞吐；无样本显示「—」，平均值 > 1 小时显示「数据异常」；
- *   5. 迷你折线（窗口内请求趋势）+ 底部两个次级按钮。
+ *   5. 后端真实时段健康状态格 + 底部两个次级按钮。
  * 不可用的卡整体降到 55% 不透明度（不只是一个红徽章）。
  */
 import { computed } from 'vue'
 import { Copy, ScrollText } from 'lucide-vue-next'
-import { Badge, Btn, ModelIcon, PlatformLogo, Sparkline } from '@/components'
-import { FMT_EMPTY, fmtCompact, fmtPct } from '@/utils/format'
+import { Badge, Btn, ModelIcon, PlatformLogo, TitleTip } from '@/components'
+import MarketHealthTimeline from './MarketHealthTimeline.vue'
+import { FMT_EMPTY, fmtPct } from '@/utils/format'
 import { priceText, rateTone, type MarketCard } from '@/api/market'
 import { avgDurationText, durationState } from '@/api/stats'
 import { useI18n } from '@/i18n'
@@ -110,11 +111,6 @@ const metrics = computed<Metric[]>(() => {
   ]
 })
 
-const sparkTitle = computed(() =>
-  props.card.sparkTotal === null
-    ? t('page.market.spark.none')
-    : t('page.market.spark.total', { count: fmtCompact(props.card.sparkTotal) }),
-)
 </script>
 
 <template>
@@ -124,24 +120,24 @@ const sparkTitle = computed(() =>
         <ModelIcon :vendor="card.key" :model="card.callName" :size="20" />
       </span>
       <div class="mkc__title">
-        <h3 :title="card.name">{{ card.name }}</h3>
-        <code class="mkc__call" :title="card.callName">{{ card.callName || FMT_EMPTY }}</code>
+        <TitleTip :content="card.name"><h3>{{ card.name }}</h3></TitleTip>
+        <TitleTip :content="card.callName"><code class="mkc__call">{{ card.callName || FMT_EMPTY }}</code></TitleTip>
       </div>
       <Badge dot :tone="card.available ? 'ok' : 'neutral'">
         {{ card.available ? t('page.market.state.available') : t('page.market.state.unavailable') }}
       </Badge>
     </header>
 
-    <div class="mkc__platforms" :title="allPlatformsTitle">
+    <TitleTip :content="allPlatformsTitle"><div class="mkc__platforms">
       <ul v-if="card.platformCount" class="mkc__logos">
-        <li v-for="logo in logos" :key="logo.id" class="mkc__logo" :title="logo.title">
+        <li v-for="logo in logos" :key="logo.id" class="mkc__logo">
           <PlatformLogo :id="logo.id" :size="18" :label="logo.title" />
         </li>
-        <li v-if="restCount" class="mkc__more" :title="restTitle">+{{ restCount }}</li>
+        <li v-if="restCount" class="mkc__more">+{{ restCount }}</li>
       </ul>
       <span v-else class="mkc__muted">{{ t('page.market.card.noPlatform') }}</span>
       <span class="mkc__count">{{ t('page.market.card.platformCount', { count: card.platformCount }) }}</span>
-    </div>
+    </div></TitleTip>
 
     <div class="mkc__price">
       <b :class="{ 'is-muted': priceMuted, 'is-free': card.free }">{{ price }}</b>
@@ -157,15 +153,7 @@ const sparkTitle = computed(() =>
       </div>
     </dl>
 
-    <div class="mkc__spark" :title="sparkTitle">
-      <span class="mkc__spark-label">
-        {{ t('page.market.card.spark', { window: hoursLabel, count: fmtCompact(card.requests) }) }}
-      </span>
-      <div v-if="card.spark.length" class="mkc__spark-line">
-        <Sparkline :data="card.spark" tone="brand" :height="28" />
-      </div>
-      <span v-else class="mkc__muted">{{ FMT_EMPTY }}</span>
-    </div>
+    <MarketHealthTimeline :health="card.health" :hours-label="hoursLabel" />
 
     <footer class="mkc__foot">
       <Btn variant="quiet" size="sm" :icon="Copy" @click="emit('copy', card)">
@@ -404,25 +392,6 @@ const sparkTitle = computed(() =>
   font-weight: 400;
 }
 
-.mkc__spark {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  min-width: 0;
-}
-
-.mkc__spark-label {
-  font-size: var(--fs-small);
-  color: var(--fg-muted);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.mkc__spark-line {
-  flex: 1;
-  min-width: 60px;
-}
-
 .mkc__foot {
   display: flex;
   align-items: center;
@@ -445,8 +414,5 @@ const sparkTitle = computed(() =>
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .mkc__spark {
-    flex-wrap: wrap;
-  }
 }
 </style>

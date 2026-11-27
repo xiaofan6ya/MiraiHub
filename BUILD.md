@@ -9,6 +9,8 @@
 
 构建会使用当前工作目录的源码，包括未提交改动。`--dry-run` 仅检查工具并显示命令；`--non-interactive` 沿用当前版本，不等待输入。交互模式在 10 秒内未提交输入或直接回车，也沿用当前版本。
 
+新版控制台的正式源码位于 `admin/ui`。EXE/APK 构建都会先运行该目录的 `npm run build`，再收录 `admin/ui/dist`；需要 Node.js 20.19+ 和 npm，首次缺少前端依赖时会运行 `npm ci`。前端构建失败会中止打包，不会继续使用旧页面。`ui-refresh-verification` 下的设计预览副本不作为打包输入。
+
 ## 环境
 
 需要 64 位 Python 3.10、JDK 17、Gradle 8.11.1、Android SDK 35 和 Build Tools 35.0.0。优先复用 `.desktop-build`、`build/android-tools/` 和 Gradle 缓存。其他安装位置可显式指定：

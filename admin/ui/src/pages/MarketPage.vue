@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import TitleTip from '@/components/base/TitleTip.vue'
+
 /**
  * S13 模型广场 /market（模板 A：页头 + 筛选 + 卡片/列表双视图）
  *
  * 契约：docs/ui-v2/contracts/model-market.md
  * 设计稿：docs/ui-v2/06-pages-d.md P15
  *
- * 页面只做摆放：所有字段换算、筛选、排序、分页、sparkline 分桶都在 api/market.ts 的
+ * 页面只做摆放：所有字段换算、筛选、排序、分页、时段健康数据都在 api/market.ts 的
  * 纯函数里（可单测）。后端语义（归一模型 / available = 有定价且活跃账号 > 冷却账号）
  * 在 api 层的注释里写清，页面不重复判断。
  *
@@ -14,7 +16,7 @@
  *   · 口径：**全网关**（/api/stats/model-market 不读 X-Platform），页头徽章写明；
  *     因此不再订阅顶栏平台切换（platform_scoping_review §3）；要看某个平台用页内「平台」筛选；
  *   · 四态齐全：首次加载骨架 7 张卡 / 刷新保留旧数据（右上角转圈）/ 空 / 错误；
- *   · 卡片拆到 ./Market/MarketCardItem.vue；迷你折线用公共 Sparkline（纯 SVG）。
+ *   · 卡片拆到 ./Market/MarketCardItem.vue；健康状态格直接使用服务端的时段边界和状态。
  */
 import {
   computed,
@@ -40,7 +42,6 @@ import {
   FilterBar,
   ModelIcon,
   Segmented,
-  Sparkline,
   type FilterChip,
   type SegmentedOption,
   type SorterPayload,
@@ -54,13 +55,12 @@ import { ApiError, isAbortError } from '@/api/http'
 import { copyText } from '@/platform/clipboard'
 import { avgDurationText, durationState } from '@/api/stats'
 import MarketCardItem from './Market/MarketCardItem.vue'
+import MarketHealthTimeline from './Market/MarketHealthTimeline.vue'
 import { useRevisit } from '@/pages/_shared/useRevisit'
 import {
   MARKET_HOURS,
   filterMarketCards,
-  getMarketTrend,
   getModelAggregate,
-  indexTrendSeries,
   listModelMarket,
   logLinkFor,
   marketHoursLabel,
@@ -140,14 +140,12 @@ function setHours(value: string | number): void {
 
 const payload = ref<ModelMarketPayload | null>(null)
 const aggregate = ref<Awaited<ReturnType<typeof getModelAggregate>> | null>(null)
-const trend = ref<Awaited<ReturnType<typeof getMarketTrend>>['trend'] | null>(null)
 const loading = ref(false)
 const loadError = ref<{ message: string; detail: string } | null>(null)
-const trendMissing = ref(false)
 
 let controller: AbortController | null = null
 
-const cards = computed(() => toMarketCards(payload.value, aggregate.value, trend.value, t))
+const cards = computed(() => toMarketCards(payload.value, aggregate.value, null, t))
 
 const firstLoading = computed(() => loading.value && payload.value === null)
 const hasFilters = computed(() =>
@@ -174,19 +172,15 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = null
   try {
-    const [market, agg, dash] = await Promise.all([
+    const [market, agg] = await Promise.all([
       listModelMarket(hours.value, current.signal),
       // 副接口失败不影响主流程（契约 §8.2）
       getModelAggregate(current.signal).catch(() => null),
-      // sparkline 只是锦上添花：拿不到就不画，不弹错
-      getMarketTrend(hours.value, current.signal).catch(() => null),
     ])
     // r4：副接口吞掉 AbortError 后旧请求仍可能 resolve；只认最后一次请求（防切时间窗时旧数据回写）。
     if (controller !== current) return
     payload.value = market
     aggregate.value = agg
-    trend.value = dash?.trend ?? null
-    trendMissing.value = !indexTrendSeries(trend.value).size
   } catch (error) {
     if (isAbortError(error) || controller !== current) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
@@ -389,12 +383,12 @@ function renderModel(row: TableRow): VNodeChild {
   return h('div', { class: 'mkt-cell' }, [
     h(ModelIcon, { vendor: card.key, model: card.callName, size: 18 }),
     h('div', { class: 'mkt-cell__main' }, [
-      h('span', { class: 'mkt-cell__name', title: card.name }, card.name),
-      h(
+      h(TitleTip, { content: String((card.name) ?? '') }, { default: () => h('span', { class: 'mkt-cell__name' }, card.name) }),
+      h(TitleTip, { content: String((card.platformLabels.join(' · ')) ?? '') }, { default: () => h(
         'span',
-        { class: 'mkt-cell__sub', title: card.platformLabels.join(' · ') },
+        { class: 'mkt-cell__sub' },
         card.platformLabels.join(' · ') || t('page.market.card.noPlatform'),
-      ),
+      ) }),
     ]),
   ])
 }
@@ -527,16 +521,13 @@ const columns = computed<TableColumn[]>(() => [
     },
   },
   {
-    key: 'spark',
-    title: t('page.market.col.spark'),
+    key: 'health',
+    title: t('page.market.health.title'),
     mobile: 'hidden',
     width: 140,
     render: (row: TableRow) => {
       const card = row as unknown as MarketCard
-      if (!card.spark.length) return h('span', { class: 'mkt-dash', title: t('page.market.spark.none') }, FMT_EMPTY)
-      return h('div', { class: 'mkt-spark', title: t('page.market.spark.total', { count: fmtCompact(card.sparkTotal ?? 0) }) }, [
-        h(Sparkline, { data: card.spark, tone: 'brand', height: 24 }),
-      ])
+      return h(MarketHealthTimeline, { health: card.health, hoursLabel: hoursLabel.value, mini: true })
     },
   },
   {
@@ -792,9 +783,6 @@ watch(hours, () => {
 
         <p v-if="windowSummary" class="market-window">
           {{ windowSummary }}
-          <span v-if="trendMissing" class="market-window__hint">
-            {{ t('page.market.windowHint') }}
-          </span>
         </p>
       </div>
     </Card>
@@ -835,10 +823,6 @@ watch(hours, () => {
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   /* 同一行卡片等高、底部操作条对齐（卡片内 footer margin-top:auto） */
   align-items: stretch;
-}
-
-:deep(.mkt-spark) {
-  width: 112px;
 }
 
 .market-dash,

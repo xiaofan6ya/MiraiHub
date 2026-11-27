@@ -36,6 +36,7 @@ import {
   FilterBar,
   KpiCard,
   Segmented,
+  TitleTip,
   applyLineDefaults,
   type FilterChip,
   type SegmentedOption,
@@ -130,9 +131,10 @@ async function loadStats(refresh = false): Promise<void> {
   loadError.value = null
   try {
     const data = await getUsageStats(toUsageParams(filters, { refresh }), current.signal)
+    if (controller !== current) return
     payload.value = data
   } catch (error) {
-    if (isAbortError(error)) return
+    if (isAbortError(error) || controller !== current) return
     const detail = error instanceof ApiError && error.detail ? prettyDetail(error.detail) : ''
     const failure = t('page.usage.failure', {
       action: t('page.usage.action.load'),
@@ -518,11 +520,11 @@ watch(
       <section class="usage-kpis">
         <KpiCard v-for="item in kpis" :key="item.key" :label="item.label" :value="null" loading />
       </section>
-      <Card class="usage-trend" :title="t('page.usage.card.trend')">
+      <Card class="usage-trend mh-panel-card" :title="t('page.usage.card.trend')">
         <div class="mh-skeleton usage-skeleton__chart" />
       </Card>
       <div class="usage-grid usage-grid--3">
-        <div v-for="index in 3" :key="index" class="mh-skeleton usage-skeleton__card" />
+        <div v-for="index in 3" :key="index" class="mh-skeleton usage-skeleton__card mh-panel-placeholder" />
       </div>
     </div>
 
@@ -541,7 +543,7 @@ watch(
         />
       </section>
 
-      <Card class="usage-trend" :title="t('page.usage.card.trend')" :loading="loading && !!payload">
+      <Card class="usage-trend mh-panel-card" :title="t('page.usage.card.trend')" :loading="loading && !!payload">
         <template #extra>
           <span class="usage-metric">{{ t('page.usage.trendScope', { range: win.label }) }}</span>
           <Segmented
@@ -563,7 +565,7 @@ watch(
       </Card>
 
       <div class="usage-grid usage-grid--3">
-        <Card :title="t('page.usage.card.models')">
+        <Card class="mh-panel-card" :title="t('page.usage.card.models')">
           <template #extra>
             <span class="usage-metric">{{ metricText(modelMetric) }}</span>
             <Btn
@@ -588,7 +590,7 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card :title="t('page.usage.card.keys')">
+        <Card class="mh-panel-card" :title="t('page.usage.card.keys')">
           <template #extra>
             <span class="usage-metric">{{ metricText(keyMetric) }}</span>
             <Btn
@@ -613,11 +615,11 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card :title="t('page.usage.card.endpoints')">
+        <Card class="mh-panel-card" :title="t('page.usage.card.endpoints')">
           <template #extra>
             <span class="usage-metric">{{ metricText(endpointMetric) }}</span>
             <!-- 第 2 轮审查 P2：与其他卡一致放「日志」按钮，禁用并在悬停说明原因 -->
-            <span class="usage-disabled-tip" :title="t('page.usage.card.endpointHint')">
+            <TitleTip :content="t('page.usage.card.endpointHint')">
               <Btn
                 variant="quiet"
                 size="sm"
@@ -627,7 +629,7 @@ watch(
               >
                 {{ t('page.usage.action.logs') }}
               </Btn>
-            </span>
+            </TitleTip>
           </template>
           <div v-if="endpointBars.length" class="usage-bars">
             <BarList :items="endpointBars" :format="rowFormat(endpointMetric)" />
@@ -637,7 +639,7 @@ watch(
       </div>
 
       <div class="usage-grid usage-grid--2">
-        <Card :title="t('page.usage.card.accounts')">
+        <Card class="mh-panel-card" :title="t('page.usage.card.accounts')">
           <template #extra>
             <span class="usage-metric">{{ t('page.usage.metric.requests') }}</span>
             <Btn
@@ -662,7 +664,7 @@ watch(
           <Empty v-else compact :description="emptyNote" />
         </Card>
 
-        <Card :title="t('page.usage.card.results')">
+        <Card class="mh-panel-card" :title="t('page.usage.card.results')">
           <template #extra>
             <span class="usage-metric">{{ t('page.usage.metric.allRequests') }}</span>
             <Btn
@@ -705,7 +707,8 @@ watch(
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
   gap: var(--sp-4);
-  align-items: start;
+  align-items: stretch;
+  grid-auto-rows: 1fr;
   min-width: 0;
 }
 
@@ -728,18 +731,16 @@ watch(
   display: grid;
   gap: var(--sp-4);
   min-width: 0;
+  align-items: stretch;
+  grid-auto-rows: 1fr;
 }
 
 .usage-grid--3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  /* 子卡按内容高度排，不互相撑高留白（第 1 轮审查 P1-3） */
-  align-items: start;
 }
 
 .usage-grid--2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* 子卡按内容高度排，不互相撑高留白（第 1 轮审查 P1-3） */
-  align-items: start;
 }
 
 .usage-metric {
@@ -808,4 +809,5 @@ watch(
     width: 100%;
   }
 }
+
 </style>
