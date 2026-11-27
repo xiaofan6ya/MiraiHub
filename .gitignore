@@ -365,3 +365,8 @@ _marvis/
 # 根目录临时产物（抓包 / 反编译清单 / 一次性分析报告）：归位到这里，不进仓库。
 temp/
 
+
+# README 用的后台截图要入库（第 201 行的 screenshots/ 是根目录临时截图目录，别连带挡掉这里）
+!assets/screenshots/
+!assets/screenshots/*.png
+

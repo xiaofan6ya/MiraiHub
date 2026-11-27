@@ -160,8 +160,6 @@ export const zhCN = {
   'shell.closeNav': '关闭导航',
   'shell.navMenu': '导航菜单',
   'shell.sessions': '登录设备',
-  'shell.legacyConsole': '切回旧版',
-  'shell.legacyConsoleTip': '切回旧版控制台',
   'shell.logout': '退出登录',
   'shell.updates': '更新与备份',
   'shell.hasUpdate': '有更新',

@@ -5,6 +5,10 @@
 一个 API Key，调用多家上游；一套协议，覆盖所有模型。
 自带账号池、配额计费、风控哨兵与实时监控 —— 开箱即用，不需要外部中间件。
 
+当前版本 **v1.1.5** · Windows / macOS / Android / Docker
+
+![MiraiHub 概览](assets/screenshots/overview.png)
+
 ---
 
 ## 它解决什么问题
@@ -23,18 +27,39 @@
    你的客户端         │          MiraiHub            │      上游平台
   ─────────────      │  ┌────────────────────────┐  │   ──────────────
   OpenAI SDK   ──►   │  │  /v1/chat/completions  │  │──► WorkBuddy
-  Anthropic    ──►   │  │  /v1/responses         │  │──► Trae 国内版
-  Codex CLI    ──►   │  │  /v1/messages          │  │──► Trae 国际版
-                     │  └────────────────────────┘  │──► Qoder
-                     │   统一鉴权 · 选号 · 计费      │──► Qoder 国际版
-                     │   调度 · 重试 · 记账 · 监控    │──► Loomy
-                     │                               │──► WPS 灵犀
+  Anthropic    ──►   │  │  /v1/responses         │  │──► Trae（国内 / 国际）
+  Codex CLI    ──►   │  │  /v1/messages          │  │──► Qoder（国内 / 国际）
+                     │  └────────────────────────┘  │──► Loomy
+                     │   统一鉴权 · 选号 · 计费      │──► 小浣熊 / CodeArts
+                     │   调度 · 重试 · 记账 · 监控    │──► MiniMax / WPS 灵犀
+                     │                               │──► Marvis / KroWork / AStudio / Codar
                      └──────────────────────────────┘
 ```
 
 对外**只有一套 Key 和一套协议**；对内自动选平台、选账号、换号重试、按倍率记账。
 
-![MiraiHub 概览](assets/screenshots/overview.png)
+---
+
+## 管理后台
+
+Vue 3 + Vite 单页应用，**25 个页面 / 9 个分组**，深浅两套主题，全程离线可用（字体、图标、图表库都打进包里）。
+
+| 分组 | 页面 |
+|---|---|
+| 概览 | 概览 · 风控哨兵 · 数据看板 |
+| 平台 | 平台管理 · 平台网关 |
+| 账号 | 账号池 · 积分到期 · 积分流水 · 成长计划 |
+| 调用 | 使用记录 · 用量日志 · API Keys · IP 管理 |
+| 配置 | 模型配置 · 模型广场 · 分组管理 · 定时任务 |
+| 接入 | 客户端参数 · 同步设置 · 预警管理 |
+| 智能体 | 智能体（生图 / 生视频对话） |
+| 公开入口 | 公开注册入口（邀请链接、文案、平台开关） |
+| 系统 | 设置 · 出口代理 · 更新与备份 |
+
+访问 `/admin` 即可。只有一个入口 —— **旧的手写 JS 控制台已在 v1.1.5 完全移除**，
+`?ui=v1` 与 `MIRAIHUB_CONSOLE` 开关一并下线，`/admin/v2/*` 只保留 301 兼容跳转。
+
+![账号池](assets/screenshots/accounts.png)
 
 ---
 
@@ -46,12 +71,13 @@ MiraiHub 不是「写死几个平台的代理」，而是**一个可以不断往
 
 ```
 admin/platform/<你的平台>/
-  __init__.py            登记 PlatformSpec（id / 标签 / 网关入口 / 存储平台 / 区域）
+  __init__.py            登记 PlatformSpec（id / 标签 / 网关入口 / 存储平台 / 区域 / 动作声明）
   gateway.py             实现转发（chat / responses / messages / models / balance）
-  platform_gateway.py    实现管理契约（账号池 11 项操作 / 任务 / 客户端探测）
+  platform_gateway.py    实现管理契约（账号池操作 / 任务 / 客户端探测 / 用量）
   core/                  纯协议层（上游客户端 / 指纹 / 目录 / 协议转换）
   services/              状态层（选号 / 额度 / 记账 / 目录同步）
   routers/               /api/<平台>/* 后台接口
+  public_auth.py         （可选）公开注册入口适配器：声明 modes + begin/poll
 ```
 
 **框架层不用改一行。** 这是刻意的设计约束：
@@ -99,10 +125,10 @@ python admin/platform/skill/scripts/verify_platform.py  # 接入后验收
 
 实时盯住每一个账号的失败信号，**在账号被封之前先撤**。
 
-- 按错误码聚合（限流 / 鉴权失效 / 模型不存在 / 内容拦截）
+- 按错误码聚合（限流 / 鉴权失效 / 模型不存在 / 内容拦截 / 上游端点下线）
 - 命中阈值自动熔断该账号，冷却期内不再被选中
-- 可视化拓扑：请求 → 哨兵 → 各平台，出问题的那条线会亮红
-- 支持手动暂停某个平台止损（**不消耗额度、不打上游**）
+- 平台级暂停：止损时不消耗额度、不打上游
+- 受影响账号明细 + 剩余冷却时间
 
 ![风控哨兵](assets/screenshots/sentinel.png)
 
@@ -138,6 +164,25 @@ python admin/platform/skill/scripts/verify_platform.py  # 接入后验收
 
 ![API Key 管理](assets/screenshots/keys.png)
 
+### 🖼 模型广场
+
+把「哪个模型现在能调、稳不稳、多少钱」摊在一屏里：按时段画可用性时间轴，
+按请求数 / 价格 / 吞吐 / 成功率排序，还能一键筛出今天挂过的模型。
+数据来自 rollup 汇总与原始日志，缺数据时明确标注来源，不编数字。
+
+![模型广场](assets/screenshots/market.png)
+
+### 🤖 智能体
+
+后台内置一个对话工作台，可以直接用池子里的模型生图、生视频：
+
+- 提示词预设模板（写实摄影 / 日系插画 / 电影感 / 产品级 / 海报 / 国风水墨 …）
+- 草稿一键「增强」成完整创作提示词
+- 长视频分段：给目标总时长，自动规划分镜
+- 产物带下载入口与本次积分消耗
+
+![智能体](assets/screenshots/agent.png)
+
 ### 🔁 三协议互通
 
 | 端点 | 协议 |
@@ -161,9 +206,7 @@ Claude Code、DeepSeek Harness 等）会直接丢弃、**不产生事件**。事
 客户端维护的「流空闲超时」就不会被重置 —— 上游明明一直在思考，客户端仍会
 在 idle 超时后掐断整条流，表现为「任务跑到一半突然断」。
 
-它和 `ADMIN_STREAM_IDLE_TIMEOUT` 是互补关系：后者管服务端读上游的静默
-上限，前者管客户端能不能「看见」流还活着。回退开关
-`MIRAIHUB_KEEPALIVE_DATA_FRAME=0` 可改回旧的注释帧（仅在排查客户端对
+回退开关 `MIRAIHUB_KEEPALIVE_DATA_FRAME=0` 可改回旧的注释帧（仅在排查客户端对
 空增量帧的兼容问题时使用；代价是保活不再重置 idle 计时器）。
 
 ### 📊 实时监控与准确计量
@@ -177,10 +220,19 @@ Claude Code、DeepSeek Harness 等）会直接丢弃、**不产生事件**。事
 
 ![用量日志](assets/screenshots/logs.png)
 
-### 🖥 桌面版 / Android
+### 🎁 公开注册入口
 
-- Windows 桌面版（pywebview）：双击即用，内置托盘与版本更新
-- Android：同一套后端，账号池 + `/v1` 网关
+给协作者一条邀请链接，他们自己连账号进池子，不需要登后台：
+
+- 平台级开关 + 文案自定义（标题 / 副标题 / 说明 / 页脚，带字数上限）
+- 手机号验证码、扫码授权、**官方登录接力**（WorkBuddy 的官方授权页）三种方式
+- 邀请码绑定、票据时效、单 IP 限流与总闸
+
+### 💻 桌面版 / Android
+
+- **Windows / macOS 桌面版**（pywebview）：双击即用，内置托盘与版本更新
+- **Android**：同一套后端与前端（WebView 直接加载 `/admin`），原生桥接提供
+  重启本地服务、通知设置、电池优化、自启动、导出文件保存
 
 ---
 
@@ -211,6 +263,9 @@ python main.py
 > 数据与日志默认在项目目录下的 `data/` 与 `logs/`。
 > 数据库支持 SQLite（默认）与 MySQL（`ADMIN_DATABASE_URL`）。
 
+前端源码在 `admin/ui`，打包时会自动 `npm run build`；手动改前端后执行
+`pnpm build`（Node 20.19+），否则 `/admin` 会 404 并在日志里提示未构建。
+
 ### 方式三：Linux Docker 部署
 
 安装 Docker Engine 和 Compose 插件后执行：
@@ -226,7 +281,8 @@ docker compose --env-file .env.docker ps
 docker compose --env-file .env.docker logs --tail=100 admin
 ```
 
-访问 `http://服务器IP:8790/admin`，使用 `.env.docker` 的用户名和密码登录。放行 TCP 8790；公网部署建议配置 HTTPS 反向代理（并把代理地址加入 `ADMIN_TRUSTED_PROXY_IPS`）。
+访问 `http://服务器IP:8790/admin`，使用 `.env.docker` 的用户名和密码登录。
+放行 TCP 8790；公网部署建议配置 HTTPS 反向代理（并把代理地址加入 `ADMIN_TRUSTED_PROXY_IPS`）。
 
 国内网络构建较慢时，可给基础镜像与 pip 换源后再构建（参数以 Dockerfile 顶部注释为准）：
 
@@ -236,19 +292,15 @@ docker compose --env-file .env.docker build \
 docker compose --env-file .env.docker up -d
 ```
 
-默认只运行**一个 admin 容器**，包含 Web UI、多账号网关与定时任务。SQLite 保存在 `admin_data` 命名卷（容器内 `/data/workbuddy.db`），限流使用进程内存，无需另装 MySQL 或 Redis。保持单 worker，使账号租约、短信出口限流与调度任务共享状态。
+默认只运行**一个 admin 容器**，包含 Web UI、多账号网关与定时任务。SQLite 保存在
+`admin_data` 命名卷（容器内 `/data/workbuddy.db`），限流使用进程内存，无需另装
+MySQL 或 Redis。保持单 worker，使账号租约、短信出口限流与调度任务共享状态。
 
-Compose 中的 converter 是可选的单账号转换器，已放入 `standalone` profile，admin 不依赖它。只有需要独立读取宿主机 `credentials/` 凭证目录时，才在 `.env.docker` 中配置独立转换器的访问密钥（参数原名以 Compose 文件为准，即 `CODEBUDDY2OPENAI_KEY`），并执行：
+升级执行 `git pull`，再执行 `up -d --build`。`docker compose down` 保留数据，
+**不要添加 `-v`**。管理台的「更新与备份」可以检查 GitHub 正式版本、查看
+Docker/Linux 升级命令，并下载经过完整性校验的 SQLite 在线备份。
 
-```bash
-docker compose --env-file .env.docker --profile standalone up -d --build
-```
-
-升级执行 `git pull`，再执行 `up -d --build`。`docker compose down` 保留数据，**不要添加 `-v`**。旧版 MySQL 数据不会自动迁入 SQLite；迁移前先备份。沿用 MySQL 时用 Compose override 覆盖 `ADMIN_DATABASE_URL`，地址须从容器内可达。
-
-管理台的「更新与备份」可以检查 GitHub 正式版本、查看 Docker/Linux 升级命令，并下载经过完整性校验的 SQLite 在线备份。MySQL 部署会提供备份命令说明，需先用数据库工具完成备份。当前采用版本检查和手动执行升级，不会从 Web 服务控制宿主机或 Docker。
-
-也可以通过命令行备份 SQLite：
+也可以从命令行备份：
 
 ```bash
 docker compose --env-file .env.docker stop admin
@@ -256,24 +308,39 @@ docker compose --env-file .env.docker cp admin:/data/. ./backup-data/
 docker compose --env-file .env.docker start admin
 ```
 
-容器内检测到的 IP 可能属于 Docker 网桥。远程接入优先使用浏览器当前访问的服务器地址及映射端口；需要局域网访问时填写宿主机 IP。
-
-管理台「积分流水」分别展示上游确认的奖励和余额变化观察，支持账号、来源、类型、时间范围筛选及分页。签到、成长奖励和补偿都会记录来源；无法确认来源的余额变化标记为未知，不与奖励记录相加。升级前已保存的成长记录可分批导入，更早未保存的来源及奖励后余额无法恢复。
-
-账号池操作中的「账号并发上限」支持留空跟随全局、0 不限、正整数限制在途请求数。全局默认仍为 `ADMIN_POOL_MAX_IN_FLIGHT=3`；这是网关本地的并发保护，不代表上游提供的配额。维护中的账号始终暂停接入。
-
 ---
 
 ## 用起来
 
+### 0. 确认模型目录
+
+后台 →「模型配置」里同步上游模型目录、设倍率、按平台调整展示名与上下文长度。
+**没配的模型对客户端不可见** —— 客户端只看到这张表里启用的部分，这也是控制
+「哪些模型能被调」的总开关。
+
+![模型配置](assets/screenshots/models.png)
+
 ### 1. 导入账号
 
-工作台 →「账号池」→ 按平台导入（本机扫描 / 授权登录 / 粘贴凭证）。
-每个平台可以放多个账号，网关自动轮转。
+后台 →「账号池」→ 按平台添加。每个平台可以放多个账号，网关自动轮转。
+
+添加方式由平台能力声明决定（`/api/platforms` 的 `actions` / `supports_local_scan`）：
+
+| 方式 | 说明 |
+|---|---|
+| 手机号验证码 | 平台支持短信登录时出现 |
+| 授权登录 | 扫码 / 设备码 / 浏览器回调 / 官方登录接力 |
+| 扫描本机 | 服务端读本机登录目录（桌面版最方便） |
+| 导入 | 粘贴凭证、批量 JSON、跨实例档案迁移 |
+
+账号行支持重新登录（保留 Key 绑定与历史）、导出登录态、健康检查、模型额度与冷却查看。
 
 ### 2. 创建 Key
 
-工作台 →「API Keys」→ 新建。可选的精细化配置见上文「精细化 Key 管理」。
+后台 →「API Keys」→ 新建。精细化配置见上文「精细化 Key 管理」。
+
+Key 可以单独限制来源 IP、并发、可用模型与账号；被共享出去的 Key 还能按
+设备标识封禁。
 
 ### 3. 调用
 
@@ -309,12 +376,35 @@ client = anthropic.Anthropic(base_url="http://127.0.0.1:8790", api_key="sk-你�
 
 ### 4. 看它跑得怎么样
 
-- 「用量日志」：每次调用的明细 + 实时刷新
+- 「概览」：今日流量、成功率、各平台余额与 token 构成
+- 「用量日志」：每次调用的明细 + 实时刷新 + 按 IP / Key / 模型下钻
 - 「风控哨兵」：进行中的请求、平台健康、自动熔断
 - 「使用记录」：按平台 / 模型 / Key / 端点的用量分布
 - 「积分到期」：哪些额度快作废，配合「到期优先」策略消化
 
 ![积分到期](assets/screenshots/credits.png)
+
+---
+
+## 支持的平台
+
+| 平台 | 标识 | 说明 |
+|---|---|---|
+| WorkBuddy | `workbuddy` | 内置默认平台；手机号登录 + 官方登录接力 |
+| Trae | `trae-cn` / `trae-intl` | 国内版与国际版独立凭证 / 目录；设备码授权 |
+| Qoder | `qoder` / `qoder-intl` | 设备轮询授权，任意设备可授权 |
+| Loomy | `loomy` | 按 token 计量；手机号登录 + 邀请码 |
+| 小浣熊 | `raccoon` | 按 token 计量；扫码授权 |
+| CodeArts | `codearts` | 华为云 CodeArts，每日签到领权益 |
+| MiniMax Code | `minimax` | Anthropic Messages 上游；设备授权 |
+| WPS 灵犀 | `wps-lingxi` | Cookie 登录 + 桌面 agent-runtime 通路 |
+| 腾讯 Marvis | `marvis` | 扫码授权 + 回调贴回；qimei 设备指纹 |
+| KroWork | `krowork` | 手机号验证码登录 |
+| AStudio | `astudio` | 讯飞 Astron Studio，OpenAI Responses 网关 |
+| 科搭 Codar | `codar` | SpeedAI 科搭，OpenAI + Claude 双协议 |
+
+接入新平台请读 [admin/platform/skill/SKILL.md](admin/platform/skill/SKILL.md)，
+**不要改 `admin/` 根目录的文件**。
 
 ---
 
@@ -330,48 +420,22 @@ MiraiHub/
 │   │   ├── dispatch.py      /v1/* 分叉中间件（唯一的平台判断点）
 │   │   ├── gateway_router.py 跨平台调度策略
 │   │   ├── sentinel*.py     风控哨兵
-│   │   ├── workbuddy/       ┐
-│   │   ├── trae/            │
-│   │   ├── qoder/           ├ 各平台模块（可整目录删除）
-│   │   ├── loomy/           │
-│   │   ├── raccoon/         │
-│   │   ├── codearts/        │
-│   │   ├── minimax/         │
-│   │   ├── wps_lingxi/      │
-│   │   ├── astudio/         ├ 各平台模块（可整目录删除）
-│   │   └── codar/           ┘
-│   └── console/             管理后台前端
-├── desktop/                 Windows 桌面版（pywebview）
-├── android/                 Android 壳
+│   │   └── <各平台>/        单个平台自成一个目录（可整目录删除）
+│   ├── ui/                  ★ 管理后台前端（Vue 3 + Vite，25 页）
+│   │   ├── src/             源码（pages / components / api / stores / i18n）
+│   │   └── dist/            构建产物（打包时生成，不入库）
+│   ├── static/              旧控制台时代的 vendor 资源（正在淘汰）
+│   └── server.py            FastAPI 应用装配（/admin、/api、/v1 都在这里挂）
+├── desktop/                 Windows / macOS 桌面版（pywebview）
+├── android/                 Android 壳（WebView 加载 /admin + 原生桥接）
 ├── scripts/                 构建与运维脚本
+├── tests/                   回归用例（含 tests/manual 下的手工探测脚本）
 └── admin/platform/skill/    ★ 平台接入方法论（先读这个）
 ```
 
 > **`admin/` 就是网关本体。** 它不是某个平台的附属：
 > `/v1/*` 由 `admin/routers/proxy.py` 实现，`workbuddy` 只是内置默认平台
 > （它的上游地址恰好是某个外部域名）。详见 skill 的 §2.5。
-
----
-
-## 支持的平台
-
-| 平台 | 标识 | 说明 |
-|---|---|---|
-| WorkBuddy | `workbuddy` | 内置默认平台 |
-| Trae 国内版 | `trae-cn` | 与国际版独立凭证 / 目录 |
-| Trae 国际版 | `trae-intl` | |
-| Qoder 中国版 | `qoder` | |
-| Qoder 国际版 | `qoder-intl` | |
-| Loomy | `loomy` | 按 token 计量 |
-| 小浣熊 | `raccoon` | 按 token 计量 |
-| CodeArts | `codearts` | 华为云 CodeArts，每日签到领权益 |
-| MiniMax Code | `minimax` | Anthropic Messages 上游 |
-| WPS 灵犀 | `wps-lingxi` | Cookie 登录 + 桌面 agent-runtime 通路 |
-| AStudio | `astudio` | 讯飞 Astron Studio，OpenAI Responses 网关，每日登录积分可签到 |
-| 科搭 Codar | `codar` | SpeedAI 科搭，OpenAI + Claude 双协议，滚动 24h 签到 |
-
-接入新平台请读 [admin/platform/skill/SKILL.md](admin/platform/skill/SKILL.md)，
-**不要改 `admin/` 根目录的文件**。
 
 ---
 
@@ -413,10 +477,20 @@ MiraiHub/
 非流式上游无法测出解码速度，显示「—」是设计如此 —— 不给假数字。
 若明明是流式却没数据，检查是否真的做了流式转发（见 FIXED-BUGS 五·补13）。
 
+**Q：后台打开是 404 或者白屏？**
+
+前端没构建。在 `admin/ui` 下执行 `pnpm build`（或 `npm run build`），
+产物会生成到 `admin/ui/dist`。日志里会有一条「后台前端未构建」的 warning。
+
 **Q：改了配置不生效？**
 
 1. 确认服务真的重启了（`main.py` 会拉子进程，只 kill 父进程无效）
 2. 部分配置有缓存，详见 FIXED-BUGS 1.3
+
+**Q：Android 上少了「重启服务」之类的设置？**
+
+那批能力在「设置 → Android 本机」卡片里，只在 APK 的 WebView 内渲染
+（需要在 `window.WBAndroid` 桥接存在时才会出现）。
 
 ---
 

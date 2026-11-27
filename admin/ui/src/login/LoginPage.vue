@@ -66,8 +66,8 @@ async function submit(): Promise<void> {
     const fp = fingerprint()
     if (fp) headers['X-Browser-Fingerprint'] = fp
     await http('POST', '/api/login', { body, headers })
-    // 会话在 HttpOnly Cookie 里；直接进新版控制台。
-    location.replace('/admin/v2/')
+    // 会话在 HttpOnly Cookie 里；直接进后台唯一入口（`/admin/v2/` 只剩 301 兼容）。
+    location.replace('/admin/')
   } catch (error) {
     if (error instanceof ApiError) {
       errorText.value = error.status === 401 ? '用户名或密码错误' : error.message
@@ -103,7 +103,7 @@ onMounted(() => {
 <template>
   <main ref="root" class="login" :class="{ 'is-paused': hidden }">
     <header class="login__topbar">
-      <a class="login__brand-head" href="/admin/v2/login.html" aria-label="MiraiHub 登录首页">
+      <a class="login__brand-head" href="/admin/login.html" aria-label="MiraiHub 登录首页">
         <svg class="login__logo" viewBox="0 0 40 40" fill="none" aria-hidden="true">
           <rect x="1" y="1" width="38" height="38" rx="12" fill="var(--surface-2)" stroke="var(--border-strong)" />
           <path d="M10.5 28V12.5l9.5 9 9.5-9V28" stroke="var(--fg)" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round" />

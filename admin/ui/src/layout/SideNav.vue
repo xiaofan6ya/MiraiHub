@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NPopover } from 'naive-ui'
-import { ChevronsLeft, ChevronsRight, LogOut, MonitorSmartphone, Undo2 } from 'lucide-vue-next'
+import { ChevronsLeft, ChevronsRight, LogOut, MonitorSmartphone } from 'lucide-vue-next'
 import { GROUPS, PAGES_BY_KEY, groupEntry, isPageKey, type GroupDef, type PageKey } from '@/router/pages'
 import { useShellBadges } from '@/platform/shellBadges'
 import { useAppInfo } from '@/platform/version'
@@ -15,7 +15,7 @@ import TitleTip from '@/components/base/TitleTip.vue'
  * 侧栏（03-shell §2.1 + 10-visual-refresh §1.2）：深墨蓝，两种主题都是。
  *   顶部品牌区：logo（28px 圆角方底，深底上清楚）+ MiraiHub + 版本号小字（有更新时带「有更新」）；
  *   中间 9 个分组项 36px：选中 = --side-active-bg 底 + 左侧 3px --side-accent 竖条 + 白字；
- *   底部：登录设备、切回旧版、退出登录。
+ *   底部：登录设备、退出登录。
  * 点击分组回到该组上次访问的页面（localStorage `mh.lastTab.<group>`）。
  * 768–1279 默认收起 64px（悬停显示 tooltip），状态存 `mh.sideCollapsed`；<768 由 MobileDrawer 复用本组件。
  *
@@ -216,16 +216,6 @@ function goMaintenance(): void {
           </button>
         </template>
         <div class="mh-help__content">{{ t('shell.sessions') }}</div>
-      </n-popover>
-      <n-popover placement="right" :delay="200">
-        <template #trigger>
-          <a class="foot-item foot-link" href="/admin?ui=v1">
-            <Undo2 :size="16" />
-            <span v-if="!isCollapsed">{{ t('shell.legacyConsole') }}</span>
-            <span v-else class="mh-sr-only">{{ t('shell.legacyConsole') }}</span>
-          </a>
-        </template>
-        <div class="mh-help__content">{{ t('shell.legacyConsoleTip') }}</div>
       </n-popover>
       <n-popover placement="right" :delay="200" :disabled="!isCollapsed">
         <template #trigger>

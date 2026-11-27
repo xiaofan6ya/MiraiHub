@@ -154,8 +154,6 @@ export const enUS: Record<MessageKey, string> = {
   'shell.closeNav': 'Close navigation',
   'shell.navMenu': 'Navigation menu',
   'shell.sessions': 'Signed-in devices',
-  'shell.legacyConsole': 'Classic console',
-  'shell.legacyConsoleTip': 'Switch to the classic console',
   'shell.logout': 'Sign out',
   'shell.updates': 'Updates & backup',
   'shell.hasUpdate': 'Update',
