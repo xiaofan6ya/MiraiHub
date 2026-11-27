@@ -513,7 +513,8 @@ def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
         log.debug("uskey 真签成功 | model=%s | cost=%.2fms", sign_model, sign_ms)
         return {"uskey": uskey, "nonce": nonce,
                 "conversation_id": cid, "response_id": rid,
-                "client_version": version, "cached": False}
+                "client_version": version, "cached": False,
+                "qimei36": _local_device_of(openid)}
 
     # ------------------------------------------------------------------
     # 走到这里 = 真签没成。两条路，默认走前者（fail-closed）
@@ -545,7 +546,39 @@ def uskey_identity(acct: dict, *, scene: str = "", agent_tag: str = "",
     )
     return {"uskey": uskey, "nonce": nonce,
             "conversation_id": cid, "response_id": rid,
-            "client_version": version, "cached": False}
+            "client_version": version, "cached": False,
+            "qimei36": _local_device_of(openid)}
+
+
+def _local_device_of(openid: str) -> str:
+    """这个账号在 **TLV 里实际用的**设备串，供 header 复用。
+
+    ## 为什么必须有这个函数
+
+    TLV 载荷里有两处 18 字节设备段（`OFF_QIMEI1` / `OFF_QIMEI2`），
+    header `Ual-Access-MarvisExt.qimei36` 是第三处 —— 三处**必须完全一致**。
+    签名侧走 `device.for_account(openid)`（按账号派生），而 header 侧原来
+    走 `ext_qimei36()` → `uskey.qimei36()`（**无参**）→ 没有 `MARVIS_QIMEI36`
+    就抛异常 → 返回空串 → header 里根本不带这个键。
+
+    上游看到的就是「TLV 有设备串、header 没有」，两处自相矛盾。
+    这个函数让 header 直接取签名侧同一份值，从根上保证三处一致。
+
+    注意：本次改动**只保证一致性**，是否因此影响上游判定尚未验证 ——
+    实测修复前后上游都回 4100404（且换出口 IP、换签名方式、换真机 qimei
+    均无效），成因另查。
+
+    显式覆盖（`MARVIS_QIMEI36`）仍然优先 —— 走 `device.for_account` 时
+    它已经在里面生效了，所以这里不需要再判断一次。
+    """
+    try:
+        from . import device
+
+        qimei, _dev18 = device.for_account(str(openid or ""))
+        return qimei
+    except Exception:  # noqa: BLE001 - 派生失败就当没有，绝不编一个值
+        log.debug("按账号派生 qimei36 失败", exc_info=True)
+        return ""
 
 
 #: `Ual-Access-MarvisExt` 上报的客户端标识 —— 这一组是对着真客户端 200 抓包
