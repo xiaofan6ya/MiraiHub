@@ -31,15 +31,20 @@ import {
   importLocalAccounts,
   importLocalText,
   importModeOf,
+  importPlatformLocal,
   importStorageOf,
   manualHint,
   maskPhone,
   parseImportText,
+  platformScanRows,
+  platformScanSummary,
   pollBrowserAuth,
   preparePhoneFlow,
   scanLocalAccounts,
+  scanPlatformLocal,
   scanPreviewRows,
   scanSummary,
+  scanTargetOf,
   storageOf,
   submitAuthFallback,
   sendPhoneCode,
@@ -48,6 +53,7 @@ import {
   type BrowserAuthView,
   type PhoneForm,
   type PlatformAddSpec,
+  type PlatformScanPayload,
   type ScanLocalPayload,
   type ScanPreviewRow,
 } from '@/api/account-add'
@@ -162,18 +168,36 @@ async function submitImport(): Promise<void> {
 /* ---------------- 扫描本机 ---------------- */
 const scanLoading = ref(false)
 const scanPayload = ref<ScanLocalPayload | null>(null)
+const scanPlatformPayload = ref<PlatformScanPayload | null>(null)
 const scanRows = ref<ScanPreviewRow[]>([])
 const scanSelected = ref<string[]>([])
 const scanError = ref('')
 const scanBusy = ref(false)
 
+/**
+ * 「扫描本机」打哪一组接口（issue #127）。
+ *
+ * 默认平台走 `/api/accounts/scan-local`（通用接口，只认 WorkBuddy 凭证目录）；
+ * 其余平台走各自的 `/api/<storage>/scan-local`，否则 CodeArts 抽屉里会列出
+ * 并「导入」WorkBuddy 的号 —— 用户看到的是「扫描到了但导不进这个平台」。
+ */
+const scanTarget = computed(() => scanTargetOf(props.spec))
+
 async function loadScan(): Promise<void> {
   scanLoading.value = true
   scanError.value = ''
   try {
-    const payload = await scanLocalAccounts()
-    scanPayload.value = payload
-    scanRows.value = scanPreviewRows(payload, t)
+    if (scanTarget.value.generic) {
+      const payload = await scanLocalAccounts()
+      scanPayload.value = payload
+      scanPlatformPayload.value = null
+      scanRows.value = scanPreviewRows(payload, t)
+    } else {
+      const payload = await scanPlatformLocal(scanTarget.value.prefix)
+      scanPayload.value = null
+      scanPlatformPayload.value = payload
+      scanRows.value = platformScanRows(payload, t)
+    }
     scanSelected.value = scanRows.value.filter((row) => row.selected).map((row) => row.file)
   } catch (error) {
     scanError.value = failureText(t('page.accounts.scanScanFailed'), error)
@@ -183,7 +207,11 @@ async function loadScan(): Promise<void> {
   }
 }
 
-const scanSummaryText = computed(() => scanSummary(scanPayload.value, scanRows.value, t))
+const scanSummaryText = computed(() =>
+  scanTarget.value.generic
+    ? scanSummary(scanPayload.value, scanRows.value, t)
+    : platformScanSummary(scanPlatformPayload.value, scanRows.value, t),
+)
 
 function toggleScanRow(file: string, checked: boolean): void {
   const next = new Set(scanSelected.value)
@@ -199,7 +227,9 @@ async function submitScan(): Promise<void> {
   }
   scanBusy.value = true
   try {
-    const result = await importLocalAccounts(scanSelected.value)
+    const result = scanTarget.value.generic
+      ? await importLocalAccounts(scanSelected.value)
+      : await importPlatformLocal(scanTarget.value.prefix, scanSelected.value)
     toast.success(t('page.accounts.scanImported', { summary: importLocalText(result, t) }))
     close()
     emit('added')

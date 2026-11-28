@@ -369,6 +369,107 @@ export function importLocalAccounts(files: string[], all = false): Promise<Impor
   })
 }
 
+/* ------------------------------------------------------------------ *
+ * 扫描本机：默认平台 vs 各平台自己的入口（issue #127）
+ *
+ * `/api/accounts/scan-local` / `import-local` 是**写死默认平台**的：
+ * 它们只读 `CLIENT_AUTH_DIR`（WorkBuddy/CodeBuddy 的凭证目录），不接收
+ * platform 参数。于是从 CodeArts/Marvis/Trae 的添加抽屉点「扫描本机」，
+ * 列出来的是 WorkBuddy 的号，导入也进默认平台号池 —— 用户看到的是
+ * 「扫描到了，但导不进这个平台」。
+ *
+ * 非默认平台改打各自平台的 `/api/<storage>/scan-local` 与
+ * `/api/<storage>/import-local`（这些接口本来就有）。
+ * ------------------------------------------------------------------ */
+
+export interface ScanTarget {
+  storage: string
+  prefix: string
+  /** 通用扫描接口（默认平台）还是平台自己的接口。 */
+  generic: boolean
+}
+
+/** 这个抽屉的「扫描本机」该打哪一组接口。 */
+export function scanTargetOf(spec: PlatformAddSpec | null | undefined): ScanTarget {
+  const storage = storageOf(spec) || 'workbuddy'
+  const generic = storage === 'workbuddy' || storage === 'codebuddy'
+  return {
+    storage,
+    prefix: generic ? '/api/accounts' : '/api/' + storage,
+    generic,
+  }
+}
+
+/** 平台自己的 scan-local 回包（各平台字段名不统一，按需取）。 */
+export interface PlatformScanPayload extends Record<string, unknown> {
+  items?: Array<Record<string, unknown>>
+  hint?: string
+  error?: string
+  exists?: boolean
+  can_import?: boolean
+  dir?: string
+  storage?: string
+  config_root?: string
+}
+
+export function scanPlatformLocal(prefix: string): Promise<PlatformScanPayload> {
+  return http<PlatformScanPayload>('GET', prefix + '/scan-local')
+}
+
+/** 平台自己的 import-local：`uids` 是扫描结果里的账号标识。 */
+export function importPlatformLocal(
+  prefix: string,
+  uids: string[],
+  all = false,
+): Promise<ImportLocalResult> {
+  return http<ImportLocalResult>('POST', prefix + '/import-local', {
+    body: { uids, all },
+  })
+}
+
+/** 平台扫描结果 → 预览行（字段名兼容各平台写法）。 */
+export function platformScanRows(
+  payload: PlatformScanPayload | null,
+  translate?: Translate,
+): ScanPreviewRow[] {
+  const tr = translate ?? defaultTranslate
+  return (payload?.items || []).map((item, index) => {
+    const uid = pickString(item, ['uid', 'uid_full', 'userid', 'userId', 'account_id', 'id', 'uid_hint'])
+    const name = pickString(item, ['user_name', 'userName', 'name', 'nickname', 'label', 'email', 'account'])
+    const rawExpires = item.expires ?? item.expires_at ?? item.expiresAt ?? ''
+    const error = String(item.error || '')
+    const inPool = Boolean(item.in_pool ?? item.pooled ?? item.exists ?? item.imported)
+    return {
+      file: uid || String(item.source || 'item-' + (index + 1)),
+      name: name || uid || tr('page.accounts.scanUnnamed'),
+      uid,
+      expires: rawExpires ? String(rawExpires) : '',
+      inPool,
+      active: false,
+      error,
+      // 没有 uid 的条目导不进去，默认不勾
+      selected: !error && !inPool && Boolean(uid),
+    }
+  })
+}
+
+/** 平台扫描汇总文案（没有通用 payload 的 dir / pool_total 字段）。 */
+export function platformScanSummary(
+  payload: PlatformScanPayload | null,
+  rows: ScanPreviewRow[],
+  translate?: Translate,
+): string {
+  if (!payload) return ''
+  const tr = translate ?? defaultTranslate
+  const problem = String(payload.error || payload.hint || '')
+  if (payload.exists === false) {
+    return problem || tr('add.scan.noDir', { dir: String(payload.dir || payload.config_root || '') })
+  }
+  if (!rows.length && problem) return problem
+  const dir = String(payload.dir || payload.storage || payload.config_root || '')
+  return tr('add.scan.found', { count: rows.length }) + (dir ? tr('add.scan.dir', { dir }) : '')
+}
+
 /** 手机号登录：准备会话（可选，krowork 用）。 */
 export function preparePhoneFlow(spec: PlatformAddSpec | null | undefined, form: PhoneForm): Promise<Record<string, unknown>> {
   const flow = flowOf(spec)
