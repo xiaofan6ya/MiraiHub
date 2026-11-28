@@ -2610,10 +2610,43 @@ def refresh_account(acc_id: int, with_expiry: bool = True,
     到底还剩多少、哪个包要先到期」，只回一个总额等于没解决他的问题。
     多一次上游请求（约 0.4s），换取到期快照的实时性，这个交换是值得的。
     批量刷新走 `/credits/sync` 与定时任务，口径一致。
+
+    ## 为什么必须按平台分派（issue #125）
+
+    原来这里无条件走 `_refresh_balance()` → `backend.AccountSession`，那是
+    **WorkBuddy 的凭证协议**（读 `auth` / `account` 字段）。Trae / Qoder /
+    Marvis / Loomy / MiniMax / Raccoon 的凭证是 `token` / `refresh_token`，
+    必然 `CredentialError: 账号凭证缺少 auth`。
+
+    批量入口（`_refresh_batch_account`）早就按平台分派过了，单账号入口漏了 ——
+    所以「刷新全部」是好的，「刷新这一个」全平台失败。这里补上同一套分派，
+    非默认平台直接复用批量实现，避免两份逻辑再漂移。
     """
     acc = db.query(Account).filter(Account.id == acc_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
+
+    from admin.platform import registry
+
+    storage = (getattr(acc, "platform", "") or "").strip().lower()
+    default_platform = (registry.DEFAULT_PLATFORM or "").strip().lower()
+    if storage and storage != default_platform:
+        result = _refresh_batch_account(db, acc)
+        db.commit()
+        db.refresh(acc)
+        if not result.get("ok"):
+            raise HTTPException(status_code=502, detail={
+                'message': '本网关：账号余额刷新失败，具体原因见上游原文',
+                'upstream': {'message': result.get('reason') or '平台刷新失败'},
+                'platform': storage})
+        return {
+            "id": acc.id,
+            "balance_total": acc.balance_total,
+            "balance_remain": acc.balance_remain,
+            "warnings": [],
+            **_credit_fields(acc),
+        }
+
     errors = []
     ok = _refresh_balance(acc, with_expiry=with_expiry, on_error=errors.append)
     db.commit()
