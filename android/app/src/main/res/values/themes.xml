@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用主题：NoActionBar + 主题化窗口背景（冷启动不再白闪/黑闪突兀）。
+     Android 12+ 的系统启动画面在 values-v31 里定制。 -->
+<resources>
+    <style name="Theme.MiraiHub" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/boot_bg</item>
+    </style>
+</resources>

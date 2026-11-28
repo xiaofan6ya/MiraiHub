@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 与 MainActivity.applySystemTheme 的浅色页底同源（#f6f7f9 的更浅水洗）。
+     只在首帧之前可见：冷启动窗口背景 + Android 12 以下系统启动画面。 -->
+<resources>
+    <color name="boot_bg">#F4F7FD</color>
+</resources>

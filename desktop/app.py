@@ -463,12 +463,49 @@ def _webview_windows():
     return list(getattr(webview, "windows", []) or [])
 
 
+def _clamp_window_to_work_area(window) -> None:
+    """把无边框窗口的位置和大小钳回显示器工作区。
+
+    ## 为什么需要（v1.1.6 实测：200% 缩放下底部越界 39px）
+
+    pywebview 的 WinForms 表单按「初始逻辑尺寸 × AutoScaleMode.Dpi」得到
+    物理尺寸，而这个物理值不参与任何工作区判断 —— 逻辑 860px 在 200% 下变成
+    1720px，屏幕工作区往往只剩 1681px，底边就压进任务栏。无边框窗口没有
+    系统 WM_NCCALCSIZE 兜底，WinForms 也不会自动收，越界就这么留下来。
+
+    最大化不在这里处理（Bridge.window_action 里 MaximizedBounds 已钉到
+    工作区）；这里只管 Normal 状态下的初始几何，顺带把被外部脚本（用户的
+    摆位 bat）挪出屏幕的位置拉回来。
+    """
+    if os.name != "nt" or window is None:
+        return
+    try:
+        from System.Windows.Forms import FormWindowState, Screen
+
+        native = window.native
+        if native is None or native.WindowState != FormWindowState.Normal:
+            return
+        area = Screen.FromHandle(native.Handle).WorkingArea
+        bounds = native.Bounds
+        width, height = min(bounds.Width, area.Width), min(bounds.Height, area.Height)
+        x = min(max(bounds.X, area.Left), area.Right - width)
+        y = min(max(bounds.Y, area.Top), area.Bottom - height)
+        if (x, y, width, height) != (bounds.X, bounds.Y, bounds.Width, bounds.Height):
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
+            user32.SetWindowPos(native.Handle.ToInt64(), None, x, y, width, height,
+                                SWP_NOZORDER | SWP_NOACTIVATE)
+            logger.debug("窗口几何已钳回工作区：%s", (x, y, width, height))
+    except Exception:                 # noqa: BLE001 - 钳制失败不能挡启动
+        logger.debug("窗口工作区钳制失败", exc_info=True)
+
+
 SPLASH = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#e8eef7,#f5f7fa 55%,#e6ecf6);color:#1b2430;font:15px 'Segoe UI','Microsoft YaHei',sans-serif;display:grid;place-items:center;min-height:100vh}
-main{width:min(480px,90vw);padding:40px;background:#fffffff0;border:1px solid white;border-radius:28px;box-shadow:0 20px 70px #1a243320}.tag{color:#3E6A99;font-size:12px;letter-spacing:2px}h1{font-size:28px;margin:10px 0 26px}p{color:#5c6673;line-height:1.8}.bar{height:5px;background:#e6ecf6;border-radius:6px;overflow:hidden}.bar:after{content:'';display:block;width:40%;height:100%;background:#3E6A99;animation:load 1.3s infinite}@keyframes load{to{transform:translateX(260%)}}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(150deg,#dfe9ff,#f5f7fa 55%,#e4ebfb);color:#1b2430;font:15px 'Segoe UI','Microsoft YaHei',sans-serif;display:grid;place-items:center;min-height:100vh}
+main{width:min(480px,90vw);padding:40px;background:#fffffff0;border:1px solid white;border-radius:28px;box-shadow:0 20px 70px #1a243320}.tag{color:#3B66E8;font-size:12px;letter-spacing:2px}h1{font-size:28px;margin:10px 0 26px}p{color:#5c6673;line-height:1.8}.bar{height:5px;background:#e6ecf6;border-radius:6px;overflow:hidden}.bar:after{content:'';display:block;width:40%;height:100%;background:#3B66E8;animation:load 1.3s infinite}@keyframes load{to{transform:translateX(260%)}}
 button{padding:11px 16px;border:0;border-radius:10px;cursor:pointer;background:#e8eef7;color:#33587F;margin:4px 6px 4px 0}button:disabled{opacity:.5;cursor:default}.hint{font-size:12px;color:#7d8794}textarea{width:100%;height:190px;border:1px solid #d8e0ea;border-radius:10px;padding:12px;resize:vertical}
 #forceDialog{position:fixed;inset:0;background:#1b243066;display:grid;place-items:center}#forceDialog[hidden]{display:none}#forceDialog>div{width:min(420px,90vw);background:#fff;border-radius:18px;padding:24px;box-shadow:0 20px 60px #1a243344}
-</style><div class="pywebview-drag-region" style="position:fixed;top:0;left:0;right:100px;height:36px"></div><div style="position:fixed;top:0;right:0"><button aria-label="最小化" onclick="pywebview.api.window_action('minimize')">−</button><button aria-label="关闭窗口" onclick="pywebview.api.window_action('close')">×</button></div><main><div class="tag">你的本地 AI 网关</div><h1>MiraiHub</h1><p class="hint">v__VERSION__</p><p id="status" role="status" aria-live="polite">正在启动本地服务…</p><p class="hint" id="detail"></p><div class="bar" id="bar"></div><p class="hint">就绪后自动进入工作台，无需登录管理台。<br>首次运行可能稍慢，请保留账号数据。</p>
+</style><div class="pywebview-drag-region" style="position:fixed;top:0;left:0;right:136px;height:36px"></div><div style="position:fixed;top:0;right:0"><button aria-label="最小化" onclick="pywebview.api.window_action('minimize')">−</button><button aria-label="最大化" onclick="pywebview.api.window_action('maximize')">□</button><button aria-label="关闭窗口" onclick="pywebview.api.window_action('close')">×</button></div><main><div class="tag">你的本地 AI 网关</div><h1>MiraiHub</h1><p class="hint">v__VERSION__</p><p id="status" role="status" aria-live="polite">正在启动本地服务…</p><p class="hint" id="detail"></p><div class="bar" id="bar"></div><p class="hint">就绪后自动进入工作台，无需登录管理台。<br>首次运行可能稍慢，请保留账号数据。</p>
 <button id="retryButton" onclick="retryStart()">重试启动</button><button id="forceButton" hidden onclick="openForce()">强制结束…</button><button id="diagnosticButton" hidden onclick="showDiagnostic()">查看诊断</button><section id="diagnostic" hidden><p>服务尚未启动也可复制或导出诊断。</p><textarea id="report" readonly aria-label="启动诊断"></textarea><button onclick="copyReport()">复制诊断</button><button onclick="downloadReport()">导出诊断</button></section></main>
 <div id="forceDialog" hidden role="dialog" aria-modal="true" aria-labelledby="forceTitle"><div><p><strong id="forceTitle">确定强制结束本地服务？</strong></p><p class="hint" id="forceCount">最近已知：状态未知。</p><p class="hint">强制结束会中断正在进行的请求与落库。默认继续等待。</p><button id="keepWaiting" onclick="keepWaiting()">继续等待</button><button id="confirmForce" onclick="confirmForce()">强制结束</button></div></div>
 <script>
@@ -560,6 +597,28 @@ class Bridge:
 
     def force_stop(self, confirm=False):
         return self._controller.force_stop(confirm)
+
+    def window_frame(self):
+        """前端探测窗口形态：frameless 时由前端自绘拖拽区 + 窗口控制按钮。
+
+        Windows 上窗口无边框（_create_window 的 frameless），macOS 保留原生
+        标题栏 —— 前端只有知道这一点，才决定要不要渲染 − □ × 和拖拽条。
+        旧版客户端没有这个方法，前端按 UA 兜底（edgechromium 的 UA 必含
+        Windows NT，WKWebView 必含 Macintosh）。
+        """
+        return {"frameless": os.name == "nt", "platform": sys.platform}
+
+    def window_state(self):
+        """当前窗口状态（normal/maximized/minimized）。
+
+        拖拽区在 mousedown 时问一次：用户可能在启动页点了最大化，随后导航进
+        工作台 —— 前端的本地标记会丢，只有壳知道真实状态。
+        """
+        window = self._controller.window
+        try:
+            return {"state": str(window.native.WindowState).lower()}
+        except Exception:                 # noqa: BLE001 - 拿不到就按可拖处理
+            return {"state": "normal"}
 
     def window_action(self, action):
         window = self._controller.window
@@ -1477,7 +1536,17 @@ class DesktopAPI:
                 self.tray.notify("服务已启动 · 控制台端口 %d" % port)
             return
         try:
-            self.window.load_url("http://127.0.0.1:%d/admin?desktop=1" % port)
+            # 桌面壳免登：把一次性 `local_shell` 令牌放进 URL，服务端换 HttpOnly
+            # Cookie 后 303 把令牌从地址栏抹掉。
+            #
+            # 为什么不用 JS 桥（`pywebview.api.desktop_login()`）：pywebview 的
+            # 返回值回调表 `_returnValuesCallbacks` 在 Vue 的 hash 路由跳转
+            # （`/` → `#/overview`）之后会失效，调用报
+            # `... is not a function`，令牌永远换不到 → 页面 401 → 重载 → 死循环。
+            # URL 换票不依赖任何 JS 回调，落地即生效。
+            token = self._local_shell_token()
+            self.window.load_url(
+                "http://127.0.0.1:%d/admin?desktop=1&token=%s" % (port, token))
         except Exception:
             logger.exception("进入工作台失败")
 
@@ -1592,6 +1661,7 @@ class DesktopAPI:
             self.window = None
             self.tray.notify("窗口创建失败，请改用「在浏览器中打开」")
             return {"error": str(exc)}
+        _clamp_window_to_work_area(self.window)
         generation = self.current_generation
         if generation is not None and generation.ready:
             self._enter_workbench(generation)
@@ -1662,14 +1732,18 @@ class DesktopAPI:
     # 控制台 / 导出 / 诊断
     # ------------------------------------------------------------------
     def _is_local_console_url(self) -> bool:
-        """Accept the console's persistent tab query while keeping the bridge local."""
+        """只认本壳自己加载的本地控制台页（scheme/host/port/path 全核对）。
+
+        曾经要求 `?desktop=1`：但 401 统一跳转是 `location.replace('/admin')`，
+        查询串会被丢掉 —— 页面重载后凭据换发就永远过不了这道闸，壳陷入
+        「401 → 重载 → 401」死循环。窗口内只会出现本服务自己的页面（外链一律
+        交系统浏览器打开，见 webview.settings），因此查询串不再是安全判据。
+        """
         current = urllib.parse.urlsplit(self.window.get_current_url() or "")
-        query = urllib.parse.parse_qs(current.query)
         return (current.scheme == "http"
                 and current.hostname == "127.0.0.1"
                 and current.port == self.port
-                and current.path.rstrip("/") == "/admin"
-                and query.get("desktop") == ["1"])
+                and current.path.rstrip("/") == "/admin")
 
     def save_text(self, filename, text, mime="application/json"):
         """Save only after the owner chooses a destination in the native picker."""
@@ -1691,6 +1765,15 @@ class DesktopAPI:
             return {"ok": True}
         except Exception:
             return {"ok": False, "error": "文件保存失败，请更换保存位置后重试"}
+
+    def _local_shell_token(self) -> str:
+        """签一个 `local_shell` 令牌（与 `desktop_login` 同一把密钥、同一份载荷）。
+
+        只用于「进入工作台」时拼 URL 换 Cookie，**不落盘、不写日志**。
+        """
+        import jwt
+        return jwt.encode({"sub": self.config["username"], "local_shell": True},
+                          self.config["jwt_secret"], algorithm="HS256")
 
     def desktop_login(self):
         if not self._is_local_console_url():
@@ -2028,7 +2111,13 @@ def run(tray_mode: bool = False):
             api.window = api._create_window()
             api.tray_mode = False
             _boot("window created (window mode)")
-            webview.start(lambda: (api.retry_runtime(), api.retry_start()),
+
+            def start_window_shell():
+                _clamp_window_to_work_area(api.window)
+                api.retry_runtime()
+                api.retry_start()
+
+            webview.start(start_window_shell,
                           gui=_webview_gui(), private_mode=False,
                           storage_path=str(base / "webview"),
                           icon=_window_icon())
@@ -2047,6 +2136,7 @@ def run(tray_mode: bool = False):
         def start_tray_shell():
             # 先起服务，再等就绪后导航：服务没起来时页面自己显示阶段与重试按钮。
             _boot("start_tray_shell entered")
+            _clamp_window_to_work_area(api.window)
             api.retry_runtime()
             api.retry_start()
             threading.Thread(target=api._check_tray_startup_update,

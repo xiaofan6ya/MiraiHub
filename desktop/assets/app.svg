@@ -1,57 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="MiraiHub">
   <!--
-    MiraiHub 图标 —— 「多路汇聚成网关」的星形拓扑。
+    MiraiHub 应用图标 —— 以**网页版** admin/ui/public/favicon.svg 为基准统一（2026-11-28）。
 
-    设计约束（来自产品要求）：
-      1. **不使用绿色**：绿色是旧品牌的元素，和界面主色叠在一起显脏。
-         这里用中性石墨底 + 近白线条，浅色/深色主题下都成立。
-      2. **纯矢量**：所有尺寸共用这一份代码，不依赖位图缩放。
-      3. **几何即语义**：三条入边 + 中心核心 + 一条出边，
-         直接对应「多平台上行 → 网关 → 统一协议下行」。
+    之前三端是两套东西：网页 favicon 是「深色底 + 银灰 M」，桌面/安卓是「蓝底 + 星形拓扑」。
+    用户确认以网页版为准，这里把 40×40 的 favicon 等比放大到 256 画布并做小尺寸补偿：
+      1. 底板圆角 12→77（等比），底色 #1B2936 与 favicon 完全一致；
+      2. M 字形按 65% 画布宽重排（favicon 里它几乎顶满，直接放大会糊边）；
+      3. 描边 3.2→22（等比 20.5，再补一点让小尺寸下更结实）；
+      4. 右上圆点保留，是 favicon 的识别细节。
 
-    坐标说明（画布 256）：
-        核心菱形中心 (136,128)，旋转 45° 后半对角线约 34，
-        视觉范围 x∈[102,170]。三条入边统一停在 x=96 附近，
-        避免线头被菱形吃掉（第一版横线就栽在这里）。
+    备份：改动前的星形拓扑版在 temp/icon-backup/app-topology.svg。
   -->
   <defs>
-    <linearGradient id="mh-bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2A3344"/>
-      <stop offset="1" stop-color="#12171F"/>
+    <linearGradient id="mh-m" x1="45" y1="62" x2="211" y2="198" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E6EEF5" />
+      <stop offset=".52" stop-color="#B5C5D4" />
+      <stop offset="1" stop-color="#88A6BB" />
     </linearGradient>
-    <linearGradient id="mh-ink" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#B9C4D4"/>
+    <linearGradient id="mh-plate" x1="20" y1="16" x2="236" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22323F" />
+      <stop offset=".55" stop-color="#1B2936" />
+      <stop offset="1" stop-color="#131E28" />
     </linearGradient>
-    <radialGradient id="mh-core" cx=".35" cy=".3" r=".78">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#BFC9D8"/>
-    </radialGradient>
   </defs>
 
-  <!-- 圆角底板 -->
-  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#mh-bg)"/>
+  <!-- 底板：与 favicon 同色，加一层极淡的对角渐变避免平板感 -->
+  <rect x="0" y="0" width="256" height="256" rx="77" fill="url(#mh-plate)" />
 
-  <!-- 三条入边（不同上游平台） -->
-  <g stroke="url(#mh-ink)" stroke-width="11" stroke-linecap="round"
-     fill="none" opacity=".5">
-    <path d="M56 58  L104 100"/>
-    <path d="M46 128 L94 128"/>
-    <path d="M56 198 L104 156"/>
-  </g>
+  <!-- M 字形（favicon 的 M11 28V12.5l9.5 9 9.5-9V28，等比 ×8.74 后居中于 128,128） -->
+  <path d="M45 198 V62 L128 141 L211 62 V198"
+        fill="none" stroke="url(#mh-m)" stroke-width="22"
+        stroke-linecap="round" stroke-linejoin="round" />
 
-  <!-- 汇聚核心（网关本体） -->
-  <rect x="110" y="102" width="52" height="52" rx="15"
-        transform="rotate(45 136 128)" fill="url(#mh-core)"/>
-
-  <!-- 出边（统一协议对外） -->
-  <path d="M172 128 L214 128" stroke="url(#mh-ink)" stroke-width="11"
-        stroke-linecap="round" opacity=".9"/>
-
-  <!-- 三个端点 -->
-  <g fill="url(#mh-ink)">
-    <circle cx="56"  cy="58"  r="10" opacity=".85"/>
-    <circle cx="46"  cy="128" r="10" opacity=".85"/>
-    <circle cx="56"  cy="198" r="10" opacity=".85"/>
-  </g>
+  <!-- 右上角识别圆点 -->
+  <circle cx="219" cy="42" r="17" fill="#88A6BB" />
 </svg>

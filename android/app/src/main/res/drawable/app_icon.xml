@@ -1,54 +1,49 @@
-<!-- MiraiHub 图标（legacy，API 24-25 直接显示）。
-     与 desktop/assets/app.svg 同稿：「多路汇聚成网关」星形拓扑。
-     石墨底 + 近白线条，不再使用旧品牌的青绿。 -->
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面图标（非自适应，API 25 及以下）—— 与网页版 favicon 同一套视觉（2026-11-28 统一）。
+
+  自适应图标（API 26+）见 mipmap-anydpi-v26/ic_launcher.xml + drawable/app_icon_fg|bg。
+  这里只在老设备上兜底，所以直接画「深色底 + 银灰 M + 右上圆点」的完整版，
+  不拆前景/背景。
+
+  备份：改动前的星形拓扑版在 temp/icon-backup/。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp"
-    android:viewportWidth="256" android:viewportHeight="256">
+    android:viewportWidth="108" android:viewportHeight="108">
 
-    <!-- 圆角底板：#2A3344 → #12171F（左上→右下） -->
-    <path android:pathData="M66,8 L190,8 A58,58 0 0 1 248,66 L248,190 A58,58 0 0 1 190,248 L66,248 A58,58 0 0 1 8,190 L8,66 A58,58 0 0 1 66,8 Z">
+    <!-- 深色底板（启动器会按自家形状裁切，这里画满） -->
+    <path android:pathData="M0,0 L108,0 L108,108 L0,108 Z">
         <aapt:attr name="android:fillColor">
             <gradient android:type="linear"
-                android:startX="8" android:startY="8"
-                android:endX="248" android:endY="248"
-                android:startColor="#2A3344" android:endColor="#12171F" />
+                android:startX="16" android:startY="12"
+                android:endX="96" android:endY="100"
+                android:startColor="#22323F"
+                android:centerColor="#1B2936"
+                android:endColor="#131E28" />
         </aapt:attr>
     </path>
 
-    <!-- 三条入边（不同上游平台），白描边，透明度 .5 -->
-    <group>
-        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
-            android:strokeWidth="11" android:strokeLineCap="round"
-            android:pathData="M56,58 L104,100" />
-        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
-            android:strokeWidth="11" android:strokeLineCap="round"
-            android:pathData="M46,128 L94,128" />
-        <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.5"
-            android:strokeWidth="11" android:strokeLineCap="round"
-            android:pathData="M56,198 L104,156" />
-    </group>
-
-    <!-- 汇聚核心（网关本体）：圆角方块旋转 45°，径向白→#BFC9D8 -->
-    <group android:rotation="45" android:pivotX="136" android:pivotY="128">
-        <path android:pathData="M125,102 L147,102 A15,15 0 0 1 162,117 L162,139 A15,15 0 0 1 147,154 L125,154 A15,15 0 0 1 110,139 L110,117 A15,15 0 0 1 125,102 Z">
-            <aapt:attr name="android:fillColor">
-                <gradient android:type="radial"
-                    android:centerX="87" android:centerY="77" android:gradientRadius="195"
-                    android:startColor="#FFFFFF" android:endColor="#BFC9D8" />
+    <group android:scaleX="0.72" android:scaleY="0.72"
+        android:pivotX="54" android:pivotY="54">
+        <!-- M 字形 -->
+        <path android:pathData="M26,80 V34 L54,60 L82,34 V80"
+            android:strokeWidth="9.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="@android:color/transparent">
+            <aapt:attr name="android:strokeColor">
+                <gradient android:type="linear"
+                    android:startX="26" android:startY="34"
+                    android:endX="82" android:endY="80"
+                    android:startColor="#E6EEF5"
+                    android:centerColor="#B5C5D4"
+                    android:endColor="#88A6BB" />
             </aapt:attr>
         </path>
-    </group>
-
-    <!-- 出边（统一协议对外） -->
-    <path android:strokeColor="#FFFFFF" android:strokeAlpha="0.9"
-        android:strokeWidth="11" android:strokeLineCap="round"
-        android:pathData="M172,128 L214,128" />
-
-    <!-- 三个端点 -->
-    <group android:fillColor="#FFFFFF" android:fillAlpha="0.85">
-        <path android:pathData="M56,58 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
-        <path android:pathData="M46,128 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
-        <path android:pathData="M56,198 m-10,0 a10,10 0 1 1 20,0 a10,10 0 1 1 -20,0 Z" />
+        <!-- 右上角识别圆点 -->
+        <path android:pathData="M85,20 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0"
+            android:fillColor="#88A6BB" />
     </group>
 </vector>

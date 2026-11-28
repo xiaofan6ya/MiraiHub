@@ -36,12 +36,76 @@ public class MainActivity extends Activity {
             web.setBackgroundColor(background);
             ((View) web.getParent()).setBackgroundColor(background);
         }
+        applyBootTheme(dark);
+    }
+
+    /** 系统当前是否处于深色模式（页面主题同步过来之前的启动页判据）。 */
+    private boolean isSystemDark() {
+        int mask = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        return mask == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** 启动页卡片配色跟随主题：页面主题（WBMobile.setTheme）与系统深色都走这里。 */
+    private void applyBootTheme(boolean dark) {
+        if (boot == null) return;
+        // 品牌蓝渐变背景（v2 启动页）：与图标底色同源，不再是灰白/灰黑一块板。
+        boot.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, dark
+            ? new int[]{Color.rgb(18, 24, 46), Color.rgb(14, 16, 20)}
+            : new int[]{Color.rgb(223, 233, 255), Color.rgb(244, 247, 253)}));
+        GradientDrawable surface = new GradientDrawable();
+        surface.setColor(dark ? Color.argb(248, 22, 27, 40) : Color.argb(250, 255, 255, 255));
+        surface.setCornerRadius(dp(32));
+        surface.setStroke(dp(1), dark ? Color.rgb(56, 66, 92) : Color.rgb(228, 236, 250));
+        card.setBackground(surface);
+        GradientDrawable badge = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+            dark ? new int[]{Color.rgb(38, 52, 96), Color.rgb(28, 38, 74)}
+                 : new int[]{Color.rgb(224, 234, 255), Color.rgb(206, 221, 253)});
+        badge.setShape(GradientDrawable.OVAL);
+        logoBadge.setBackground(badge);
+        bootTag.setTextColor(dark ? Color.rgb(129, 168, 255) : Color.rgb(59, 102, 232));
+        int title = dark ? Color.rgb(234, 238, 245) : Color.rgb(24, 28, 36);
+        bootBrand.setTextColor(title);
+        bootTitle.setTextColor(title);
+        status.setTextColor(dark ? Color.rgb(150, 158, 172) : Color.rgb(101, 108, 122));
+        footnote.setTextColor(dark ? Color.rgb(106, 114, 128) : Color.rgb(132, 140, 154));
+        details.setTextColor(dark ? Color.rgb(129, 168, 255) : Color.rgb(59, 102, 232));
+        progress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(
+            dark ? Color.rgb(129, 168, 255) : Color.rgb(59, 102, 232)));
+        restart.setTextColor(Color.WHITE);
+        GradientDrawable action = new GradientDrawable();
+        action.setColor(dark ? Color.rgb(59, 102, 232) : Color.rgb(59, 102, 232));
+        action.setCornerRadius(dp(24));
+        restart.setBackground(action);
+    }
+
+    /**
+     * 把状态栏高度写进页面的 `--wb-safe-top`（顶栏 sticky top 用）。
+     * WebView 里 `env(safe-area-inset-top)` 并不总可用，原生注入最稳。
+     */
+    private void applySafeTop(int top) {
+        if (top == lastSafeTop) return;
+        lastSafeTop = top;
+        injectSafeTop();
+    }
+
+    /** 重新注入 --wb-safe-top：页面导航会换掉整个 DOM，落页后要补一次。 */
+    private void injectSafeTop() {
+        if (web == null || lastSafeTop < 0) return;
+        web.evaluateJavascript(
+            "document.documentElement.style.setProperty('--wb-safe-top','" + lastSafeTop + "px')", null);
     }
     private TextView status;
     private FrameLayout boot;
     private TextView bootTitle;
     private ProgressBar progress;
     private Button details;
+    /** 启动页卡片与其中的文案（applyBootTheme 换肤用）。 */
+    private LinearLayout card;
+    /** Logo 圆形徽章（v2 启动页）。 */
+    private FrameLayout logoBadge;
+    private TextView bootTag, bootBrand, footnote;
+    /** 最近一次注入页面的状态栏高度；-1 表示还没量到。 */
+    private int lastSafeTop = -1;
     private ValueCallback<Uri[]> upload;
     private String loadedOrigin;
     private int loadedRevision;
@@ -214,50 +278,52 @@ public class MainActivity extends Activity {
                 top = insets.getSystemWindowInsetTop(); left = insets.getSystemWindowInsetLeft();
                 right = insets.getSystemWindowInsetRight(); bottom = insets.getSystemWindowInsetBottom();
             }
-            // Keep the entire WebView inside system bars, cutouts and keyboard.
-            // CSS padding scrolls away and cannot protect the status bar area.
-            view.setPadding(left, top, right, bottom);
+            // 沉浸式：WebView 铺满全屏，页面内容画进状态栏下面（顶栏用
+            // --wb-safe-top 让出自己的位置），状态栏不再留一条窗口底色的
+            // 空带 —— 之前在这里垫 top padding，深色页面顶上永远横一条浅色
+            // 窗口背景（用户反馈的「分裂感」）。键盘与导航条仍由原生兜底：
+            // CSS 的 env(safe-area-inset-bottom) 在部分 WebView 上不可靠。
+            view.setPadding(left, 0, right, bottom);
+            applySafeTop(top);
             return insets;
         });
         web = new WebView(this);
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         layout.addView(web, new FrameLayout.LayoutParams(-1, -1));
-        applySystemTheme(false);
+        // 初始按系统深色模式来；进工作台后由页面主题（WBMobile.setTheme）接管。
+        applySystemTheme(isSystemDark());
         boot = new FrameLayout(this);
-        // 启动页配色与控制台同源：极淡的品牌蓝水洗（#f4f7fd→#f6f7f9），
-        // 不再引入薄荷绿旧主题（青绿光斑会和蓝色选中态串色）。
-        boot.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-            new int[]{Color.rgb(244, 247, 253), Color.rgb(246, 247, 249), Color.rgb(236, 241, 253)}));
-        LinearLayout card = new LinearLayout(this);
+        card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_HORIZONTAL);
         card.setPadding(dp(28), dp(36), dp(28), dp(28));
-        GradientDrawable surface = new GradientDrawable();
-        surface.setColor(Color.argb(245, 255, 255, 255)); surface.setCornerRadius(dp(28));
-        surface.setStroke(dp(1), Color.WHITE);
-        card.setBackground(surface); card.setElevation(dp(8));
+        card.setElevation(dp(8));
         int width = Math.min(dp(340), getResources().getDisplayMetrics().widthPixels - dp(40));
         FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(width, -2, Gravity.CENTER);
         boot.addView(card, cardParams);
+        // v2 启动页：Logo 坐在渐变圆徽章里，不再裸贴一张方图。
+        logoBadge = new FrameLayout(this);
         ImageView logo = new ImageView(this);
         logo.setImageResource(R.drawable.app_icon);
-        card.addView(logo, new LinearLayout.LayoutParams(dp(68), dp(68)));
-        TextView tag = new TextView(this);
-        tag.setText("你的本地 AI 网关"); tag.setTextSize(12); tag.setTextColor(Color.rgb(65, 118, 230));
-        tag.setGravity(Gravity.CENTER);
-        tag.setPadding(0, dp(20), 0, 0); card.addView(tag);
-        TextView brand = new TextView(this);
-        brand.setText("MiraiHub"); brand.setTextSize(24); brand.setTypeface(null, Typeface.BOLD);
-        brand.setTextColor(Color.rgb(22, 24, 29)); brand.setGravity(Gravity.CENTER);
-        brand.setPadding(0, dp(6), 0, dp(26)); card.addView(brand);
+        logo.setPadding(dp(14), dp(14), dp(14), dp(14));
+        logoBadge.addView(logo, new FrameLayout.LayoutParams(-1, -1));
+        card.addView(logoBadge, new LinearLayout.LayoutParams(dp(88), dp(88)));
+        bootTag = new TextView(this);
+        bootTag.setText("你的本地 AI 网关"); bootTag.setTextSize(12);
+        bootTag.setGravity(Gravity.CENTER);
+        bootTag.setPadding(0, dp(20), 0, 0); card.addView(bootTag);
+        bootBrand = new TextView(this);
+        bootBrand.setText("MiraiHub"); bootBrand.setTextSize(24); bootBrand.setTypeface(null, Typeface.BOLD);
+        bootBrand.setGravity(Gravity.CENTER);
+        bootBrand.setPadding(0, dp(6), 0, dp(26)); card.addView(bootBrand);
         bootTitle = new TextView(this);
         setStartupText(bootTitle, "正在打开工作台"); bootTitle.setTextSize(16);
         bootTitle.setGravity(Gravity.CENTER);
-        bootTitle.setTextColor(Color.rgb(22, 24, 29)); card.addView(bootTitle);
+        card.addView(bootTitle);
         status = new TextView(this);
         setStartupText(status, "正在准备本地服务\n就绪后将自动进入工作台");
         status.setTextSize(13); status.setGravity(Gravity.CENTER);
-        status.setTextColor(Color.rgb(101, 105, 112)); status.setLineSpacing(dp(5), 1);
+        status.setLineSpacing(dp(5), 1);
         status.setPadding(0, dp(12), 0, dp(20)); card.addView(status);
         progress = new ProgressBar(this);
         progress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Color.rgb(65, 118, 230)));
@@ -274,16 +340,19 @@ public class MainActivity extends Activity {
         });
         card.addView(restart, new LinearLayout.LayoutParams(-1, dp(48)));
         details = new Button(this);
-        details.setText("启动诊断 · 复制或导出"); details.setTextSize(12); details.setTextColor(Color.rgb(65, 118, 230));
+        details.setText("启动诊断 · 复制或导出"); details.setTextSize(12);
         details.setBackgroundColor(Color.TRANSPARENT); details.setVisibility(View.GONE);
         details.setOnClickListener(view -> showStartupDiagnostic());
         card.addView(details);
-        TextView footnote = new TextView(this);
+        footnote = new TextView(this);
         footnote.setText("本地运行  ·  无需登录管理台\n首次启动可能稍慢，请保留账号数据");
         footnote.setTextSize(11); footnote.setGravity(Gravity.CENTER); footnote.setLineSpacing(dp(5), 1);
-        footnote.setTextColor(Color.rgb(130, 139, 148)); footnote.setPadding(0, dp(22), 0, 0); card.addView(footnote);
+        footnote.setPadding(0, dp(22), 0, 0); card.addView(footnote);
         layout.addView(boot, new FrameLayout.LayoutParams(-1, -1));
         setContentView(layout);
+        // 卡片控件此时才建好：初始换肤在 onCreate 里 applySystemTheme 的那次
+        // 调用发生时 boot 还是 null（applyBootTheme 直接返回），这里补上。
+        applyBootTheme(isSystemDark());
         layout.requestApplyInsets();
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
@@ -298,6 +367,8 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 bridgeTrusted = isAdmin(url);
+                // 新文档没有上次注入的 --wb-safe-top，落页第一时间补上。
+                injectSafeTop();
                 if (bridgeTrusted) {
                     pageGeneration++; workbenchReady = false; checkingPage = false; pageError = null;
                     pageStartedAt = SystemClock.elapsedRealtime();
@@ -310,6 +381,7 @@ public class MainActivity extends Activity {
                 return route(request.getUrl());
             }
             @Override public void onPageFinished(WebView view, String url) {
+                injectSafeTop();
                 if (isAdmin(url)) checkWorkbench();
             }
             @Override public void onPageCommitVisible(WebView view, String url) {

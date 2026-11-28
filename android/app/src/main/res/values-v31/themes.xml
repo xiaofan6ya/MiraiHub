@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ 系统启动画面：石墨底 + 应用图标（与图标底板同源，不再是
+     白底突兀方块）。postSplashScreenTheme 落回同一主题，避免二次换肤。 -->
+<resources>
+    <style name="Theme.MiraiHub" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/boot_bg</item>
+        <item name="android:windowSplashScreenBackground">#12171F</item>
+        <item name="android:windowSplashScreenAnimationDuration">300</item>
+    </style>
+</resources>

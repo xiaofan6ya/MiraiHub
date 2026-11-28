@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标（API 26+）：石墨底 + 星形拓扑前景 + 单色层（Android 13 主题图标）。
+     与 drawable-anydpi-v26/app_icon.xml 同稿；manifest 的 android:icon 现在指向
+     @mipmap/ic_launcher —— 部分 OEM 桌面（ColorOS 等）对纯 VectorDrawable 的
+     launcher 图标栅格化失败，会退化成系统默认图标，必须有 PNG mipmap 兜底。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/app_icon_bg" />
+    <foreground android:drawable="@drawable/app_icon_fg" />
+    <monochrome android:drawable="@drawable/app_icon_fg" />
+</adaptive-icon>

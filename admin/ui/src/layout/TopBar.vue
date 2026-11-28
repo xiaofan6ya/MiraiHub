@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Activity, Copy, Menu, MonitorCog, Moon, Search, Sun } from 'lucide-vue-next'
 import DynamicIsland from '@/components/feedback/DynamicIsland.vue'
 import { islandKey, useIslandMessage } from '@/components/feedback/islandQueue'
 import PlatformPicker from './PlatformPicker.vue'
 import ThemeStudio from './ThemeStudio.vue'
+import WindowControls from './WindowControls.vue'
 import { isMobile, openCommandPalette } from './shellState'
 import { useHeartbeatStore } from '@/stores/heartbeat'
 import { useTheme } from '@/theme/useTheme'
 import { apiBaseUrl, copyText } from '@/platform/clipboard'
+import { bindWindowDrag } from '@/platform/nativeWindow'
 import { groupTitle, pageTitle, useI18n } from '@/i18n'
 import { groupOf, isPageKey } from '@/router/pages'
 
@@ -42,10 +44,15 @@ watch(() => heartbeat.status, (status, previous) => {
   else if (status === 'reconnecting') message.warning(heartbeat.statusText)
   else if (previous !== 'ok') message.success(heartbeat.statusText)
 })
+// 无边框桌面壳的拖拽区：垫在浮岛下面的整条顶栏。绑定即生效 —— 是否拖动
+// 由 mousedown 时的实时状态决定（frameless 探测完成后自动生效）。
+const dragRegion = ref<HTMLElement | null>(null)
+onMounted(() => { if (dragRegion.value) bindWindowDrag(dragRegion.value) })
 </script>
 
 <template>
   <header class="topbar pywebview-drag-region" :aria-label="t('island.workspace')">
+    <div ref="dragRegion" class="topbar-drag" aria-hidden="true"></div>
     <button v-if="isMobile" type="button" class="topbar-mobile-menu" :aria-label="t('shell.openMenu')" @click="emit('open-mobile-nav')"><Menu :size="18" /></button>
     <DynamicIsland v-if="queue" :queue="queue" persistent :title="pageLabel" :status="heartbeat.statusText" :status-tone="heartbeat.statusTone">
       <template #panel="{ close }">
@@ -64,11 +71,15 @@ watch(() => heartbeat.status, (status, previous) => {
         </div>
       </template>
     </DynamicIsland>
+    <WindowControls />
   </header>
 </template>
 
 <style scoped>
-.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:40;flex:none;height:var(--topbar-h,68px);pointer-events:none;-webkit-app-region:drag}
+.topbar{position:sticky;top:var(--wb-safe-top, env(safe-area-inset-top, 0px));z-index:40;flex:none;height:var(--topbar-h,68px);pointer-events:none;-webkit-app-region:drag}
+/* 无边框壳的拖拽条：垫在浮岛与按钮下面，占满整条顶栏；浮岛/按钮自己的
+   pointer-events:auto 优先命中，空隙处落到这里拖动窗口。 */
+.topbar-drag{position:absolute;inset:0;pointer-events:auto}
 .topbar :deep(button),.topbar :deep(.picker),.topbar :deep(input){-webkit-app-region:no-drag;pointer-events:auto}
 .topbar-mobile-menu{position:absolute;left:12px;top:13px;z-index:55;display:grid;place-items:center;width:32px;height:32px;border:1px solid var(--border);border-radius:50%;background:var(--surface);color:var(--fg-2);cursor:pointer}
 .island-breadcrumb{padding:12px 0 13px;border-top:1px solid var(--border-soft);font-size:11px;color:var(--fg-muted)}.island-breadcrumb strong{font-weight:500;color:var(--fg)}

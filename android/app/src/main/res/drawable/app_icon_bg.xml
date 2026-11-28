@@ -1,14 +1,25 @@
-<!-- 桌面背景（自适应图标，API 26+）：石墨渐变，与 app.svg 底板同源。 -->
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面图标背景（自适应图标，API 26+）—— 与网页版 favicon 同一底色 #1B2936（2026-11-28 统一）。
+
+  之前是品牌蓝渐变底 + 星形拓扑前景；现在整体对齐网页端：
+  深色底 + 银灰 M 字形。深底在浅色/深色两套系统主题下都能立住。
+
+  备份：改动前的版本在 temp/icon-backup/app_icon_bg-topology.xml。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
+
     <path android:pathData="M0,0 L108,0 L108,108 L0,108 Z">
         <aapt:attr name="android:fillColor">
             <gradient android:type="linear"
-                android:startX="0" android:startY="0"
-                android:endX="108" android:endY="108"
-                android:startColor="#2A3344" android:endColor="#12171F" />
+                android:startX="16" android:startY="12"
+                android:endX="96" android:endY="100"
+                android:startColor="#22323F"
+                android:centerColor="#1B2936"
+                android:endColor="#131E28" />
         </aapt:attr>
     </path>
 </vector>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 深色模式的冷启动底色：官方石墨，进工作台不闪白。 -->
+<resources>
+    <color name="boot_bg">#0E1014</color>
+</resources>

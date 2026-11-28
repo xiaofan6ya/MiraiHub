@@ -15,9 +15,9 @@
     <!-- 应用名必须与桌面端一致（桌面标题/托盘/诊断都叫 MiraiHub）。
          这里曾写死 "wb2api"，导致安装后桌面图标和任务切换器显示的
          是旧项目名，与本产品对不上（2026-11-16 用户实测反馈）。 -->
-    <application android:label="MiraiHub" android:icon="@drawable/app_icon"
+    <application android:label="MiraiHub" android:icon="@mipmap/ic_launcher"
         android:allowBackup="false" android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Theme.MiraiHub"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"

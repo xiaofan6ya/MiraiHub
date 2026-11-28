@@ -1933,6 +1933,27 @@ def admin_index(request: Request):
     两者都缺就是构建没跑：直说 404 并打日志（见 `_log_ui_missing`），
     比发一个白屏页面更好排查。
     """
+    # 桌面壳免登：URL 里带一次性 `local_shell` 令牌 → 换 HttpOnly Cookie → 303
+    # 把令牌从地址栏抹掉。
+    #
+    # 为什么走 URL 而不是 JS 桥：pywebview 的返回值回调表
+    # `_returnValuesCallbacks` 在 Vue 的 hash 路由跳转（`/` → `#/overview`）之后
+    # 会失效，`pywebview.api.desktop_login()` 报 `... is not a function`，令牌
+    # 永远换不到 → 页面所有 API 401 → 前端统一跳 /admin → 整页重载 → 死循环
+    # （用户看到的「一直闪 + 一直提示未登录」）。URL 换票不依赖任何 JS 回调。
+    boot = request.query_params.get("token") or ""
+    if boot:
+        try:
+            import jwt as _jwt
+            payload = _jwt.decode(boot, settings.JWT_SECRET, algorithms=["HS256"])
+        except Exception:  # noqa: BLE001 - 令牌坏了就当没带
+            payload = None
+        if isinstance(payload, dict) and payload.get("local_shell") is True:
+            device_id, new_device = _ensure_device_id(request)
+            resp = RedirectResponse(url="/admin?desktop=1", status_code=303)
+            _attach_auth_cookies(resp, request, boot, device_id, new_device)
+            return resp
+
     if not (UI_DIST / "index.html").is_file():
         _log_ui_missing()
         raise HTTPException(status_code=404)

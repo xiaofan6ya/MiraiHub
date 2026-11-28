@@ -148,6 +148,10 @@ export const enUS: Record<MessageKey, string> = {
 
   'app.documentTitle': '{title} · MiraiHub',
   'shell.brandSub': 'Admin console',
+  'window.minimize': 'Minimize',
+  'window.maximize': 'Maximize',
+  'window.restore': 'Restore',
+  'window.close': 'Close window',
   'shell.mainNav': 'Main navigation',
   'shell.expandSide': 'Expand sidebar',
   'shell.collapseSide': 'Collapse sidebar',

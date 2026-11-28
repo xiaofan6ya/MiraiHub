@@ -154,6 +154,10 @@ export const zhCN = {
   /* ---------------- 应用 / 外壳 ---------------- */
   'app.documentTitle': '{title} · MiraiHub',
   'shell.brandSub': '管理后台',
+  'window.minimize': '最小化',
+  'window.maximize': '最大化',
+  'window.restore': '还原',
+  'window.close': '关闭窗口',
   'shell.mainNav': '主导航',
   'shell.expandSide': '展开侧栏',
   'shell.collapseSide': '收起侧栏',

@@ -25,7 +25,8 @@ import { useAppInfo } from '@/platform/version'
 import { refreshShellBadges, startShellBadgePolling, stopShellBadgePolling } from '@/platform/shellBadges'
 import { consumeNextHash } from '@/api/auth'
 import { logout } from '@/api/session'
-import { initDesktop } from '@/platform/desktop'
+import { initWindowChrome } from '@/platform/nativeWindow'
+import { ensureDesktopSession, isDesktop } from '@/platform/desktop'
 import { pageTitle, useI18n } from '@/i18n'
 import { prefetchGroupIdle } from '@/router/pageLoaders'
 import { silentRefreshing } from '@/composables/useRevisit'
@@ -129,10 +130,15 @@ function guardPlatformOnlyPage(): void {
 
 onMounted(async () => {
   initShellViewport()
+  // 桌面壳免登必须先于心跳：没有会话时第一拍就 401 → 重载循环（1.1.6 起的
+  // 「一直闪 + 未登录」。安卓侧由 WBMobile.initialize 兜住，桌面壳走这里）。
+  // 失败不阻塞外壳 —— 心跳会按未登录处理，用户至少能看到页面状态。
+  await ensureDesktopSession()
   // 心跳第一拍同时是「会话检查」：401 由 http 层统一回 /admin（带 hash 暂存）。
   heartbeat.start()
   scheduleAppInfo()
-  void initDesktop()
+  // 桌面壳握手 + 无边框窗饰（拖拽区在 TopBar 内，把手在这里装）。
+  void initWindowChrome()
   await platformStore.load()
   void refreshShellBadges()
   // 侧栏提示点（积分到期 warn / 哨兵批次封控 danger）60 秒刷新一次，页面不可见时跳过。
@@ -227,6 +233,7 @@ function confirmLogout(): void {
     <SideNav
       v-if="!isMobile"
       :collapsed="sideCollapsed"
+      :hide-logout="isDesktop()"
       @toggle-collapse="toggleSideCollapsed"
       @open-sessions="openSessionsDrawer"
       @logout="confirmLogout"

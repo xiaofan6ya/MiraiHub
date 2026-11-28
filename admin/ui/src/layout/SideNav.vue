@@ -26,8 +26,17 @@ const props = withDefaults(
     collapsed?: boolean
     /** desktop = 固定侧栏；drawer = <768 的滑出抽屉（复用同一份内容） */
     variant?: 'desktop' | 'drawer'
+    /**
+     * 桌面壳（pywebview）里隐藏「退出登录」。
+     *
+     * 桌面版是**免登**的：进工作台靠 URL 一次性 local_shell 令牌换 Cookie，
+     * 没有「登录」这个动作。点退出会清掉 Cookie 并 `location.replace('/admin')`，
+     * 把 `?desktop=1&token=` 一起丢掉 → 下一拍 API 全 401 → 前端回跳 → 重载 →
+     * 又 401：用户看到的就是卡死闪屏。本地运行时没有可退出的会话，直接不给这个入口。
+     */
+    hideLogout?: boolean
   }>(),
-  { collapsed: false, variant: 'desktop' },
+  { collapsed: false, variant: 'desktop', hideLogout: false },
 )
 
 const emit = defineEmits<{
@@ -217,7 +226,7 @@ function goMaintenance(): void {
         </template>
         <div class="mh-help__content">{{ t('shell.sessions') }}</div>
       </n-popover>
-      <n-popover placement="right" :delay="200" :disabled="!isCollapsed">
+      <n-popover v-if="!hideLogout" placement="right" :delay="200" :disabled="!isCollapsed">
         <template #trigger>
           <button type="button" class="foot-item" @click="emit('logout')">
             <LogOut :size="16" />
