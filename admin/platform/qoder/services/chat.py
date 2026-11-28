@@ -309,6 +309,29 @@ def _build_model_server_body(*, model: dict, messages: list[dict],
     return out
 
 
+#: 「主机不可达」的特征串：请求**没有到达上游**，换链路重发是安全的。
+#:
+#: 只收 DNS / TCP 连接失败两类：
+#:   * `getaddrinfo` / `11001` / `Name or service not known` —— 域名解析失败
+#:     （Windows 的 `WSAHOST_NOT_FOUND` 就是 11001）；
+#:   * `Connection refused` / `10061` —— 对端没监听（主机在、端口没开）。
+#:
+#: 故意**不收** timeout / reset / SSL 中断：那几种情况下请求可能已经送达，
+#: 重发会二次记账、二次扣额度。
+_UNREACHABLE_MARKERS = (
+    "getaddrinfo", "11001", "name or service not known",
+    "temporary failure in name resolution", "nodename nor servname",
+    "name resolution", "connection refused", "10061",
+    "network is unreachable", "no route to host",
+)
+
+
+def _host_unreachable(detail: str | None) -> bool:
+    """这次网络失败是不是「主机不可达」（可以安全换链路重发）。"""
+    text = str(detail or "").lower()
+    return any(marker in text for marker in _UNREACHABLE_MARKERS)
+
+
 def _plan_iterator(plan: dict):
     """按 plan["mode"] 选上游迭代器（两条链路产出同形态的 chunk dict）。
 
@@ -336,7 +359,18 @@ def _plan_iterator(plan: dict):
                 account_id=plan.get("account_id", 0), abort=plan.get("abort"))
             return
         except client.UpstreamError as exc:
-            if exc.kind != "endpoint_gone":
+            # 回退条件有两条，缺一条国际版就整平台不可用：
+            #   1. `endpoint_gone` —— 端点被上游撤掉（空 404），已在 11-26 处理；
+            #   2. `network` 且是**主机不可达**（DNS 解析不到 / 连接被拒）。
+            #      国际版的 model server 主机 `api2-v2.qoder.sh` 已经不存在
+            #      （2026-11-28 实测：阿里/DNSPod/Google 三路 DNS 全 NXDOMAIN），
+            #      请求在建立连接前就失败 —— 以前这里只认 `endpoint_gone`，
+            #      于是 DNS 失败被原样抛给用户，旧链路一次都没被尝试过，
+            #      表现为「国际版号全部『对话请求网络失败』」。
+            #      注意只对「不可达」放行：超时/读流中断仍按网络错误抛出，
+            #      那种情况请求可能已经到过上游，重发会二次记账。
+            if not (exc.kind == "endpoint_gone"
+                    or (exc.kind == "network" and _host_unreachable(exc.detail))):
                 raise
             _mark_model_server_down(exc.message)
             logger.warning("Qoder model server 不可用，自动回退旧链路：%s",
