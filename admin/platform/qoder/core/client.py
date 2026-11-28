@@ -455,6 +455,14 @@ def iter_model_chat_stream(token: str, realm: str, *, body: dict,
     request_id = str(context.get("request_id") or uuid.uuid4())
     session_id = str(context.get("session_id") or ("sess-" + uuid.uuid4().hex[:16]))
     base = endpoints.model_base(realm)
+    if not base:
+        # 该地区没有可用的 model server 主机（国际版 `api2-v2.qoder.sh`
+        # 已 NXDOMAIN，默认不再配置）。这里直接给 `endpoint_gone`，
+        # 让 `services/chat.py` 立刻回退旧链路 —— 而不是把 DNS 失败
+        # 包成「对话请求网络失败」丢给用户（issue #126）。
+        raise UpstreamError(
+            "该地区没有可用的 model server 主机（%s），改走旧链路" % (realm or "cn"),
+            status=404, code="404", kind="endpoint_gone", detail="no model base")
     url = base + endpoints.MODEL_CHAT_PATH
     encoded = json.dumps(body, ensure_ascii=False).encode()
     headers = {

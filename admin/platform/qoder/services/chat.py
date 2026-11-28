@@ -327,6 +327,16 @@ def _plan_iterator(plan: dict):
     （`/algo/.../agent_chat_generation`，实测 200 正常出流），
     之后所有请求直接走旧链路，不再每次白撞一次 404。
     标记有 TTL：上游哪天把端点放回来，到点会自动再用新链路试。
+
+    ## 主机不可达也算「这条链路没了」（2026-11-28，issue #126）
+
+    原来只回退 `endpoint_gone`（空 404）。但主机本身消失（DNS 解析失败 /
+    连接被拒 / 无路由）同样是**链路级**事实，跟请求内容、账号状态无关 ——
+    这类错误原来被原样抛给用户，国际版账号因此 100% 报「对话请求网络失败」，
+    连一次旧链路都没试过。
+
+    只放宽到「不可达」这几类，**不含 timeout**：超时可能请求已经到过上游并
+    记账，重发会二次计费。
     """
     mode = plan.get("mode")
     if mode == "model_server" and _model_server_usable():
@@ -336,7 +346,7 @@ def _plan_iterator(plan: dict):
                 account_id=plan.get("account_id", 0), abort=plan.get("abort"))
             return
         except client.UpstreamError as exc:
-            if exc.kind != "endpoint_gone":
+            if not _is_link_gone(exc):
                 raise
             _mark_model_server_down(exc.message)
             logger.warning("Qoder model server 不可用，自动回退旧链路：%s",
@@ -346,6 +356,32 @@ def _plan_iterator(plan: dict):
         body=plan["upstream"], name=plan["name"], email=plan["email"],
         machine_id=plan["machine_id"], account_id=plan.get("account_id", 0),
         abort=plan.get("abort"))
+
+
+#: 「主机不可达」的特征片段（小写比较）。只认**没到过上游**的失败形态：
+#: DNS 解析失败、连接被拒、网络不可达、没有路由。
+#: **不要**把 timeout / reset 放进来 —— 那两类的请求可能已经到过上游并记账，
+#: 重发等于二次计费。
+_UNREACHABLE = (
+    "getaddrinfo", "11001", "name or service not known",
+    "temporary failure in name resolution", "nodename nor servname",
+    "connection refused", "10061", "network is unreachable", "no route to host",
+)
+
+
+def _is_link_gone(exc) -> bool:
+    """这条上游链路是不是**整体没了**（可以安全回退到旧链路）。
+
+    `endpoint_gone`：端点被撤（空 404），上游自己表示「没有这条路由」。
+    `network` 且特征命中 `_UNREACHABLE`：主机不可达（例如国际版
+    `api2-v2.qoder.sh` 已 NXDOMAIN），请求没到过上游，可以改走旧链路。
+    """
+    if getattr(exc, "kind", "") == "endpoint_gone":
+        return True
+    if getattr(exc, "kind", "") != "network":
+        return False
+    detail = str(getattr(exc, "detail", "") or "").lower()
+    return any(marker in detail for marker in _UNREACHABLE)
 
 
 #: model server 端点的可用性标记（进程内，跨账号共享 —— 端点没了是平台级事实）。

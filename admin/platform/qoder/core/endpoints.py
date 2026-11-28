@@ -30,6 +30,8 @@ qoder-intl   国际版    openapi.qoder.sh        api3.qoder.sh / api2.qoder.sh
 """
 from __future__ import annotations
 
+import os
+
 PLATFORM = "qoder"
 
 #: 地区 key -> 端点集合
@@ -129,15 +131,24 @@ CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation"
 MODEL_CHAT_PATH = "/model/v1/chat/completions"
 MODEL_BASE = {
     "cn": "https://gateway.qoder.com.cn",
-    "intl": "https://api2-v2.qoder.sh",
+    #: 国际版 model server 主机。**默认留空**：`api2-v2.qoder.sh` 已经全球
+    #: NXDOMAIN（三路公共 DNS 均返回 Non-existent domain，不是本地污染），
+    #: 留着它等于让每个国际版账号先白撞一次 DNS 再失败（issue #126）。
+    #: 留空时 `iter_model_chat_stream()` 直接抛 `endpoint_gone`，
+    #: 由 `services/chat.py::_plan_iterator` 立刻回退旧 COSY 链路；
+    #: 上游哪天把主机放回来，用 `QODER_MODEL_BASE_INTL` 指回去即可。
+    "intl": os.environ.get("QODER_MODEL_BASE_INTL", "").strip(),
 }
 #: metadata.context.client_type（新版桌面客户端形态）
 MODEL_CLIENT_TYPE = "6"
 
 
 def model_base(realm: str) -> str:
-    """model server 主机（对话新链路）。"""
-    return MODEL_BASE.get(realm or "cn") or MODEL_BASE["cn"]
+    """model server 主机（对话新链路）。空串 = 该地区不走新链路。"""
+    key = realm or "cn"
+    if key not in MODEL_BASE:
+        key = "cn"
+    return MODEL_BASE[key] or ""
 
 
 # ---------------------------------------------------------------------------
