@@ -201,8 +201,31 @@ def _platform_health(db, account: Account) -> dict | None:
 
     返回 None 表示「该账号仍走默认平台原有检查逻辑」
     （默认平台 / 未登记平台 / 网关未实现 health）。
+
+    ## 两个坑（issue #129）
+
+    1. **平台注册表是懒加载的**：`load_platforms()` 原来只在平台页 / 网关
+       接口被访问时顺手调用。后台巡检、脚本自检这类没打开过平台页的进程里
+       `_REGISTRY` 还是空的，`spec_for_storage()` 恒返回 None → 所有非默认
+       平台账号被判成「该平台未提供三项健康检查」。这里显式加载一次（幂等）。
+    2. **阶段名不能硬绑默认平台那三格**：各平台上报的 stage 名不一样
+       （qoder: token/profile/models/quota/chat_link；marvis: token/refresh；
+       codearts: token/models/quota/chat_link），原来只认 `session`/`balance`，
+       于是 Qoder/Marvis 的余额行恒为 `ok=False` 且 `detail` 是空串 ——
+       前端画一条没有原因的红条。
     """
     from admin.platform import registry
+
+    # `_account_label` 只在 `check_account` 里局部导入过，这个函数原来直接用
+    # 模块级名字 → 平台 health() 没回 `account` 时 NameError（整条检测 500）。
+    from admin.scheduler import _account_label
+
+    try:
+        from admin.platform.loader import load_platforms
+
+        load_platforms()
+    except Exception as exc:  # noqa: BLE001 - 加载失败按「未登记平台」继续
+        _logger.warning("平台注册表加载失败，按未登记平台处理：%s", exc)
 
     storage = (getattr(account, "platform", "") or "").lower()
     if not storage or storage == registry.DEFAULT_PLATFORM:
@@ -228,11 +251,48 @@ def _platform_health(db, account: Account) -> dict | None:
     if not isinstance(res, dict):
         return None
     stages = res.get("stages") or {}
-    sess_stage = stages.get("session") or stages.get("balance") or {}
-    model_stage = stages.get("models") or {}
+
+    def _stage(*names: str) -> tuple[str, dict]:
+        """按语义取第一个存在的阶段（返回 `(阶段名, 阶段字典)`）。
+
+        各平台的阶段名不统一，硬绑单个名字等于让别的平台永远红条：
+        qoder 用 `token`/`profile`/`quota`，marvis 用 `token`/`refresh`，
+        codearts 用 `token`/`models`/`quota`。这里按「谁能代表登录态 /
+        可用额度 / 对话能力」依次找，找不到就回 `("", {})`。
+        """
+        for name in names:
+            value = stages.get(name)
+            if isinstance(value, dict):
+                return name, value
+        return "", {}
+
+    sess_name, sess_stage = _stage("session", "balance", "token", "profile", "quota")
+    model_name, model_stage = _stage("models", "profile")
+    chat_name, chat_stage = _stage("conversation", "chat", "chat_link")
     healthy = bool(res.get("ok"))
-    reasons = ["%s: %s" % (name, s.get("detail"))
-               for name, s in stages.items() if not s.get("ok")]
+
+    def _detail(stage: dict, fallback: str) -> str:
+        """阶段原因：先看统一字段，再看各平台的历史写法，最后给一句兜底。
+
+        `detail` 不是唯一写法 —— trae 用 `error`/`message`，codearts 用
+        `error`。以前直接取 `detail`，取不到就是空串，前端只能画一条
+        **没有原因**的红条。绝不返回空串。
+        """
+        for key in ("detail", "message", "error", "reason"):
+            value = stage.get(key)
+            if value:
+                return str(value)
+        return fallback
+
+    def _row(found: bool, stage: dict, fallback: str) -> dict:
+        # 平台没有这个阶段时按整体健康度回落，并写明「本平台无此阶段」
+        return {"ok": bool(stage.get("ok")) if found else healthy,
+                "detail": _detail(stage, fallback) if found else fallback}
+
+    reasons = []
+    for name, stage in stages.items():
+        if isinstance(stage, dict) and not stage.get("ok"):
+            reasons.append("%s: %s" % (name, _detail(stage, "未通过")))
     return {
         "account_id": account.id,
         "account": res.get("account") or _account_label(account),
@@ -241,15 +301,15 @@ def _platform_health(db, account: Account) -> dict | None:
         "status": "healthy" if healthy else "failed",
         "restored": False,
         "stages": {
-            "balance": {"ok": bool(sess_stage.get("ok")),
-                        "detail": sess_stage.get("detail", ""),
-                        "stage": "session"},
-            "models": {"ok": bool(model_stage.get("ok")),
-                       "detail": model_stage.get("detail", "")},
-            "conversation": {"ok": healthy,
-                             "detail": "本平台以 session+models 表征健康"},
+            "balance": _row(bool(sess_name), sess_stage,
+                            "本平台无此阶段（%s）" % (storage or "?")),
+            "models": _row(bool(model_name), model_stage,
+                           "本平台无此阶段（%s）" % (storage or "?")),
+            "conversation": _row(bool(chat_name), chat_stage,
+                                 "本平台以 session+models 表征健康"),
         },
-        "reason": ("平台级健康检查通过" if healthy else "；".join(reasons)),
+        "reason": ("平台级健康检查通过" if healthy
+                   else "；".join(reasons) or "平台级健康检查未通过（上游未给出具体阶段）"),
     }
 
 
