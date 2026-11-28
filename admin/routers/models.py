@@ -119,13 +119,34 @@ def _invalidate_routing_cache() -> None:
         pass
 
 
-def _get_enabled_models(db: Session) -> set[str]:
-    """获取当前启用的模型 ID 集合（用于代理过滤）。"""
-    rows = db.query(ModelConfig).filter(ModelConfig.enabled == 1).all()
-    return {m.model_id for m in rows}
+def _scope_query(query, platform: str):
+    """按落库平台收窄一个 `ModelConfig` 查询；`platform` 为空时原样返回。
+
+    WorkBuddy 兼容历史写法（`workbuddy` / `codebuddy` / 空串 / NULL），
+    所以这里必须走 `workbuddy.scoping.platform_cond` 而不是裸 `==` ——
+    老库里 `model_configs.platform` 可能还是 NULL，裸等值会把这些行全漏掉，
+    表现为「auto 找不到任何免费模型」（见 issue #125）。
+    """
+    target = (platform or "").strip()
+    if not target:
+        return query
+    from admin.platform.workbuddy import scoping
+
+    return query.filter(scoping.platform_cond(ModelConfig.platform, target))
 
 
-def _get_free_models(db: Session) -> set[str]:
+def _get_enabled_models(db: Session, platform: str = "") -> set[str]:
+    """获取当前启用的模型 ID 集合（用于代理过滤）。
+
+    `platform`：给了就只看该平台的配置行。`routers/proxy.py` 的 auto 选模型
+    与降级候选都按 `platform="workbuddy"` 调用 —— 此前签名不接收这个参数，
+    直接 `TypeError` 冒成 500（issue #125）。
+    """
+    query = _scope_query(db.query(ModelConfig).filter(ModelConfig.enabled == 1), platform)
+    return {m.model_id for m in query.all()}
+
+
+def _get_free_models(db: Session, platform: str = "") -> set[str]:
     """获取当前启用且**真免费**的模型 ID 集合。
 
     ## 判定规则
@@ -142,7 +163,7 @@ def _get_free_models(db: Session) -> set[str]:
     原来把 `is NULL` 和 `== 0` 一起当免费，还漏了负值 ——
     Loomy 这种「无量纲」平台会被整体误判成免费。
     """
-    rows = db.query(ModelConfig).filter(
+    rows = _scope_query(db.query(ModelConfig).filter(
         ModelConfig.enabled == 1,
         (
             (ModelConfig.credit_multiplier == 0)
@@ -151,7 +172,7 @@ def _get_free_models(db: Session) -> set[str]:
         # 排除负值（无量纲标记）
         (ModelConfig.credit_multiplier >= 0)
         | (ModelConfig.credit_multiplier.is_(None)),
-    ).all()
+    ), platform).all()
     return {m.model_id for m in rows if not is_media_model(m.model_id)}
 
 
