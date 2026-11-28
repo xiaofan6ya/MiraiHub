@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -893,6 +895,30 @@ def _device_poll_impl(nonce: str, db: Session):
                             % (type(exc).__name__, str(exc)[:200])) from exc
 
 
+def _uid_from_jwt(token: str) -> str:
+    """从 access token 的 payload 里取用户 id（`data.id`，退化到 `sub`）。
+
+    上游回调**不返回** UserId（`pick("UserId","user_id","UID")` 和
+    `user_info.UserID` 两条路都是空），但 JWT 里带着：
+
+        {"data": {"id": "2926256481121401", "source": "refresh_token"},
+         "exp": 1797040276, "iat": 1795830676}
+
+    uid 恒为空字符串的后果是入库去重键退化成 `platform + ""` ——
+    每次授权都命中同一条记录并覆盖它，库里永远只剩一个 Trae 号（issue #125）。
+    """
+    try:
+        payload = str(token or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:  # noqa: BLE001 - 不是 JWT / 段错位都按「取不到」处理
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    return str(inner.get("id") or data.get("sub") or data.get("id") or "")
+
+
 def _finish_trae_account(db: Session, session, token_data: dict,
                          result: dict) -> dict:
     """换到 token 之后的收尾：解析字段 → 写 accounts 表。"""
@@ -936,6 +962,12 @@ def _finish_trae_account(db: Session, session, token_data: dict,
     info = result.get("user_info") or {}
     if not uid:
         uid = str(info.get("UserID") or info.get("UserId") or "")
+    if not uid:
+        # 上游不给 UserId：从 JWT 解（实测有效），还不行就用 token 摘要兜底。
+        # 绝不能让 uid 停在 ""：那会让所有号的去重键撞在一起，互相覆盖。
+        uid = _uid_from_jwt(access)
+    if not uid and access:
+        uid = "tok:" + hashlib.sha256(access.encode("utf-8")).hexdigest()[:16]
     screen = str(pick("ScreenName", "screen_name") or
                  info.get("ScreenName") or "")
     tenant = str(info.get("TenantID") or "")
