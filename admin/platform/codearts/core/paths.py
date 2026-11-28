@@ -28,10 +28,17 @@ PLATFORM = "codearts"
 #: 固定的目录名 / 文件名（**不要写盘符**）
 INSTALL_NAMES = ("CodeArts", "codearts")
 EXE_NAMES = ("CodeArts.exe",)
-DATA_NAMES = ("codearts",)
+#: userData 目录名。`codearts` 是独立 IDE；`codearts-agent` / `codearts-ide`
+#: 是 VS Code 系壳（登录态在 `User/globalStorage/state.vscdb`，issue #128）。
+DATA_NAMES = ("codearts", "codearts-agent", "codearts-ide")
 #: 用于确认「这个同名目录确实是 CodeArts」
 INSTALL_REQUIRE = ("resources/app.asar",)
-DATA_REQUIRE = ("Local State", "secretStorage")
+#: 解密必须有它（两代客户端都有 OSCrypt 主密钥）
+DATA_REQUIRE = ("Local State",)
+#: 任一存在即可：`secretStorage` = 独立客户端，`User` = VS Code 系壳。
+#: 注意不能用 `require` 写 `secretStorage` —— 壳客户端根本没有这个目录，
+#: 会被判成「本机没有 CodeArts 客户端数据目录」。
+DATA_MARKERS = ("secretStorage", "User")
 
 #: UA 前缀用的产品名
 UA_PRODUCT = "CodeArts"
@@ -58,9 +65,14 @@ def app_exe_candidates() -> list[str]:
 
 
 def data_dir_candidates(*, all_matches: bool = False) -> list[str]:
-    """userData 目录（存在的优先）。"""
+    """userData 目录（存在的优先；`all_matches=True` 时收集全部形态）。
+
+    `markers` 用来放行 VS Code 系壳：它把登录态写在
+    `User/globalStorage/state.vscdb`，没有 `secretStorage` 目录。
+    """
     return ip.resolve(PLATFORM, kind="user_data_dir", names=DATA_NAMES,
-                      require=DATA_REQUIRE, roots=(r"%APPDATA%",),
+                      require=DATA_REQUIRE, markers=DATA_MARKERS,
+                      roots=(r"%APPDATA%",),
                       fallback=DATA_DIR_CANDIDATES, max_depth=0,
                       stop_after_first=not all_matches)
 

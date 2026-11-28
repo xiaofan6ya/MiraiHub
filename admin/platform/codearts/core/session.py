@@ -100,6 +100,21 @@ def local_state_file() -> str:
     return os.path.join(app_data_dir(), "Local State")
 
 
+def vscdb_file() -> str:
+    """VS Code 系壳客户端（CodeArts Agent / Snap）的登录态容器。
+
+    ```
+    %APPDATA%/codearts-agent/Local State                        ← OSCrypt 主密钥（DPAPI）
+    %APPDATA%/codearts-agent/User/globalStorage/state.vscdb      ← SQLite · ItemTable
+    ```
+
+    key 形如 `secret://{"extensionId":"huaweicloud.authentication","key":"HuaweiCloudSession"}`，
+    value 是 `{"type":"Buffer","data":[…]}`（或直接是 BLOB）—— 还原成 `v10`
+    密文后与 `secretStorage/*.enc` 走同一个 `decrypt_blob()`。
+    """
+    return os.path.join(app_data_dir(), "User", "globalStorage", "state.vscdb")
+
+
 def installed() -> bool:
     return os.path.isdir(app_data_dir())
 
@@ -200,6 +215,8 @@ class LocalSession:
     dpop_private_key: str = ""
     dpop_public_key: str = ""
     pkce_code_verifier: str = ""
+    #: 这份登录态是从哪个容器读出来的（secretStorage/*.enc 或 state.vscdb）
+    source: str = ""
     raw: dict = field(default_factory=dict)
 
     def to_credential(self) -> dict:
@@ -231,52 +248,266 @@ class LocalSession:
         return int(self.expires_at / 1000 - time.time())
 
 
-def load_session(key: str = SESSION_KEY) -> LocalSession:
-    """读并解密本机登录态。失败一律抛 `SessionError`（带 kind）。"""
-    if not installed():
-        raise SessionError("本机没有 CodeArts 客户端数据目录", kind="no_client",
-                           detail=app_data_dir())
-    path = secret_file(key)
-    if not os.path.isfile(path):
-        raise SessionError("客户端没有已保存的登录态（可能未登录）",
-                           kind="no_login", detail=path)
+#: VS Code 系壳客户端在 `ItemTable` 里存登录态的 key 前缀与扩展名（实测形态）
+VSCODE_SECRET_PREFIX = "secret://"
+VSCODE_EXTENSION_ID = "huaweicloud.authentication"
+VSCODE_SECRET_NAME = "HuaweiCloudSession"
+
+
+def _pick(mapping: dict, *names, default=""):
+    """按顺序取第一个非空字段（两代客户端的字段名不一致）。"""
+    for name in names:
+        try:
+            value = mapping.get(name)
+        except AttributeError:
+            continue
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _jwk_text(value) -> str:
+    """DPoP 密钥统一成 JWK 字符串。
+
+    CodeArts IDE 存的是**字符串**，Agent 存的是**JWK 对象** ——
+    `dpop_proof()` 只吃字符串，这里必须归一，否则续期直接 `json.loads` 崩。
+    """
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value or "")
+
+
+def _to_ms(value) -> int:
+    """过期时间统一成毫秒时间戳（IDE 是毫秒整数，Agent 是 ISO 字符串）。"""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        number = int(value)
+        return number if number <= 0 else (number if number > 10 ** 12 else number * 1000)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if text.isdigit():
+        return _to_ms(int(text))
     try:
-        raw = base64.b64decode(open(path, "rb").read())
-    except OSError as exc:
-        raise SessionError("登录态文件读取失败", kind="no_login",
-                           detail=str(exc)) from exc
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0
+    return int(parsed.timestamp() * 1000)
+
+
+def parse_payload(payload: dict, *, source: str = "") -> LocalSession:
+    """把两代客户端的登录态结构**归一**成 `LocalSession`。
+
+    |                  | CodeArts IDE            | CodeArts Agent（VS Code 壳）  |
+    |------------------|-------------------------|-------------------------------|
+    | 外层             | `{"session": {...}}`    | 平铺                          |
+    | 安全令牌         | `securityToken`         | `securitytoken`               |
+    | 过期             | `expiresAt`（毫秒）     | `expires_at`（ISO 字符串）    |
+    | 刷新令牌         | `refreshToken`          | `refresh_token`               |
+    | 账号             | `userId` / `userName`   | `account.id` / `account.label`|
+    | DPoP 密钥        | 字符串                  | JWK 对象                      |
+
+    不归一就会表现为「扫到了但导不进 / 续期 400」——两代客户端 vem 都能登录，
+    但字段名对不上（issue #128）。
+    """
+    if not isinstance(payload, dict):
+        raise SessionError("登录态不是 JSON 对象", kind="no_login")
+    session = payload.get("session")
+    if not isinstance(session, dict):
+        session = payload
+    context = payload.get("loginContext")
+    if not isinstance(context, dict):
+        context = {}
+    account = session.get("account")
+    if not isinstance(account, dict):
+        account = {}
+    pkce = context.get("pkcePair")
+    if not isinstance(pkce, dict):
+        pkce = session.get("pkcePair") if isinstance(session.get("pkcePair"), dict) else {}
+    dpop = context.get("dpopKeyPair")
+    if not isinstance(dpop, dict):
+        dpop = {}
+    if not dpop:
+        for name in ("dpopKeyPair", "dpop_key_pair", "dpop"):
+            candidate = session.get(name)
+            if isinstance(candidate, dict):
+                dpop = candidate
+                break
+    if not dpop:
+        dpop = session
+
+    access_key = str(_pick(session, "accessKey", "access_key", "accesskey", "AK", "ak"))
+    secret_key = str(_pick(session, "secretKey", "secret_key", "secretkey", "SK", "sk"))
+    if not access_key or not secret_key:
+        raise SessionError("登录态缺少 AK/SK（客户端需要重新登录）",
+                           kind="no_login", detail="keys=%s" % sorted(session)[:20])
+
+    uid = str(_pick(session, "userId", "user_id", "uid") or _pick(account, "id", "uid"))
+    user_name = str(_pick(session, "userName", "user_name") or
+                    _pick(account, "label", "name") or uid)
+    return LocalSession(
+        access_key=access_key,
+        secret_key=secret_key,
+        security_token=str(_pick(session, "securityToken", "securitytoken",
+                                 "security_token")),
+        refresh_token=str(_pick(session, "refreshToken", "refresh_token")),
+        expires_at=_to_ms(_pick(session, "expiresAt", "expires_at")),
+        uid=uid,
+        user_name=user_name,
+        domain_id=str(_pick(session, "domainId", "domain_id") or
+                      _pick(account, "domainId", "domain_id")),
+        client_id=str(_pick(session, "clientId", "client_id") or CLIENT_ID),
+        created_at=str(_pick(session, "createdAt", "created_at")),
+        updated_at=str(_pick(session, "updatedAt", "updated_at")),
+        region=str(_pick(session, "region", default="cn-north-4") or "cn-north-4"),
+        dpop_private_key=_jwk_text(_pick(dpop, "privateKey", "private_key", "private")),
+        dpop_public_key=_jwk_text(_pick(dpop, "publicKey", "public_key", "public")),
+        pkce_code_verifier=str(_pick(pkce, "codeVerifier", "code_verifier", "verifier")),
+        source=source,
+        raw=session,
+    )
+
+
+def _decode_payload(raw: bytes, source: str) -> LocalSession:
     plain = decrypt_blob(raw, _aes_key())
     try:
         payload = json.loads(plain.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise SessionError("登录态不是合法 JSON", kind="no_login",
                            detail=str(exc)) from exc
+    return parse_payload(payload, source=source)
 
-    session = payload.get("session") or {}
-    context = payload.get("loginContext") or {}
-    pkce = context.get("pkcePair") or {}
-    dpop = context.get("dpopKeyPair") or {}
-    if not session.get("accessKey") or not session.get("secretKey"):
-        raise SessionError("登录态缺少 AK/SK（客户端需要重新登录）",
-                           kind="no_login", detail="keys=%s" % list(session))
 
-    return LocalSession(
-        access_key=str(session.get("accessKey") or ""),
-        secret_key=str(session.get("secretKey") or ""),
-        security_token=str(session.get("securityToken") or ""),
-        refresh_token=str(session.get("refreshToken") or ""),
-        expires_at=int(session.get("expiresAt") or 0),
-        uid=str(session.get("userId") or ""),
-        user_name=str(session.get("userName") or ""),
-        domain_id=str(session.get("domainId") or ""),
-        client_id=str(session.get("clientId") or CLIENT_ID),
-        created_at=str(session.get("createdAt") or ""),
-        updated_at=str(session.get("updatedAt") or ""),
-        dpop_private_key=str(dpop.get("privateKey") or ""),
-        dpop_public_key=str(dpop.get("publicKey") or ""),
-        pkce_code_verifier=str(pkce.get("codeVerifier") or ""),
-        raw=session,
-    )
+def read_secret_storage(path: str) -> LocalSession:
+    """读 `secretStorage/<sha256(key)>.enc`（CodeArts IDE 形态）。"""
+    try:
+        raw = base64.b64decode(open(path, "rb").read())
+    except OSError as exc:
+        raise SessionError("登录态文件读取失败", kind="no_login",
+                           detail=str(exc)) from exc
+    return _decode_payload(raw, path)
+
+
+def _vscdb_key() -> str:
+    payload = json.dumps({"extensionId": VSCODE_EXTENSION_ID,
+                          "key": VSCODE_SECRET_NAME},
+                         separators=(",", ":"))
+    return VSCODE_SECRET_PREFIX + payload
+
+
+def _blob_bytes(value) -> bytes:
+    """`ItemTable.value` -> 原始密文字节。
+
+    可能拿到三种形态：BLOB、`{"type":"Buffer","data":[...]}` 的 JSON 文本、
+    或裸 base64 / 明文 JSON。统一还原成 `v10…` 密文（不可还原时给空串）。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    text = str(value or "").strip()
+    if not text:
+        return b""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text.encode("utf-8", "ignore")
+    if isinstance(parsed, dict) and isinstance(parsed.get("data"), list):
+        return bytes(int(x) & 0xFF for x in parsed["data"])
+    return text.encode("utf-8", "ignore")
+
+
+def read_vscdb(path: str) -> LocalSession:
+    """从 `state.vscdb` 的 `ItemTable` 读登录态（CodeArts Agent / Snap 形态）。
+
+    只读打开（`mode=ro`），绝不写客户端库 —— 客户端随时可能在写这张表。
+    """
+    import sqlite3
+
+    uri = "file:%s?mode=ro&immutable=1" % path.replace("\\", "/")
+    value = None
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            row = conn.execute(
+                "SELECT value FROM ItemTable WHERE key = ? LIMIT 1",
+                (_vscdb_key(),)).fetchone()
+            if row is None:
+                # key 里的 JSON 可能带空格 / 换行（不同客户端版本写法不一）
+                row = conn.execute(
+                    "SELECT value FROM ItemTable WHERE key LIKE ? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    ("%HuaweiCloudSession%",)).fetchone()
+            value = row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise SessionError("state.vscdb 读取失败（客户端可能正在写）",
+                           kind="no_login", detail=str(exc)) from exc
+    raw = _blob_bytes(value)
+    if not raw:
+        raise SessionError("state.vscdb 里没有登录态（客户端未登录）",
+                           kind="no_login", detail=path)
+    return _decode_payload(raw, path)
+
+
+def _candidate_dirs() -> list[str]:
+    """所有已装客户端的数据目录（IDE 与 VS Code 壳可能同时存在）。"""
+    from admin.platform.codearts.core import paths
+
+    dirs = [d for d in paths.data_dir_candidates(all_matches=True) if d]
+    default = app_data_dir()
+    if default and default not in dirs:
+        dirs.append(default)
+    return dirs
+
+
+def load_session(key: str = SESSION_KEY) -> LocalSession:
+    """读并解密本机登录态。失败一律抛 `SessionError`（带 kind）。
+
+    ## 两种客户端形态（issue #128）
+
+    * **CodeArts IDE**：`%APPDATA%/codearts/secretStorage/<sha256(key)>.enc`
+    * **CodeArts Agent / Snap**（VS Code 系壳）：
+      `%APPDATA%/codearts-agent/User/globalStorage/state.vscdb` 的 `ItemTable`
+
+    两者的密文与解密算法完全一样（`v10` + AES-256-GCM + DPAPI 取 key），
+    差别只在「存哪」和「怎么序列化」。逐个目录先试 secretStorage、
+    再试 state.vscdb，第一个成功的就是本次登录态。
+    """
+    dirs = _candidate_dirs()
+    if not dirs and not installed():
+        raise SessionError("本机没有 CodeArts 客户端数据目录", kind="no_client",
+                           detail=app_data_dir())
+    tried: list[str] = []
+    errors: list[SessionError] = []
+    for directory in dirs:
+        enc = os.path.join(directory, "secretStorage",
+                           hashlib.sha256(key.encode("utf-8")).hexdigest() + ".enc")
+        if os.path.isfile(enc):
+            tried.append(enc)
+            try:
+                return read_secret_storage(enc)
+            except SessionError as exc:
+                errors.append(exc)
+        db = os.path.join(directory, "User", "globalStorage", "state.vscdb")
+        if os.path.isfile(db):
+            tried.append(db)
+            try:
+                return read_vscdb(db)
+            except SessionError as exc:
+                errors.append(exc)
+    if not tried:
+        raise SessionError("客户端没有已保存的登录态（可能未登录）",
+                           kind="no_login",
+                           detail="；".join(dirs) or app_data_dir())
+    # 有容器但都读失败：把最具体的那条抛出去（dpapi 优先于 no_login）
+    for exc in errors:
+        if exc.kind == "dpapi":
+            raise exc
+    raise errors[-1] if errors else SessionError(
+        "登录态读取失败", kind="no_login", detail="；".join(tried))
 
 
 # ---------------------------------------------------------------------------

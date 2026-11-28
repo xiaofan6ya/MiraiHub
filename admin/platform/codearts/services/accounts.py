@@ -140,10 +140,19 @@ def _local_credential(uid: str = "") -> dict | None:
 
 
 def _adopt(account: Account, data: dict, db: Session) -> dict:
-    """把凭证写回账号；若此前是被「续期失败」自动禁用的，顺手恢复。"""
+    """把凭证写回账号；若此前是被「续期失败 / 登录态被拒」自动禁用的，顺手恢复。
+
+    ## 前缀必须覆盖 `account_health` 真正写的那句（issue #128）
+
+    健康检查连续失败时 `account_health` 写的是
+    `登录态被上游拒绝（3/3）：续期失败：…`（`AUTH_FAIL_PREFIX`）。
+    这里原来只认 `续期失败` / `凭证已过期` 两个前缀 —— 前者只在
+    「续期」这一步失败时才出现，被整体判死时前缀是 `登录态被上游拒绝`，
+    于是「客户端重新登录 → 刷新」这条自救路径是断的，用户只能手动点「启用」。
+    """
     _store(account, data)
     if account.status == "disabled" and str(account.last_err_msg or "").startswith(
-            ("续期失败", "凭证已过期")):
+            ("续期失败", "凭证已过期", "登录态被上游拒绝", "上游认证接口异常")):
         # 只有「我们自己判死」的才恢复；人工禁用的保持原样
         account.status = "active"
         account.last_err_msg = ""
