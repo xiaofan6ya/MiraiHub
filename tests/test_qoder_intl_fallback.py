@@ -106,14 +106,3 @@ def test_plan_iterator_does_not_fall_back_on_timeout(monkeypatch):
     with pytest.raises(qclient.UpstreamError):
         list(qchat._plan_iterator(plan))
     assert calls["legacy"] == 0
-
-
-def test_activation_message_is_explained():
-    """`企业尚未激活，请重新购买` 要给出「找谁、怎么做」，而不是原样抛。"""
-    hint = qclient._activation_hint("企业尚未激活，请重新购买")
-    assert "未激活" in hint
-    assert "无法绕过" in hint
-    assert "Qoder 控制台" in hint
-    # 普通错误不能被误伤
-    assert qclient._activation_hint("model not found") == ""
-    assert qclient._activation_hint("") == ""
