@@ -365,6 +365,8 @@ def _plan_iterator(plan: dict):
 _UNREACHABLE = (
     "getaddrinfo", "11001", "name or service not known",
     "temporary failure in name resolution", "nodename nor servname",
+    # macOS / musl 上常见的另一种写法（PR #130 补的）
+    "name resolution",
     "connection refused", "10061", "network is unreachable", "no route to host",
 )
 

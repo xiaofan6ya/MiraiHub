@@ -336,6 +336,8 @@ tools/set_safe_context_limits.py
 # 多平台适配（issue #125/#126/#128/#129）的回归：锁住 auto 500、
 # intl 不回退、CodeArts Agent 登录态归一、健康检查阶段映射
 !tests/test_multiplatform_triage.py
+# qoder-intl 主机不可达回退（issue #126 / PR #130）
+!tests/test_qoder_intl_fallback.py
 
 # Runtime account/device state and local review artifacts stay private.
 /admin/platform/marvis/core/qimei_table.json
